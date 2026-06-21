@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web;
@@ -16,7 +17,10 @@ namespace QbitDownload;
 
 public class QbitController : BaseController
 {
-    #region qBittorrent client (cookie auth)
+    static readonly Regex _hashRx = new Regex("^([0-9a-fA-F]{40}|[0-9A-Za-z]{32})$", RegexOptions.Compiled);
+    static bool ValidHash(string h) => !string.IsNullOrEmpty(h) && _hashRx.IsMatch(h);
+
+    #region qBittorrent client (cookie auth, проверяем логин)
     async Task<HttpClient> qbit()
     {
         var handler = new HttpClientHandler
@@ -38,7 +42,20 @@ public class QbitController : BaseController
             new KeyValuePair<string, string>("username", ModInit.conf.qbitUser),
             new KeyValuePair<string, string>("password", ModInit.conf.qbitPass)
         });
-        await c.PostAsync("/api/v2/auth/login", form);
+        var resp = await c.PostAsync("/api/v2/auth/login", form);
+        string login = (await resp.Content.ReadAsStringAsync())?.Trim();
+
+        // Успех = 2xx + выставлена сессионная кука. qBit v5 отдаёт 204 + QBT_SID (тело пустое),
+        // старые версии — 200 + "Ok.". Неверные креды: 403 (v5) или 200 + "Fails." без куки.
+        bool hasSid = false;
+        foreach (Cookie ck in handler.CookieContainer.GetCookies(new Uri(ModInit.conf.qbitHost)))
+            if (ck.Name.StartsWith("QBT_SID", StringComparison.OrdinalIgnoreCase)) { hasSid = true; break; }
+
+        if (!resp.IsSuccessStatusCode || (!hasSid && login != "Ok."))
+        {
+            c.Dispose();
+            throw new Exception("qbit auth failed");
+        }
         return c;
     }
     #endregion
@@ -96,47 +113,79 @@ public class QbitController : BaseController
     }
     #endregion
 
-    #region /qdl/add — добавить magnet в qBittorrent (резолв parselink при необходимости)
+    #region /qdl/add — добавить magnet/.torrent в qBittorrent (резолв parselink при необходимости)
     [HttpGet, HttpPost, AllowAnonymous]
     [Route("qdl/add")]
     async public Task<ActionResult> Add(string magnet = null, string parselink = null, string title = null)
     {
         try
         {
-            // link: настоящий "magnet:?...", ИЛИ URL-резолвер JacRed (parselink).
+            // link: настоящий "magnet:?...", либо URL-резолвер JacRed (parselink).
             // Резолвер может отдать: 302→magnet (rutracker/kinozal/nnm), magnet в теле, или .torrent-файл.
             string link = !string.IsNullOrWhiteSpace(magnet) ? magnet : parselink;
             byte[] torrentFile = null;
+            const long MaxBytes = 10L * 1024 * 1024;
 
             if (!string.IsNullOrWhiteSpace(link) && !link.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
             {
-                using var rh = new HttpClientHandler { AllowAutoRedirect = false };
-                using var rc = new HttpClient(rh) { Timeout = TimeSpan.FromSeconds(45) };
-                var resp = await rc.GetAsync(link);
+                // SSRF-защита: ходим ТОЛЬКО на собственный JacRed-резолвер (loopback/наш listen-хост:порт).
+                // Публичные трекеры дают готовый magnet (сюда не попадают). См. claude/06 §A,§J.
+                if (!Uri.TryCreate(link, UriKind.Absolute, out var startUri) || !IsSelfResolver(startUri))
+                    return Json(new { success = false, error = "bad link" });
 
-                if (resp.Headers.Location != null && resp.Headers.Location.OriginalString.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
+                using var rh = new HttpClientHandler { AllowAutoRedirect = false };
+                using var rc = new HttpClient(rh) { Timeout = TimeSpan.FromSeconds(15) };
+
+                HttpResponseMessage resp = null;
+                try
                 {
-                    link = resp.Headers.Location.OriginalString;          // 302 → magnet
-                }
-                else
-                {
-                    string ct = resp.Content.Headers.ContentType?.MediaType ?? "";
-                    if (ct.Contains("bittorrent") || ct.Contains("octet-stream"))
+                    var current = startUri;
+                    for (int hop = 0; hop < 5; hop++)        // следуем редиректам (302→magnet и т.п.)
                     {
-                        torrentFile = await resp.Content.ReadAsByteArrayAsync();
-                        if (torrentFile == null || torrentFile.Length < 50) torrentFile = null;
+                        resp?.Dispose();
+                        resp = await rc.GetAsync(current, HttpCompletionOption.ResponseHeadersRead);
+
+                        int code = (int)resp.StatusCode;
+                        var loc = resp.Headers.Location;
+                        if (code < 300 || code >= 400 || loc == null) break;   // терминальный ответ
+
+                        var next = loc.IsAbsoluteUri ? loc : new Uri(resp.RequestMessage?.RequestUri ?? current, loc);
+                        if (next.OriginalString.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
+                        { link = next.OriginalString; resp.Dispose(); resp = null; break; }
+
+                        if (!IsSelfResolver(next)) { resp.Dispose(); resp = null; break; }   // наружу не ходим
+                        current = next;
                     }
-                    if (torrentFile == null)
+
+                    if (resp != null && !link.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
                     {
-                        string b = await resp.Content.ReadAsStringAsync();
-                        var m = Regex.Match(b ?? "", "magnet:\\?[^\"'\\s<]+");
-                        if (m.Success) link = m.Value;
-                        else return Json(new { success = false, error = "resolve: " + (b ?? "").Trim() });
+                        if (resp.Content.Headers.ContentLength > MaxBytes)
+                            return Json(new { success = false, error = "too big" });
+                        try { await resp.Content.LoadIntoBufferAsync(MaxBytes); }
+                        catch { return Json(new { success = false, error = "too big" }); }
+
+                        byte[] data = await resp.Content.ReadAsByteArrayAsync();
+                        if (LooksLikeTorrent(data))
+                        {
+                            torrentFile = data;
+                        }
+                        else
+                        {
+                            string b = Encoding.UTF8.GetString(data ?? Array.Empty<byte>());
+                            var m = Regex.Match(b ?? "", "magnet:\\?[^\"'\\s<]+");
+                            if (m.Success) link = m.Value;
+                            else
+                            {
+                                Console.WriteLine("[QbitDownload] resolve failed: " + (b ?? "").Trim());
+                                return Json(new { success = false, error = "resolve failed" });
+                            }
+                        }
                     }
                 }
+                finally { resp?.Dispose(); }
             }
 
-            var c = await qbit();
+            using var c = await qbit();
             MultipartFormDataContent content;
             string usedMagnet = null;
 
@@ -167,11 +216,31 @@ public class QbitController : BaseController
             var r = await c.PostAsync("/api/v2/torrents/add", content);
             string body = (await r.Content.ReadAsStringAsync())?.Trim() ?? "";
 
-            // qBittorrent отвечает либо "Ok." (старые версии), либо JSON {"success_count":1,...} (v5+)
-            bool ok = r.IsSuccessStatusCode && (
-                body == "Ok." ||
-                (body.StartsWith("{") && body.Contains("\"success_count\"") && !body.Contains("\"success_count\":0"))
-            );
+            // qBit-ответы зависят от версии (проверено эмпирически на v5/linuxserver):
+            //   новый торрент → 200 + {"success_count":1,"added_torrent_ids":[..]} (старые: "Ok." / 204)
+            //   дубликат      → 409 + "Conflict"
+            bool ok = false, duplicate = false;
+            if ((int)r.StatusCode == 409 || body.Equals("Conflict", StringComparison.OrdinalIgnoreCase))
+            {
+                duplicate = true; ok = true;          // уже в загрузках — это успех
+            }
+            else if (r.IsSuccessStatusCode)
+            {
+                if (body == "Ok." || body.Length == 0) ok = true;
+                else if (body.StartsWith("{"))
+                {
+                    try
+                    {
+                        var j = JObject.Parse(body);
+                        int success = j.Value<int?>("success_count") ?? 0;
+                        int pending = j.Value<int?>("pending_count") ?? 0;
+                        int dup = j.Value<int?>("duplicate_count") ?? 0;
+                        duplicate = dup > 0;
+                        ok = success > 0 || pending > 0 || duplicate;
+                    }
+                    catch { ok = false; }
+                }
+            }
 
             string hash = "";
             if (usedMagnet != null)
@@ -180,11 +249,12 @@ public class QbitController : BaseController
                 if (hm.Success) hash = hm.Groups[1].Value.ToLower();
             }
 
-            return Json(new { success = ok, hash, body });
+            return Json(new { success = ok, duplicate, hash, body });
         }
         catch (Exception ex)
         {
-            return Json(new { success = false, error = ex.Message });
+            Console.WriteLine("[QbitDownload] add: " + ex);
+            return Json(new { success = false, error = "internal error" });
         }
     }
     #endregion
@@ -196,7 +266,7 @@ public class QbitController : BaseController
     {
         try
         {
-            var c = await qbit();
+            using var c = await qbit();
             string raw = await c.GetStringAsync($"/api/v2/torrents/info?category={HttpUtility.UrlEncode(ModInit.conf.category)}&sort=added_on&reverse=true");
 
             var result = new JArray();
@@ -218,7 +288,8 @@ public class QbitController : BaseController
         }
         catch (Exception ex)
         {
-            return Json(new { error = ex.Message });
+            Console.WriteLine("[QbitDownload] list: " + ex);
+            return Json(new { error = "internal error" });
         }
     }
     #endregion
@@ -228,15 +299,17 @@ public class QbitController : BaseController
     [Route("qdl/files")]
     async public Task<ActionResult> Files(string hash)
     {
+        if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            var c = await qbit();
-            string raw = await c.GetStringAsync($"/api/v2/torrents/files?hash={hash}");
+            using var c = await qbit();
+            string raw = await c.GetStringAsync($"/api/v2/torrents/files?hash={HttpUtility.UrlEncode(hash)}");
             return ContentTo(raw ?? "[]", "application/json; charset=utf-8");
         }
         catch (Exception ex)
         {
-            return Json(new { error = ex.Message });
+            Console.WriteLine("[QbitDownload] files: " + ex);
+            return Json(new { error = "internal error" });
         }
     }
     #endregion
@@ -246,16 +319,19 @@ public class QbitController : BaseController
     [Route("qdl/stream")]
     async public Task<ActionResult> Stream(string hash, int index = -1)
     {
+        if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            var c = await qbit();
+            using var c = await qbit();
+            string he = HttpUtility.UrlEncode(hash);
 
-            string infoRaw = await c.GetStringAsync($"/api/v2/torrents/info?hashes={hash}");
+            string infoRaw = await c.GetStringAsync($"/api/v2/torrents/info?hashes={he}");
             var info = JArray.Parse(infoRaw);
             if (info.Count == 0) return NotFound();
             string savePath = info[0].Value<string>("save_path") ?? ModInit.conf.downloadsPath;
+            string contentPath = info[0].Value<string>("content_path");
 
-            string filesRaw = await c.GetStringAsync($"/api/v2/torrents/files?hash={hash}");
+            string filesRaw = await c.GetStringAsync($"/api/v2/torrents/files?hash={he}");
             var files = JArray.Parse(filesRaw);
             if (files.Count == 0) return NotFound();
 
@@ -277,22 +353,54 @@ public class QbitController : BaseController
             if (file == null) return NotFound();
 
             string rel = file.Value<string>("name");
-            string full = Combine(savePath, rel);
-            if (!System.IO.File.Exists(full))
-                full = Combine(ModInit.conf.downloadsPath, rel);   // remap на наш mount, если save_path иной
-            if (!System.IO.File.Exists(full))
+
+            // content_path точнее save_path (учитывает temp-папку незавершённых и per-category пути).
+            // Для одиночного файла content_path указывает прямо на файл.
+            string full = null;
+            if (files.Count == 1 && !string.IsNullOrEmpty(contentPath) && System.IO.File.Exists(contentPath))
+                full = contentPath;
+            if (full == null) full = ConfinedCombine(savePath, rel);
+            if (full == null || !System.IO.File.Exists(full))
+                full = ConfinedCombine(ModInit.conf.downloadsPath, rel);   // remap на наш mount
+            if (full == null || !System.IO.File.Exists(full))
                 return NotFound();
 
             return PhysicalFile(full, MimeType(full), enableRangeProcessing: true);
         }
         catch (Exception ex)
         {
-            return Json(new { error = ex.Message });
+            Console.WriteLine("[QbitDownload] stream: " + ex);
+            return Json(new { error = "internal error" });
         }
     }
 
-    static string Combine(string baseDir, string rel)
-        => baseDir.TrimEnd('/', '\\') + "/" + (rel ?? "").Replace('\\', '/').TrimStart('/');
+    // Безопасная сборка пути: выкидываем .. / . / пустые сегменты, канонизируем и проверяем,
+    // что результат строго внутри baseDir (защита от path traversal в file.name).
+    static string ConfinedCombine(string baseDir, string rel)
+    {
+        if (string.IsNullOrEmpty(baseDir) || string.IsNullOrEmpty(rel)) return null;
+
+        var parts = rel.Replace('\\', '/').Split('/');
+        var clean = new List<string>(parts.Length);
+        foreach (var p in parts)
+        {
+            if (p.Length == 0 || p == "." || p == "..") continue;
+            clean.Add(p);
+        }
+        if (clean.Count == 0) return null;
+
+        string baseFull = Path.GetFullPath(baseDir);
+        string candidate = Path.GetFullPath(Path.Combine(baseFull, string.Join("/", clean)));
+
+        string prefix = baseFull.EndsWith(Path.DirectorySeparatorChar.ToString())
+            ? baseFull
+            : baseFull + Path.DirectorySeparatorChar;
+
+        var cmp = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (!candidate.StartsWith(prefix, cmp)) return null;
+
+        return candidate;
+    }
 
     static string MimeType(string path)
     {
@@ -315,9 +423,10 @@ public class QbitController : BaseController
     [Route("qdl/delete")]
     async public Task<ActionResult> Delete(string hash, bool deleteFiles = false)
     {
+        if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            var c = await qbit();
+            using var c = await qbit();
             var form = new FormUrlEncodedContent(new[]
             {
                 new KeyValuePair<string, string>("hashes", hash),
@@ -328,8 +437,34 @@ public class QbitController : BaseController
         }
         catch (Exception ex)
         {
-            return Json(new { success = false, error = ex.Message });
+            Console.WriteLine("[QbitDownload] delete: " + ex);
+            return Json(new { success = false, error = "internal error" });
         }
+    }
+    #endregion
+
+    #region helpers
+    // Разрешаем фетчить только собственный JacRed-резолвер (loopback / наш listen-хост, наш порт)
+    bool IsSelfResolver(Uri u)
+    {
+        if (u == null) return false;
+        if (u.Scheme != "http" && u.Scheme != "https") return false;
+        if (u.Port != CoreInit.conf.listen.port) return false;
+
+        string h = u.Host.ToLowerInvariant();
+        if (h == "127.0.0.1" || h == "localhost" || h == "::1") return true;
+        if (!string.IsNullOrEmpty(CoreInit.conf.listen.localhost) && h == CoreInit.conf.listen.localhost.ToLowerInvariant()) return true;
+        try { if (h == new Uri(host).Host.ToLowerInvariant()) return true; } catch { }
+        return false;
+    }
+
+    // .torrent — это bencode-словарь: первый значимый байт = 'd' (0x64).
+    static bool LooksLikeTorrent(byte[] data)
+    {
+        if (data == null || data.Length < 50) return false;
+        int i = 0;
+        while (i < data.Length && (data[i] == (byte)' ' || data[i] == (byte)'\t' || data[i] == (byte)'\r' || data[i] == (byte)'\n')) i++;
+        return i < data.Length && data[i] == 0x64;
     }
     #endregion
 }

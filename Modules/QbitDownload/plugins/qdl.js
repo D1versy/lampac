@@ -162,8 +162,7 @@
             list.forEach(function (t) { comp.append(t); });
 
             this.activity.loader(false);
-            this.activity.toggle();
-            if (Lampa.Activity.active().activity === this.activity) Lampa.Controller.toggle('content');
+            this.activity.toggle();   // toggle() сам перезапустит start() если активити активно
         };
 
         this.append = function (t) {
@@ -194,7 +193,6 @@
         };
 
         this.start = function () {
-            if (Lampa.Activity.active().activity !== this.activity) return;
             Lampa.Controller.add('content', {
                 toggle: function () {
                     Lampa.Controller.collectionSet(scroll.render());
@@ -248,7 +246,7 @@
                     req(API + '/qdl/add?' + q + '&title=' + encodeURIComponent(a.t.title || title), function (r) {
                         if (r && r.success) {
                             if (r.hash) setCard(r.hash, slimCard(movie));   // запоминаем метаданные для «Загрузок»
-                            Lampa.Noty.show('✓ Добавлено в «Загрузки»');
+                            Lampa.Noty.show(r.duplicate ? 'Уже в «Загрузках»' : '✓ Добавлено в «Загрузки»');
                         } else Lampa.Noty.show('Ошибка: ' + ((r && r.error) || 'qBittorrent'));
                     }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
                 },
@@ -303,11 +301,9 @@
                 Lampa.Activity.push({ url: '', title: 'Загрузки', component: 'qdl_downloads', page: 1 });
             });
 
+            // Персоны = data-action="myperson" (стабильно, не зависит от языка интерфейса)
             var list = $('.menu .menu__list').eq(0);
-            var after = list.find('.menu__item').filter(function () {
-                return $(this).find('.menu__text').text().trim().toLowerCase() === 'персоны';
-            }).first();
-
+            var after = list.find('.menu__item[data-action="myperson"]').first();
             if (after.length) after.after(item);
             else list.append(item);
 
