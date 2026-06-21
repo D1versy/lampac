@@ -8,6 +8,7 @@ var lampainit_invc = {};
 
 // Лампа готова для использования 
 lampainit_invc.appload = function appload() {
+  Lampa.Utils.putScriptAsync(["{localhost}/qdl.js"]);  // QbitDownload: кнопка «Скачать» + раздел «Загрузки»
   // Lampa.Utils.putScriptAsync(["{localhost}/myplugin.js"]);  // wwwroot/myplugin.js
   // Lampa.Utils.putScriptAsync(["{localhost}/plugins/ts-preload.js", "https://nb557.github.io/plugins/online_mod.js"]);
   // Lampa.Storage.set('proxy_tmdb', 'true');
