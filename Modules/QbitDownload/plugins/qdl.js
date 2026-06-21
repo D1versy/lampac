@@ -29,6 +29,9 @@
         });
     }
 
+    function tmdbImg(path) { try { return Lampa.TMDB.image(path); } catch (e) { return ''; } }
+    function tmdbKey() { try { return Lampa.TMDB.key(); } catch (e) { return ''; } }   // key() — функция!
+
     function injectCss() {
         if (document.getElementById('qdl-css')) return;
         var st = document.createElement('style');
@@ -41,38 +44,46 @@
         document.head.appendChild(st);
     }
 
-    // ───────── Метаданные TMDB ─────────
+    // ───────── Метаданные TMDB (богатый набор полей) ─────────
+    function names(arr) { return (arr || []).map(function (x) { return (x && x.name) ? x.name : x; }).filter(Boolean); }
+
     function slimCard(m) {
         if (!m) return null;
+        var isTv = m.media_type === 'tv' || ((m.name || m.first_air_date) && !m.title && !m.release_date);
+        var date = m.release_date || m.first_air_date || '';
         return {
             id: m.id,
+            media_type: m.media_type || (isTv ? 'tv' : 'movie'),
             title: m.title || m.name,
-            name: m.name || m.title,
             original_title: m.original_title || m.original_name,
-            original_name: m.original_name,
             overview: m.overview,
-            release_date: m.release_date,
-            first_air_date: m.first_air_date,
+            tagline: m.tagline,
+            release_date: date,
+            year: (date + '').slice(0, 4),
             vote_average: m.vote_average,
             poster_path: m.poster_path,
-            media_type: m.media_type || ((m.name || m.first_air_date) && !m.title && !m.release_date ? 'tv' : 'movie'),
+            backdrop_path: m.backdrop_path,
+            genres: names(m.genres),
+            runtime: m.runtime || (m.episode_run_time && m.episode_run_time[0]) || 0,
+            countries: names(m.production_countries).concat(m.origin_country || []),
+            status: m.status,
+            number_of_seasons: m.number_of_seasons,
+            number_of_episodes: m.number_of_episodes,
+            age: m.age || m.certification || '',
             source: m.source || 'tmdb'
         };
     }
 
-    // сохранить метаданные + постер на бэкенд (SSD-кэш)
     function saveMeta(hash, movie, cb) {
         if (!hash || !movie) { if (cb) cb(null); return; }
-        var purl = '';
-        try { if (movie.poster_path) purl = Lampa.TMDB.image('t/p/w500' + movie.poster_path); } catch (e) {}
+        var purl = movie.poster_path ? tmdbImg('t/p/w500' + movie.poster_path) : '';
         post(API + '/qdl/save', { hash: hash, card: JSON.stringify(slimCard(movie)), poster_url: purl }, cb, function () { if (cb) cb(null); });
     }
 
-    // поиск метаданных по имени раздачи (для загрузок без привязки)
     function cleanName(name) {
         var s = String(name || '');
-        s = s.split(/[\[\(]/)[0];                  // до первой [ или (
-        s = s.split('/')[0];                       // "Рус / Eng" → первое
+        s = s.split(/[\[\(]/)[0];
+        s = s.split('/')[0];
         s = s.replace(/[._]/g, ' ');
         s = s.replace(/\b(19|20)\d\d\b[\s\S]*$/, '');
         s = s.replace(/\b(WEB-?DL|BluRay|HDRip|WEBRip|2160p|1080p|720p|4K|HEVC|x26[45]|BDRip|DVDRip)\b[\s\S]*$/i, '');
@@ -81,9 +92,7 @@
 
     function tmdbSearch(name, cb) {
         try {
-            var key = '';
-            try { key = Lampa.TMDB.key(); } catch (e) {}   // TMDB.key — ФУНКЦИЯ, её надо вызвать
-            var url = Lampa.TMDB.api('search/multi?api_key=' + key + '&language=ru-RU&query=' + encodeURIComponent(name));
+            var url = Lampa.TMDB.api('search/multi?api_key=' + tmdbKey() + '&language=ru-RU&query=' + encodeURIComponent(name));
             req(url, function (r) {
                 var list = (r && r.results) ? r.results.filter(function (x) {
                     return (x.media_type === 'movie' || x.media_type === 'tv') && x.poster_path;
@@ -91,6 +100,21 @@
                 cb(list[0] || null);
             }, function () { cb(null); });
         } catch (e) { cb(null); }
+    }
+
+    // полные детали (жанры, хронометраж, страны, статус, слоган…)
+    function tmdbDetails(id, mt, cb) {
+        try {
+            var url = Lampa.TMDB.api(mt + '/' + id + '?api_key=' + tmdbKey() + '&language=ru-RU');
+            req(url, function (d) { if (d && d.id) { d.media_type = mt; cb(d); } else cb(null); }, function () { cb(null); });
+        } catch (e) { cb(null); }
+    }
+
+    function enrich(name, cb) {   // имя раздачи → полная карточка TMDB
+        tmdbSearch(cleanName(name), function (found) {
+            if (!found) { cb(null); return; }
+            tmdbDetails(found.id, found.media_type, function (d) { cb(d || found); });
+        });
     }
 
     function posterUrl(item) {
@@ -132,7 +156,6 @@
         }, function () { Lampa.Noty.show('Ошибка чтения файлов'); });
     }
 
-    // «Смотреть»: сериал → выбор серии, фильм → самый большой файл
     function watch(item) {
         var name = (item.meta && item.meta.title) || item.name;
         req(API + '/qdl/files?hash=' + item.hash, function (files) {
@@ -142,35 +165,58 @@
         }, function () { playLocal(item.hash, -1, name); });
     }
 
-    // ───────── Простая карточка загрузки (постер + описание + 1 кнопка) ─────────
+    // ───────── Детальная карточка загрузки (вся инфа как в оригинале, 1 кнопка) ─────────
     function openDownload(item) {
         Lampa.Activity.push({ url: '', title: (item.meta && item.meta.title) || item.name, component: 'qdl_card', qdl: item });
     }
 
+    function badge(val, label) {
+        return '<span style="display:inline-flex;align-items:center;gap:.35em;background:rgba(255,255,255,.14);padding:.3em .65em;border-radius:.45em;margin:0 .5em .5em 0;font-size:1em"><b>' + esc(val) + '</b><span style="opacity:.55;font-size:.78em">' + esc(label) + '</span></span>';
+    }
+    function chip(txt) {
+        return '<span style="display:inline-block;background:rgba(255,255,255,.1);padding:.3em .65em;border-radius:.45em;margin:0 .5em .5em 0;font-size:1em">' + esc(txt) + '</span>';
+    }
+
     function ComponentCard(object) {
         var item = object.qdl || {};
-        var meta = item.meta || {};
         var scroll = new Lampa.Scroll({ mask: true, over: true });
         var html = $('<div></div>');
 
         this.create = function () {
+            var m = item.meta || {};
             var pct = Math.round((item.progress || 0) * 100);
-            var kind = meta.media_type === 'tv' ? 'Сериал' : (meta.media_type === 'movie' ? 'Фильм' : '');
-            var info = [
-                meta.year, kind,
-                (meta.vote_average ? ('★ ' + (Math.round(meta.vote_average * 10) / 10)) : ''),
-                (pct < 100 ? (pct + '% загружено') : '✓ загружено')
-            ].filter(Boolean).join('   ·   ');
+            var kind = m.media_type === 'tv' ? 'Сериал' : 'Фильм';
+            var rt = m.runtime ? (Math.floor(m.runtime / 60) + ':' + ('0' + (m.runtime % 60)).slice(-2)) : '';
+            var meta1 = [m.year, (m.countries && m.countries.length ? m.countries.slice(0, 2).join(', ') : ''), kind, rt].filter(Boolean).join('   ·   ');
+            var genres = (m.genres && m.genres.length) ? m.genres.slice(0, 4).join(', ') : '';
+
+            var badges = '';
+            if (m.vote_average) badges += badge((Math.round(m.vote_average * 10) / 10), 'TMDB');
+            if (m.age) badges += chip(/\d$/.test(String(m.age)) ? m.age + '+' : m.age);
+            if (m.status) badges += chip(m.status === 'Released' ? 'Выпущен' : (m.status === 'Ended' ? 'Завершён' : (m.status === 'Returning Series' ? 'Идёт' : m.status)));
+            if (m.number_of_seasons) badges += chip('Сезонов: ' + m.number_of_seasons);
+            badges += chip(pct < 100 ? pct + '% загружено' : '✓ загружено');
+
+            var bg = m.backdrop_path ? tmdbImg('t/p/w1280' + m.backdrop_path) : '';
+            var bgDiv = bg
+                ? '<div style="position:absolute;inset:0;background:url(' + bg + ') center top/cover no-repeat;opacity:.22"></div>' +
+                  '<div style="position:absolute;inset:0;background:linear-gradient(90deg,rgba(0,0,0,.65),rgba(0,0,0,.15))"></div>'
+                : '';
 
             var body = $(
-                '<div style="padding:2.5em">' +
-                  '<div style="display:flex;gap:2.5em;align-items:flex-start">' +
-                    '<img class="qdl-poster" src="' + posterUrl(item) + '" style="width:17em;height:25.5em;object-fit:cover;border-radius:1em;background:#222;flex:none">' +
+                '<div style="position:relative;min-height:100%">' +
+                  bgDiv +
+                  '<div style="position:relative;display:flex;gap:2.5em;padding:2.5em">' +
+                    '<img class="qdl-poster" src="' + posterUrl(item) + '" style="width:17em;height:25.5em;object-fit:cover;border-radius:1em;background:#222;flex:none;box-shadow:0 1em 3em rgba(0,0,0,.5)">' +
                     '<div style="flex:1;min-width:0">' +
-                      '<div style="font-size:2.4em;font-weight:600;line-height:1.1">' + esc(meta.title || item.name) + '</div>' +
-                      '<div style="opacity:.6;font-size:1.2em;margin:.8em 0 1.2em">' + esc(info) + '</div>' +
-                      '<div style="font-size:1.25em;line-height:1.55;opacity:.9;max-width:42em;margin-bottom:1.6em">' + esc(meta.overview || 'Нет описания.') + '</div>' +
-                      '<div class="qdl-watch selector" style="display:inline-flex;align-items:center;gap:.4em;padding:.7em 1.7em;background:rgba(255,255,255,.14);border-radius:.6em;font-size:1.3em">▶&nbsp;Смотреть</div>' +
+                      '<div style="font-size:2.6em;font-weight:700;line-height:1.05">' + esc(m.title || item.name) + '</div>' +
+                      (m.original_title && m.original_title !== m.title ? '<div style="opacity:.5;font-size:1.3em;margin-top:.2em">' + esc(m.original_title) + '</div>' : '') +
+                      (m.tagline ? '<div style="opacity:.6;font-style:italic;font-size:1.2em;margin-top:.5em">«' + esc(m.tagline) + '»</div>' : '') +
+                      '<div style="margin:1.1em 0 .5em">' + badges + '</div>' +
+                      (meta1 ? '<div style="opacity:.7;font-size:1.15em;margin-bottom:.3em">' + esc(meta1) + '</div>' : '') +
+                      (genres ? '<div style="opacity:.7;font-size:1.15em;margin-bottom:1em">' + esc(genres) + '</div>' : '') +
+                      '<div style="font-size:1.2em;line-height:1.55;opacity:.92;max-width:46em;margin-bottom:1.7em">' + esc(m.overview || 'Нет описания.') + '</div>' +
+                      '<div class="qdl-watch selector" style="display:inline-flex;align-items:center;gap:.4em;padding:.75em 2em;background:rgba(255,255,255,.16);border-radius:.6em;font-size:1.4em">▶&nbsp;Смотреть</div>' +
                     '</div>' +
                   '</div>' +
                 '</div>'
@@ -180,6 +226,18 @@
 
             scroll.append(body);
             html.append(scroll.render());
+
+            // если метаданных нет — дотянем и перерисуем карточку
+            if (!item.meta) {
+                enrich(item.name, function (card) {
+                    if (!card) return;
+                    saveMeta(item.hash, card, function (r) {
+                        item.meta = slimCard(card);
+                        if (r && r.has_poster) item.has_poster = true;
+                        Lampa.Activity.replace();
+                    });
+                });
+            }
             return this.render();
         };
 
@@ -204,7 +262,7 @@
         this.destroy = function () { scroll.destroy(); html.remove(); };
     }
 
-    // ───────── Грид «Загрузки» ─────────
+    // ───────── Грид «Загрузки» (вертикальные карточки-постеры) ─────────
     function ComponentDownloads(object) {
         var comp = this;
         var network = new Lampa.Reguest();
@@ -235,21 +293,18 @@
         this.append = function (t) {
             var meta = t.meta || {};
             var pct = Math.round((t.progress || 0) * 100);
-            var title = meta.title || t.name;
-            var year = meta.year || '';
 
-            var el = Lampa.Template.get('card', { title: title, release_year: year });
-            el.addClass('card--collection selector');
+            // обычная ВЕРТИКАЛЬНАЯ карточка-постер (без card--collection!)
+            var el = Lampa.Template.get('card', { title: meta.title || t.name, release_year: meta.year || '' });
 
             var img = el.find('.card__img');
             img.attr('src', posterUrl(t));
             img.on('error', function () { this.src = './img/img_broken.svg'; });
 
             var view = el.find('.card__view'); if (!view.length) view = el;
-            var badge = pct < 100
+            view.append(pct < 100
                 ? '<div style="position:absolute;left:.4em;top:.4em;background:rgba(0,0,0,.75);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">' + pct + '%</div>'
-                : '<div style="position:absolute;left:.4em;top:.4em;background:rgba(20,160,40,.9);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">✓</div>';
-            view.append(badge);
+                : '<div style="position:absolute;left:.4em;top:.4em;background:rgba(20,160,40,.9);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">✓</div>');
 
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:enter', function () { openDownload(t); });
@@ -257,14 +312,14 @@
 
             body.append(el);
 
-            // нет метаданных → дотягиваем поиском по TMDB и кэшируем
+            // нет метаданных → ищем в TMDB + тянем полные детали, кэшируем, обновляем карточку
             if (!t.meta) {
-                tmdbSearch(cleanName(t.name), function (found) {
-                    if (!found) return;
-                    saveMeta(t.hash, found, function (r) {
-                        t.meta = slimCard(found);
-                        el.find('.card__title').text(found.title || found.name || t.name);
-                        if (r && r.has_poster) el.find('.card__img').attr('src', API + '/qdl/poster?hash=' + t.hash + '&t=' + Date.now());
+                enrich(t.name, function (card) {
+                    if (!card) return;
+                    saveMeta(t.hash, card, function (r) {
+                        t.meta = slimCard(card);
+                        el.find('.card__title').text(card.title || card.name || t.name);
+                        if (r && r.has_poster) { t.has_poster = true; el.find('.card__img').attr('src', API + '/qdl/poster?hash=' + t.hash + '&t=' + Date.now()); }
                     });
                 });
             }
@@ -341,7 +396,7 @@
                     Lampa.Noty.show('Добавляю в загрузки…');
                     req(API + '/qdl/add?' + q + '&title=' + encodeURIComponent(a.t.title || title), function (r) {
                         if (r && r.success) {
-                            if (r.hash) saveMeta(r.hash, movie);   // кэшируем метаданные+постер на SSD
+                            if (r.hash) saveMeta(r.hash, movie);   // кэшируем метаданные+постер
                             Lampa.Noty.show(r.duplicate ? 'Уже в «Загрузках»' : '✓ Добавлено в «Загрузки»');
                         } else Lampa.Noty.show('Ошибка: ' + ((r && r.error) || 'qBittorrent'));
                     }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
@@ -368,22 +423,20 @@
                 cont.append(btn);
             }
 
-            // если фильм уже скачан — ЗЕЛЁНАЯ кнопка «Смотреть (загружено)» + привязка метаданных
+            // фильм уже скачан → ЗЕЛЁНАЯ «Смотреть (загружено)» + привязка метаданных
             if (movie && movie.id && !$('.qdl-watch-btn', render).length) {
                 req(API + '/qdl/list', function (list) {
                     list = list || [];
                     var titles = [movie.title, movie.original_title, movie.name, movie.original_name]
                         .filter(Boolean).map(function (s) { return String(s).toLowerCase().trim(); });
 
-                    // 1) точное совпадение по TMDB id
                     var hit = list.filter(function (x) { return x.meta && String(x.meta.id) === String(movie.id); })[0];
-                    // 2) иначе — по очищенному имени раздачи (и сразу привязываем метаданные к этой карточке)
                     if (!hit) {
                         hit = list.filter(function (x) {
                             var n = cleanName(x.name).toLowerCase().trim();
                             return n && titles.some(function (t) { return t === n || t.indexOf(n) === 0 || n.indexOf(t) === 0; });
                         })[0];
-                        if (hit && !hit.meta) saveMeta(hit.hash, movie);   // back-link: карточка → загрузка
+                        if (hit && !hit.meta) saveMeta(hit.hash, movie);   // back-link карточка → загрузка
                     }
                     if (!hit || $('.qdl-watch-btn', render).length) return;
 
@@ -396,48 +449,47 @@
         } catch (err) { console.log('qdl: addButton', err); }
     }
 
-    // ───────── Пункт меню «Загрузки» (под «Персоны» = data-action="myperson") ─────────
-    function placeMenu(item) {
-        var anchor = $('.menu .menu__item[data-action="myperson"]').first();   // ГЛОБАЛЬНО по всему меню
-        if (anchor.length) { anchor.after(item); return true; }
-        return false;
-    }
-
-    function addMenu() {
-        if ($('.menu .qdl-menu').length) return;
+    // ───────── Пункт меню «Загрузки» строго под «Персоны» (data-action="myperson") ─────────
+    function buildMenuItem() {
         var item = $('<li class="menu__item selector qdl-menu"><div class="menu__ico">' + ICON + '</div><div class="menu__text">Загрузки</div></li>');
         item.on('hover:enter', function () {
             Lampa.Activity.push({ url: '', title: 'Загрузки', component: 'qdl_downloads', page: 1 });
         });
+        return item;
+    }
 
-        if (placeMenu(item)) return;
-
-        // меню дорисовывается после app:ready — следим за DOM и вставляем под «Персоны», как только появится
-        var done = false;
-        var menuEl = document.querySelector('.menu');
-        var obs = menuEl ? new MutationObserver(function () {
-            if (done) return;
-            if ($('.menu .qdl-menu').length) { done = true; obs.disconnect(); return; }
-            if (placeMenu(item)) { done = true; obs.disconnect(); }
-        }) : null;
-        if (obs) obs.observe(menuEl, { childList: true, subtree: true });
-
-        setTimeout(function () {                                  // фолбэк ~8с → вниз, если «Персоны» нет
-            if (done) return;
-            done = true;
-            if (obs) obs.disconnect();
-            if (!$('.menu .qdl-menu').length) {
-                var list = $('.menu .menu__list').eq(0);
-                if (list.length) list.append(item);
+    function ensureMenu() {
+        try {
+            var anchor = $('.menu .menu__item[data-action="myperson"]').first();
+            if (!anchor.length) return;                 // «Персоны» ещё не отрисованы — ждём
+            var existing = $('.menu .qdl-menu');
+            if (!existing.length) { anchor.after(buildMenuItem()); return; }
+            // уже есть — держим строго сразу после «Персоны» (меню могло пере-рендериться)
+            if (existing.prev('.menu__item')[0] !== anchor[0]) {
+                existing.detach();
+                anchor.after(existing);
             }
-        }, 8000);
+        } catch (e) {}
+    }
+
+    function startMenuWatcher() {
+        ensureMenu();
+        var deb = null;
+        try {
+            var obs = new MutationObserver(function () {
+                if (deb) return;
+                deb = setTimeout(function () { deb = null; ensureMenu(); }, 300);
+            });
+            obs.observe(document.body, { childList: true, subtree: true });
+        } catch (e) {}
+        [500, 1500, 3000, 6000].forEach(function (t) { setTimeout(ensureMenu, t); });
     }
 
     function start() {
         Lampa.Component.add('qdl_downloads', ComponentDownloads);
         Lampa.Component.add('qdl_card', ComponentCard);
         Lampa.Listener.follow('full', addButton);
-        addMenu();
+        startMenuWatcher();
     }
 
     if (window.appready) start();

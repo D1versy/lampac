@@ -461,27 +461,14 @@ public class QbitController : BaseController
             Directory.CreateDirectory(Path.Combine(ModInit.conf.cachePath, "meta"));
             Directory.CreateDirectory(Path.Combine(ModInit.conf.cachePath, "img"));
 
-            if (!string.IsNullOrWhiteSpace(card))
+            // Клиент шлёт уже подготовленную карточку (slimCard) со всеми нужными полями —
+            // храним как есть (валидируем JSON + кап размера), чтобы метаданные были богатыми.
+            if (!string.IsNullOrWhiteSpace(card) && card.Length < 65536)
             {
                 try
                 {
                     var j = JObject.Parse(card);
-                    string date = j.Value<string>("release_date") ?? j.Value<string>("first_air_date") ?? "";
-                    bool isTv = (string)j["media_type"] == "tv"
-                                || (j["title"] == null && (j["name"] != null || j["first_air_date"] != null))
-                                || (j["first_air_date"] != null && j["release_date"] == null);
-                    var slim = new JObject
-                    {
-                        ["id"] = j.Value<int?>("id"),
-                        ["title"] = (string)(j["title"] ?? j["name"]),
-                        ["original_title"] = (string)(j["original_title"] ?? j["original_name"]),
-                        ["overview"] = j.Value<string>("overview"),
-                        ["year"] = date.Length >= 4 ? date.Substring(0, 4) : "",
-                        ["vote_average"] = j.Value<double?>("vote_average"),
-                        ["media_type"] = isTv ? "tv" : "movie",
-                        ["source"] = j.Value<string>("source") ?? "tmdb"
-                    };
-                    System.IO.File.WriteAllText(MetaPath(hash), slim.ToString(Newtonsoft.Json.Formatting.None));
+                    System.IO.File.WriteAllText(MetaPath(hash), j.ToString(Newtonsoft.Json.Formatting.None));
                 }
                 catch { }
             }
