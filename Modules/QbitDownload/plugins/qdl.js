@@ -553,11 +553,56 @@
         [500, 1500, 3000, 6000].forEach(function (t) { setTimeout(ensureMenu, t); });
     }
 
+    // ───────── Кнопка фуллскрина в плеере на мобильном (Lampa прячет свою на android/iOS) ─────────
+    function isMobile() {
+        try { if (Lampa.Platform && typeof Lampa.Platform.is === 'function' && Lampa.Platform.is('android')) return true; } catch (e) {}
+        return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+    }
+
+    function fsToggle() {
+        var cont = document.querySelector('.player') || document.documentElement;
+        var v = document.querySelector('.player-video video') || document.querySelector('.player video') || document.querySelector('video');
+        try {
+            if (document.fullscreenElement || document.webkitFullscreenElement) {
+                (document.exitFullscreen || document.webkitExitFullscreen || function () {}).call(document);
+                return;
+            }
+            if (cont && cont.requestFullscreen) { cont.requestFullscreen(); return; }            // Android/десктоп: весь плеер (UI Lampa остаётся)
+            if (cont && cont.webkitRequestFullscreen) { cont.webkitRequestFullscreen(); return; }
+            if (v && v.webkitEnterFullscreen) { v.webkitEnterFullscreen(); return; }              // iOS: нативный фуллскрин видео
+            if (v && v.requestFullscreen) { v.requestFullscreen(); return; }
+        } catch (e) {}
+    }
+
+    function ensurePlayerFs() {
+        if (!isMobile()) return;
+        var panel = document.querySelector('.player-panel');
+        if (!panel || panel.querySelector('.qdl-fs')) return;
+        var btn = document.createElement('div');
+        btn.className = 'player-panel__fullscreen button selector qdl-fs';
+        btn.innerHTML = '<svg><use xlink:href="#sprite-fullscreen"></use></svg>';
+        try { $(btn).on('hover:enter', fsToggle); } catch (e) {}
+        btn.addEventListener('click', function (e) { e.preventDefault(); fsToggle(); });
+        var anchor = panel.querySelector('.player-panel__fullscreen');
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(btn, anchor.nextSibling);
+        else panel.appendChild(btn);
+    }
+
+    function startPlayerFsWatcher() {
+        if (!isMobile()) return;
+        var deb = null;
+        try {
+            new MutationObserver(function () { if (deb) return; deb = setTimeout(function () { deb = null; ensurePlayerFs(); }, 300); })
+                .observe(document.body, { childList: true, subtree: true });
+        } catch (e) {}
+    }
+
     function start() {
         Lampa.Component.add('qdl_downloads', ComponentDownloads);
         Lampa.Component.add('qdl_card', ComponentCard);
         Lampa.Listener.follow('full', addButton);
         startMenuWatcher();
+        startPlayerFsWatcher();
     }
 
     if (window.appready) start();
