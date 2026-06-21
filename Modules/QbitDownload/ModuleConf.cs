@@ -21,4 +21,9 @@ public class ModuleConf : ModuleBaseConf
 
     // Локальный кэш метаданных/постеров загрузок (том на SSD, rw). Только картинки+JSON, не видео.
     public string cachePath { get; set; } = "/qdl-data";
+
+    // HLS-транскод для браузеров (звук EAC3/AC3/DTS → AAC, видео copy). Кэш на HDD (дублирует видео).
+    public string hlsPath { get; set; } = "/qdl-hls";
+    public string ffmpeg { get; set; } = "/lampac/data/ffmpeg";
+    public long hlsCacheCapGb { get; set; } = 30;
 }

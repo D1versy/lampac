@@ -4,7 +4,9 @@ using Newtonsoft.Json.Linq;
 using Shared;
 using Shared.Services;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -330,48 +332,8 @@ public class QbitController : BaseController
         try
         {
             using var c = await qbit();
-            string he = HttpUtility.UrlEncode(hash);
-
-            string infoRaw = await c.GetStringAsync($"/api/v2/torrents/info?hashes={he}");
-            var info = JArray.Parse(infoRaw);
-            if (info.Count == 0) return NotFound();
-            string savePath = info[0].Value<string>("save_path") ?? ModInit.conf.downloadsPath;
-            string contentPath = info[0].Value<string>("content_path");
-
-            string filesRaw = await c.GetStringAsync($"/api/v2/torrents/files?hash={he}");
-            var files = JArray.Parse(filesRaw);
-            if (files.Count == 0) return NotFound();
-
-            JToken file = null;
-            if (index >= 0)
-            {
-                foreach (var f in files)
-                    if ((f.Value<int?>("index") ?? -1) == index) { file = f; break; }
-            }
-            if (file == null)
-            {
-                long max = -1;
-                foreach (var f in files)
-                {
-                    long s = f.Value<long?>("size") ?? 0;
-                    if (s > max) { max = s; file = f; }
-                }
-            }
-            if (file == null) return NotFound();
-
-            string rel = file.Value<string>("name");
-
-            // content_path точнее save_path (учитывает temp-папку незавершённых и per-category пути).
-            // Для одиночного файла content_path указывает прямо на файл.
-            string full = null;
-            if (files.Count == 1 && !string.IsNullOrEmpty(contentPath) && System.IO.File.Exists(contentPath))
-                full = contentPath;
-            if (full == null) full = ConfinedCombine(savePath, rel);
-            if (full == null || !System.IO.File.Exists(full))
-                full = ConfinedCombine(ModInit.conf.downloadsPath, rel);   // remap на наш mount
-            if (full == null || !System.IO.File.Exists(full))
-                return NotFound();
-
+            string full = await ResolveFile(c, hash, index);
+            if (full == null) return NotFound();
             return PhysicalFile(full, MimeType(full), enableRangeProcessing: true);
         }
         catch (Exception ex)
@@ -379,6 +341,43 @@ public class QbitController : BaseController
             Console.WriteLine("[QbitDownload] stream: " + ex);
             return Json(new { error = "internal error" });
         }
+    }
+
+    // Находит локальный путь к видеофайлу торрента (index<0 → самый большой). null если нет.
+    async Task<string> ResolveFile(HttpClient c, string hash, int index)
+    {
+        string he = HttpUtility.UrlEncode(hash);
+
+        string infoRaw = await c.GetStringAsync($"/api/v2/torrents/info?hashes={he}");
+        var info = JArray.Parse(infoRaw);
+        if (info.Count == 0) return null;
+        string savePath = info[0].Value<string>("save_path") ?? ModInit.conf.downloadsPath;
+        string contentPath = info[0].Value<string>("content_path");
+
+        string filesRaw = await c.GetStringAsync($"/api/v2/torrents/files?hash={he}");
+        var files = JArray.Parse(filesRaw);
+        if (files.Count == 0) return null;
+
+        JToken file = null;
+        if (index >= 0)
+            foreach (var f in files)
+                if ((f.Value<int?>("index") ?? -1) == index) { file = f; break; }
+        if (file == null)
+        {
+            long max = -1;
+            foreach (var f in files) { long s = f.Value<long?>("size") ?? 0; if (s > max) { max = s; file = f; } }
+        }
+        if (file == null) return null;
+
+        string rel = file.Value<string>("name");
+        string full = null;
+        if (files.Count == 1 && !string.IsNullOrEmpty(contentPath) && System.IO.File.Exists(contentPath))
+            full = contentPath;
+        if (full == null) full = ConfinedCombine(savePath, rel);
+        if (full == null || !System.IO.File.Exists(full))
+            full = ConfinedCombine(ModInit.conf.downloadsPath, rel);
+        if (full == null || !System.IO.File.Exists(full)) return null;
+        return full;
     }
 
     // Безопасная сборка пути: выкидываем .. / . / пустые сегменты, канонизируем и проверяем,
@@ -513,6 +512,123 @@ public class QbitController : BaseController
         string p = PosterPath(hash);
         if (!System.IO.File.Exists(p)) return NotFound();
         return PhysicalFile(p, "image/jpeg");
+    }
+    #endregion
+
+    #region /qdl/hls — HLS-транскод для браузера (звук EAC3/AC3/DTS → AAC, видео copy)
+    static readonly ConcurrentDictionary<string, byte> _hlsRunning = new();
+
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/hls/{key}/{file}")]
+    async public Task<ActionResult> Hls(string key, string file)
+    {
+        var mk = Regex.Match(key ?? "", "^([0-9a-fA-F]{40}|[0-9A-Za-z]{32})_(-?\\d+)$");
+        if (!mk.Success) return BadRequest();
+        if (!Regex.IsMatch(file ?? "", "^(playlist\\.m3u8|seg\\d{1,6}\\.ts)$")) return BadRequest();
+
+        string hash = mk.Groups[1].Value;
+        int index = int.Parse(mk.Groups[2].Value);
+        string dir = Path.Combine(ModInit.conf.hlsPath, key);
+        string target = Path.Combine(dir, file);
+
+        if (file.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!System.IO.File.Exists(target)) return NotFound();
+            return PhysicalFile(target, "video/mp2t", enableRangeProcessing: true);
+        }
+
+        // playlist.m3u8 — генерим при первом запросе
+        if (!System.IO.File.Exists(target))
+        {
+            string src;
+            try { using (var c = await qbit()) src = await ResolveFile(c, hash, index); }
+            catch (Exception ex) { Console.WriteLine("[QbitDownload] hls resolve: " + ex); return Json(new { error = "internal error" }); }
+            if (src == null) return NotFound();
+
+            CleanupHls();
+            StartHls(key, src, dir);
+
+            // ждём появления плейлиста + первого сегмента (event-playlist растёт по мере транскода)
+            for (int i = 0; i < 60; i++)
+            {
+                if (System.IO.File.Exists(target) && Directory.Exists(dir) && Directory.GetFiles(dir, "seg*.ts").Length >= 1) break;
+                await Task.Delay(500);
+            }
+            if (!System.IO.File.Exists(target)) return StatusCode(503);
+        }
+
+        return PhysicalFile(target, "application/vnd.apple.mpegurl");
+    }
+
+    static void StartHls(string key, string src, string dir)
+    {
+        if (!_hlsRunning.TryAdd(key, 1)) return;   // уже генерится
+        try
+        {
+            Directory.CreateDirectory(dir);
+            var psi = new ProcessStartInfo
+            {
+                FileName = ModInit.conf.ffmpeg,
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+            foreach (var a in new[]
+            {
+                "-y", "-i", src,
+                "-map", "0:v:0?", "-map", "0:a:0?",
+                "-c:v", "copy",                    // видео не трогаем (AVC браузер играет)
+                "-c:a", "aac", "-ac", "2", "-b:a", "256k",   // звук EAC3/AC3/DTS → AAC stereo
+                "-f", "hls", "-hls_time", "6", "-hls_playlist_type", "event",
+                "-hls_flags", "independent_segments",
+                "-hls_segment_filename", Path.Combine(dir, "seg%05d.ts"),
+                Path.Combine(dir, "playlist.m3u8")
+            }) psi.ArgumentList.Add(a);
+
+            var p = Process.Start(psi);
+            _ = Task.Run(async () =>
+            {
+                try { _ = p.StandardError.ReadToEndAsync(); _ = p.StandardOutput.ReadToEndAsync(); await p.WaitForExitAsync(); }
+                catch { }
+                _hlsRunning.TryRemove(key, out _);
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[QbitDownload] hls start: " + ex);
+            _hlsRunning.TryRemove(key, out _);
+        }
+    }
+
+    // не даём HLS-кэшу (дублирует видео) разрастаться: при превышении капа чистим старые папки
+    static void CleanupHls()
+    {
+        try
+        {
+            string root = ModInit.conf.hlsPath;
+            if (!Directory.Exists(root)) return;
+            long cap = Math.Max(1, ModInit.conf.hlsCacheCapGb) * 1024L * 1024 * 1024;
+
+            var list = new List<(DirectoryInfo d, long size, DateTime atime)>();
+            long total = 0;
+            foreach (var d in new DirectoryInfo(root).GetDirectories())
+            {
+                long s = 0; DateTime at = d.CreationTimeUtc;
+                foreach (var f in d.GetFiles()) { s += f.Length; if (f.LastWriteTimeUtc > at) at = f.LastWriteTimeUtc; }
+                total += s; list.Add((d, s, at));
+            }
+            if (total <= cap) return;
+
+            list.Sort((a, b) => a.atime.CompareTo(b.atime));   // старые первыми
+            foreach (var it in list)
+            {
+                if (total <= cap) break;
+                if (_hlsRunning.ContainsKey(it.d.Name)) continue;   // активные не трогаем
+                try { it.d.Delete(true); total -= it.size; } catch { }
+            }
+        }
+        catch { }
     }
     #endregion
 

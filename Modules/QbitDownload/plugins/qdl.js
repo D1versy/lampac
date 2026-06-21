@@ -128,9 +128,20 @@
     }
     function baseName(p) { return String(p || '').split('/').pop().split('\\').pop(); }
 
+    // ТВ (нативный плеер) тянет оригинал (EAC3 ок), десктоп-браузер — HLS (звук→AAC)
+    function isBrowser() {
+        try { if (Lampa.Platform && typeof Lampa.Platform.is === 'function') return Lampa.Platform.is('browser'); } catch (e) {}
+        var ua = navigator.userAgent || '';
+        return !/Tizen|Web0?S|webOS|SMART-TV|SmartTV|HbbTV|AppleTV|CrKey|Android TV|NetCast|VIDAA|MSX/i.test(ua);
+    }
+    function streamUrl(hash, index) {
+        if (isBrowser()) return API + '/qdl/hls/' + hash + '_' + (index >= 0 ? index : -1) + '/playlist.m3u8';
+        return API + '/qdl/stream?hash=' + hash + (index >= 0 ? '&index=' + index : '');
+    }
+
     // ───────── Воспроизведение локального файла (оффлайн) ─────────
     function playLocal(hash, index, title) {
-        var url = API + '/qdl/stream?hash=' + hash + (index >= 0 ? '&index=' + index : '');
+        var url = streamUrl(hash, index);
         Lampa.Player.play({ title: title || 'Загрузка', url: url });
         Lampa.Player.playlist([{ title: title || 'Загрузка', url: url }]);
     }
@@ -142,13 +153,13 @@
             if (vids.length === 1) { playLocal(hash, vids[0].index, baseName(vids[0].name)); return; }
 
             var playlist = vids.map(function (f) {
-                return { title: baseName(f.name), url: API + '/qdl/stream?hash=' + hash + '&index=' + f.index };
+                return { title: baseName(f.name), url: streamUrl(hash, f.index) };
             });
             Lampa.Select.show({
                 title: 'Серии — ' + (name || ''),
                 items: vids.map(function (f) { return { title: baseName(f.name), index: f.index }; }),
                 onSelect: function (a) {
-                    Lampa.Player.play({ title: a.title, url: API + '/qdl/stream?hash=' + hash + '&index=' + a.index });
+                    Lampa.Player.play({ title: a.title, url: streamUrl(hash, a.index) });
                     Lampa.Player.playlist(playlist);
                 },
                 onBack: function () { Lampa.Controller.toggle('content'); }
