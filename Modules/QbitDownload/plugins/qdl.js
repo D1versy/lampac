@@ -460,12 +460,26 @@
     // ───────── Поиск раздач + кнопка «Скачать» ─────────
     function chooseAndDownload(movie) {
         movie = movie || {};
-        var title = movie.title || movie.name || movie.original_title || movie.original_name || '';
+        var title = movie.title || movie.name || '';
+        var original = movie.original_title || movie.original_name || '';
         var year = ((movie.release_date || movie.first_air_date || '') + '').slice(0, 4);
-        if (!title) { Lampa.Noty.show('Не удалось определить название'); return; }
+        // сериал → is_serial=2, фильм → 1 (как в нативном поиске Lampa)
+        var isSerial = (movie.media_type === 'tv' || movie.original_name || movie.number_of_seasons) ? 2 : 1;
+        var search = title || original;
+        if (!search) { Lampa.Noty.show('Не удалось определить название'); return; }
+
+        var apikey = '';
+        try { apikey = Lampa.Storage.get('jackett_key', '') || ''; } catch (e) {}
 
         Lampa.Noty.show('Поиск раздач…');
-        var url = API + '/qdl/search?query=' + encodeURIComponent(title) + (year ? '&year=' + year : '');
+        // ПОЛНЫЙ контекст → бэкенд бьёт в тот же индексатор, что нативный «через торрент»:
+        // правильный фильм (а не саундтрек/однофамилец) + все трекеры
+        var url = API + '/qdl/search?query=' + encodeURIComponent(search)
+            + (title ? '&title=' + encodeURIComponent(title) : '')
+            + (original ? '&title_original=' + encodeURIComponent(original) : '')
+            + (year ? '&year=' + year : '')
+            + '&is_serial=' + isSerial
+            + (apikey ? '&apikey=' + encodeURIComponent(apikey) : '');
 
         req(url, function (list) {
             if (!list || !list.length) { Lampa.Noty.show('Раздачи не найдены'); return; }
@@ -475,7 +489,7 @@
                 items: list.slice(0, 60).map(function (t) {
                     return {
                         title: t.title,
-                        subtitle: [t.size, t.tracker, (t.sid ? ('сидов: ' + t.sid) : '')].filter(Boolean).join('  •  '),
+                        subtitle: [(t.quality ? t.quality + 'p' : ''), t.size, t.tracker, (t.sid ? ('сидов: ' + t.sid) : '')].filter(Boolean).join('  •  '),
                         t: t
                     };
                 }),

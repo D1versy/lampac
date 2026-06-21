@@ -8,6 +8,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -74,44 +75,84 @@ public class QbitController : BaseController
     }
     #endregion
 
-    #region /qdl/search — поиск торрентов через JacRed (тот же источник, что у Lampa)
+    #region /qdl/search — раздачи через нативный индексатор Lampa (правильный фильм + все трекеры)
     [HttpGet, AllowAnonymous]
     [Route("qdl/search")]
-    async public Task<ActionResult> Search(string query, int year = 0)
+    async public Task<ActionResult> Search(string query, string title = null, string title_original = null,
+                                           int year = 0, int is_serial = -1, string apikey = null)
     {
-        if (string.IsNullOrWhiteSpace(query))
+        string search = !string.IsNullOrWhiteSpace(query) ? query
+                      : !string.IsNullOrWhiteSpace(title) ? title : title_original;
+        if (string.IsNullOrWhiteSpace(search))
             return ContentTo("[]", "application/json; charset=utf-8");
 
-        string url = $"http://{CoreInit.conf.listen.localhost}:{CoreInit.conf.listen.port}/api/v1.0/torrents?search={HttpUtility.UrlEncode(query)}";
-        string raw = await Http.Get(url, timeoutSeconds: 40);
+        // ВАЖНО: тот же эндпоинт, что использует нативный «Смотреть через торрент» (jackett-совместимый),
+        // с ПОЛНЫМ TMDB-контекстом (title+original+year+is_serial) → корректный матчинг именно нужного фильма
+        // и опрос ВСЕХ трекеров (rutracker/kinozal/rutor/nnmclub). Старый /api/v1.0/torrents?search= делал
+        // лишь текстовый поиск по локальной БД → выдавал саундтреки/однофамильцев (не тот фильм). См. claude/06.
+        var sb = new StringBuilder();
+        sb.Append($"http://{CoreInit.conf.listen.localhost}:{CoreInit.conf.listen.port}/api/v2.0/indexers/all/results");
+        sb.Append("?apikey=").Append(HttpUtility.UrlEncode(apikey ?? ""));   // не настроен → проверка пропускает любой
+        sb.Append("&Query=").Append(HttpUtility.UrlEncode(search));
+        if (!string.IsNullOrWhiteSpace(title)) sb.Append("&title=").Append(HttpUtility.UrlEncode(title));
+        if (!string.IsNullOrWhiteSpace(title_original)) sb.Append("&title_original=").Append(HttpUtility.UrlEncode(title_original));
+        if (year > 0) sb.Append("&year=").Append(year);
+        if (is_serial >= 0) sb.Append("&is_serial=").Append(is_serial);
+
+        string raw = await Http.Get(sb.ToString(), timeoutSeconds: 40);
 
         var result = new JArray();
         if (!string.IsNullOrEmpty(raw))
         {
             try
             {
-                foreach (var t in JArray.Parse(raw))
+                var arr = JObject.Parse(raw)["Results"] as JArray;
+                if (arr != null)
                 {
-                    int relased = t.Value<int?>("relased") ?? 0;
-                    if (year > 0 && relased > 0 && relased != year)
-                        continue;
-
-                    result.Add(new JObject
+                    var seen = new HashSet<string>();
+                    foreach (var t in arr)
                     {
-                        ["title"] = t.Value<string>("title"),
-                        ["magnet"] = t.Value<string>("magnet"),
-                        ["parselink"] = t.Value<string>("parselink"),
-                        ["tracker"] = t.Value<string>("tracker") ?? t.Value<string>("trackerName"),
-                        ["sid"] = t.Value<int?>("sid") ?? 0,
-                        ["size"] = t.Value<string>("sizeName"),
-                        ["quality"] = t.Value<int?>("quality") ?? 0
-                    });
+                        string mag = t.Value<string>("MagnetUri");
+                        string link = t.Value<string>("Link");
+                        if (string.IsNullOrWhiteSpace(mag) && string.IsNullOrWhiteSpace(link)) continue;   // нечего качать
+
+                        string ttl = t.Value<string>("Title") ?? "";
+                        string dedupe = !string.IsNullOrWhiteSpace(mag) ? MagnetHash(mag) : link;          // дедуп по btih / parselink
+                        if (!string.IsNullOrEmpty(dedupe) && !seen.Add(dedupe)) continue;
+
+                        result.Add(new JObject
+                        {
+                            ["title"] = ttl,
+                            ["magnet"] = mag,
+                            ["parselink"] = link,
+                            ["tracker"] = t.Value<string>("Tracker"),
+                            ["sid"] = t.Value<int?>("Seeders") ?? 0,
+                            ["size"] = HumanSize(t.Value<long?>("Size") ?? 0),
+                            ["quality"] = QualityFromTitle(ttl)
+                        });
+                    }
                 }
             }
             catch { }
         }
 
-        return ContentTo(result.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+        // самые «живые» раздачи сверху (надёжнее докачиваются)
+        var sorted = new JArray(result.OrderByDescending(x => x.Value<int?>("sid") ?? 0));
+        return ContentTo(sorted.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
+
+    static string HumanSize(long b)
+    {
+        if (b <= 0) return "";
+        string[] u = { "B", "KB", "MB", "GB", "TB" };
+        double s = b; int i = 0;
+        while (s >= 1024 && i < u.Length - 1) { s /= 1024; i++; }
+        return (i >= 3 ? s.ToString("0.0") : s.ToString("0")) + " " + u[i];
+    }
+    static int QualityFromTitle(string t)
+    {
+        var m = Regex.Match(t ?? "", "(2160|1080|720|480)p?", RegexOptions.IgnoreCase);
+        return m.Success ? int.Parse(m.Groups[1].Value) : 0;
     }
     #endregion
 
