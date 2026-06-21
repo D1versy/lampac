@@ -531,33 +531,47 @@ public class QbitController : BaseController
         string dir = Path.Combine(ModInit.conf.hlsPath, key);
         string target = Path.Combine(dir, file);
 
-        if (file.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
+        try
         {
-            if (!System.IO.File.Exists(target)) return NotFound();
-            return PhysicalFile(target, "video/mp2t", enableRangeProcessing: true);
-        }
-
-        // playlist.m3u8 — генерим при первом запросе
-        if (!System.IO.File.Exists(target))
-        {
-            string src;
-            try { using (var c = await qbit()) src = await ResolveFile(c, hash, index); }
-            catch (Exception ex) { Console.WriteLine("[QbitDownload] hls resolve: " + ex); return Json(new { error = "internal error" }); }
-            if (src == null) return NotFound();
-
-            CleanupHls();
-            StartHls(key, src, dir);
-
-            // ждём появления плейлиста + первого сегмента (event-playlist растёт по мере транскода)
-            for (int i = 0; i < 60; i++)
+            // сегмент: отдаём с FileShare.ReadWrite (ffmpeg может ещё держать соседние файлы)
+            if (file.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
             {
-                if (System.IO.File.Exists(target) && Directory.Exists(dir) && Directory.GetFiles(dir, "seg*.ts").Length >= 1) break;
-                await Task.Delay(500);
+                if (!System.IO.File.Exists(target)) return NotFound();
+                var ts = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                return File(ts, "video/mp2t", enableRangeProcessing: true);
             }
-            if (!System.IO.File.Exists(target)) return StatusCode(503);
-        }
 
-        return PhysicalFile(target, "application/vnd.apple.mpegurl");
+            // playlist.m3u8 — генерим при первом запросе
+            if (!System.IO.File.Exists(target))
+            {
+                string src;
+                using (var c = await qbit()) src = await ResolveFile(c, hash, index);
+                if (src == null) return NotFound();
+
+                CleanupHls();
+                StartHls(key, src, dir);
+
+                // ждём появления плейлиста + первого сегмента (event-playlist растёт по мере транскода)
+                for (int i = 0; i < 60; i++)
+                {
+                    if (System.IO.File.Exists(target) && Directory.Exists(dir) && Directory.GetFiles(dir, "seg*.ts").Length >= 1) break;
+                    await Task.Delay(500);
+                }
+                if (!System.IO.File.Exists(target)) return StatusCode(503);
+            }
+
+            // ffmpeg продолжает ДОПИСЫВАТЬ playlist.m3u8 → читаем с FileShare.ReadWrite (иначе sharing violation → 500)
+            string m3u8;
+            using (var fs = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var sr = new StreamReader(fs))
+                m3u8 = await sr.ReadToEndAsync();
+            return Content(m3u8, "application/vnd.apple.mpegurl");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[QbitDownload] hls: " + ex);
+            return StatusCode(503);
+        }
     }
 
     static void StartHls(string key, string src, string dir)
