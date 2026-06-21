@@ -13,6 +13,20 @@ lampainit_invc.appload = function appload() {
   Lampa.Storage.set('torrserver_url', 'http://192.168.87.24:8090');
   Lampa.Storage.set('torrserver_auth', 'false');
 
+  // переустановить локальную разблокировку premium (на случай если значение перетёрлось); без токена → наружу ничего не уходит
+  try {
+    localStorage.setItem('account_user', JSON.stringify({ id: 1, premium: Date.now() + 3650 * 86400000 }));
+    localStorage.setItem('developer_nopremium', 'false');
+  } catch (e) {}
+  // нейтральные строки вместо CUB/Premium (best-effort; основной эффект даёт скрытие CSS)
+  try {
+    Lampa.Lang.add({
+      change_source_on_cub: { ru: 'Сменить источник', en: 'Change source', uk: 'Змінити джерело' },
+      extensions_from_cub: { ru: 'Расширения', en: 'Extensions', uk: 'Розширення' },
+      plugins_load_from: { ru: 'Загрузка плагинов', en: 'Loading plugins', uk: 'Завантаження плагінів' }
+    });
+  } catch (e) {}
+
   // убрать упоминание стороннего сервиса (Телеграм), кнопку профиля/аккаунта и раздел «Синхронизация» в настройках
   try {
     if (!document.getElementById('qdl-hide-extras')) {
@@ -23,7 +37,9 @@ lampainit_invc.appload = function appload() {
         + '[data-component="account"]{display:none!important}'
         + '.menu__item[data-action="about"]{display:none!important}'
         + '.account-modal-split__text,.account-modal__site{display:none!important}'   // промо CUB Premium
-        + '.selectbox-item:has(.selectbox-item__lock){display:none!important}';       // пункты с замком (логин/премиум)
+        + '.selectbox-item:has(.selectbox-item__lock){display:none!important}'        // пункты с замком (логин/премиум)
+        + '.extensions__cub,.extensions__item-premium,.cub-premium,.ad-video-block{display:none!important}'  // бренд/реклама CUB
+        + '.button--subscribe,.full-start-new__reactions,.full-start__reactions{display:none!important}';     // серверные фичи CUB (подписки/реакции)
       document.head.appendChild(st);
     }
 
@@ -68,7 +84,15 @@ lampainit_invc.first_initiale = function firstinitiale() {
 };
 
 
-// Ниже код выполняется до загрузки лампы, например можно изменить настройки 
+// ── ДО загрузки Lampa: локальная разблокировка premium ──
+// hasPremium() = countDays(Date.now(), account_user.premium) > 0. Ставим premium далеко в будущее (мс).
+// НЕ трогаем токен 'account' → permit.sync/access=false → наружу на cub.rip ничего не уходит.
+try {
+  localStorage.setItem('account_user', JSON.stringify({ id: 1, premium: Date.now() + 3650 * 86400000 }));
+  localStorage.setItem('developer_nopremium', 'false');
+} catch (e) {}
+
+// Ниже код выполняется до загрузки лампы, например можно изменить настройки
 // window.lampa_settings.push_state = false;
 // localStorage.setItem('cub_domain', 'mirror-kurwa.men');
 // localStorage.setItem('cub_mirrors', '["mirror-kurwa.men"]');
