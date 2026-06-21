@@ -542,12 +542,13 @@ public class QbitController : BaseController
     [Route("qdl/hls/{key}/{file}")]
     async public Task<ActionResult> Hls(string key, string file)
     {
-        var mk = Regex.Match(key ?? "", "^([0-9a-fA-F]{40}|[0-9A-Za-z]{32})_(-?\\d+)$");
+        var mk = Regex.Match(key ?? "", "^([0-9a-fA-F]{40}|[0-9A-Za-z]{32})_(-?\\d+)(?:_(o|e\\d+|f\\d+))?$");
         if (!mk.Success) return BadRequest();
         if (!Regex.IsMatch(file ?? "", "^(playlist\\.m3u8|seg\\d{1,6}\\.ts)$")) return BadRequest();
 
         string hash = mk.Groups[1].Value;
         int index = int.Parse(mk.Groups[2].Value);
+        string audio = mk.Groups[3].Success ? mk.Groups[3].Value : "o";   // o=ориг, eN=встроенная дорожка, fN=внешний файл-озвучка
         string dir = Path.Combine(ModInit.conf.hlsPath, key);
         string target = Path.Combine(dir, file);
 
@@ -573,12 +574,21 @@ public class QbitController : BaseController
                     _hlsFailed.TryRemove(key, out _);
                 }
 
-                string src;
-                using (var c = await Qbit()) src = await ResolveFile(c, hash, index);
-                if (src == null) return NotFound();
+                string src, extAudio = null, audioMap = "0:a:0?";
+                using (var c = await Qbit())
+                {
+                    src = await ResolveFile(c, hash, index);
+                    if (src == null) return NotFound();
+                    if (audio.StartsWith("e")) audioMap = "0:a:" + audio.Substring(1);       // встроенная дорожка N
+                    else if (audio.StartsWith("f"))                                            // внешний файл-озвучка (домешиваем)
+                    {
+                        extAudio = await ResolveFile(c, hash, int.Parse(audio.Substring(1)));
+                        if (!string.IsNullOrEmpty(extAudio)) audioMap = "1:a:0";
+                    }
+                }
 
                 CleanupHls();
-                StartHls(key, src, dir);
+                StartHls(key, dir, src, extAudio, audioMap);
 
                 // ждём появления плейлиста + первого сегмента (event-playlist растёт по мере транскода)
                 for (int i = 0; i < 60; i++)
@@ -604,7 +614,116 @@ public class QbitController : BaseController
         }
     }
 
-    static void StartHls(string key, string src, string dir)
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/audio")]
+    async public Task<ActionResult> Audio(string hash, int index = -1)
+    {
+        if (!ValidHash(hash)) return BadRequest();
+        try
+        {
+            using var c = await Qbit();
+            string filesRaw = await c.GetStringAsync($"/api/v2/torrents/files?hash={HttpUtility.UrlEncode(hash)}");
+            var files = JArray.Parse(filesRaw);
+
+            // найти видеофайл (по index или самый большой)
+            JToken vf = null;
+            if (index >= 0) foreach (var f in files) if ((f.Value<int?>("index") ?? -1) == index) { vf = f; break; }
+            if (vf == null)
+            {
+                long max = -1;
+                foreach (var f in files)
+                {
+                    string n = f.Value<string>("name") ?? "";
+                    if (!Regex.IsMatch(n, "\\.(mkv|mp4|avi|ts|m4v|webm|mov)$", RegexOptions.IgnoreCase)) continue;
+                    long s = f.Value<long?>("size") ?? 0; if (s > max) { max = s; vf = f; }
+                }
+            }
+            if (vf == null) return ContentTo("[]", "application/json; charset=utf-8");
+
+            string vname = (vf.Value<string>("name") ?? "").Replace('\\', '/');
+            string vbase = Path.GetFileNameWithoutExtension(vname.Substring(vname.LastIndexOf('/') + 1));
+            int vindex = vf.Value<int?>("index") ?? index;
+
+            var opts = new JArray();
+
+            // встроенные аудиодорожки (ffprobe видео)
+            string vpath = await ResolveFile(c, hash, vindex);
+            foreach (var a in ProbeAudio(vpath)) opts.Add(a);
+
+            // внешние озвучки: аудиофайлы рядом, имя которых начинается с имени видео
+            foreach (var f in files)
+            {
+                string n = (f.Value<string>("name") ?? "").Replace('\\', '/');
+                string fn = n.Substring(n.LastIndexOf('/') + 1);
+                if (!Regex.IsMatch(fn, "\\.(mka|aac|ac3|eac3|flac|dts|mp3|opus|m4a|wav)$", RegexOptions.IgnoreCase)) continue;
+                string fbase = Path.GetFileNameWithoutExtension(fn);
+                if (!fbase.StartsWith(vbase, StringComparison.OrdinalIgnoreCase)) continue;
+
+                string label = fbase.Length > vbase.Length ? fbase.Substring(vbase.Length).TrimStart('.', ' ', '-', '_') : "";
+                if (string.IsNullOrWhiteSpace(label))
+                {
+                    var parts = n.Split('/');
+                    label = parts.Length >= 2 ? parts[parts.Length - 2] : "Озвучка";
+                }
+                opts.Add(new JObject { ["id"] = "f" + (f.Value<int?>("index") ?? 0), ["label"] = label, ["lang"] = "rus" });
+            }
+
+            return ContentTo(opts.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] audio: " + ex); return ContentTo("[]", "application/json; charset=utf-8"); }
+    }
+
+    static List<JObject> ProbeAudio(string path)
+    {
+        var res = new List<JObject>();
+        if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return res;
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = ModInit.conf.ffprobe,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            foreach (var a in new[] { "-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "a", path })
+                psi.ArgumentList.Add(a);
+
+            var p = Process.Start(psi);
+            string outp = p.StandardOutput.ReadToEnd();
+            p.StandardError.ReadToEnd();
+            p.WaitForExit(15000);
+
+            var streams = JObject.Parse(outp)["streams"] as JArray ?? new JArray();
+            int ord = 0;
+            foreach (var s in streams)
+            {
+                var tags = s["tags"] as JObject;
+                string lang = tags?.Value<string>("language") ?? "";
+                string title = tags?.Value<string>("title");
+                string label = !string.IsNullOrWhiteSpace(title) ? title : LangName(lang);
+                res.Add(new JObject { ["id"] = "e" + ord, ["label"] = label + " (ориг.)", ["lang"] = lang });
+                ord++;
+            }
+        }
+        catch { }
+        return res;
+    }
+
+    static string LangName(string l)
+    {
+        switch ((l ?? "").ToLowerInvariant())
+        {
+            case "jpn": case "ja": return "Японский";
+            case "eng": case "en": return "Английский";
+            case "rus": case "ru": return "Русский";
+            case "": return "Оригинал";
+            default: return l;
+        }
+    }
+
+    static void StartHls(string key, string dir, string videoPath, string extAudio, string audioMap)
     {
         if (!_hlsRunning.TryAdd(key, 1)) return;   // уже генерится
         try
@@ -618,17 +737,19 @@ public class QbitController : BaseController
                 RedirectStandardOutput = true,
                 CreateNoWindow = true
             };
-            foreach (var a in new[]
+            var args = new List<string> { "-y", "-i", videoPath };
+            if (!string.IsNullOrEmpty(extAudio)) { args.Add("-i"); args.Add(extAudio); }   // внешняя озвучка — вторым входом
+            args.AddRange(new[]
             {
-                "-y", "-i", src,
-                "-map", "0:v:0?", "-map", "0:a:0?",
+                "-map", "0:v:0?", "-map", string.IsNullOrEmpty(audioMap) ? "0:a:0?" : audioMap,
                 "-c:v", "copy",                    // видео не трогаем (AVC браузер играет)
-                "-c:a", "aac", "-ac", "2", "-b:a", "256k",   // звук EAC3/AC3/DTS → AAC stereo
+                "-c:a", "aac", "-ac", "2", "-b:a", "256k",   // звук → AAC stereo
                 "-f", "hls", "-hls_time", "6", "-hls_playlist_type", "event",
                 "-hls_flags", "independent_segments",
                 "-hls_segment_filename", Path.Combine(dir, "seg%05d.ts"),
                 Path.Combine(dir, "playlist.m3u8")
-            }) psi.ArgumentList.Add(a);
+            });
+            foreach (var a in args) psi.ArgumentList.Add(a);
 
             var p = Process.Start(psi);
             _ = Task.Run(async () =>

@@ -25,6 +25,7 @@ public class ModuleConf : ModuleBaseConf
     // HLS-транскод для браузеров (звук EAC3/AC3/DTS → AAC, видео copy). Кэш на HDD (дублирует видео).
     public string hlsPath { get; set; } = "/qdl-hls";
     public string ffmpeg { get; set; } = "/lampac/data/ffmpeg";
+    public string ffprobe { get; set; } = "/lampac/data/ffprobe";
     public long hlsCacheCapGb { get; set; } = 30;
 
     // Слежение за сериалами: как часто проверять обновление раздач (часы).

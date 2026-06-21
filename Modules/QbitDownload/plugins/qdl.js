@@ -143,16 +143,45 @@
         var ua = navigator.userAgent || '';
         return !/Tizen|Web0?S|webOS|SMART-TV|SmartTV|HbbTV|AppleTV|CrKey|Android TV|NetCast|VIDAA|MSX/i.test(ua);
     }
-    function streamUrl(hash, index) {
-        if (isBrowser()) return API + '/qdl/hls/' + hash + '_' + (index >= 0 ? index : -1) + '/playlist.m3u8';
+    // audio: 'o' (ориг) | 'eN' (встроенная) | 'fN' (внешняя озвучка). Внешняя → ВСЕГДА HLS (домешиваем).
+    function streamUrl(hash, index, audio) {
+        var ext = audio && audio.charAt(0) === 'f';
+        if (ext || isBrowser()) {
+            var k = hash + '_' + (index >= 0 ? index : -1) + (audio && audio !== 'o' ? '_' + audio : '');
+            return API + '/qdl/hls/' + k + '/playlist.m3u8';
+        }
         return API + '/qdl/stream?hash=' + hash + (index >= 0 ? '&index=' + index : '');
+    }
+
+    // выбор озвучки запоминается на сериал (по hash)
+    function getAudioPref(hash) { try { return (Lampa.Storage.get('qdl_audio', {}) || {})[hash]; } catch (e) { return null; } }
+    function setAudioPref(hash, id) { try { var m = Lampa.Storage.get('qdl_audio', {}) || {}; m[hash] = id; Lampa.Storage.set('qdl_audio', m); } catch (e) {} }
+
+    // определить озвучку (из памяти или спросить один раз), затем cb(audioId)
+    function ensureAudio(hash, index, cb) {
+        var pref = getAudioPref(hash);
+        if (pref) { cb(pref); return; }
+        req(API + '/qdl/audio?hash=' + hash + '&index=' + (index >= 0 ? index : -1), function (opts) {
+            opts = opts || [];
+            if (opts.length <= 1) { cb(opts[0] && opts[0].id); return; }
+            Lampa.Select.show({
+                title: 'Озвучка',
+                items: opts.map(function (o) { return { title: o.label, id: o.id }; }),
+                onSelect: function (s) { setAudioPref(hash, s.id); cb(s.id); },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }, function () { cb(null); });
+    }
+
+    function rawPlay(hash, index, title, audio) {
+        var url = streamUrl(hash, index, audio);
+        Lampa.Player.play({ title: title || 'Загрузка', url: url });
+        Lampa.Player.playlist([{ title: title || 'Загрузка', url: url }]);
     }
 
     // ───────── Воспроизведение локального файла (оффлайн) ─────────
     function playLocal(hash, index, title) {
-        var url = streamUrl(hash, index);
-        Lampa.Player.play({ title: title || 'Загрузка', url: url });
-        Lampa.Player.playlist([{ title: title || 'Загрузка', url: url }]);
+        ensureAudio(hash, index, function (audio) { rawPlay(hash, index, title, audio); });
     }
 
     function chooseEpisode(hash, name) {
@@ -161,17 +190,19 @@
             if (!vids.length) { Lampa.Noty.show('Видеофайлы не найдены'); return; }
             if (vids.length === 1) { playLocal(hash, vids[0].index, baseName(vids[0].name)); return; }
 
-            var playlist = vids.map(function (f) {
-                return { title: baseName(f.name), url: streamUrl(hash, f.index) };
-            });
-            Lampa.Select.show({
-                title: 'Серии — ' + (name || ''),
-                items: vids.map(function (f) { return { title: baseName(f.name), index: f.index }; }),
-                onSelect: function (a) {
-                    Lampa.Player.play({ title: a.title, url: streamUrl(hash, a.index) });
-                    Lampa.Player.playlist(playlist);
-                },
-                onBack: function () { Lampa.Controller.toggle('content'); }
+            ensureAudio(hash, vids[0].index, function (audio) {   // озвучку выбираем один раз на сериал
+                var playlist = vids.map(function (f) {
+                    return { title: baseName(f.name), url: streamUrl(hash, f.index, audio) };
+                });
+                Lampa.Select.show({
+                    title: 'Серии — ' + (name || ''),
+                    items: vids.map(function (f) { return { title: baseName(f.name), index: f.index }; }),
+                    onSelect: function (a) {
+                        Lampa.Player.play({ title: a.title, url: streamUrl(hash, a.index, audio) });
+                        Lampa.Player.playlist(playlist);
+                    },
+                    onBack: function () { Lampa.Controller.toggle('content'); }
+                });
             });
         }, function () { Lampa.Noty.show('Ошибка чтения файлов'); });
     }
@@ -383,12 +414,25 @@
             items: [
                 { title: 'Открыть карточку', act: 'page' },
                 { title: '▶ Смотреть (оффлайн)', act: 'play' },
+                { title: '🔊 Озвучка', act: 'audio' },
                 { title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'watch' },
                 { title: '🗑 Удалить (с файлами)', act: 'del' }
             ],
             onSelect: function (b) {
                 if (b.act === 'page') openDownload(t);
                 else if (b.act === 'play') watch(t);
+                else if (b.act === 'audio') {
+                    req(API + '/qdl/audio?hash=' + t.hash + '&index=-1', function (opts) {
+                        opts = opts || [];
+                        if (!opts.length) { Lampa.Noty.show('Аудиодорожек не найдено'); return; }
+                        Lampa.Select.show({
+                            title: 'Озвучка',
+                            items: opts.map(function (o) { return { title: o.label, id: o.id }; }),
+                            onSelect: function (s) { setAudioPref(t.hash, s.id); Lampa.Noty.show('Озвучка: ' + s.title); },
+                            onBack: function () { Lampa.Controller.toggle('content'); }
+                        });
+                    });
+                }
                 else if (b.act === 'watch') {
                     if (t.watched)
                         req(API + '/qdl/watch/remove?hash=' + t.hash, function () { t.watched = false; Lampa.Noty.show('Слежение выключено'); });
