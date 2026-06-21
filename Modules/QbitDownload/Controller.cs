@@ -272,16 +272,23 @@ public class QbitController : BaseController
             var result = new JArray();
             foreach (var t in JArray.Parse(raw))
             {
-                result.Add(new JObject
+                string h = t.Value<string>("hash") ?? "";
+                var item = new JObject
                 {
-                    ["hash"] = t.Value<string>("hash"),
+                    ["hash"] = h,
                     ["name"] = t.Value<string>("name"),
                     ["progress"] = t.Value<double?>("progress") ?? 0,
                     ["state"] = t.Value<string>("state"),
                     ["size"] = t.Value<long?>("size") ?? 0,
                     ["save_path"] = t.Value<string>("save_path"),
-                    ["content_path"] = t.Value<string>("content_path")
-                });
+                    ["content_path"] = t.Value<string>("content_path"),
+                    ["has_poster"] = ValidHash(h) && System.IO.File.Exists(PosterPath(h))
+                };
+                if (ValidHash(h) && System.IO.File.Exists(MetaPath(h)))
+                {
+                    try { item["meta"] = JObject.Parse(System.IO.File.ReadAllText(MetaPath(h))); } catch { }
+                }
+                result.Add(item);
             }
 
             return ContentTo(result.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
@@ -443,7 +450,108 @@ public class QbitController : BaseController
     }
     #endregion
 
+    #region /qdl/save — сохранить метаданные TMDB + закэшировать постер локально (SSD)
+    [HttpPost, AllowAnonymous]
+    [Route("qdl/save")]
+    async public Task<ActionResult> Save(string hash, string card = null, string poster_url = null)
+    {
+        if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(ModInit.conf.cachePath, "meta"));
+            Directory.CreateDirectory(Path.Combine(ModInit.conf.cachePath, "img"));
+
+            if (!string.IsNullOrWhiteSpace(card))
+            {
+                try
+                {
+                    var j = JObject.Parse(card);
+                    string date = j.Value<string>("release_date") ?? j.Value<string>("first_air_date") ?? "";
+                    bool isTv = (string)j["media_type"] == "tv"
+                                || (j["title"] == null && (j["name"] != null || j["first_air_date"] != null))
+                                || (j["first_air_date"] != null && j["release_date"] == null);
+                    var slim = new JObject
+                    {
+                        ["id"] = j.Value<int?>("id"),
+                        ["title"] = (string)(j["title"] ?? j["name"]),
+                        ["original_title"] = (string)(j["original_title"] ?? j["original_name"]),
+                        ["overview"] = j.Value<string>("overview"),
+                        ["year"] = date.Length >= 4 ? date.Substring(0, 4) : "",
+                        ["vote_average"] = j.Value<double?>("vote_average"),
+                        ["media_type"] = isTv ? "tv" : "movie",
+                        ["source"] = j.Value<string>("source") ?? "tmdb"
+                    };
+                    System.IO.File.WriteAllText(MetaPath(hash), slim.ToString(Newtonsoft.Json.Formatting.None));
+                }
+                catch { }
+            }
+
+            // постер качаем сами (только https + image/* + кап 6МБ; loopback/приват запрещены)
+            if (!string.IsNullOrWhiteSpace(poster_url)
+                && Uri.TryCreate(poster_url, UriKind.Absolute, out var pu)
+                && pu.Scheme == "https" && !IsPrivateHost(pu))
+            {
+                try
+                {
+                    using var hc = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+                    using var pr = await hc.GetAsync(pu, HttpCompletionOption.ResponseHeadersRead);
+                    string ct = pr.Content.Headers.ContentType?.MediaType ?? "";
+                    if (pr.IsSuccessStatusCode && ct.StartsWith("image/"))
+                    {
+                        await pr.Content.LoadIntoBufferAsync(6_000_000);
+                        byte[] img = await pr.Content.ReadAsByteArrayAsync();
+                        if (img != null && img.Length > 200)
+                            System.IO.File.WriteAllBytes(PosterPath(hash), img);
+                    }
+                }
+                catch { }
+            }
+
+            return Json(new { success = true, has_poster = System.IO.File.Exists(PosterPath(hash)) });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[QbitDownload] save: " + ex);
+            return Json(new { success = false, error = "internal error" });
+        }
+    }
+    #endregion
+
+    #region /qdl/poster — отдать локально закэшированный постер
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/poster")]
+    public ActionResult Poster(string hash)
+    {
+        if (!ValidHash(hash)) return BadRequest();
+        string p = PosterPath(hash);
+        if (!System.IO.File.Exists(p)) return NotFound();
+        return PhysicalFile(p, "image/jpeg");
+    }
+    #endregion
+
     #region helpers
+    static string MetaPath(string hash) => Path.Combine(ModInit.conf.cachePath, "meta", hash + ".json");
+    static string PosterPath(string hash) => Path.Combine(ModInit.conf.cachePath, "img", hash + ".jpg");
+
+    // постер не должен указывать на loopback/приватную сеть (анти-SSRF для внешних картинок)
+    static bool IsPrivateHost(Uri u)
+    {
+        string h = u.Host.ToLowerInvariant();
+        if (h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "0.0.0.0") return true;
+        if (System.Net.IPAddress.TryParse(u.Host, out var ip))
+        {
+            var b = ip.GetAddressBytes();
+            if (b.Length == 4)
+                return b[0] == 10
+                    || (b[0] == 172 && b[1] >= 16 && b[1] <= 31)
+                    || (b[0] == 192 && b[1] == 168)
+                    || (b[0] == 169 && b[1] == 254)
+                    || b[0] == 127;
+            if (ip.IsIPv6LinkLocal || System.Net.IPAddress.IsLoopback(ip)) return true;
+        }
+        return false;
+    }
+
     // Разрешаем фетчить только собственный JacRed-резолвер (loopback / наш listen-хост, наш порт)
     bool IsSelfResolver(Uri u)
     {

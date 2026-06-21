@@ -18,4 +18,7 @@ public class ModuleConf : ModuleBaseConf
     public string category { get; set; } = "lampa";
 
     public int timeoutSeconds { get; set; } = 20;
+
+    // Локальный кэш метаданных/постеров загрузок (том на SSD, rw). Только картинки+JSON, не видео.
+    public string cachePath { get; set; } = "/qdl-data";
 }
