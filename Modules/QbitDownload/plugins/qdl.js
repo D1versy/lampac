@@ -52,11 +52,16 @@
 
     function slimCard(m) {
         if (!m) return null;
-        var isTv = m.media_type === 'tv' || ((m.name || m.first_air_date) && !m.title && !m.release_date);
+        // тип: сначала явный media_type/method, затем СТРУКТУРНЫЕ признаки сериала (сезоны/серии),
+        // и только потом эвристика по полям. ВАЖНО: у TMDB id в movie и tv — РАЗНЫЕ объекты!
+        var isTv = m.media_type === 'tv' || m.method === 'tv'
+            || !!(m.number_of_seasons || m.number_of_episodes || m.seasons || m.episode_run_time)
+            || (!!m.first_air_date && !m.release_date)
+            || (!!m.name && !m.title);
         var date = m.release_date || m.first_air_date || '';
         return {
             id: m.id,
-            media_type: m.media_type || (isTv ? 'tv' : 'movie'),
+            media_type: isTv ? 'tv' : 'movie',
             title: m.title || m.name,
             original_title: m.original_title || m.original_name,
             overview: m.overview,
@@ -454,14 +459,28 @@
             if (!cont.length) cont = $('.full-start-new__buttons', render);
             if (!cont.length) return;
 
-            // открыто из «Загрузок» (полная карточка, режим одной кнопки)
+            // тип/источник берём С ОТКРЫТОЙ КАРТОЧКИ (method/source активности), а не угадываем —
+            // у TMDB id в movie и tv это РАЗНЫЕ объекты, ошибка типа = другой фильм
             var active = (function () { try { return Lampa.Activity.active() || {}; } catch (e) { return {}; } })();
+            if (movie) {
+                if (!movie.media_type && active.method) movie.media_type = active.method;
+                if (!movie.source && active.source) movie.source = active.source;
+            }
+
+            // открыто из «Загрузок» (полная карточка, режим одной кнопки)
             if (active.qdl_hash) {
                 injectCss();
                 render.addClass('qdl-only');                 // CSS прячет все прочие кнопки
                 if (!$('.qdl-watch-btn', render).length) {
                     var w = $('<div class="full-start__button selector qdl-watch-btn">' + ICON + '<span>Смотреть</span></div>');
                     w.on('hover:enter', function () { watchByHash(active.qdl_hash, movie.title || movie.name); });
+                    // удержание (long-press) на кнопке → меню управления (следить/удалить) — для дискаверабилити
+                    w.on('hover:long', function () {
+                        req(API + '/qdl/list', function (list) {
+                            var it = (list || []).filter(function (x) { return x.hash === active.qdl_hash; })[0] || { hash: active.qdl_hash, meta: movie };
+                            quickMenu(it);
+                        }, function () { quickMenu({ hash: active.qdl_hash, meta: movie }); });
+                    });
                     cont.prepend(w);
                 }
                 return;   // НЕ добавляем «Скачать», прочие кнопки скрыты
