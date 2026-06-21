@@ -13,11 +13,7 @@ lampainit_invc.appload = function appload() {
   Lampa.Storage.set('torrserver_url', 'http://192.168.87.24:8090');
   Lampa.Storage.set('torrserver_auth', 'false');
 
-  // переустановить локальную разблокировку premium (на случай если значение перетёрлось); без токена → наружу ничего не уходит
-  try {
-    localStorage.setItem('account_user', JSON.stringify({ id: 1, premium: Date.now() + 3650 * 86400000 }));
-    localStorage.setItem('developer_nopremium', 'false');
-  } catch (e) {}
+  // (разблокировка premium авторитетно ставится в appready — после Profile.check, который стирает account_user)
   // нейтральные строки вместо CUB/Premium (best-effort; основной эффект даёт скрытие CSS)
   try {
     Lampa.Lang.add({
@@ -71,9 +67,32 @@ lampainit_invc.appload = function appload() {
 };
 
 
-// Лампа полностью загружена, можно работать с интерфейсом 
+// Лампа полностью загружена, можно работать с интерфейсом
 lampainit_invc.appready = function appready() {
-  // $('.head .notice--icon').remove();
+  // ── Авторитетная локальная разблокировка premium ──
+  // appready вызывается ПОСЛЕ события app 'ready', т.е. после Account.init → Profile.check,
+  // который при отсутствии токена стирает account_user в '' (permit.access=false).
+  // Ставим через Lampa.Storage.set: оно пишет и в localStorage, и в in-memory кэш `readed`,
+  // а именно из `readed` читает Account.hasPremium() (get → readed[name] первым).
+  // hasPremium() = user.id ? countDays(Date.now(), user.premium) : 0 → вернёт ~3650 (>0).
+  // hasPremium неперезаписываем (writable:false) — поэтому правим именно данные, не функцию.
+  // Наружу ничего не уходит: серверные ветки гейтятся permit.access = token && account_use, токена нет.
+  var spoofUser = function () { return { id: 1, premium: Date.now() + 3650 * 86400000 }; };
+  var reinstall = function () {
+    try { Lampa.Storage.set('account_user', spoofUser()); } catch (e) {}
+  };
+  reinstall();
+  // Страж: если account_user когда-нибудь обнулят событием (logoff и т.п.) — восстановить.
+  // Профиль-вайп на старте идёт с nolisten=true (события нет) и сюда не попадает, но мы уже переустановили выше.
+  // Рекурсии нет: reinstall шлёт change со значением-объектом (есть .id) → ветка empty не срабатывает.
+  try {
+    Lampa.Storage.listener.follow('change', function (e) {
+      if (!e || e.name !== 'account_user') return;
+      var v = e.value;
+      var empty = v === '' || v == null || (typeof v === 'object' && !v.id);
+      if (empty) setTimeout(reinstall, 0);
+    });
+  } catch (e) {}
 };
 
 
@@ -84,12 +103,14 @@ lampainit_invc.first_initiale = function firstinitiale() {
 };
 
 
-// ── ДО загрузки Lampa: локальная разблокировка premium ──
-// hasPremium() = countDays(Date.now(), account_user.premium) > 0. Ставим premium далеко в будущее (мс).
-// НЕ трогаем токен 'account' → permit.sync/access=false → наружу на cub.rip ничего не уходит.
+// ── ДО загрузки Lampa: ранний seed premium ──
+// hasPremium() = countDays(Date.now(), account_user.premium) > 0. premium = метка в будущем (мс).
+// ВАЖНО: на старте Account.init → Profile.check СТИРАЕТ account_user в '' (нет токена → permit.access=false),
+// поэтому этот seed — лишь подстраховка для самых ранних чтений; авторитетная установка — в appready (ниже).
+// НЕ трогаем токен 'account' → permit.access/sync=false → наружу на cub.rip ничего не уходит.
 try {
   localStorage.setItem('account_user', JSON.stringify({ id: 1, premium: Date.now() + 3650 * 86400000 }));
-  localStorage.setItem('developer_nopremium', 'false');
+  localStorage.removeItem('developer_nopremium'); // дефолт 'false'; любая иная строка → truthy → hasPremium()=0
 } catch (e) {}
 
 // Ниже код выполняется до загрузки лампы, например можно изменить настройки
