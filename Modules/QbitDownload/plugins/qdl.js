@@ -33,7 +33,11 @@
         if (document.getElementById('qdl-css')) return;
         var st = document.createElement('style');
         st.id = 'qdl-css';
-        st.textContent = '.qdl-watch.focus{background:#fff !important;color:#000 !important;transform:scale(1.03)}';
+        st.textContent =
+            '.qdl-watch.focus{background:#fff !important;color:#000 !important;transform:scale(1.03)}' +
+            '.qdl-watch-btn{background:rgba(20,160,40,.92) !important;color:#fff !important}' +
+            '.qdl-watch-btn.focus{background:#19b531 !important;color:#fff !important}' +
+            '.qdl-watch-btn span{color:#fff !important}';
         document.head.appendChild(st);
     }
 
@@ -77,7 +81,8 @@
 
     function tmdbSearch(name, cb) {
         try {
-            var key = (Lampa.TMDB && Lampa.TMDB.key) ? Lampa.TMDB.key : '';
+            var key = '';
+            try { key = Lampa.TMDB.key(); } catch (e) {}   // TMDB.key — ФУНКЦИЯ, её надо вызвать
             var url = Lampa.TMDB.api('search/multi?api_key=' + key + '&language=ru-RU&query=' + encodeURIComponent(name));
             req(url, function (r) {
                 var list = (r && r.results) ? r.results.filter(function (x) {
@@ -363,11 +368,26 @@
                 cont.append(btn);
             }
 
-            // если фильм уже скачан — кнопка «Смотреть (загружено)»
+            // если фильм уже скачан — ЗЕЛЁНАЯ кнопка «Смотреть (загружено)» + привязка метаданных
             if (movie && movie.id && !$('.qdl-watch-btn', render).length) {
                 req(API + '/qdl/list', function (list) {
-                    var hit = (list || []).filter(function (x) { return x.meta && String(x.meta.id) === String(movie.id); })[0];
+                    list = list || [];
+                    var titles = [movie.title, movie.original_title, movie.name, movie.original_name]
+                        .filter(Boolean).map(function (s) { return String(s).toLowerCase().trim(); });
+
+                    // 1) точное совпадение по TMDB id
+                    var hit = list.filter(function (x) { return x.meta && String(x.meta.id) === String(movie.id); })[0];
+                    // 2) иначе — по очищенному имени раздачи (и сразу привязываем метаданные к этой карточке)
+                    if (!hit) {
+                        hit = list.filter(function (x) {
+                            var n = cleanName(x.name).toLowerCase().trim();
+                            return n && titles.some(function (t) { return t === n || t.indexOf(n) === 0 || n.indexOf(t) === 0; });
+                        })[0];
+                        if (hit && !hit.meta) saveMeta(hit.hash, movie);   // back-link: карточка → загрузка
+                    }
                     if (!hit || $('.qdl-watch-btn', render).length) return;
+
+                    injectCss();
                     var play = $('<div class="full-start__button selector qdl-watch-btn">' + ICON + '<span>Смотреть (загружено)</span></div>');
                     play.on('hover:enter', function () { watch(hit); });
                     cont.prepend(play);
@@ -377,6 +397,12 @@
     }
 
     // ───────── Пункт меню «Загрузки» (под «Персоны» = data-action="myperson") ─────────
+    function placeMenu(item) {
+        var anchor = $('.menu .menu__item[data-action="myperson"]').first();   // ГЛОБАЛЬНО по всему меню
+        if (anchor.length) { anchor.after(item); return true; }
+        return false;
+    }
+
     function addMenu() {
         if ($('.menu .qdl-menu').length) return;
         var item = $('<li class="menu__item selector qdl-menu"><div class="menu__ico">' + ICON + '</div><div class="menu__text">Загрузки</div></li>');
@@ -384,16 +410,27 @@
             Lampa.Activity.push({ url: '', title: 'Загрузки', component: 'qdl_downloads', page: 1 });
         });
 
-        // меню может дорисовываться после app:ready — ретраим, пока не появится «Персоны»
-        var tries = 0;
-        var timer = setInterval(function () {
-            tries++;
-            if ($('.menu .qdl-menu').length) { clearInterval(timer); return; }
-            var list = $('.menu .menu__list').eq(0);
-            var after = list.find('[data-action="myperson"]').closest('.menu__item').first();
-            if (after.length) { after.after(item); clearInterval(timer); }
-            else if (tries >= 30) { clearInterval(timer); if (list.length) list.append(item); }   // ~12с → вниз
-        }, 400);
+        if (placeMenu(item)) return;
+
+        // меню дорисовывается после app:ready — следим за DOM и вставляем под «Персоны», как только появится
+        var done = false;
+        var menuEl = document.querySelector('.menu');
+        var obs = menuEl ? new MutationObserver(function () {
+            if (done) return;
+            if ($('.menu .qdl-menu').length) { done = true; obs.disconnect(); return; }
+            if (placeMenu(item)) { done = true; obs.disconnect(); }
+        }) : null;
+        if (obs) obs.observe(menuEl, { childList: true, subtree: true });
+
+        setTimeout(function () {                                  // фолбэк ~8с → вниз, если «Персоны» нет
+            if (done) return;
+            done = true;
+            if (obs) obs.disconnect();
+            if (!$('.menu .qdl-menu').length) {
+                var list = $('.menu .menu__list').eq(0);
+                if (list.length) list.append(item);
+            }
+        }, 8000);
     }
 
     function start() {
