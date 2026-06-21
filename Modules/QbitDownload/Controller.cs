@@ -655,22 +655,9 @@ public class QbitController : BaseController
             string vpath = await ResolveFile(c, hash, vindex);
             foreach (var a in ProbeAudio(vpath)) opts.Add(a);
 
-            // внешние озвучки: аудиофайлы рядом, имя которых начинается с имени видео.
-            // ID = по СТУДИИ (стабилен между сериями), НЕ по индексу файла — иначе на др. серии играет чужой звук.
-            var seen = new HashSet<string>();
-            foreach (var f in files)
-            {
-                string n = (f.Value<string>("name") ?? "").Replace('\\', '/');
-                string fn = n.Substring(n.LastIndexOf('/') + 1);
-                if (!Regex.IsMatch(fn, "\\.(mka|aac|ac3|eac3|flac|dts|mp3|opus|m4a|wav)$", RegexOptions.IgnoreCase)) continue;
-                string fbase = Path.GetFileNameWithoutExtension(fn);
-                if (!fbase.StartsWith(vbase, StringComparison.OrdinalIgnoreCase)) continue;
-
-                string studio = StudioOf(n, vbase);
-                string id = StudioId(studio);
-                if (!seen.Add(id)) continue;   // одна студия — один пункт
-                opts.Add(new JObject { ["id"] = id, ["label"] = studio, ["lang"] = "rus" });
-            }
+            // внешние озвучки — устойчивый матчер (студия + серия, много фолбэков; claude/06 §T)
+            foreach (var d in DubsForVideo(files, vf))
+                opts.Add(new JObject { ["id"] = d.id, ["label"] = d.label, ["lang"] = "rus" });
 
             return ContentTo(opts.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
         }
@@ -727,61 +714,205 @@ public class QbitController : BaseController
         }
     }
 
-    // стабильный ID студии озвучки (FNV-1a → 8 hex; ASCII, кириллица ок) — переживает разные серии
+    // ───────── Устойчивый матчер озвучек (видео↔внешние аудио). См. claude/06 §T ─────────
+    sealed class Ep { public string kind; public int season = -1; public int ep = -1; public int ep2 = -1; public bool any => kind != null || ep >= 0; }
+
+    static readonly Regex[] _noiseRx =
+    {
+        new Regex(@"(?i)\b(?:19|20)\d{2}\b"),
+        new Regex(@"(?i)\b\d{3,4}[pi]\b"),
+        new Regex(@"(?i)\b(?:2160|1080|720|480|576|360)\b"),
+        new Regex(@"(?i)\b(?:x?264|x?265|h\.?26[45]|hevc|avc|av1|vp9|xvid|divx)\b"),
+        new Regex(@"(?i)\b(?:10|8)\s?bit\b"),
+        new Regex(@"(?i)\b(?:aac|ac3|eac3|dts(?:-hd)?|flac|opus|truehd|mp3)\b"),
+        new Regex(@"(?i)\b\d+(?:\.\d+)?\s?(?:fps|kbps|mbps|hz|khz)\b"),
+        new Regex(@"(?i)\b(?:bdrip|bluray|webdl|web-?dl|webrip|hdtv|dvdrip|remux|uhd)\b"),
+        new Regex(@"(?i)\b[257]\.[01]\b"),
+        new Regex(@"(?i)\b\d{3,4}x\d{3,4}\b"),
+    };
+    static string StripNoise(string s) { foreach (var r in _noiseRx) s = r.Replace(s, " "); return s; }
+
+    static Ep ParseEp(string baseName)
+    {
+        string s = baseName ?? "";
+        Match m;
+        if ((m = Regex.Match(s, @"(?i)\b(OVA|ONA|OAD)\s*0*(\d{1,2})?\b")).Success) return new Ep { kind = m.Groups[1].Value.ToUpperInvariant(), ep = m.Groups[2].Success ? int.Parse(m.Groups[2].Value) : -1 };
+        if ((m = Regex.Match(s, @"(?i)\b(?:SP|Special|Спецвыпуск|Спешл)\s*0*(\d{1,2})?\b")).Success) return new Ep { kind = "SP", ep = m.Groups[1].Success ? int.Parse(m.Groups[1].Value) : -1 };
+        if ((m = Regex.Match(s, @"(?i)\b(NCOP|NCED|Creditless\s*OP|Creditless\s*ED|Clean\s*Opening|Clean\s*Ending)\b")).Success) { string k = m.Value.ToUpperInvariant(); return new Ep { kind = (k.Contains("ED") || k.Contains("ENDING")) ? "NCED" : "NCOP" }; }
+        if ((m = Regex.Match(s, @"(?i)(?<![A-Za-z])(OP|ED|PV|CM|Menu|Trailer|Preview|Teaser)\s*0*(\d{1,2})?(?![A-Za-z])")).Success) return new Ep { kind = m.Groups[1].Value.ToUpperInvariant() };
+        string c = StripNoise(s);
+        if ((m = Regex.Match(c, @"(?i)(?:S\d{1,2})?E0*(\d{1,3})\s*-\s*E?0*(\d{1,3})")).Success) return new Ep { kind = "RANGE", ep = int.Parse(m.Groups[1].Value), ep2 = int.Parse(m.Groups[2].Value) };
+        if ((m = Regex.Match(c, @"(?:^|[\s._\[-])0*(\d{1,3})\s*-\s*0*(\d{1,3})(?=[\s._\]-]|$)")).Success) return new Ep { kind = "RANGE", ep = int.Parse(m.Groups[1].Value), ep2 = int.Parse(m.Groups[2].Value) };
+        if ((m = Regex.Match(c, @"(?i)(?<![A-Za-z0-9])S(\d{1,2})E0*(\d{1,3})(?!\d)")).Success) return new Ep { season = int.Parse(m.Groups[1].Value), ep = int.Parse(m.Groups[2].Value) };
+        if ((m = Regex.Match(c, @"(?i)(?<![A-Za-z0-9])(\d{1,2})x0*(\d{1,3})(?!\d)")).Success) return new Ep { season = int.Parse(m.Groups[1].Value), ep = int.Parse(m.Groups[2].Value) };
+        if ((m = Regex.Match(c, @"(?i)(?<![A-Za-z0-9])E[Pp]?\.?\s*0*(\d{1,3})(?!\d)")).Success) return new Ep { ep = int.Parse(m.Groups[1].Value) };
+        if ((m = Regex.Match(c, @"(?i)(?:серия|episode|эпизод|вып(?:уск)?)\s*[№#]?\s*0*(\d{1,3})(?!\d)")).Success) return new Ep { ep = int.Parse(m.Groups[1].Value) };
+        if ((m = Regex.Match(c, @"#0*(\d{1,3})(?!\d)")).Success) return new Ep { ep = int.Parse(m.Groups[1].Value) };
+        if ((m = Regex.Match(c, @"(?:^|\s)-\s+0*(\d{1,3})(?=\s|$|\[|\()")).Success) return new Ep { ep = int.Parse(m.Groups[1].Value) };
+        if ((m = Regex.Match(c, @"\[\s*0*(\d{1,3})\s*\]")).Success) return new Ep { ep = int.Parse(m.Groups[1].Value) };
+        if ((m = Regex.Match(c, @"(?:^|[._ ])0*(\d{1,3})(?=[._ \[]|$)")).Success) return new Ep { ep = int.Parse(m.Groups[1].Value) };
+        if ((m = Regex.Match(c.Trim(), @"^0*(\d{1,3})$")).Success) return new Ep { ep = int.Parse(m.Groups[1].Value) };
+        return new Ep();
+    }
+
+    static bool EpEqual(Ep v, Ep a)
+    {
+        if (v == null || a == null || !v.any || !a.any) return false;
+        if (v.kind != a.kind) return false;
+        if (v.kind == "RANGE") return v.ep == a.ep && v.ep2 == a.ep2;
+        if (v.ep != a.ep) return false;
+        if (v.season >= 0 && a.season >= 0 && v.season != a.season) return false;
+        return v.kind != null || v.ep >= 0;
+    }
+
+    static readonly Regex _genericFolderRx = new Regex(@"(?i)^(rus[ ._-]?sound[s]?|sound[s]?|audio|звук|озвучк\w*|voice|dub|дубляж|переводы?|дорожк\w*|tracks?|rus|русск\w*)$");
+    static bool IsGenericFolder(string name) => string.IsNullOrWhiteSpace(name) || _genericFolderRx.IsMatch(name.Trim());
+
+    static string CleanStudio(string s)
+    {
+        s = Regex.Replace(s ?? "", @"[._]+", " ");
+        s = Regex.Replace(s, @"\s{2,}", " ").Trim(' ', '-', '_', '.', '[', ']', '(', ')');
+        return string.IsNullOrWhiteSpace(s) ? "Озвучка" : s;
+    }
+
     static string StudioId(string studio)
     {
+        string norm = Regex.Replace((studio ?? "").ToLowerInvariant(), @"[\s._\-]+", "");
         uint h = 2166136261;
-        foreach (char ch in (studio ?? "").ToLowerInvariant()) { h ^= ch; h *= 16777619; }
+        foreach (char ch in norm) { h ^= ch; h *= 16777619; }
         return "d" + h.ToString("x8");
     }
 
-    // студия = суффикс имени файла после имени видео (".AniLiberty"→"AniLiberty"), иначе родительская папка
-    static string StudioOf(string fileNameFull, string videoBase)
+    // студия озвучки: суффикс после имени видео → НЕ-generic подпапка → имя без хвостового номера → [скобки]
+    static string StudioOf(string fullPath, string videoBase)
     {
-        string fn = (fileNameFull ?? "").Replace('\\', '/');
-        string baseNoExt = Path.GetFileNameWithoutExtension(fn.Substring(fn.LastIndexOf('/') + 1));
-        if (baseNoExt.StartsWith(videoBase, StringComparison.OrdinalIgnoreCase) && baseNoExt.Length > videoBase.Length)
+        string p = (fullPath ?? "").Replace('\\', '/');
+        string fbase = Path.GetFileNameWithoutExtension(p.Substring(p.LastIndexOf('/') + 1));
+
+        if (fbase.StartsWith(videoBase, StringComparison.OrdinalIgnoreCase) && fbase.Length > videoBase.Length)
         {
-            string suf = baseNoExt.Substring(videoBase.Length).Trim('.', ' ', '-', '_', '[', ']', '(', ')');
-            if (!string.IsNullOrWhiteSpace(suf)) return suf;
+            string suf = fbase.Substring(videoBase.Length).Trim('.', ' ', '-', '_', '[', ']', '(', ')');
+            if (!string.IsNullOrWhiteSpace(suf)) return CleanStudio(suf);
         }
-        var parts = fn.Split('/');
-        return parts.Length >= 2 ? parts[parts.Length - 2] : "Озвучка";
+        var parts = p.Split('/');
+        for (int i = parts.Length - 2; i >= 1; i--)
+            if (!IsGenericFolder(parts[i])) return CleanStudio(parts[i]);
+
+        // остаток после общего префикса с видео (после вырезания тех-шума) — устойчиво к разным тегам качества
+        string na = Regex.Replace(Regex.Replace(StripNoise(fbase), @"\[\s*\]|\(\s*\)", " "), @"\s{2,}", " ").Trim();
+        string nv = Regex.Replace(Regex.Replace(StripNoise(videoBase), @"\[\s*\]|\(\s*\)", " "), @"\s{2,}", " ").Trim();
+        int kk = 0; while (kk < na.Length && kk < nv.Length && char.ToLowerInvariant(na[kk]) == char.ToLowerInvariant(nv[kk])) kk++;
+        string rem = Regex.Replace(na.Substring(kk), @"(?i)(S\d{1,2}E\d{1,3}|\d{1,2}x\d{1,3}|EP?\.?\d{1,3}|OVA\s*\d*|SP\s*\d*|NCOP|NCED|\d{1,3})", " ");
+        rem = Regex.Replace(rem, @"\s{2,}", " ").Trim(' ', '-', '_', '.', '[', ']', '(', ')');
+        if (!string.IsNullOrWhiteSpace(rem) && !Regex.IsMatch(rem, @"^\d+$")) return CleanStudio(rem);
+
+        var b = Regex.Match(fbase, @"\[([^\]]+)\]");
+        if (b.Success && !IsGenericFolder(b.Groups[1].Value)) return CleanStudio(b.Groups[1].Value);
+        return "Озвучка";
     }
 
-    // найти файл-озвучку выбранной СТУДИИ именно для серии videoIndex
+    static bool NormStarts(string a, string b)
+    {
+        a = (a ?? "").Replace('_', ' ').Replace('.', ' ').Trim();
+        b = (b ?? "").Replace('_', ' ').Replace('.', ' ').Trim();
+        return b.Length > 0 && a.StartsWith(b, StringComparison.OrdinalIgnoreCase);
+    }
+
+    static readonly Regex _audioExtRx = new Regex(@"(?i)\.(mka|aac|ac3|eac3|dts|flac|opus|m4a|wav|mp3|thd)$");
+    static readonly Regex _videoExtRx = new Regex(@"(?i)\.(mkv|mp4|avi|ts|m2ts|webm|mov|m4v)$");
+
+    static string BaseNoExt(JToken f) { string n = (f.Value<string>("name") ?? "").Replace('\\', '/'); return Path.GetFileNameWithoutExtension(n.Substring(n.LastIndexOf('/') + 1)); }
+
+    static int NaturalCompare(string a, string b)
+    {
+        a = a ?? ""; b = b ?? ""; int i = 0, j = 0;
+        while (i < a.Length && j < b.Length)
+        {
+            if (char.IsDigit(a[i]) && char.IsDigit(b[j]))
+            {
+                int si = i, sj = j;
+                while (i < a.Length && char.IsDigit(a[i])) i++;
+                while (j < b.Length && char.IsDigit(b[j])) j++;
+                string na = a.Substring(si, i - si).TrimStart('0'); string nb = b.Substring(sj, j - sj).TrimStart('0');
+                if (na.Length != nb.Length) return na.Length - nb.Length;
+                int cmp = string.CompareOrdinal(na, nb); if (cmp != 0) return cmp;
+            }
+            else { int cmp = char.ToLowerInvariant(a[i]).CompareTo(char.ToLowerInvariant(b[j])); if (cmp != 0) return cmp; i++; j++; }
+        }
+        return (a.Length - i) - (b.Length - j);
+    }
+
+    // для видеофайла → список озвучек (studioId, label, индекс аудиофайла)
+    static List<(string id, string label, int idx)> DubsForVideo(JArray files, JToken video)
+    {
+        var res = new List<(string, string, int)>();
+        if (video == null) return res;
+        string vbase = BaseNoExt(video);
+        var vEp = ParseEp(vbase);
+
+        var videos = new List<JToken>(); var audios = new List<JToken>();
+        foreach (var f in files)
+        {
+            string n = f.Value<string>("name") ?? "";
+            if (_videoExtRx.IsMatch(n)) videos.Add(f);
+            else if (_audioExtRx.IsMatch(n)) audios.Add(f);
+        }
+        bool isMovie = videos.Count == 1;
+
+        var byStudio = new Dictionary<string, List<JToken>>();
+        var labelOf = new Dictionary<string, string>();
+        foreach (var a in audios)
+        {
+            string studio = StudioOf(a.Value<string>("name") ?? "", vbase);
+            string id = StudioId(studio);
+            if (!byStudio.TryGetValue(id, out var lst)) { lst = new List<JToken>(); byStudio[id] = lst; labelOf[id] = studio; }
+            lst.Add(a);
+        }
+
+        videos.Sort((x, y) => NaturalCompare(x.Value<string>("name"), y.Value<string>("name")));
+        int vPos = videos.FindIndex(x => (x.Value<int?>("index") ?? -2) == (video.Value<int?>("index") ?? -1));
+
+        foreach (var kv in byStudio)
+        {
+            var lst = kv.Value;
+            JToken best = null; int bestRank = 0;
+            foreach (var a in lst)
+            {
+                var aEp = ParseEp(BaseNoExt(a));
+                int rank = 0;
+                if (vEp.any && aEp.any && EpEqual(vEp, aEp)) rank = 6;          // A: точная серия
+                else if (NormStarts(BaseNoExt(a), vbase)) rank = 5;             // B: префикс имени
+                else if (isMovie && !vEp.any) rank = 3;                         // D: фильм — любая дорожка
+                else if (!aEp.any && lst.Count == 1) rank = 2;                  // E: season-pack (1 файл студии без серии)
+                if (rank > bestRank) { best = a; bestRank = rank; }
+            }
+            if (best == null && lst.Count == videos.Count && vPos >= 0)         // F: позиционный (равные счётчики, без серий)
+            {
+                bool noeps = true; foreach (var a in lst) if (ParseEp(BaseNoExt(a)).any) { noeps = false; break; }
+                if (noeps) { lst.Sort((x, y) => NaturalCompare(x.Value<string>("name"), y.Value<string>("name"))); if (vPos < lst.Count) best = lst[vPos]; }
+            }
+            if (best != null) res.Add((kv.Key, labelOf[kv.Key], best.Value<int?>("index") ?? -1));
+        }
+        return res;
+    }
+
+    static JToken FindVideo(JArray files, int index)
+    {
+        if (index >= 0) foreach (var f in files) if ((f.Value<int?>("index") ?? -1) == index) return f;
+        JToken vf = null; long max = -1;
+        foreach (var f in files) { if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue; long s = f.Value<long?>("size") ?? 0; if (s > max) { max = s; vf = f; } }
+        return vf;
+    }
+
+    // найти файл-озвучку выбранной студии именно для серии videoIndex
     static async Task<string> ResolveDubFile(HttpClient c, string hash, int videoIndex, string dubId)
     {
         string filesRaw = await c.GetStringAsync($"/api/v2/torrents/files?hash={HttpUtility.UrlEncode(hash)}");
         var files = JArray.Parse(filesRaw);
-
-        JToken vf = null;
-        if (videoIndex >= 0) foreach (var f in files) if ((f.Value<int?>("index") ?? -1) == videoIndex) { vf = f; break; }
-        if (vf == null)
-        {
-            long max = -1;
-            foreach (var f in files)
-            {
-                string nm = f.Value<string>("name") ?? "";
-                if (!Regex.IsMatch(nm, "\\.(mkv|mp4|avi|ts|m4v|webm|mov)$", RegexOptions.IgnoreCase)) continue;
-                long s = f.Value<long?>("size") ?? 0; if (s > max) { max = s; vf = f; }
-            }
-        }
-        if (vf == null) return null;
-
-        string vn = (vf.Value<string>("name") ?? "").Replace('\\', '/');
-        string vbase = Path.GetFileNameWithoutExtension(vn.Substring(vn.LastIndexOf('/') + 1));
-
-        foreach (var f in files)
-        {
-            string n = (f.Value<string>("name") ?? "").Replace('\\', '/');
-            string fn = n.Substring(n.LastIndexOf('/') + 1);
-            if (!Regex.IsMatch(fn, "\\.(mka|aac|ac3|eac3|flac|dts|mp3|opus|m4a|wav)$", RegexOptions.IgnoreCase)) continue;
-            string fbase = Path.GetFileNameWithoutExtension(fn);
-            if (!fbase.StartsWith(vbase, StringComparison.OrdinalIgnoreCase)) continue;
-            if (StudioId(StudioOf(n, vbase)) != dubId) continue;
-            return await ResolveFile(c, hash, f.Value<int?>("index") ?? -1);
-        }
+        var video = FindVideo(files, videoIndex);
+        if (video == null) return null;
+        foreach (var d in DubsForVideo(files, video))
+            if (d.id == dubId) return await ResolveFile(c, hash, d.idx);
         return null;
     }
 
