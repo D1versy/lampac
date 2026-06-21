@@ -21,9 +21,28 @@ lampainit_invc.appload = function appload() {
       st.textContent = '.feed-head__info{display:none!important}'
         + '.head__action.open--profile{display:none!important}'
         + '[data-component="account"]{display:none!important}'
-        + '.menu__item[data-action="about"]{display:none!important}';
+        + '.menu__item[data-action="about"]{display:none!important}'
+        + '.account-modal-split__text,.account-modal__site{display:none!important}'   // промо CUB Premium
+        + '.selectbox-item:has(.selectbox-item__lock){display:none!important}';       // пункты с замком (логин/премиум)
       document.head.appendChild(st);
     }
+
+    // фолбэк для браузеров без :has (напр. старый Tizen-ТВ) — прячем пункты с замком вручную
+    var hideLocked = function () {
+      try {
+        var locks = document.querySelectorAll('.selectbox-item__lock');
+        for (var i = 0; i < locks.length; i++) {
+          var it = locks[i].closest ? locks[i].closest('.selectbox-item') : null;
+          if (it) it.style.display = 'none';
+        }
+      } catch (e) {}
+    };
+    hideLocked();
+    try {
+      var deb = null;
+      new MutationObserver(function () { if (deb) return; deb = setTimeout(function () { deb = null; hideLocked(); }, 300); })
+        .observe(document.body, { childList: true, subtree: true });
+    } catch (e) {}
   } catch (e) {}
   // Lampa.Utils.putScriptAsync(["{localhost}/myplugin.js"]);  // wwwroot/myplugin.js
   // Lampa.Utils.putScriptAsync(["{localhost}/plugins/ts-preload.js", "https://nb557.github.io/plugins/online_mod.js"]);
