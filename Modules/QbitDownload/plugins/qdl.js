@@ -43,7 +43,11 @@
             '.qdl-watch-btn span{color:#fff !important}' +
             // режим «Загрузки»: в полной карточке прячем все кнопки, кроме нашей «Смотреть»
             '.qdl-only .full-start__buttons .full-start__button:not(.qdl-watch-btn),' +
-            '.qdl-only .full-start-new__buttons .full-start__button:not(.qdl-watch-btn){display:none !important}';
+            '.qdl-only .full-start-new__buttons .full-start__button:not(.qdl-watch-btn){display:none !important}' +
+            // своя кнопка фуллскрина в плеере (НЕ класс player-panel__fullscreen — иначе Lampa её прячет на моб.)
+            '.qdl-fs{display:inline-flex !important;align-items:center;justify-content:center;padding:.6em;margin:0 .2em;cursor:pointer;opacity:.85;vertical-align:middle}' +
+            '.qdl-fs.focus{opacity:1;transform:scale(1.12)}' +
+            '.qdl-fs svg{width:1.8em;height:1.8em}';
         document.head.appendChild(st);
     }
 
@@ -623,11 +627,13 @@
         if (!isMobile()) return;
         var panel = document.querySelector('.player-panel');
         if (!panel || panel.querySelector('.qdl-fs')) return;
+        injectCss();
         var btn = document.createElement('div');
-        btn.className = 'player-panel__fullscreen button selector qdl-fs';
+        btn.className = 'button selector qdl-fs';   // БЕЗ player-panel__fullscreen — иначе Lampa скрывает его на моб.
         btn.innerHTML = '<svg><use xlink:href="#sprite-fullscreen"></use></svg>';
         try { $(btn).on('hover:enter', fsToggle); } catch (e) {}
         btn.addEventListener('click', function (e) { e.preventDefault(); fsToggle(); });
+        // вставляем рядом со скрытой штатной кнопкой фуллскрина (или в конец панели)
         var anchor = panel.querySelector('.player-panel__fullscreen');
         if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(btn, anchor.nextSibling);
         else panel.appendChild(btn);
