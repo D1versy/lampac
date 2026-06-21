@@ -360,7 +360,7 @@ public class QbitController : BaseController
     }
 
     // Находит локальный путь к видеофайлу торрента (index<0 → самый большой). null если нет.
-    async Task<string> ResolveFile(HttpClient c, string hash, int index)
+    static async Task<string> ResolveFile(HttpClient c, string hash, int index)
     {
         string he = HttpUtility.UrlEncode(hash);
 
@@ -542,7 +542,7 @@ public class QbitController : BaseController
     [Route("qdl/hls/{key}/{file}")]
     async public Task<ActionResult> Hls(string key, string file)
     {
-        var mk = Regex.Match(key ?? "", "^([0-9a-fA-F]{40}|[0-9A-Za-z]{32})_(-?\\d+)(?:_(o|e\\d+|f\\d+))?$");
+        var mk = Regex.Match(key ?? "", "^([0-9a-fA-F]{40}|[0-9A-Za-z]{32})_(-?\\d+)(?:_(o|e\\d+|d[0-9a-f]{8}|f\\d+))?$");
         if (!mk.Success) return BadRequest();
         if (!Regex.IsMatch(file ?? "", "^(playlist\\.m3u8|seg\\d{1,6}\\.ts)$")) return BadRequest();
 
@@ -580,7 +580,12 @@ public class QbitController : BaseController
                     src = await ResolveFile(c, hash, index);
                     if (src == null) return NotFound();
                     if (audio.StartsWith("e")) audioMap = "0:a:" + audio.Substring(1);       // встроенная дорожка N
-                    else if (audio.StartsWith("f"))                                            // внешний файл-озвучка (домешиваем)
+                    else if (audio.StartsWith("d"))                                            // внешняя озвучка по СТУДИИ — файл для ЭТОЙ серии
+                    {
+                        extAudio = await ResolveDubFile(c, hash, index, audio);
+                        if (!string.IsNullOrEmpty(extAudio)) audioMap = "1:a:0";
+                    }
+                    else if (audio.StartsWith("f"))                                            // back-compat: внешний файл по индексу
                     {
                         extAudio = await ResolveFile(c, hash, int.Parse(audio.Substring(1)));
                         if (!string.IsNullOrEmpty(extAudio)) audioMap = "1:a:0";
@@ -650,7 +655,9 @@ public class QbitController : BaseController
             string vpath = await ResolveFile(c, hash, vindex);
             foreach (var a in ProbeAudio(vpath)) opts.Add(a);
 
-            // внешние озвучки: аудиофайлы рядом, имя которых начинается с имени видео
+            // внешние озвучки: аудиофайлы рядом, имя которых начинается с имени видео.
+            // ID = по СТУДИИ (стабилен между сериями), НЕ по индексу файла — иначе на др. серии играет чужой звук.
+            var seen = new HashSet<string>();
             foreach (var f in files)
             {
                 string n = (f.Value<string>("name") ?? "").Replace('\\', '/');
@@ -659,13 +666,10 @@ public class QbitController : BaseController
                 string fbase = Path.GetFileNameWithoutExtension(fn);
                 if (!fbase.StartsWith(vbase, StringComparison.OrdinalIgnoreCase)) continue;
 
-                string label = fbase.Length > vbase.Length ? fbase.Substring(vbase.Length).TrimStart('.', ' ', '-', '_') : "";
-                if (string.IsNullOrWhiteSpace(label))
-                {
-                    var parts = n.Split('/');
-                    label = parts.Length >= 2 ? parts[parts.Length - 2] : "Озвучка";
-                }
-                opts.Add(new JObject { ["id"] = "f" + (f.Value<int?>("index") ?? 0), ["label"] = label, ["lang"] = "rus" });
+                string studio = StudioOf(n, vbase);
+                string id = StudioId(studio);
+                if (!seen.Add(id)) continue;   // одна студия — один пункт
+                opts.Add(new JObject { ["id"] = id, ["label"] = studio, ["lang"] = "rus" });
             }
 
             return ContentTo(opts.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
@@ -721,6 +725,64 @@ public class QbitController : BaseController
             case "": return "Оригинал";
             default: return l;
         }
+    }
+
+    // стабильный ID студии озвучки (FNV-1a → 8 hex; ASCII, кириллица ок) — переживает разные серии
+    static string StudioId(string studio)
+    {
+        uint h = 2166136261;
+        foreach (char ch in (studio ?? "").ToLowerInvariant()) { h ^= ch; h *= 16777619; }
+        return "d" + h.ToString("x8");
+    }
+
+    // студия = суффикс имени файла после имени видео (".AniLiberty"→"AniLiberty"), иначе родительская папка
+    static string StudioOf(string fileNameFull, string videoBase)
+    {
+        string fn = (fileNameFull ?? "").Replace('\\', '/');
+        string baseNoExt = Path.GetFileNameWithoutExtension(fn.Substring(fn.LastIndexOf('/') + 1));
+        if (baseNoExt.StartsWith(videoBase, StringComparison.OrdinalIgnoreCase) && baseNoExt.Length > videoBase.Length)
+        {
+            string suf = baseNoExt.Substring(videoBase.Length).Trim('.', ' ', '-', '_', '[', ']', '(', ')');
+            if (!string.IsNullOrWhiteSpace(suf)) return suf;
+        }
+        var parts = fn.Split('/');
+        return parts.Length >= 2 ? parts[parts.Length - 2] : "Озвучка";
+    }
+
+    // найти файл-озвучку выбранной СТУДИИ именно для серии videoIndex
+    static async Task<string> ResolveDubFile(HttpClient c, string hash, int videoIndex, string dubId)
+    {
+        string filesRaw = await c.GetStringAsync($"/api/v2/torrents/files?hash={HttpUtility.UrlEncode(hash)}");
+        var files = JArray.Parse(filesRaw);
+
+        JToken vf = null;
+        if (videoIndex >= 0) foreach (var f in files) if ((f.Value<int?>("index") ?? -1) == videoIndex) { vf = f; break; }
+        if (vf == null)
+        {
+            long max = -1;
+            foreach (var f in files)
+            {
+                string nm = f.Value<string>("name") ?? "";
+                if (!Regex.IsMatch(nm, "\\.(mkv|mp4|avi|ts|m4v|webm|mov)$", RegexOptions.IgnoreCase)) continue;
+                long s = f.Value<long?>("size") ?? 0; if (s > max) { max = s; vf = f; }
+            }
+        }
+        if (vf == null) return null;
+
+        string vn = (vf.Value<string>("name") ?? "").Replace('\\', '/');
+        string vbase = Path.GetFileNameWithoutExtension(vn.Substring(vn.LastIndexOf('/') + 1));
+
+        foreach (var f in files)
+        {
+            string n = (f.Value<string>("name") ?? "").Replace('\\', '/');
+            string fn = n.Substring(n.LastIndexOf('/') + 1);
+            if (!Regex.IsMatch(fn, "\\.(mka|aac|ac3|eac3|flac|dts|mp3|opus|m4a|wav)$", RegexOptions.IgnoreCase)) continue;
+            string fbase = Path.GetFileNameWithoutExtension(fn);
+            if (!fbase.StartsWith(vbase, StringComparison.OrdinalIgnoreCase)) continue;
+            if (StudioId(StudioOf(n, vbase)) != dubId) continue;
+            return await ResolveFile(c, hash, f.Value<int?>("index") ?? -1);
+        }
+        return null;
     }
 
     static void StartHls(string key, string dir, string videoPath, string extAudio, string audioMap)

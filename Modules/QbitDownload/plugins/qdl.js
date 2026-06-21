@@ -143,9 +143,9 @@
         var ua = navigator.userAgent || '';
         return !/Tizen|Web0?S|webOS|SMART-TV|SmartTV|HbbTV|AppleTV|CrKey|Android TV|NetCast|VIDAA|MSX/i.test(ua);
     }
-    // audio: 'o' (ориг) | 'eN' (встроенная) | 'fN' (внешняя озвучка). Внешняя → ВСЕГДА HLS (домешиваем).
+    // audio: 'o' (ориг) | 'eN' (встроенная) | 'd<id>' (озвучка по студии). Внешняя → ВСЕГДА HLS (домешиваем).
     function streamUrl(hash, index, audio) {
-        var ext = audio && audio.charAt(0) === 'f';
+        var ext = audio && (audio.charAt(0) === 'f' || audio.charAt(0) === 'd');
         if (ext || isBrowser()) {
             var k = hash + '_' + (index >= 0 ? index : -1) + (audio && audio !== 'o' ? '_' + audio : '');
             return API + '/qdl/hls/' + k + '/playlist.m3u8';
@@ -154,19 +154,20 @@
     }
 
     // выбор озвучки запоминается на сериал (по hash)
-    function getAudioPref(hash) { try { return (Lampa.Storage.get('qdl_audio', {}) || {})[hash]; } catch (e) { return null; } }
-    function setAudioPref(hash, id) { try { var m = Lampa.Storage.get('qdl_audio', {}) || {}; m[hash] = id; Lampa.Storage.set('qdl_audio', m); } catch (e) {} }
+    function getAudioPref(hash) { try { return (Lampa.Storage.get('qdl_audio2', {}) || {})[hash]; } catch (e) { return null; } }
+    function setAudioPref(hash, id) { try { var m = Lampa.Storage.get('qdl_audio2', {}) || {}; m[hash] = id; Lampa.Storage.set('qdl_audio2', m); } catch (e) {} }
 
     // определить озвучку (из памяти или спросить один раз), затем cb(audioId)
     function ensureAudio(hash, index, cb) {
-        var pref = getAudioPref(hash);
-        if (pref) { cb(pref); return; }
         req(API + '/qdl/audio?hash=' + hash + '&index=' + (index >= 0 ? index : -1), function (opts) {
             opts = opts || [];
             if (opts.length <= 1) { cb(opts[0] && opts[0].id); return; }
+            var pref = getAudioPref(hash);
+            // показываем меню КАЖДЫЙ раз (можно сменить), запомненную озвучку — первой, с галочкой
+            var ordered = opts.slice().sort(function (a, b) { return (b.id === pref ? 1 : 0) - (a.id === pref ? 1 : 0); });
             Lampa.Select.show({
                 title: 'Озвучка',
-                items: opts.map(function (o) { return { title: o.label, id: o.id }; }),
+                items: ordered.map(function (o) { return { title: (o.id === pref ? '✓ ' : '') + o.label, id: o.id }; }),
                 onSelect: function (s) { setAudioPref(hash, s.id); cb(s.id); },
                 onBack: function () { Lampa.Controller.toggle('content'); }
             });
