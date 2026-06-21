@@ -26,4 +26,7 @@ public class ModuleConf : ModuleBaseConf
     public string hlsPath { get; set; } = "/qdl-hls";
     public string ffmpeg { get; set; } = "/lampac/data/ffmpeg";
     public long hlsCacheCapGb { get; set; } = 30;
+
+    // Слежение за сериалами: как часто проверять обновление раздач (часы).
+    public int watchIntervalHours { get; set; } = 6;
 }

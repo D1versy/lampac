@@ -23,7 +23,7 @@ public class QbitController : BaseController
     static bool ValidHash(string h) => !string.IsNullOrEmpty(h) && _hashRx.IsMatch(h);
 
     #region qBittorrent client (cookie auth, проверяем логин)
-    async Task<HttpClient> qbit()
+    static async Task<HttpClient> Qbit()
     {
         var handler = new HttpClientHandler
         {
@@ -118,13 +118,14 @@ public class QbitController : BaseController
     #region /qdl/add — добавить magnet/.torrent в qBittorrent (резолв parselink при необходимости)
     [HttpGet, HttpPost, AllowAnonymous]
     [Route("qdl/add")]
-    async public Task<ActionResult> Add(string magnet = null, string parselink = null, string title = null)
+    async public Task<ActionResult> Add(string magnet = null, string parselink = null, string title = null, string query = null)
     {
         try
         {
             // link: настоящий "magnet:?...", либо URL-резолвер JacRed (parselink).
             // Резолвер может отдать: 302→magnet (rutracker/kinozal/nnm), magnet в теле, или .torrent-файл.
             string link = !string.IsNullOrWhiteSpace(magnet) ? magnet : parselink;
+            string origLink = link;                  // исходный указатель на раздачу (для слежения)
             byte[] torrentFile = null;
             const long MaxBytes = 10L * 1024 * 1024;
 
@@ -187,7 +188,7 @@ public class QbitController : BaseController
                 finally { resp?.Dispose(); }
             }
 
-            using var c = await qbit();
+            using var c = await Qbit();
             MultipartFormDataContent content;
             string usedMagnet = null;
 
@@ -251,6 +252,17 @@ public class QbitController : BaseController
                 if (hm.Success) hash = hm.Groups[1].Value.ToLower();
             }
 
+            // сохраняем исходный указатель на раздачу — нужен для слежения за сериалом (пере-резолв)
+            if (ok && !string.IsNullOrEmpty(hash) && !string.IsNullOrWhiteSpace(origLink))
+            {
+                try
+                {
+                    Directory.CreateDirectory(Path.Combine(ModInit.conf.cachePath, "links"));
+                    System.IO.File.WriteAllText(LinkPath(hash), new JObject { ["link"] = origLink, ["query"] = query }.ToString(Newtonsoft.Json.Formatting.None));
+                }
+                catch { }
+            }
+
             return Json(new { success = ok, duplicate, hash, body });
         }
         catch (Exception ex)
@@ -268,8 +280,11 @@ public class QbitController : BaseController
     {
         try
         {
-            using var c = await qbit();
+            using var c = await Qbit();
             string raw = await c.GetStringAsync($"/api/v2/torrents/info?category={HttpUtility.UrlEncode(ModInit.conf.category)}&sort=added_on&reverse=true");
+
+            var watched = new HashSet<string>();
+            foreach (var w in LoadWatch()) { var wh = w.Value<string>("hash"); if (!string.IsNullOrEmpty(wh)) watched.Add(wh); }
 
             var result = new JArray();
             foreach (var t in JArray.Parse(raw))
@@ -284,7 +299,8 @@ public class QbitController : BaseController
                     ["size"] = t.Value<long?>("size") ?? 0,
                     ["save_path"] = t.Value<string>("save_path"),
                     ["content_path"] = t.Value<string>("content_path"),
-                    ["has_poster"] = ValidHash(h) && System.IO.File.Exists(PosterPath(h))
+                    ["has_poster"] = ValidHash(h) && System.IO.File.Exists(PosterPath(h)),
+                    ["watched"] = watched.Contains(h)
                 };
                 if (ValidHash(h) && System.IO.File.Exists(MetaPath(h)))
                 {
@@ -311,7 +327,7 @@ public class QbitController : BaseController
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            using var c = await qbit();
+            using var c = await Qbit();
             string raw = await c.GetStringAsync($"/api/v2/torrents/files?hash={HttpUtility.UrlEncode(hash)}");
             return ContentTo(raw ?? "[]", "application/json; charset=utf-8");
         }
@@ -331,7 +347,7 @@ public class QbitController : BaseController
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            using var c = await qbit();
+            using var c = await Qbit();
             string full = await ResolveFile(c, hash, index);
             if (full == null) return NotFound();
             return PhysicalFile(full, MimeType(full), enableRangeProcessing: true);
@@ -432,7 +448,7 @@ public class QbitController : BaseController
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            using var c = await qbit();
+            using var c = await Qbit();
             var form = new FormUrlEncodedContent(new[]
             {
                 new KeyValuePair<string, string>("hashes", hash),
@@ -558,7 +574,7 @@ public class QbitController : BaseController
                 }
 
                 string src;
-                using (var c = await qbit()) src = await ResolveFile(c, hash, index);
+                using (var c = await Qbit()) src = await ResolveFile(c, hash, index);
                 if (src == null) return NotFound();
 
                 CleanupHls();
@@ -677,6 +693,195 @@ public class QbitController : BaseController
             }
         }
         catch { }
+    }
+    #endregion
+
+    #region /qdl/watch — слежение за сериалами (авто-докачка новых серий)
+    static string WatchFile => Path.Combine(ModInit.conf.cachePath, "watch.json");
+    static string LinkPath(string hash) => Path.Combine(ModInit.conf.cachePath, "links", hash + ".json");
+    static readonly object _watchLock = new();
+
+    static JArray LoadWatch()
+    {
+        try { if (System.IO.File.Exists(WatchFile)) return JArray.Parse(System.IO.File.ReadAllText(WatchFile)); } catch { }
+        return new JArray();
+    }
+    static void SaveWatch(JArray a)
+    {
+        try { Directory.CreateDirectory(ModInit.conf.cachePath); System.IO.File.WriteAllText(WatchFile, a.ToString(Newtonsoft.Json.Formatting.None)); } catch { }
+    }
+
+    [HttpGet, HttpPost, AllowAnonymous]
+    [Route("qdl/watch")]
+    public ActionResult WatchAdd(string hash)
+    {
+        if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
+        try
+        {
+            string link = null, query = null;
+            if (System.IO.File.Exists(LinkPath(hash)))
+            {
+                var lj = JObject.Parse(System.IO.File.ReadAllText(LinkPath(hash)));
+                link = lj.Value<string>("link"); query = lj.Value<string>("query");
+            }
+            if (string.IsNullOrWhiteSpace(link))
+                return Json(new { success = false, error = "no link" });   // перекачай раздачу, чтобы включить слежение
+
+            JObject meta = System.IO.File.Exists(MetaPath(hash)) ? JObject.Parse(System.IO.File.ReadAllText(MetaPath(hash))) : new JObject();
+            lock (_watchLock)
+            {
+                var a = LoadWatch();
+                foreach (var m in a) if (m.Value<string>("hash") == hash) return Json(new { success = true });
+                a.Add(new JObject { ["hash"] = hash, ["link"] = link, ["query"] = query, ["id"] = meta.Value<int?>("id"), ["title"] = meta.Value<string>("title") });
+                SaveWatch(a);
+            }
+            return Json(new { success = true });
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] watch add: " + ex); return Json(new { success = false, error = "internal error" }); }
+    }
+
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/watch/remove")]
+    public ActionResult WatchRemove(string hash)
+    {
+        try
+        {
+            lock (_watchLock)
+            {
+                var a = LoadWatch(); var b = new JArray();
+                foreach (var m in a) if (m.Value<string>("hash") != hash) b.Add(m);
+                SaveWatch(b);
+            }
+            return Json(new { success = true });
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] watch remove: " + ex); return Json(new { success = false }); }
+    }
+
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/watch/list")]
+    public ActionResult WatchListAll() => ContentTo(LoadWatch().ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/watch/check")]
+    async public Task<ActionResult> WatchCheckNow() { int n = await CheckWatches(); return Json(new { success = true, regrabbed = n }); }
+
+    // Фоновая проверка: пере-резолвим раздачу; если infohash изменился (добавили серии) —
+    // до-добавляем новую раздачу (qBit перепроверит файлы и дотянет только новые серии).
+    public static async Task<int> CheckWatches()
+    {
+        int regrabbed = 0;
+        JArray list; lock (_watchLock) { list = LoadWatch(); }
+        bool changed = false;
+
+        foreach (var m in list)
+        {
+            try
+            {
+                string link = m.Value<string>("link");
+                string curHash = m.Value<string>("hash");
+                if (string.IsNullOrWhiteSpace(link) || string.IsNullOrWhiteSpace(curHash)) continue;
+
+                string magnet = await ResolveMagnetStatic(link);
+                string newHash = MagnetHash(magnet);
+                if (string.IsNullOrWhiteSpace(newHash) || newHash.Equals(curHash, StringComparison.OrdinalIgnoreCase)) continue;
+
+                using var c = await Qbit();
+                if (!await QbitAddMagnet(c, magnet)) continue;     // qBit перепроверит и дотянет новые серии
+
+                try   // убрать старую раздачу (файлы оставить)
+                {
+                    var form = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("hashes", curHash), new KeyValuePair<string, string>("deleteFiles", "false") });
+                    await c.PostAsync("/api/v2/torrents/delete", form);
+                }
+                catch { }
+
+                MigrateCache(curHash, newHash);
+                m["hash"] = newHash;
+                changed = true; regrabbed++;
+                Console.WriteLine("[QbitDownload] watch: re-grab " + m.Value<string>("title") + " " + curHash + "->" + newHash);
+            }
+            catch (Exception ex) { Console.WriteLine("[QbitDownload] watch item: " + ex); }
+        }
+
+        if (changed) lock (_watchLock) { SaveWatch(list); }
+        return regrabbed;
+    }
+
+    static void MigrateCache(string oldH, string newH)
+    {
+        void mv(string a, string b) { try { if (System.IO.File.Exists(a)) { Directory.CreateDirectory(Path.GetDirectoryName(b)); System.IO.File.Copy(a, b, true); System.IO.File.Delete(a); } } catch { } }
+        mv(MetaPath(oldH), MetaPath(newH));
+        mv(PosterPath(oldH), PosterPath(newH));
+        mv(LinkPath(oldH), LinkPath(newH));
+    }
+
+    static string MagnetHash(string magnet)
+    {
+        var hm = Regex.Match(magnet ?? "", "btih:([0-9a-fA-F]{40}|[0-9a-zA-Z]{32})", RegexOptions.IgnoreCase);
+        return hm.Success ? hm.Groups[1].Value.ToLower() : "";
+    }
+
+    // резолв нашего loopback-парселинка в magnet (фоновая проверка, без request-host)
+    static async Task<string> ResolveMagnetStatic(string link)
+    {
+        if (string.IsNullOrWhiteSpace(link)) return null;
+        if (link.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase)) return link;   // прямой magnet не меняется
+        if (!Uri.TryCreate(link, UriKind.Absolute, out var u) || !IsLoopbackSelf(u)) return null;
+
+        using var rh = new HttpClientHandler { AllowAutoRedirect = false };
+        using var rc = new HttpClient(rh) { Timeout = TimeSpan.FromSeconds(20) };
+        HttpResponseMessage resp = null;
+        try
+        {
+            var current = u;
+            for (int hop = 0; hop < 5; hop++)
+            {
+                resp?.Dispose();
+                resp = await rc.GetAsync(current, HttpCompletionOption.ResponseHeadersRead);
+                int code = (int)resp.StatusCode; var loc = resp.Headers.Location;
+                if (code < 300 || code >= 400 || loc == null) break;
+                var next = loc.IsAbsoluteUri ? loc : new Uri(resp.RequestMessage?.RequestUri ?? current, loc);
+                if (next.OriginalString.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase)) return next.OriginalString;
+                if (!IsLoopbackSelf(next)) break;
+                current = next;
+            }
+            if (resp != null)
+            {
+                try { await resp.Content.LoadIntoBufferAsync(5_000_000); } catch { return null; }
+                var mm = Regex.Match(await resp.Content.ReadAsStringAsync() ?? "", "magnet:\\?[^\"'\\s<]+");
+                if (mm.Success) return mm.Value;
+            }
+        }
+        catch { }
+        finally { resp?.Dispose(); }
+        return null;
+    }
+
+    static bool IsLoopbackSelf(Uri u)
+    {
+        if (u == null || (u.Scheme != "http" && u.Scheme != "https")) return false;
+        if (u.Port != CoreInit.conf.listen.port) return false;
+        string h = u.Host.ToLowerInvariant();
+        if (h == "127.0.0.1" || h == "localhost" || h == "::1") return true;
+        if (!string.IsNullOrEmpty(CoreInit.conf.listen.localhost) && h == CoreInit.conf.listen.localhost.ToLowerInvariant()) return true;
+        return false;
+    }
+
+    static async Task<bool> QbitAddMagnet(HttpClient c, string magnet)
+    {
+        var content = new MultipartFormDataContent
+        {
+            { new StringContent(magnet), "urls" },
+            { new StringContent(ModInit.conf.downloadsPath), "savepath" },
+            { new StringContent(ModInit.conf.category), "category" }
+        };
+        var r = await c.PostAsync("/api/v2/torrents/add", content);
+        string body = (await r.Content.ReadAsStringAsync())?.Trim() ?? "";
+        if ((int)r.StatusCode == 409 || body.Equals("Conflict", StringComparison.OrdinalIgnoreCase)) return true;
+        if (!r.IsSuccessStatusCode) return false;
+        if (body == "Ok." || body.Length == 0) return true;
+        if (body.StartsWith("{")) { try { var j = JObject.Parse(body); return (j.Value<int?>("success_count") ?? 0) > 0 || (j.Value<int?>("pending_count") ?? 0) > 0; } catch { return false; } }
+        return false;
     }
     #endregion
 

@@ -378,11 +378,21 @@
             items: [
                 { title: 'Открыть карточку', act: 'page' },
                 { title: '▶ Смотреть (оффлайн)', act: 'play' },
+                { title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'watch' },
                 { title: '🗑 Удалить (с файлами)', act: 'del' }
             ],
             onSelect: function (b) {
                 if (b.act === 'page') openDownload(t);
                 else if (b.act === 'play') watch(t);
+                else if (b.act === 'watch') {
+                    if (t.watched)
+                        req(API + '/qdl/watch/remove?hash=' + t.hash, function () { t.watched = false; Lampa.Noty.show('Слежение выключено'); });
+                    else
+                        req(API + '/qdl/watch?hash=' + t.hash, function (r) {
+                            if (r && r.success) { t.watched = true; Lampa.Noty.show('✓ Слежу за новыми сериями'); }
+                            else Lampa.Noty.show('Не вышло — перекачай раздачу и попробуй снова');
+                        });
+                }
                 else if (b.act === 'del')
                     req(API + '/qdl/delete?hash=' + t.hash + '&deleteFiles=true', function () {
                         Lampa.Noty.show('Удалено');
@@ -421,7 +431,7 @@
                         ? ('magnet=' + encodeURIComponent(a.t.magnet))
                         : ('parselink=' + encodeURIComponent(a.t.parselink || ''));
                     Lampa.Noty.show('Добавляю в загрузки…');
-                    req(API + '/qdl/add?' + q + '&title=' + encodeURIComponent(a.t.title || title), function (r) {
+                    req(API + '/qdl/add?' + q + '&title=' + encodeURIComponent(a.t.title || title) + '&query=' + encodeURIComponent(title), function (r) {
                         if (r && r.success) {
                             if (r.hash) saveMeta(r.hash, movie);   // кэшируем метаданные+постер
                             Lampa.Noty.show(r.duplicate ? 'Уже в «Загрузках»' : '✓ Добавлено в «Загрузки»');
