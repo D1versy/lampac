@@ -53,11 +53,27 @@ lampainit_invc.appload = function appload() {
           if ((tabs[j].textContent || '').trim() === 'CUB') tabs[j].style.display = 'none';
       } catch (e) {}
     };
+    // убрать суффикс источника-бренда « - CUB» из заголовка шапки (.head__title').text(name+' - '+source.toUpperCase()))
+    // source='cub' → 'CUB'; срезаем ТОЛЬКО " - CUB" в конце, чтобы не задеть реальные названия с « - » (фильмы)
+    var stripBrand = function () {
+      try {
+        var titles = document.querySelectorAll('.head__title');
+        for (var i = 0; i < titles.length; i++) {
+          var t = titles[i].textContent || '';
+          var fixed = t.replace(/\s*[-–—]\s*CUB\s*$/i, '');
+          if (fixed !== t) titles[i].textContent = fixed;
+        }
+      } catch (e) {}
+    };
     hideLocked();
+    stripBrand();
     try {
       var deb = null;
-      new MutationObserver(function () { if (deb) return; deb = setTimeout(function () { deb = null; hideLocked(); }, 300); })
-        .observe(document.body, { childList: true, subtree: true });
+      new MutationObserver(function () {
+        stripBrand();                 // дёшево и сразу — реагирует на ту же мутацию, что ставит заголовок (без мерцания)
+        if (deb) return;
+        deb = setTimeout(function () { deb = null; hideLocked(); }, 300);
+      }).observe(document.body, { childList: true, subtree: true });
     } catch (e) {}
   } catch (e) {}
   // Lampa.Utils.putScriptAsync(["{localhost}/myplugin.js"]);  // wwwroot/myplugin.js
