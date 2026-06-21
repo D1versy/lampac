@@ -35,6 +35,10 @@ lampainit_invc.appload = function appload() {
           var it = locks[i].closest ? locks[i].closest('.selectbox-item') : null;
           if (it) it.style.display = 'none';
         }
+        // вкладка «CUB» в навигации (текст, не data-атрибут)
+        var tabs = document.querySelectorAll('.navigation-tabs__button');
+        for (var j = 0; j < tabs.length; j++)
+          if ((tabs[j].textContent || '').trim() === 'CUB') tabs[j].style.display = 'none';
       } catch (e) {}
     };
     hideLocked();
