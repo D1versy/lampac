@@ -40,7 +40,10 @@
             '.qdl-watch.focus{background:#fff !important;color:#000 !important;transform:scale(1.03)}' +
             '.qdl-watch-btn{background:rgba(20,160,40,.92) !important;color:#fff !important}' +
             '.qdl-watch-btn.focus{background:#19b531 !important;color:#fff !important}' +
-            '.qdl-watch-btn span{color:#fff !important}';
+            '.qdl-watch-btn span{color:#fff !important}' +
+            // режим «Загрузки»: в полной карточке прячем все кнопки, кроме нашей «Смотреть»
+            '.qdl-only .full-start__buttons .full-start__button:not(.qdl-watch-btn),' +
+            '.qdl-only .full-start-new__buttons .full-start__button:not(.qdl-watch-btn){display:none !important}';
         document.head.appendChild(st);
     }
 
@@ -128,9 +131,10 @@
     }
     function baseName(p) { return String(p || '').split('/').pop().split('\\').pop(); }
 
-    // ТВ (нативный плеер) тянет оригинал (EAC3 ок), десктоп-браузер — HLS (звук→AAC)
+    // ТВ (нативный плеер) тянет оригинал (EAC3 ок), всё остальное (десктоп/мобайл-браузер) — HLS (звук→AAC).
+    // ВАЖНО: Platform.is('browser') слишком узок (на Linux-десктопе platform='' → false). Берём инверсию tv().
     function isBrowser() {
-        try { if (Lampa.Platform && typeof Lampa.Platform.is === 'function') return Lampa.Platform.is('browser'); } catch (e) {}
+        try { if (Lampa.Platform && typeof Lampa.Platform.tv === 'function') return !Lampa.Platform.tv(); } catch (e) {}
         var ua = navigator.userAgent || '';
         return !/Tizen|Web0?S|webOS|SMART-TV|SmartTV|HbbTV|AppleTV|CrKey|Android TV|NetCast|VIDAA|MSX/i.test(ua);
     }
@@ -167,18 +171,28 @@
         }, function () { Lampa.Noty.show('Ошибка чтения файлов'); });
     }
 
-    function watch(item) {
-        var name = (item.meta && item.meta.title) || item.name;
-        req(API + '/qdl/files?hash=' + item.hash, function (files) {
+    function watchByHash(hash, name) {
+        req(API + '/qdl/files?hash=' + hash, function (files) {
             var vids = videoFiles(files);
-            if (vids.length > 1) chooseEpisode(item.hash, name);
-            else playLocal(item.hash, vids.length ? vids[0].index : -1, name);
-        }, function () { playLocal(item.hash, -1, name); });
+            if (vids.length > 1) chooseEpisode(hash, name);
+            else playLocal(hash, vids.length ? vids[0].index : -1, name);
+        }, function () { playLocal(hash, -1, name); });
     }
+    function watch(item) { watchByHash(item.hash, (item.meta && item.meta.title) || item.name); }
 
-    // ───────── Детальная карточка загрузки (вся инфа как в оригинале, 1 кнопка) ─────────
+    // ───────── Открытие загрузки: НАСТОЯЩАЯ полная карточка (вся инфа), но в режиме «одна кнопка» ─────────
     function openDownload(item) {
-        Lampa.Activity.push({ url: '', title: (item.meta && item.meta.title) || item.name, component: 'qdl_card', qdl: item });
+        var m = item.meta || {};
+        if (m.id) {
+            Lampa.Activity.push({
+                url: '', component: 'full', id: m.id,
+                method: m.media_type === 'tv' ? 'tv' : 'movie',
+                card: m, source: m.source || 'tmdb',
+                qdl_hash: item.hash    // маркер: открыто из «Загрузок» → addButton оставит одну кнопку «Смотреть»
+            });
+        } else {
+            watchByHash(item.hash, item.name);   // нет метаданных → просто играем
+        }
     }
 
     function badge(val, label) {
@@ -238,14 +252,16 @@
             scroll.append(body);
             html.append(scroll.render());
 
-            // если метаданных нет — дотянем и перерисуем карточку
+            // если метаданных нет — дотянем и перерисуем карточку (с защитой от replace после ухода)
+            var self = this;
             if (!item.meta) {
                 enrich(item.name, function (card) {
-                    if (!card) return;
+                    if (!card || self.destroyed) return;
                     saveMeta(item.hash, card, function (r) {
+                        if (self.destroyed) return;
                         item.meta = slimCard(card);
                         if (r && r.has_poster) item.has_poster = true;
-                        Lampa.Activity.replace();
+                        try { if (Lampa.Activity.own && !Lampa.Activity.own(self)) return; Lampa.Activity.replace(); } catch (e) {}
                     });
                 });
             }
@@ -428,6 +444,19 @@
             if (!cont.length) cont = $('.full-start-new__buttons', render);
             if (!cont.length) return;
 
+            // открыто из «Загрузок» (полная карточка, режим одной кнопки)
+            var active = (function () { try { return Lampa.Activity.active() || {}; } catch (e) { return {}; } })();
+            if (active.qdl_hash) {
+                injectCss();
+                render.addClass('qdl-only');                 // CSS прячет все прочие кнопки
+                if (!$('.qdl-watch-btn', render).length) {
+                    var w = $('<div class="full-start__button selector qdl-watch-btn">' + ICON + '<span>Смотреть</span></div>');
+                    w.on('hover:enter', function () { watchByHash(active.qdl_hash, movie.title || movie.name); });
+                    cont.prepend(w);
+                }
+                return;   // НЕ добавляем «Скачать», прочие кнопки скрыты
+            }
+
             if (!$('.qdl-download', render).length) {
                 var btn = $('<div class="full-start__button selector qdl-download">' + ICON + '<span>Скачать</span></div>');
                 btn.on('hover:enter', function () { chooseAndDownload(movie); });
@@ -486,13 +515,12 @@
     function startMenuWatcher() {
         ensureMenu();
         var deb = null;
+        function onMut() { if (deb) return; deb = setTimeout(function () { deb = null; ensureMenu(); }, 300); }
         try {
-            var obs = new MutationObserver(function () {
-                if (deb) return;
-                deb = setTimeout(function () { deb = null; ensureMenu(); }, 300);
-            });
-            obs.observe(document.body, { childList: true, subtree: true });
+            var menuEl = document.querySelector('.menu') || document.body;   // узкий observer (не весь body)
+            new MutationObserver(onMut).observe(menuEl, { childList: true, subtree: true });
         } catch (e) {}
+        try { if (Lampa.Listener && Lampa.Listener.follow) Lampa.Listener.follow('menu', function () { ensureMenu(); }); } catch (e) {}
         [500, 1500, 3000, 6000].forEach(function (t) { setTimeout(ensureMenu, t); });
     }
 

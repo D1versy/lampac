@@ -517,6 +517,10 @@ public class QbitController : BaseController
 
     #region /qdl/hls — HLS-транскод для браузера (звук EAC3/AC3/DTS → AAC, видео copy)
     static readonly ConcurrentDictionary<string, byte> _hlsRunning = new();
+    static readonly ConcurrentDictionary<string, DateTime> _hlsFailed = new();   // негатив-кэш упавших ffmpeg
+    static readonly ConcurrentDictionary<string, DateTime> _hlsTouch = new();    // последняя активность (защита от удаления при просмотре)
+    static readonly TimeSpan _hlsFailTtl = TimeSpan.FromMinutes(3);
+    static readonly TimeSpan _hlsTouchTtl = TimeSpan.FromMinutes(30);
 
     [HttpGet, AllowAnonymous]
     [Route("qdl/hls/{key}/{file}")]
@@ -533,6 +537,8 @@ public class QbitController : BaseController
 
         try
         {
+            _hlsTouch[key] = DateTime.UtcNow;   // отметка активности (и .ts, и .m3u8) → CleanupHls не удалит используемую папку
+
             // сегмент: отдаём с FileShare.ReadWrite (ffmpeg может ещё держать соседние файлы)
             if (file.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
             {
@@ -544,6 +550,13 @@ public class QbitController : BaseController
             // playlist.m3u8 — генерим при первом запросе
             if (!System.IO.File.Exists(target))
             {
+                // негатив-кэш: ffmpeg недавно упал на этом ключе → не спамим перезапуском
+                if (_hlsFailed.TryGetValue(key, out var failedAt))
+                {
+                    if (DateTime.UtcNow - failedAt < _hlsFailTtl) return StatusCode(503);
+                    _hlsFailed.TryRemove(key, out _);
+                }
+
                 string src;
                 using (var c = await qbit()) src = await ResolveFile(c, hash, index);
                 if (src == null) return NotFound();
@@ -555,9 +568,10 @@ public class QbitController : BaseController
                 for (int i = 0; i < 60; i++)
                 {
                     if (System.IO.File.Exists(target) && Directory.Exists(dir) && Directory.GetFiles(dir, "seg*.ts").Length >= 1) break;
+                    if (!_hlsRunning.ContainsKey(key) && !System.IO.File.Exists(target)) break;   // ffmpeg вышел без результата → не ждём 30с
                     await Task.Delay(500);
                 }
-                if (!System.IO.File.Exists(target)) return StatusCode(503);
+                if (!System.IO.File.Exists(target)) { _hlsFailed[key] = DateTime.UtcNow; return StatusCode(503); }
             }
 
             // ffmpeg продолжает ДОПИСЫВАТЬ playlist.m3u8 → читаем с FileShare.ReadWrite (иначе sharing violation → 500)
@@ -603,9 +617,27 @@ public class QbitController : BaseController
             var p = Process.Start(psi);
             _ = Task.Run(async () =>
             {
-                try { _ = p.StandardError.ReadToEndAsync(); _ = p.StandardOutput.ReadToEndAsync(); await p.WaitForExitAsync(); }
+                string err = "";
+                try
+                {
+                    var errTask = p.StandardError.ReadToEndAsync();
+                    var outTask = p.StandardOutput.ReadToEndAsync();
+                    await p.WaitForExitAsync();
+                    err = await errTask; await outTask;
+                }
                 catch { }
                 _hlsRunning.TryRemove(key, out _);
+                try
+                {
+                    bool ok = p.HasExited && p.ExitCode == 0 && System.IO.File.Exists(Path.Combine(dir, "playlist.m3u8"));
+                    if (!ok)
+                    {
+                        _hlsFailed[key] = DateTime.UtcNow;
+                        Console.WriteLine("[QbitDownload] hls ffmpeg failed key=" + key + " exit=" + (p.HasExited ? p.ExitCode.ToString() : "?") + ": " + (err ?? "").Trim());
+                    }
+                    else _hlsFailed.TryRemove(key, out _);
+                }
+                catch { }
             });
         }
         catch (Exception ex)
@@ -634,12 +666,14 @@ public class QbitController : BaseController
             }
             if (total <= cap) return;
 
+            var now = DateTime.UtcNow;
             list.Sort((a, b) => a.atime.CompareTo(b.atime));   // старые первыми
             foreach (var it in list)
             {
                 if (total <= cap) break;
-                if (_hlsRunning.ContainsKey(it.d.Name)) continue;   // активные не трогаем
-                try { it.d.Delete(true); total -= it.size; } catch { }
+                if (_hlsRunning.ContainsKey(it.d.Name)) continue;   // активный транскод не трогаем
+                if (_hlsTouch.TryGetValue(it.d.Name, out var t) && (now - t) < _hlsTouchTtl) continue;   // активное воспроизведение не трогаем
+                try { it.d.Delete(true); total -= it.size; _hlsTouch.TryRemove(it.d.Name, out _); _hlsFailed.TryRemove(it.d.Name, out _); } catch { }
             }
         }
         catch { }
