@@ -103,26 +103,67 @@ public class QbitController : BaseController
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(magnet) && !string.IsNullOrWhiteSpace(parselink))
+            // link: настоящий "magnet:?...", ИЛИ URL-резолвер JacRed (parselink).
+            // Резолвер может отдать: 302→magnet (rutracker/kinozal/nnm), magnet в теле, или .torrent-файл.
+            string link = !string.IsNullOrWhiteSpace(magnet) ? magnet : parselink;
+            byte[] torrentFile = null;
+
+            if (!string.IsNullOrWhiteSpace(link) && !link.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
             {
-                string resolved = await Http.Get(parselink, timeoutSeconds: 40);
-                if (!string.IsNullOrWhiteSpace(resolved))
+                using var rh = new HttpClientHandler { AllowAutoRedirect = false };
+                using var rc = new HttpClient(rh) { Timeout = TimeSpan.FromSeconds(45) };
+                var resp = await rc.GetAsync(link);
+
+                if (resp.Headers.Location != null && resp.Headers.Location.OriginalString.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
                 {
-                    var m = Regex.Match(resolved, "magnet:\\?[^\"'\\s]+");
-                    magnet = m.Success ? m.Value : resolved.Trim();
+                    link = resp.Headers.Location.OriginalString;          // 302 → magnet
+                }
+                else
+                {
+                    string ct = resp.Content.Headers.ContentType?.MediaType ?? "";
+                    if (ct.Contains("bittorrent") || ct.Contains("octet-stream"))
+                    {
+                        torrentFile = await resp.Content.ReadAsByteArrayAsync();
+                        if (torrentFile == null || torrentFile.Length < 50) torrentFile = null;
+                    }
+                    if (torrentFile == null)
+                    {
+                        string b = await resp.Content.ReadAsStringAsync();
+                        var m = Regex.Match(b ?? "", "magnet:\\?[^\"'\\s<]+");
+                        if (m.Success) link = m.Value;
+                        else return Json(new { success = false, error = "resolve: " + (b ?? "").Trim() });
+                    }
                 }
             }
 
-            if (string.IsNullOrWhiteSpace(magnet) || !magnet.StartsWith("magnet:"))
-                return Json(new { success = false, error = "no magnet" });
-
             var c = await qbit();
-            var content = new MultipartFormDataContent
+            MultipartFormDataContent content;
+            string usedMagnet = null;
+
+            if (torrentFile != null)
             {
-                { new StringContent(magnet), "urls" },
-                { new StringContent(ModInit.conf.downloadsPath), "savepath" },
-                { new StringContent(ModInit.conf.category), "category" }
-            };
+                var fc = new ByteArrayContent(torrentFile);
+                fc.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/x-bittorrent");
+                content = new MultipartFormDataContent
+                {
+                    { fc, "torrents", "file.torrent" },
+                    { new StringContent(ModInit.conf.downloadsPath), "savepath" },
+                    { new StringContent(ModInit.conf.category), "category" }
+                };
+            }
+            else
+            {
+                usedMagnet = link;
+                if (string.IsNullOrWhiteSpace(usedMagnet) || !usedMagnet.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
+                    return Json(new { success = false, error = "no magnet" });
+                content = new MultipartFormDataContent
+                {
+                    { new StringContent(usedMagnet), "urls" },
+                    { new StringContent(ModInit.conf.downloadsPath), "savepath" },
+                    { new StringContent(ModInit.conf.category), "category" }
+                };
+            }
+
             var r = await c.PostAsync("/api/v2/torrents/add", content);
             string body = (await r.Content.ReadAsStringAsync())?.Trim() ?? "";
 
@@ -133,8 +174,11 @@ public class QbitController : BaseController
             );
 
             string hash = "";
-            var hm = Regex.Match(magnet, "btih:([0-9a-fA-F]{40}|[0-9a-zA-Z]{32})", RegexOptions.IgnoreCase);
-            if (hm.Success) hash = hm.Groups[1].Value.ToLower();
+            if (usedMagnet != null)
+            {
+                var hm = Regex.Match(usedMagnet, "btih:([0-9a-fA-F]{40}|[0-9a-zA-Z]{32})", RegexOptions.IgnoreCase);
+                if (hm.Success) hash = hm.Groups[1].Value.ToLower();
+            }
 
             return Json(new { success = ok, hash, body });
         }
