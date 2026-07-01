@@ -3,6 +3,7 @@
 
     var API = '{localhost}';
     var ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 19h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    var BELL = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 8a6 6 0 1112 0c0 7 3 9 3 9H3s3-2 3-9z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.3 21a1.94 1.94 0 003.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
     function req(url, cb, err) {
         try {
@@ -413,6 +414,140 @@
         this.destroy = function () { network.clear(); scroll.destroy(); html.remove(); };
     }
 
+    // ───────── Уведомления о скачанных сериях (тост + центр уведомлений) ─────────
+    function relTime(iso) {
+        try {
+            var d = new Date(iso), now = new Date();
+            var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+            var hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+            if (d.toDateString() === now.toDateString()) return 'сегодня ' + hm;
+            var y = new Date(now); y.setDate(now.getDate() - 1);
+            if (d.toDateString() === y.toDateString()) return 'вчера ' + hm;
+            var days = Math.floor((now - d) / 86400000);
+            if (days >= 0 && days < 7) return days + ' дн назад';
+            return pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '.' + d.getFullYear();
+        } catch (e) { return ''; }
+    }
+
+    function updateNotiBadge(unread) {
+        try {
+            var b = $('.menu .qdl-noti-menu .qdl-noti-badge');
+            if (!b.length) return;
+            if (unread > 0) b.text(unread > 99 ? '99+' : unread).css('display', '');
+            else b.css('display', 'none');
+        } catch (e) {}
+    }
+
+    // опрос ленты: бейдж непрочитанных + тост для появившихся с прошлого опроса
+    function pollNotifications() {
+        req(API + '/qdl/notifications', function (r) {
+            if (!r) return;
+            var items = r.items || [];
+            updateNotiBadge(r.unread || 0);
+
+            var lastId = 0;
+            try { lastId = Lampa.Storage.get('qdl_noti_lastid', 0) || 0; } catch (e) {}
+            var fresh = items.filter(function (x) { return x.id > lastId; });
+            if (!fresh.length) return;
+
+            var maxId = items.reduce(function (mx, x) { return Math.max(mx, x.id); }, lastId);
+            try { Lampa.Storage.set('qdl_noti_lastid', maxId); } catch (e) {}
+
+            // на самом первом опросе (lastId===0) не спамим историей — только запоминаем точку отсчёта
+            if (lastId > 0) {
+                if (fresh.length === 1) Lampa.Noty.show('📺 ' + esc(fresh[0].title) + ' — ' + esc(fresh[0].label) + ' скачана');
+                else Lampa.Noty.show('📺 Скачано новых серий: ' + fresh.length);
+            }
+        });
+    }
+
+    // открыть карточку загрузки из уведомления (по hash)
+    function openNotification(n) {
+        req(API + '/qdl/list', function (list) {
+            var it = (list || []).filter(function (x) { return x.hash === n.hash; })[0];
+            if (it) openDownload(it);
+            else if (n.hash) watchByHash(n.hash, n.title);
+            else Lampa.Noty.show('Загрузка не найдена');
+        }, function () { if (n.hash) watchByHash(n.hash, n.title); });
+    }
+
+    // Центр уведомлений (история): постер · сериал · серия · время
+    function ComponentNotifications(object) {
+        var comp = this;
+        var network = new Lampa.Reguest();
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+        var html = $('<div></div>');
+        var body = $('<div class="category-full"></div>');
+        var last;
+
+        this.create = function () {
+            this.activity.loader(true);
+            scroll.minus();
+            html.append(scroll.render());
+            scroll.body().append(body);
+            network.silent(API + '/qdl/notifications', function (r) { comp.build((r && r.items) || []); }, function () { comp.build([]); });
+            return this.render();
+        };
+
+        this.build = function (items) {
+            if (!items.length)
+                body.append($('<div style="padding:2em;font-size:1.4em;opacity:.7">Пока нет уведомлений. Включи «🔔 Следить за новыми сериями» в «Загрузках».</div>'));
+
+            items.forEach(function (n) { comp.append(n); });
+
+            // открыли центр → помечаем всё прочитанным, бейдж гаснет
+            req(API + '/qdl/notifications/read', function () { updateNotiBadge(0); });
+
+            this.activity.loader(false);
+            this.activity.toggle();
+        };
+
+        this.append = function (n) {
+            var poster = n.hash ? (API + '/qdl/poster?hash=' + n.hash) : './img/img_broken.svg';
+            var el = $(
+                '<div class="qdl-noti-row selector" style="display:flex;align-items:center;gap:1em;padding:1em;margin:.35em .6em;background:rgba(255,255,255,.05);border-radius:.7em">' +
+                  '<img src="' + poster + '" style="width:3.6em;height:5.4em;object-fit:cover;border-radius:.4em;background:#222;flex:none">' +
+                  '<div style="flex:1;min-width:0">' +
+                    '<div style="font-size:1.3em;font-weight:600">' + esc(n.title || 'Сериал') + '</div>' +
+                    '<div style="opacity:.85;font-size:1.15em;margin-top:.25em">' + esc(n.label || '') + '</div>' +
+                    '<div style="opacity:.5;font-size:.95em;margin-top:.25em">' + esc(relTime(n.created)) + '</div>' +
+                  '</div>' +
+                '</div>'
+            );
+            el.find('img').on('error', function () { this.src = './img/img_broken.svg'; });
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:enter', function () { openNotification(n); });
+            body.append(el);
+        };
+
+        this.render = function () { return html; };
+        this.start = function () {
+            Lampa.Controller.add('content', {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                right: function () { Navigator.move('right'); },
+                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
+                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
+                back: function () { Lampa.Activity.backward(); }
+            });
+            Lampa.Controller.toggle('content');
+        };
+        this.pause = function () {};
+        this.stop = function () {};
+        this.destroy = function () { network.clear(); scroll.destroy(); html.remove(); };
+    }
+
+    function buildNotiMenuItem() {
+        var item = $('<li class="menu__item selector qdl-noti-menu"><div class="menu__ico">' + BELL + '</div><div class="menu__text">Уведомления<span class="qdl-noti-badge" style="display:none;margin-left:.6em;background:#d33;color:#fff;border-radius:1em;padding:0 .55em;font-size:.8em;font-weight:700">0</span></div></li>');
+        item.on('hover:enter', function () {
+            Lampa.Activity.push({ url: '', title: 'Уведомления', component: 'qdl_notifications', page: 1 });
+        });
+        return item;
+    }
+
     function quickMenu(t) {
         Lampa.Select.show({
             title: (t.meta && t.meta.title) || t.name,
@@ -595,11 +730,19 @@
             var anchor = $('.menu .menu__item[data-action="myperson"]').first();
             if (!anchor.length) return;                 // «Персоны» ещё не отрисованы — ждём
             var existing = $('.menu .qdl-menu');
-            if (!existing.length) { anchor.after(buildMenuItem()); return; }
+            if (!existing.length) { anchor.after(buildMenuItem()); }
             // уже есть — держим строго сразу после «Персоны» (меню могло пере-рендериться)
-            if (existing.prev('.menu__item')[0] !== anchor[0]) {
+            else if (existing.prev('.menu__item')[0] !== anchor[0]) {
                 existing.detach();
                 anchor.after(existing);
+            }
+
+            // «Уведомления» — строго сразу после «Загрузки»
+            var dl = $('.menu .qdl-menu');
+            var noti = $('.menu .qdl-noti-menu');
+            if (dl.length) {
+                if (!noti.length) { dl.after(buildNotiMenuItem()); setTimeout(pollNotifications, 200); }   // подтянуть бейдж сразу после появления пункта
+                else if (noti.prev('.menu__item')[0] !== dl[0]) { noti.detach(); dl.after(noti); }
             }
         } catch (e) {}
     }
@@ -665,9 +808,12 @@
     function start() {
         Lampa.Component.add('qdl_downloads', ComponentDownloads);
         Lampa.Component.add('qdl_card', ComponentCard);
+        Lampa.Component.add('qdl_notifications', ComponentNotifications);
         Lampa.Listener.follow('full', addButton);
         startMenuWatcher();
         startPlayerFsWatcher();
+        pollNotifications();
+        try { setInterval(pollNotifications, 90000); } catch (e) {}
     }
 
     if (window.appready) start();

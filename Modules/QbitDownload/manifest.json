@@ -4,6 +4,7 @@
   "tree": [
     "ModuleConf.cs",
     "ModInit.cs",
+    "SqlContext.cs",
     "Controller.cs"
   ]
 }

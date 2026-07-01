@@ -30,4 +30,8 @@ public class ModuleConf : ModuleBaseConf
 
     // Слежение за сериалами: как часто проверять обновление раздач (часы).
     public int watchIntervalHours { get; set; } = 6;
+
+    // Уведомления о скачанных сериях: как часто сканировать прогресс файлов отслеживаемых раздач (минуты).
+    // Дёшево (локальные запросы к qBit, без пере-резолва трекеров) → можно часто.
+    public int notifyScanIntervalMinutes { get; set; } = 15;
 }

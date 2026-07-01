@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Newtonsoft.Json.Linq;
 using Shared;
 using Shared.Services;
@@ -13,6 +14,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web;
 
@@ -1068,7 +1070,7 @@ public class QbitController : BaseController
 
     [HttpGet, HttpPost, AllowAnonymous]
     [Route("qdl/watch")]
-    public ActionResult WatchAdd(string hash)
+    async public Task<ActionResult> WatchAdd(string hash)
     {
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
@@ -1083,13 +1085,23 @@ public class QbitController : BaseController
                 return Json(new { success = false, error = "no link" });   // перекачай раздачу, чтобы включить слежение
 
             JObject meta = System.IO.File.Exists(MetaPath(hash)) ? JObject.Parse(System.IO.File.ReadAllText(MetaPath(hash))) : new JObject();
+            int seriesId = meta.Value<int?>("id") ?? 0;
+            bool added = false;
             lock (_watchLock)
             {
                 var a = LoadWatch();
-                foreach (var m in a) if (m.Value<string>("hash") == hash) return Json(new { success = true });
-                a.Add(new JObject { ["hash"] = hash, ["link"] = link, ["query"] = query, ["id"] = meta.Value<int?>("id"), ["title"] = meta.Value<string>("title") });
-                SaveWatch(a);
+                bool exists = false;
+                foreach (var m in a) if (m.Value<string>("hash") == hash) { exists = true; break; }
+                if (!exists)
+                {
+                    a.Add(new JObject { ["hash"] = hash, ["link"] = link, ["query"] = query, ["id"] = meta.Value<int?>("id"), ["title"] = meta.Value<string>("title") });
+                    SaveWatch(a);
+                    added = true;
+                }
             }
+            // отсекаем уже присутствующие серии: уведомляем только про то, что докачается ПОСЛЕ включения слежения
+            if (added)
+                await SeedBaseline(SeriesKey(seriesId, link), hash);
             return Json(new { success = true });
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] watch add: " + ex); return Json(new { success = false, error = "internal error" }); }
@@ -1101,12 +1113,19 @@ public class QbitController : BaseController
     {
         try
         {
+            string link = null; int seriesId = 0;
             lock (_watchLock)
             {
                 var a = LoadWatch(); var b = new JArray();
-                foreach (var m in a) if (m.Value<string>("hash") != hash) b.Add(m);
+                foreach (var m in a)
+                {
+                    if (m.Value<string>("hash") != hash) b.Add(m);
+                    else { link = m.Value<string>("link"); seriesId = m.Value<int?>("id") ?? 0; }
+                }
                 SaveWatch(b);
             }
+            // сбрасываем базу отсечения, чтобы повторное включение слежения перебазировалось заново (историю noti сохраняем)
+            try { string sk = SeriesKey(seriesId, link); using var db = new SqlContext(); db.seen.Where(x => x.seriesKey == sk).ExecuteDelete(); } catch { }
             return Json(new { success = true });
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] watch remove: " + ex); return Json(new { success = false }); }
@@ -1159,6 +1178,9 @@ public class QbitController : BaseController
         }
 
         if (changed) lock (_watchLock) { SaveWatch(list); }
+
+        // после возможного re-grab — заодно собрать уведомления о докачавшихся сериях
+        try { await ScanEpisodeNotifications(); } catch (Exception ex) { Console.WriteLine("[QbitDownload] post-checkwatches scan: " + ex); }
         return regrabbed;
     }
 
@@ -1238,6 +1260,189 @@ public class QbitController : BaseController
         if (body.StartsWith("{")) { try { var j = JObject.Parse(body); return (j.Value<int?>("success_count") ?? 0) > 0 || (j.Value<int?>("pending_count") ?? 0) > 0; } catch { return false; } }
         return false;
     }
+    #endregion
+
+    #region /qdl/notifications — уведомления о докачавшихся сериях отслеживаемых сериалов
+    static int _scanning = 0;
+
+    // стабильный ключ сериала (переживает смену infohash при re-grab): TMDB id, иначе хэш link
+    static string SeriesKey(int seriesId, string link)
+    {
+        if (seriesId > 0) return "t" + seriesId;
+        string s = link ?? "";
+        uint h = 2166136261; foreach (char ch in s) { h ^= ch; h *= 16777619; }   // FNV-1a (стабилен между процессами, в отличие от String.GetHashCode)
+        return "l" + h.ToString("x8");
+    }
+
+    // стабильный ключ серии для дедупа
+    static string EpKey(Ep e)
+    {
+        if (e == null || !e.any) return null;
+        if (e.kind == "RANGE") return "r" + e.ep + "-" + e.ep2;
+        if (e.kind != null) return e.kind.ToLowerInvariant() + (e.ep >= 0 ? e.ep.ToString() : "");
+        return (e.season >= 0 ? "s" + e.season : "") + "e" + e.ep;
+    }
+
+    // человекочитаемая подпись серии
+    static string EpLabel(Ep e)
+    {
+        if (e == null || !e.any) return null;
+        if (e.kind == "RANGE") return "Серии " + e.ep + "–" + e.ep2;
+        if (e.kind != null) return e.kind + (e.ep >= 0 ? " " + e.ep : "");
+        if (e.season >= 0 && e.ep >= 0) return "Сезон " + e.season + " · серия " + e.ep;
+        if (e.ep >= 0) return "Серия " + e.ep;
+        return null;
+    }
+
+    // что считаем «серией» для уведомления (экстры OP/ED/PV/NCOP… учитываем в seen, но не шумим)
+    static bool IsEpisodeLike(Ep e)
+    {
+        if (e == null || !e.any) return false;
+        if (e.kind == null) return e.ep >= 0;
+        switch (e.kind) { case "RANGE": case "OVA": case "ONA": case "OAD": case "SP": return true; default: return false; }
+    }
+
+    // baseline: запомнить все серии, присутствующие на момент включения слежения (без уведомлений)
+    static async Task SeedBaseline(string seriesKey, string hash)
+    {
+        try
+        {
+            using var c = await Qbit();
+            string filesRaw = await c.GetStringAsync($"/api/v2/torrents/files?hash={HttpUtility.UrlEncode(hash)}");
+            var files = JArray.Parse(filesRaw);
+            using var db = new SqlContext();
+            var existing = new HashSet<string>(db.seen.Where(x => x.seriesKey == seriesKey).Select(x => x.epkey));
+            foreach (var f in files)
+            {
+                if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
+                string key = EpKey(ParseEp(BaseNoExt(f)));
+                if (key == null || !existing.Add(key)) continue;
+                db.seen.Add(new SeenModel { seriesKey = seriesKey, epkey = key });
+            }
+            db.SaveChanges();
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] seed baseline: " + ex); }
+    }
+
+    // основной сканер: для каждой отслеживаемой раздачи — новые докачавшиеся серии → записи в noti
+    public static async Task<int> ScanEpisodeNotifications()
+    {
+        if (Interlocked.Exchange(ref _scanning, 1) == 1) return 0;   // не запускаем параллельно (таймер + CheckWatches)
+        int created = 0;
+        try
+        {
+            JArray list; lock (_watchLock) { list = LoadWatch(); }
+            if (list.Count == 0) return 0;
+
+            using var c = await Qbit();
+            using var db = new SqlContext();
+
+            foreach (var m in list)
+            {
+                try
+                {
+                    string hash = m.Value<string>("hash");
+                    if (!ValidHash(hash)) continue;
+                    int seriesId = m.Value<int?>("id") ?? 0;
+                    string title = m.Value<string>("title") ?? "";
+                    string sk = SeriesKey(seriesId, m.Value<string>("link"));
+
+                    string filesRaw;
+                    try { filesRaw = await c.GetStringAsync($"/api/v2/torrents/files?hash={HttpUtility.UrlEncode(hash)}"); }
+                    catch { continue; }
+                    JArray files;
+                    try { files = JArray.Parse(filesRaw); } catch { continue; }
+                    if (files.Count == 0) continue;
+
+                    var seenKeys = new HashSet<string>(db.seen.Where(x => x.seriesKey == sk).Select(x => x.epkey));
+                    bool baseline = seenKeys.Count == 0;   // первый проход (или старая запись до фичи) → только база, без уведомлений
+
+                    foreach (var f in files)
+                    {
+                        if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
+                        var ep = ParseEp(BaseNoExt(f));
+                        string key = EpKey(ep);
+                        if (key == null || seenKeys.Contains(key)) continue;
+
+                        if (baseline) { db.seen.Add(new SeenModel { seriesKey = sk, epkey = key }); seenKeys.Add(key); continue; }
+
+                        double progress = f.Value<double?>("progress") ?? 0;
+                        if (progress < 0.999) continue;   // серия ещё качается
+
+                        if (IsEpisodeLike(ep))
+                        {
+                            db.noti.Add(new NotiModel
+                            {
+                                seriesKey = sk, seriesId = seriesId, hash = hash, title = title,
+                                season = ep.season, episode = ep.ep, kind = ep.kind, epkey = key,
+                                label = EpLabel(ep), created = DateTime.UtcNow, read = false
+                            });
+                            created++;
+                            Console.WriteLine("[QbitDownload] notify: " + title + " — " + EpLabel(ep));
+                        }
+                        db.seen.Add(new SeenModel { seriesKey = sk, epkey = key });
+                        seenKeys.Add(key);
+                    }
+                }
+                catch (Exception ex) { Console.WriteLine("[QbitDownload] noti scan item: " + ex); }
+            }
+
+            try { db.SaveChanges(); }
+            catch (Exception ex) { Console.WriteLine("[QbitDownload] noti save: " + ex); }
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] noti scan: " + ex); }
+        finally { Interlocked.Exchange(ref _scanning, 0); }
+        return created;
+    }
+
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/notifications")]
+    public ActionResult Notifications()
+    {
+        try
+        {
+            using var db = new SqlContext();
+            var items = db.noti.OrderByDescending(x => x.Id).Take(200).ToList();
+            int unread = db.noti.Count(x => !x.read);
+            var arr = new JArray();
+            foreach (var n in items)
+                arr.Add(new JObject
+                {
+                    ["id"] = n.Id, ["seriesId"] = n.seriesId, ["hash"] = n.hash, ["title"] = n.title,
+                    ["season"] = n.season, ["episode"] = n.episode, ["kind"] = n.kind, ["label"] = n.label,
+                    ["created"] = DateTime.SpecifyKind(n.created, DateTimeKind.Utc).ToString("o"), ["read"] = n.read   // помечаем UTC → корректный парсинг на фронте
+                });
+            return ContentTo(new JObject { ["items"] = arr, ["unread"] = unread }.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] notifications: " + ex); return ContentTo("{\"items\":[],\"unread\":0}", "application/json; charset=utf-8"); }
+    }
+
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/notifications/read")]
+    public ActionResult NotificationsRead(long id = 0)
+    {
+        try
+        {
+            using var db = new SqlContext();
+            if (id > 0) db.noti.Where(x => x.Id == id && !x.read).ExecuteUpdate(s => s.SetProperty(x => x.read, true));
+            else db.noti.Where(x => !x.read).ExecuteUpdate(s => s.SetProperty(x => x.read, true));
+            int unread = db.noti.Count(x => !x.read);
+            return Json(new { success = true, unread });
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] notifications read: " + ex); return Json(new { success = false }); }
+    }
+
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/notifications/clear")]
+    public ActionResult NotificationsClear()
+    {
+        try { using var db = new SqlContext(); db.noti.ExecuteDelete(); return Json(new { success = true }); }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] notifications clear: " + ex); return Json(new { success = false }); }
+    }
+
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/notifications/scan")]
+    async public Task<ActionResult> NotificationsScan() { int n = await ScanEpisodeNotifications(); return Json(new { success = true, created = n }); }
     #endregion
 
     #region helpers
