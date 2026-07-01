@@ -1,0 +1,13 @@
+{
+  "name": "qdl-fork-tests",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Node tests for the fork's Lampa browser plugins (qdl.js, lampainit-invc.js)",
+  "scripts": {
+    "test": "node --test *.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1"
+  }
+}

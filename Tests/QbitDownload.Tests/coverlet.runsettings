@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The QbitDownload module sources are LINKED into the test assembly (the module is Roslyn-compiled at
+     runtime, so there is no standalone DLL). To measure their coverage we must instrument the test
+     assembly itself, then keep only the module types (namespace QbitDownload, excluding the tests). -->
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat code coverage">
+        <Configuration>
+          <Format>cobertura</Format>
+          <IncludeTestAssembly>true</IncludeTestAssembly>
+          <Include>[QbitDownload.Tests]QbitDownload.*</Include>
+          <Exclude>[QbitDownload.Tests]QbitDownload.Tests.*</Exclude>
+          <SkipAutoProps>true</SkipAutoProps>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>

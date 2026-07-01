@@ -47,12 +47,30 @@ lampainit_invc.appload = function appload() {
           var it = locks[i].closest ? locks[i].closest('.selectbox-item') : null;
           if (it) it.style.display = 'none';
         }
-        // вкладка «CUB» в навигации (текст, не data-атрибут)
-        var tabs = document.querySelectorAll('.navigation-tabs__button');
-        for (var j = 0; j < tabs.length; j++)
-          if ((tabs[j].textContent || '').trim() === 'CUB') tabs[j].style.display = 'none';
       } catch (e) {}
     };
+
+    // Спрятать вкладку «CUB»: и в навигации, и в табах модалок (напр. модалка «Уведомления»,
+    // .modal__title). CSS не умеет выбирать по тексту, а класс таба зависит от сборки Lampa —
+    // поэтому среди таб-подобных элементов ищем тот, чей текст РОВНО 'CUB', и прячем его.
+    // Селекторы бьют по САМИМ табам (нав-табы + таб-элементы внутри .modal), НЕ по контейнеру
+    // всех табов, поэтому даже когда CUB — единственный таб, соседние табы не страдают.
+    // ВАЖНО: вызывается в НЕмедленной ветке observer'а (как stripBrand). Колбэк MutationObserver
+    // отрабатывает микротаском ДО отрисовки, поэтому таб гаснет без мерцания — в отличие от
+    // прежнего варианта в debounced setTimeout(300ms), где CUB «проскакивал» на кадр.
+    var hideCubTabs = function () {
+      try {
+        // observer шлёт МНОГО мутаций при рендере списков/карточек (особенно на слабых ТВ) — сначала
+        // дёшево отсекаем случай «нет ни модалки, ни нав-табов», чтобы не гонять полный скан впустую
+        if (!document.querySelector('.modal, .navigation-tabs')) return;
+        var sel = '.navigation-tabs__button, .navigation__tab, .tabs__item, .simple-tabs__item,'
+                + ' .modal .selector, .modal .simple-button, .modal .filter__item, .modal .tab, .modal .button';
+        var els = document.querySelectorAll(sel);
+        for (var i = 0; i < els.length; i++)
+          if ((els[i].textContent || '').trim() === 'CUB' && els[i].style) els[i].style.display = 'none';
+      } catch (e) {}
+    };
+
     // убрать суффикс источника-бренда « - CUB» из заголовка шапки (.head__title').text(name+' - '+source.toUpperCase()))
     // source='cub' → 'CUB'; срезаем ТОЛЬКО " - CUB" в конце, чтобы не задеть реальные названия с « - » (фильмы)
     var stripBrand = function () {
@@ -67,10 +85,12 @@ lampainit_invc.appload = function appload() {
     };
     hideLocked();
     stripBrand();
+    hideCubTabs();
     try {
       var deb = null;
       new MutationObserver(function () {
         stripBrand();                 // дёшево и сразу — реагирует на ту же мутацию, что ставит заголовок (без мерцания)
+        hideCubTabs();                // тоже сразу — CUB-таб (модалка «Уведомления»/нав-табы) гаснет до кадра
         if (deb) return;
         deb = setTimeout(function () { deb = null; hideLocked(); }, 300);
       }).observe(document.body, { childList: true, subtree: true });
