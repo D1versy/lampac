@@ -8,7 +8,7 @@ var lampainit_invc = {};
 
 // Лампа готова для использования 
 lampainit_invc.appload = function appload() {
-  Lampa.Utils.putScriptAsync(["{localhost}/qdl.js"]);  // QbitDownload: кнопка «Скачать» + раздел «Загрузки»
+  Lampa.Utils.putScriptAsync(["{localhost}/qdl.js?v={version}"]);  // QbitDownload: кнопка «Скачать» + раздел «Загрузки» ({version} = cache-buster, подставляет сервер)
   // TorrServer — указываем на внешний контейнер (стабильный, MatriX latest, кэш на D)
   Lampa.Storage.set('torrserver_url', 'http://192.168.87.24:8090');
   Lampa.Storage.set('torrserver_auth', 'false');

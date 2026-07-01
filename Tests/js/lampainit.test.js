@@ -190,7 +190,8 @@ test('lampainit: appload calls Lampa.Utils.putScriptAsync for qdl.js', () => {
   // NB: array is created inside the vm sandbox (different realm's Array),
   // so deepStrictEqual on the array object rejects it — compare contents instead.
   assert.strictEqual(scripts[0].length, 1);
-  assert.strictEqual(scripts[0][0], '{localhost}/qdl.js');
+  // URL carries the {version} cache-buster token (the server replaces it with a per-start stamp).
+  assert.strictEqual(scripts[0][0], '{localhost}/qdl.js?v={version}');
 });
 
 test('lampainit: appload calls Lampa.Lang.add with the neutral strings', () => {

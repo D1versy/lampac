@@ -581,6 +581,10 @@ public class ApiController : BaseController
     #endregion
 
     #region lampainit.js
+    // Cache-buster for our client plugin URLs: recomputed on each process (re)start, so redeployed JS is
+    // re-fetched even by clients that ignore no-cache headers (Tizen/webOS). Injected via the {version} token.
+    static readonly string cacheVersion = System.DateTime.UtcNow.Ticks.ToString("x");
+
     [HttpGet, AllowAnonymous]
     [Staticache(20, always: true, setHeadersNoCache: true)]
     [Route("lampainit.js")]
@@ -687,6 +691,7 @@ public class ApiController : BaseController
             sb = sb.Replace("{lampainit-invc}", initinvcjs);
             sb = sb.Replace("{country}", requestInfo.Country ?? string.Empty);
             sb = sb.Replace("{localhost}", host);
+            sb = sb.Replace("{version}", cacheVersion);
             sb = sb.Replace("{deny}", string.Empty);
             sb = sb.Replace("{pirate_store}", string.Empty);
 

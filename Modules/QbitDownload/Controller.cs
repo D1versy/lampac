@@ -73,6 +73,9 @@ public class QbitController : BaseController
         string js = FileCache.ReadAllText($"{ModInit.modpath}/plugins/qdl.js", "qdl.js")
             .Replace("{localhost}", host);
 
+        // qdl.js is loaded via a versioned URL (/qdl.js?v=...); tell compliant clients to revalidate
+        // so a redeployed plugin is picked up without a manual cache clear.
+        SetHeadersNoCache();
         return ContentTo(js, "application/javascript; charset=utf-8");
     }
     #endregion
