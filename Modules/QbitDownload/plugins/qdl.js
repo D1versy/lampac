@@ -48,7 +48,10 @@
             // своя кнопка фуллскрина в плеере (НЕ класс player-panel__fullscreen — иначе Lampa её прячет на моб.)
             '.qdl-fs{display:inline-flex !important;align-items:center;justify-content:center;padding:.6em;margin:0 .2em;cursor:pointer;opacity:.85;vertical-align:middle}' +
             '.qdl-fs.focus{opacity:1;transform:scale(1.12)}' +
-            '.qdl-fs svg{width:1.8em;height:1.8em}';
+            '.qdl-fs svg{width:1.8em;height:1.8em}' +
+            // бейдж непрочитанных на нашей иконке уведомлений в хедере (красный кружок с числом)
+            '.qdl-noti-head{position:relative}' +
+            '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}';
         document.head.appendChild(st);
     }
 
@@ -430,11 +433,24 @@
     }
 
     function updateNotiBadge(unread) {
+        var txt = unread > 99 ? '99+' : String(unread);
+        // левое меню (пункт «Уведомления»)
         try {
             var b = $('.menu .qdl-noti-menu .qdl-noti-badge');
-            if (!b.length) return;
-            if (unread > 0) b.text(unread > 99 ? '99+' : unread).css('display', '');
-            else b.css('display', 'none');
+            if (b.length) {
+                if (unread > 0) b.text(txt).css('display', '');
+                else b.css('display', 'none');
+            }
+        } catch (e) {}
+        // хедер (наша иконка) — обновляем независимо от меню
+        try {
+            var head = $('.qdl-noti-head');
+            if (head.length) {
+                head.toggleClass('active', unread > 0);
+                var hb = head.find('.qdl-noti-head-badge');
+                if (unread > 0) hb.text(txt).css('display', '');
+                else hb.css('display', 'none');
+            }
         } catch (e) {}
     }
 
@@ -759,6 +775,40 @@
         [500, 1500, 3000, 6000].forEach(function (t) { setTimeout(ensureMenu, t); });
     }
 
+    // ───────── Иконка уведомлений в хедере (рядом со штатными; клик → наш центр «Уведомления») ─────────
+    function buildHeaderNoti() {
+        var item = $('<div class="head__action selector open--qdl-noti qdl-noti-head">' + BELL + '<span class="qdl-noti-head-badge" style="display:none"></span></div>');
+        item.data('controller', 'head');   // поздняя иконка в хедере иначе не фокусируется пультом
+        item.on('hover:enter', function () {
+            Lampa.Activity.push({ url: '', title: 'Уведомления', component: 'qdl_notifications', page: 1 });
+        });
+        return item;
+    }
+
+    function ensureHeaderNoti() {
+        try {
+            var actions = $('.head .head__actions');
+            if (!actions.length) return;                    // хедер ещё не отрисован / иная сборка
+            if ($('.head .qdl-noti-head').length) return;   // уже стоит
+            injectCss();
+            var bell = actions.find('.open--notice').first();
+            if (bell.length) bell.before(buildHeaderNoti());   // перед штатным «звонком»
+            else actions.append(buildHeaderNoti());
+            pollNotifications();                            // сразу подтянуть текущий бейдж
+        } catch (e) {}
+    }
+
+    function startHeaderNotiWatcher() {
+        ensureHeaderNoti();
+        var deb = null;
+        function onMut() { if (deb) return; deb = setTimeout(function () { deb = null; ensureHeaderNoti(); }, 300); }
+        try {
+            var headEl = document.querySelector('.head') || document.body;   // узкий observer
+            new MutationObserver(onMut).observe(headEl, { childList: true, subtree: true });
+        } catch (e) {}
+        [500, 1500, 3000, 6000].forEach(function (t) { setTimeout(ensureHeaderNoti, t); });
+    }
+
     // ───────── Кнопка фуллскрина в плеере на мобильном (Lampa прячет свою на android/iOS) ─────────
     function isMobile() {
         try { if (Lampa.Platform && typeof Lampa.Platform.is === 'function' && Lampa.Platform.is('android')) return true; } catch (e) {}
@@ -811,6 +861,7 @@
         Lampa.Component.add('qdl_notifications', ComponentNotifications);
         Lampa.Listener.follow('full', addButton);
         startMenuWatcher();
+        startHeaderNotiWatcher();
         startPlayerFsWatcher();
         pollNotifications();
         try { setInterval(pollNotifications, 90000); } catch (e) {}

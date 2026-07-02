@@ -134,12 +134,7 @@ function make$() {
  */
 function loadQdl(opts) {
   opts = opts || {};
-  let src = fs.readFileSync(QDL, 'utf8');
-
-  const TAIL = "if (window.appready) start();\n    else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') start(); });";
-  const EXPORT = "window.__qdl = { esc: esc, names: names, slimCard: slimCard, cleanName: cleanName, videoFiles: videoFiles, baseName: baseName, isBrowser: isBrowser, isMobile: isMobile, streamUrl: streamUrl, posterUrl: posterUrl, relTime: relTime, badge: badge, chip: chip, getAudioPref: getAudioPref, setAudioPref: setAudioPref };";
-  if (!src.includes(TAIL)) throw new Error('qdl.js tail anchor not found — harness needs updating');
-  src = src.replace(TAIL, EXPORT);
+  const src = qdlSource();
 
   const win = Object.assign({ appready: false }, opts.windowExtra || {});
   const sandbox = {
@@ -184,4 +179,35 @@ function loadLampaInit(opts) {
   return { mod: sandbox.lampainit_invc, sandbox, localStorage, lampa };
 }
 
-module.exports = { loadQdl, loadLampaInit, makeLampa, makeDocument, makeStorage, makeEl, make$, deepAssign, REPO };
+// ── shared qdl.js source transform (strip auto-start, export internal helpers) ──
+const QDL_TAIL = "if (window.appready) start();\n    else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') start(); });";
+const QDL_EXPORT = "window.__qdl = { esc: esc, names: names, slimCard: slimCard, cleanName: cleanName, videoFiles: videoFiles, baseName: baseName, isBrowser: isBrowser, isMobile: isMobile, streamUrl: streamUrl, posterUrl: posterUrl, relTime: relTime, badge: badge, chip: chip, getAudioPref: getAudioPref, setAudioPref: setAudioPref, updateNotiBadge: updateNotiBadge, ensureHeaderNoti: ensureHeaderNoti, buildHeaderNoti: buildHeaderNoti };";
+function qdlSource() {
+  const src = fs.readFileSync(QDL, 'utf8');
+  if (!src.includes(QDL_TAIL)) throw new Error('qdl.js tail anchor not found — harness needs updating');
+  return src.replace(QDL_TAIL, QDL_EXPORT);
+}
+
+/**
+ * Load qdl.js into a real DOM (jsdom) with REAL jQuery (from the repo vendor) — for testing the
+ * DOM/jQuery helpers (header notification icon, badge sync). opts: { bodyHtml, lampa }.
+ * Returns { dom, w, doc, qdl, lampa, $ }.
+ */
+function loadQdlDom(opts) {
+  opts = opts || {};
+  const { JSDOM } = require('jsdom');
+  const jquerySrc = fs.readFileSync(
+    path.join(REPO, 'Modules', 'LampaWeb', 'widgets', 'lg', 'app', 'vender', 'jquery', 'jquery.js'), 'utf8');
+
+  const dom = new JSDOM('<!DOCTYPE html><html><head></head><body>' + (opts.bodyHtml || '') + '</body></html>',
+    { runScripts: 'outside-only', url: 'http://localhost/' });
+  const w = dom.window;
+  w.eval(jquerySrc);                       // real jQuery → window.$ / window.jQuery
+  w.Lampa = opts.lampa || makeLampa();     // Reguest.silent is a no-op → pollNotifications does no network
+  w.appready = false;
+  w.eval(qdlSource());                     // auto-start stripped; internal helpers exported to window.__qdl
+  if (!w.__qdl) throw new Error('qdl.js did not export __qdl (jsdom)');
+  return { dom, w, doc: w.document, qdl: w.__qdl, lampa: w.Lampa, $: w.$ };
+}
+
+module.exports = { loadQdl, loadQdlDom, loadLampaInit, makeLampa, makeDocument, makeStorage, makeEl, make$, deepAssign, REPO };
