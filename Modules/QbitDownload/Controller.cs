@@ -91,14 +91,46 @@ public class QbitController : BaseController
         if (string.IsNullOrWhiteSpace(search))
             return ContentTo("[]", "application/json; charset=utf-8");
 
-        // ВАЖНО: тот же эндпоинт, что использует нативный «Смотреть через торрент» (jackett-совместимый),
-        // с ПОЛНЫМ TMDB-контекстом (title+original+year+is_serial) → корректный матчинг именно нужного фильма
-        // и опрос ВСЕХ трекеров (rutracker/kinozal/rutor/nnmclub). Старый /api/v1.0/torrents?search= делал
-        // лишь текстовый поиск по локальной БД → выдавал саундтреки/однофамильцев (не тот фильм). См. claude/06.
+        // Проход 1 — с типом от TMDB (movie→1 / tv→2): точная, хорошо ранжированная выдача (как было).
+        // Проход 2 — ШИРОКИЙ (is_serial=0, ветка «всё подряд» JackettApi): ровно то, что находит нативный
+        // «Смотреть через торрент» — опрашивает ВСЕ трекеры, включая аниме (AniLibria/AnimeLayer/Anifilm)
+        // и всё, что узкие ветки «фильм/сериал» пропускают. Аниме TMDB отдаёт как media_type='tv' →
+        // is_serial=2 его теряет, а «через торрент» находит именно широкой веткой. Мержим «и ту, и свою»
+        // выдачу с дедупом по btih/parselink, сортировка по сидам. См. claude/06 §A2.
+        var passes = new List<Task<JArray>> { FetchIndexer(query, title, title_original, year, is_serial, apikey) };
+        if (is_serial >= 1)
+            passes.Add(FetchIndexer(query, title, title_original, year, 0, apikey));
+
+        var all = await Task.WhenAll(passes);
+
+        var result = new JArray();
+        var seen = new HashSet<string>();
+        foreach (var arr in all)
+            foreach (var t in arr)
+            {
+                string mag = t.Value<string>("magnet");
+                string link = t.Value<string>("parselink");
+                string dedupe = !string.IsNullOrWhiteSpace(mag) ? MagnetHash(mag) : link;   // дедуп по btih / parselink
+                if (!string.IsNullOrEmpty(dedupe) && !seen.Add(dedupe)) continue;
+                result.Add(t);
+            }
+
+        // самые «живые» раздачи сверху (надёжнее докачиваются)
+        var sorted = new JArray(result.OrderByDescending(x => x.Value<int?>("sid") ?? 0));
+        return ContentTo(sorted.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
+
+    // один запрос к нативному индексатору Lampa (jackett-совместимый) с полным TMDB-контекстом.
+    // Возвращает нормализованные раздачи; дедуп/сортировку/мерж проходов делает Search.
+    async Task<JArray> FetchIndexer(string query, string title, string title_original, int year, int is_serial, string apikey)
+    {
+        string search = !string.IsNullOrWhiteSpace(query) ? query
+                      : !string.IsNullOrWhiteSpace(title) ? title : title_original;
+
         var sb = new StringBuilder();
         sb.Append($"http://{CoreInit.conf.listen.localhost}:{CoreInit.conf.listen.port}/api/v2.0/indexers/all/results");
-        sb.Append("?apikey=").Append(HttpUtility.UrlEncode(apikey ?? ""));   // не настроен → проверка пропускает любой
-        sb.Append("&Query=").Append(HttpUtility.UrlEncode(search));
+        sb.Append("?apikey=").Append(HttpUtility.UrlEncode(apikey ?? ""));
+        sb.Append("&Query=").Append(HttpUtility.UrlEncode(search ?? ""));
         if (!string.IsNullOrWhiteSpace(title)) sb.Append("&title=").Append(HttpUtility.UrlEncode(title));
         if (!string.IsNullOrWhiteSpace(title_original)) sb.Append("&title_original=").Append(HttpUtility.UrlEncode(title_original));
         if (year > 0) sb.Append("&year=").Append(year);
@@ -114,7 +146,6 @@ public class QbitController : BaseController
                 var arr = JObject.Parse(raw)["Results"] as JArray;
                 if (arr != null)
                 {
-                    var seen = new HashSet<string>();
                     foreach (var t in arr)
                     {
                         string mag = t.Value<string>("MagnetUri");
@@ -122,9 +153,6 @@ public class QbitController : BaseController
                         if (string.IsNullOrWhiteSpace(mag) && string.IsNullOrWhiteSpace(link)) continue;   // нечего качать
 
                         string ttl = t.Value<string>("Title") ?? "";
-                        string dedupe = !string.IsNullOrWhiteSpace(mag) ? MagnetHash(mag) : link;          // дедуп по btih / parselink
-                        if (!string.IsNullOrEmpty(dedupe) && !seen.Add(dedupe)) continue;
-
                         result.Add(new JObject
                         {
                             ["title"] = ttl,
@@ -140,10 +168,7 @@ public class QbitController : BaseController
             }
             catch { }
         }
-
-        // самые «живые» раздачи сверху (надёжнее докачиваются)
-        var sorted = new JArray(result.OrderByDescending(x => x.Value<int?>("sid") ?? 0));
-        return ContentTo(sorted.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+        return result;
     }
 
     static string HumanSize(long b)
