@@ -19,7 +19,7 @@ dotnet test Tests/QbitDownload.Tests/QbitDownload.Tests.csproj \
   --settings Tests/QbitDownload.Tests/coverlet.runsettings --collect:"XPlat Code Coverage"
 ```
 
-Текущий статус: **626 C# + 204 JS = 830 тестов, все зелёные.**
+Текущий статус: **626 C# + 211 JS = 837 тестов, все зелёные.**
 
 ## Как это устроено
 
