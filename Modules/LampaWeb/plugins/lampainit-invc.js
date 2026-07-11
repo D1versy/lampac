@@ -149,6 +149,40 @@ try {
   localStorage.removeItem('developer_nopremium'); // дефолт 'false'; любая иная строка → truthy → hasPremium()=0
 } catch (e) {}
 
+// ── ДО загрузки Lampa: XHR-перехват для DMCA-фолбека (пара к qdl.js, см. claude/06 Media-server) ──
+// CUB на заблокированные правообладателем карточки отдаёт {"blocked":true} → Lampa рисует
+// «Контент заблокирован» без единой кнопки. Детали карточек (tmdb.<cub>/3/movie|tv/<id>)
+// заворачиваем на свой TMDB-прокси lampac. Патч обязан стоять ЗДЕСЬ (синхронно, до старта
+// приложения): при deep-link (?card=...) запрос карточки уходит раньше, чем putScriptAsync
+// успевает подгрузить qdl.js. В qdl.js — такой же патч как фолбек (для клиентов, подключающих
+// только /qdl.js); от двойной обёртки защищает флаг window.qdl_xhr_patch.
+try {
+  if (!window.qdl_xhr_patch && window.XMLHttpRequest && window.XMLHttpRequest.prototype) {
+    window.qdl_xhr_patch = 1;
+    // две формы: прямая https://tmdb.<cub>/3/... и через серверный CubProxy
+    // (плагин cubproxy.js на request_before превращает её в <host>/cub/tmdb.<cub>/3/...)
+    var qdlRewriteCub = function (u) {
+      var m = /^https?:\/\/(?:[^\/]+\/cub\/)?tmdb\.[^\/]*\/(3\/(?:movie|tv)\/\d+(?:\/[^?]*)?)(\?.*)$/.exec(String(u));
+      if (!m) return null;
+      if (m[2].indexOf('api_key=') === -1) return null;   // прямому TMDB без ключа нельзя (401)
+      return '{localhost}/tmdb/api/' + m[1] + m[2];
+    };
+    var qdlXhrOpen = window.XMLHttpRequest.prototype.open;
+    window.XMLHttpRequest.prototype.open = function (method, url) {
+      try {
+        if (String(method).toUpperCase() === 'GET') {
+          var dm = /^https?:\/\/tmdb\.([^\/]+)\//.exec(String(url));
+          if (dm) window.qdl_cub_domain = dm[1];          // домен CUB — qdl.js возьмёт для /blocked
+          var ru = qdlRewriteCub(url);
+          if (ru) arguments[1] = ru;
+        }
+      } catch (e) {}
+      return qdlXhrOpen.apply(this, arguments);
+    };
+    lampainit_invc.rewriteCubUrl = qdlRewriteCub;         // наружу — для тестов
+  }
+} catch (e) {}
+
 // Ниже код выполняется до загрузки лампы, например можно изменить настройки
 // window.lampa_settings.push_state = false;
 // localStorage.setItem('cub_domain', 'mirror-kurwa.men');

@@ -45,6 +45,9 @@
             // режим «Загрузки»: в полной карточке прячем все кнопки, кроме нашей «Смотреть»
             '.qdl-only .full-start__buttons .full-start__button:not(.qdl-watch-btn),' +
             '.qdl-only .full-start-new__buttons .full-start__button:not(.qdl-watch-btn){display:none !important}' +
+            // DMCA-карточка (CUB блокирует): остаются только «Скачать» и «Смотреть (загружено)»
+            '.qdl-dmca .full-start__buttons .full-start__button:not(.qdl-download):not(.qdl-watch-btn),' +
+            '.qdl-dmca .full-start-new__buttons .full-start__button:not(.qdl-download):not(.qdl-watch-btn){display:none !important}' +
             // своя кнопка фуллскрина в плеере (НЕ класс player-panel__fullscreen — иначе Lampa её прячет на моб.)
             '.qdl-fs{display:inline-flex !important;align-items:center;justify-content:center;padding:.6em;margin:0 .2em;cursor:pointer;opacity:.85;vertical-align:middle}' +
             '.qdl-fs.focus{opacity:1;transform:scale(1.12)}' +
@@ -54,6 +57,88 @@
             '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}';
         document.head.appendChild(st);
     }
+
+    // ───────── DMCA-фолбек (см. claude/06 в Media-server) ─────────
+    // CUB на заблокированные правообладателем карточки отдаёт {"blocked":true} вместо JSON →
+    // Lampa рисует экран «Контент заблокирован» без единой кнопки. Обход в два слоя:
+    //  1) XHR-перехват: детали карточек (tmdb.<cub>/3/movie|tv/<id>) заворачиваем на свой
+    //     TMDB-прокси lampac (/tmdb/api) — карточка рендерится ВСЕГДА, каталог/поиск не трогаем;
+    //  2) DMCA-список CUB (/blocked) — на таких карточках прячем всё, кроме «Скачать» (.qdl-dmca).
+    // Основной патч ставит lampainit-invc.js (синхронно, до старта приложения — deep-link!);
+    // здесь дубль-фолбек для клиентов, подключивших только /qdl.js. Guard — window.qdl_xhr_patch.
+    var dmcaList = null;         // null — ещё не загружен; [] — загружен (возможно, пуст)
+    var dmcaWaiters = [];
+    var dmcaLoading = false;
+
+    function noteCubDomain(u) {
+        var m = /^https?:\/\/tmdb\.([^\/]+)\//.exec(String(u));
+        if (m) window.qdl_cub_domain = m[1];   // общий с lampainit-invc канал: домен CUB для /blocked
+    }
+
+    // Детали карточки/сезона у CUB → наш TMDB-прокси. null = запрос не трогаем.
+    // Две формы: прямая https://tmdb.<cub>/3/... и через серверный CubProxy
+    // (плагин cubproxy.js на request_before превращает её в <host>/cub/tmdb.<cub>/3/...)
+    function rewriteCubUrl(u) {
+        var m = /^https?:\/\/(?:[^\/]+\/cub\/)?tmdb\.[^\/]*\/(3\/(?:movie|tv)\/\d+(?:\/[^?]*)?)(\?.*)$/.exec(String(u));
+        if (!m) return null;
+        if (m[2].indexOf('api_key=') === -1) return null;   // прямому TMDB без ключа нельзя (401)
+        return API + '/tmdb/api/' + m[1] + m[2];
+    }
+
+    function isDmca(media, id) {
+        if (!dmcaList || !id) return false;
+        for (var i = 0; i < dmcaList.length; i++) {
+            var a = dmcaList[i];
+            if (a && a.id && a.id == id && a.cat == media) return true;
+        }
+        return false;
+    }
+
+    function setDmcaList(list) {
+        dmcaList = Object.prototype.toString.call(list) === '[object Array]' ? list : [];
+        var w = dmcaWaiters; dmcaWaiters = [];
+        w.forEach(function (cb) { try { cb(); } catch (e) {} });
+    }
+
+    function loadDmcaList() {
+        var cached = null;
+        try { cached = Lampa.Storage.get('qdl_dmca_cache', null); } catch (e) {}
+        if (cached && cached.ts && (Date.now() - cached.ts) < 6 * 3600 * 1000 && cached.list) {
+            setDmcaList(cached.list);
+            return;
+        }
+        req('https://tmdb.' + (window.qdl_cub_domain || 'cub.rip') + '/blocked', function (list) {
+            if (Object.prototype.toString.call(list) !== '[object Array]') list = (cached && cached.list) || [];
+            else { try { Lampa.Storage.set('qdl_dmca_cache', { ts: Date.now(), list: list }); } catch (e) {} }
+            setDmcaList(list);
+        }, function () { setDmcaList((cached && cached.list) || []); });
+    }
+
+    // дождаться DMCA-списка (лениво инициирует загрузку); если уже есть — колбэк сразу
+    function whenDmca(cb) {
+        if (dmcaList) return cb();
+        dmcaWaiters.push(cb);
+        if (!dmcaLoading) { dmcaLoading = true; loadDmcaList(); }
+    }
+
+    // XHR-перехват — на уровне прототипа, т.к. запрос карточки в app.min.js минифицирован
+    // и идёт напрямую на tmdb.<cub_domain> мимо Lampa.TMDB.api
+    try {
+        if (!window.qdl_xhr_patch && window.XMLHttpRequest && window.XMLHttpRequest.prototype) {
+            window.qdl_xhr_patch = 1;
+            var xhrOpen = window.XMLHttpRequest.prototype.open;
+            window.XMLHttpRequest.prototype.open = function (method, url) {
+                try {
+                    if (String(method).toUpperCase() === 'GET') {
+                        noteCubDomain(url);
+                        var ru = rewriteCubUrl(url);
+                        if (ru) arguments[1] = ru;
+                    }
+                } catch (e) {}
+                return xhrOpen.apply(this, arguments);
+            };
+        }
+    } catch (e) {}
 
     // ───────── Метаданные TMDB (богатый набор полей) ─────────
     function names(arr) { return (arr || []).map(function (x) { return (x && x.name) ? x.name : x; }).filter(Boolean); }
@@ -852,6 +937,19 @@
                 cont.append(btn);
             }
 
+            // DMCA-карточка → режим «только Скачать»: прячем онлайн и прочие кнопки (.qdl-dmca),
+            // нашу кнопку — в начало ряда. Список грузится лениво, класс навешивается по готовности.
+            if (movie && movie.id) {
+                var cat = movie.media_type || (movie.first_air_date || movie.name ? 'tv' : 'movie');
+                whenDmca(function () {
+                    if (!isDmca(cat, movie.id)) return;
+                    injectCss();
+                    render.addClass('qdl-dmca');
+                    var dl = $('.qdl-download', render);
+                    if (dl.length) cont.prepend(dl);
+                });
+            }
+
             // фильм уже скачан → ЗЕЛЁНАЯ «Смотреть (загружено)» + привязка метаданных.
             // Матчинг строгий — findDownload (id+media_type; имя — только для раздач без меты)
             if (movie && movie.id && !$('.qdl-watch-btn', render).length) {
@@ -1001,6 +1099,7 @@
         startHeaderNotiWatcher();
         startPlayerFsWatcher();
         pollNotifications();
+        try { whenDmca(function () {}); } catch (e) {}   // прогрев DMCA-списка до первого открытия карточки
         try { setInterval(pollNotifications, 90000); } catch (e) {}
     }
 
