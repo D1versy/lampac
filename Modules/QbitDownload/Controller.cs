@@ -847,6 +847,9 @@ public class QbitController : BaseController
                 var tags = s["tags"] as JObject;
                 string lang = tags?.Value<string>("language") ?? "";
                 string title = tags?.Value<string>("title");
+                // mp4 (mov muxer) хранит название дорожки в теге "name", а не "title" —
+                // иначе у транскодов §Y все озвучки становились безликим «Русский»
+                if (string.IsNullOrWhiteSpace(title)) title = tags?.Value<string>("name");
                 string label = !string.IsNullOrWhiteSpace(title) ? title : LangName(lang);
                 res.Add(new JObject { ["id"] = "e" + ord, ["label"] = label + " (ориг.)", ["lang"] = lang });
                 ord++;
