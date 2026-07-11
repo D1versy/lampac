@@ -185,7 +185,7 @@ function loadLampaInit(opts) {
 
 // ── shared qdl.js source transform (strip auto-start, export internal helpers) ──
 const QDL_TAIL = "if (window.appready) start();\n    else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') start(); });";
-const QDL_EXPORT = "window.__qdl = { esc: esc, names: names, slimCard: slimCard, cleanName: cleanName, videoFiles: videoFiles, baseName: baseName, isBrowser: isBrowser, isMobile: isMobile, streamUrl: streamUrl, posterUrl: posterUrl, relTime: relTime, badge: badge, chip: chip, getAudioPref: getAudioPref, setAudioPref: setAudioPref, updateNotiBadge: updateNotiBadge, ensureHeaderNoti: ensureHeaderNoti, buildHeaderNoti: buildHeaderNoti, normTitle: normTitle, isSerialName: isSerialName, isSeasonTail: isSeasonTail, findDownload: findDownload, addButton: addButton, canTranscode: canTranscode, quickMenu: quickMenu, confirmPartial: confirmPartial, watch: watch, openDownload: openDownload, chooseAndDownload: chooseAndDownload, pollTranscode: pollTranscode, dropAudioPref: dropAudioPref, rewriteCubUrl: rewriteCubUrl, isDmca: isDmca, whenDmca: whenDmca, setDmcaList: setDmcaList, noteCubDomain: noteCubDomain };";
+const QDL_EXPORT = "window.__qdl = { esc: esc, names: names, slimCard: slimCard, cleanName: cleanName, videoFiles: videoFiles, baseName: baseName, isBrowser: isBrowser, isMobile: isMobile, streamUrl: streamUrl, posterUrl: posterUrl, relTime: relTime, badge: badge, chip: chip, getAudioPref: getAudioPref, setAudioPref: setAudioPref, updateNotiBadge: updateNotiBadge, ensureHeaderNoti: ensureHeaderNoti, buildHeaderNoti: buildHeaderNoti, normTitle: normTitle, isSerialName: isSerialName, isSeasonTail: isSeasonTail, findDownload: findDownload, addButton: addButton, canTranscode: canTranscode, quickMenu: quickMenu, confirmPartial: confirmPartial, watch: watch, openDownload: openDownload, chooseAndDownload: chooseAndDownload, pollTranscode: pollTranscode, dropAudioPref: dropAudioPref, rewriteCubUrl: rewriteCubUrl, isDmca: isDmca, whenDmca: whenDmca, setDmcaList: setDmcaList, noteCubDomain: noteCubDomain, groupDownloads: groupDownloads, commonPrefixTitle: commonPrefixTitle, buildCollectionPicker: buildCollectionPicker, itemTitle: itemTitle, addToCollection: addToCollection, collectionMenu: collectionMenu, renameCollection: renameCollection, chooseCover: chooseCover, healPoster: healPoster, ComponentDownloads: ComponentDownloads, touchCollections: touchCollections };";
 function qdlSource() {
   // CRLF→LF: после git checkout с autocrlf файл на диске может оказаться в CRLF — якорь с \n обязан находиться
   const src = fs.readFileSync(QDL, 'utf8').replace(/\r\n/g, '\n');
@@ -209,6 +209,7 @@ function loadQdlDom(opts) {
   const w = dom.window;
   w.eval(jquerySrc);                       // real jQuery → window.$ / window.jQuery
   w.Lampa = opts.lampa || makeLampa();     // Reguest.silent is a no-op → pollNotifications does no network
+  if (opts.fetch) w.fetch = opts.fetch;    // перехват POST-мутаций (post() в qdl.js ходит через fetch)
   w.appready = false;
   w.eval(qdlSource());                     // auto-start stripped; internal helpers exported to window.__qdl
   if (!w.__qdl) throw new Error('qdl.js did not export __qdl (jsdom)');

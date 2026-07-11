@@ -52,6 +52,8 @@
             '.qdl-fs{display:inline-flex !important;align-items:center;justify-content:center;padding:.6em;margin:0 .2em;cursor:pointer;opacity:.85;vertical-align:middle}' +
             '.qdl-fs.focus{opacity:1;transform:scale(1.12)}' +
             '.qdl-fs svg{width:1.8em;height:1.8em}' +
+            // карточка коллекции в «Загрузках»: эффект стопки постеров (дёшево, без доп. DOM)
+            '.qdl-col-card .card__view{box-shadow:.3em -.3em 0 -.08em rgba(255,255,255,.28),.6em -.6em 0 -.16em rgba(255,255,255,.14);border-radius:.3em}' +
             // бейдж непрочитанных на нашей иконке уведомлений в хедере (красный кружок с числом)
             '.qdl-noti-head{position:relative}' +
             '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}';
@@ -179,6 +181,19 @@
         if (!hash || !movie) { if (cb) cb(null); return; }
         var purl = movie.poster_path ? tmdbImg('t/p/w500' + movie.poster_path) : '';
         post(API + '/qdl/save', { hash: hash, card: JSON.stringify(slimCard(movie)), poster_url: purl }, cb, function () { if (cb) cb(null); });
+    }
+
+    // Самолечение постера: мета есть, а img/<hash>.jpg на сервере нет (скачивание при /qdl/save
+    // сорвалось — сеть/DMCA-прокси). Дёргаем повторное сохранение ТОЛЬКО постера (без card —
+    // мету не перезаписываем) и обновляем карточку на месте. Дёшево: только для битых карточек.
+    function healPoster(t, img) {
+        if (!t || t.has_poster || !t.meta || !t.meta.poster_path) return;
+        post(API + '/qdl/save', { hash: t.hash, poster_url: tmdbImg('t/p/w500' + t.meta.poster_path) }, function (r) {
+            if (r && r.has_poster) {
+                t.has_poster = true;
+                img.attr('src', API + '/qdl/poster?hash=' + t.hash + '&t=' + Date.now());
+            }
+        });
     }
 
     function cleanName(name) {
@@ -541,27 +556,65 @@
         var html = $('<div></div>');
         var body = $('<div class="category-full"></div>');
         var last;
+        var builtStamp = -1;   // colStamp на момент build: разошёлся — грид устарел
 
         this.create = function () {
             this.activity.loader(true);
             scroll.minus();
             html.append(scroll.render());
             scroll.body().append(body);
-            network.silent(API + '/qdl/list', function (list) { comp.build(list || []); }, function () { comp.build([]); });
+            // список и коллекции грузим параллельно; ошибка любого — мягкая деградация в []
+            var list = null, cols = null, done = 0;
+            function ready() { if (++done === 2) comp.build(list || [], cols || []); }
+            network.silent(API + '/qdl/list', function (r) { list = r; ready(); }, function () { ready(); });
+            network.silent(API + '/qdl/collections', function (r) { cols = r; ready(); }, function () { ready(); });
             return this.render();
         };
 
-        this.build = function (list) {
-            if (!list.length)
-                body.append($('<div style="padding:2em;font-size:1.4em;opacity:.7">В «Загрузках» пока пусто. Нажми «Скачать» на карточке фильма.</div>'));
+        this.build = function (list, collections) {
+            builtStamp = colStamp;
+            var g = groupDownloads(list || [], collections || []);
 
-            list.forEach(function (t) { comp.append(t); });
+            if (object.collection_id) {
+                // под-грид коллекции: только её фильмы, в порядке добавления
+                var cg = g.cols.filter(function (c) { return c.col.id === object.collection_id; })[0];
+                if (!cg)
+                    body.append($('<div style="padding:2em;font-size:1.4em;opacity:.7">Коллекции больше нет.</div>'));
+                else
+                    cg.items.forEach(function (t) { comp.append(t, { collection: cg.col }); });
+            } else {
+                // главный грид: коллекции первыми, затем фильмы вне коллекций
+                if (!g.cols.length && !g.singles.length)
+                    body.append($('<div style="padding:2em;font-size:1.4em;opacity:.7">В «Загрузках» пока пусто. Нажми «Скачать» на карточке фильма.</div>'));
+                g.cols.forEach(function (c) { comp.appendCollection(c); });
+                g.singles.forEach(function (t) { comp.append(t); });
+            }
 
             this.activity.loader(false);
             this.activity.toggle();
         };
 
-        this.append = function (t) {
+        // карточка-папка коллекции: обложка = постер фильма-обложки, бейдж с количеством
+        this.appendCollection = function (c) {
+            var el = Lampa.Template.get('card', { title: c.col.title || 'Коллекция', release_year: '' });
+            el.addClass('qdl-col-card');
+
+            var img = el.find('.card__img');
+            img.attr('src', posterUrl(c.cover));
+            img.on('error', function () { this.src = './img/img_broken.svg'; });
+            healPoster(c.cover, img);   // обложка коллекции тоже лечится
+
+            var view = el.find('.card__view'); if (!view.length) view = el;
+            view.append('<div style="position:absolute;left:.4em;top:.4em;background:rgba(110,60,220,.9);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">📁 ' + c.items.length + '</div>');
+
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:enter', function () { openCollection(c.col); });
+            el.on('hover:long', function () { collectionMenu(c.col, c.items); });
+
+            body.append(el);
+        };
+
+        this.append = function (t, ctx) {
             var meta = t.meta || {};
             var pct = Math.round((t.progress || 0) * 100);
 
@@ -581,7 +634,7 @@
 
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:enter', function () { openDownload(t); });
-            el.on('hover:long', function () { quickMenu(t); });
+            el.on('hover:long', function () { quickMenu(t, ctx); });
 
             body.append(el);
 
@@ -596,10 +649,13 @@
                     });
                 });
             }
+            else healPoster(t, img);   // мета есть, но постер на сервере не скачался → ретрай
         };
 
         this.render = function () { return html; };
         this.start = function () {
+            // коллекции менялись, пока грид был в фоне (мутация в под-гриде и т.п.) → перерисовать
+            if (builtStamp !== -1 && builtStamp !== colStamp) { Lampa.Activity.replace(); return; }
             Lampa.Controller.add('content', {
                 toggle: function () {
                     Lampa.Controller.collectionSet(scroll.render());
@@ -765,7 +821,184 @@
         return item;
     }
 
-    function quickMenu(t) {
+    // ───────── Коллекции в «Загрузках» (стакинг фильмов, серверное хранение) ─────────
+    // Инвариант сервера: фильм максимум в одной коллекции; пустая коллекция удаляется.
+    // colStamp — счётчик мутаций: каждый живой грид запоминает свой стамп при build
+    // и в start() перерисовывается, если коллекции менялись (например в под-гриде).
+    var colStamp = 0;
+    function touchCollections() { colStamp++; }
+
+    function itemTitle(t) { return (t && t.meta && t.meta.title) || (t && t.name) || ''; }
+
+    // list (/qdl/list) + collections (/qdl/collections) → { cols: [{col, items, cover}], singles: [...] }
+    // мёртвые хэши (удалены мимо нашего API) отбрасываются, коллекция без живых фильмов не рендерится,
+    // cover — объект фильма-обложки (фолбек: первый живой)
+    function groupDownloads(list, collections) {
+        list = list || []; collections = collections || [];
+        var byHash = {}, inCol = {}, cols = [];
+        list.forEach(function (t) { if (t && t.hash) byHash[t.hash] = t; });
+        collections.forEach(function (col) {
+            var items = ((col && col.hashes) || []).map(function (h) { return byHash[h]; }).filter(Boolean);
+            if (!items.length) return;
+            items.forEach(function (t) { inCol[t.hash] = true; });
+            var cover = items.filter(function (t) { return t.hash === col.cover; })[0] || items[0];
+            cols.push({ col: col, items: items, cover: cover });
+        });
+        var singles = list.filter(function (t) { return t && t.hash && !inCol[t.hash]; });
+        return { cols: cols, singles: singles };
+    }
+
+    // автоимя коллекции: общий пословный префикс («Дюна» + «Дюна: Часть вторая» → «Дюна»)
+    function commonPrefixTitle(a, b) {
+        a = String(a || '').trim(); b = String(b || '').trim();
+        function norm(w) {
+            return w.toLowerCase().replace(/ё/g, 'е')
+                .replace(/^[\s:.,!?«»"'()\[\]\-–—]+/, '').replace(/[\s:.,!?«»"'()\[\]\-–—]+$/, '');
+        }
+        var wa = a.split(/\s+/), wb = b.split(/\s+/), out = [], n = Math.min(wa.length, wb.length);
+        for (var i = 0; i < n; i++) {
+            if (norm(wa[i]) && norm(wa[i]) === norm(wb[i])) out.push(wa[i]); else break;
+        }
+        var title = out.join(' ').replace(/[\s:.,\-–—]+$/, '');
+        return title || a || b || 'Коллекция';
+    }
+
+    // пункты пикера «Добавить в коллекцию»: сверху существующие коллекции (📁 + счётчик),
+    // ниже одиночные фильмы (выбор фильма = создать новую коллекцию из двух)
+    function buildCollectionPicker(current, collections, list) {
+        var g = groupDownloads(list, collections), items = [];
+        g.cols.forEach(function (c) {
+            items.push({ title: '📁 ' + (c.col.title || 'Коллекция'), subtitle: 'фильмов: ' + c.items.length, col: c.col });
+        });
+        g.singles.forEach(function (t) {
+            if (current && t.hash === current.hash) return;
+            var year = t.meta && t.meta.year ? ' (' + t.meta.year + ')' : '';
+            items.push({ title: '🎬 ' + itemTitle(t) + year, subtitle: 'новая коллекция из двух фильмов', item: t });
+        });
+        return items;
+    }
+
+    function openCollection(col) {
+        Lampa.Activity.push({ url: '', title: col.title || 'Коллекция', component: 'qdl_downloads', collection_id: col.id, page: 1 });
+    }
+
+    function colPost(url, data, ok) {
+        post(API + url, data, function (r) {
+            if (r && r.success) { touchCollections(); ok(r); }
+            else Lampa.Noty.show('Не получилось — попробуй ещё раз');
+        }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
+    }
+
+    function addToCollection(t) {
+        req(API + '/qdl/collections', function (collections) {
+            req(API + '/qdl/list', function (list) {
+                var items = buildCollectionPicker(t, collections || [], list || []);
+                if (!items.length) { Lampa.Noty.show('Нет других фильмов или коллекций — скачай что-нибудь ещё'); return; }
+                Lampa.Select.show({
+                    title: 'Куда добавить «' + itemTitle(t) + '»',
+                    items: items,
+                    onSelect: function (b) {
+                        if (b.col)
+                            colPost('/qdl/collections/add', { id: b.col.id, hash: t.hash }, function () {
+                                Lampa.Noty.show('✓ Добавлено в «' + (b.col.title || 'Коллекция') + '»');
+                                Lampa.Activity.replace();
+                            });
+                        else if (b.item)
+                            colPost('/qdl/collections/create', { title: commonPrefixTitle(itemTitle(t), itemTitle(b.item)), hashes: t.hash + ',' + b.item.hash }, function (r) {
+                                Lampa.Noty.show('✓ Коллекция «' + ((r.collection && r.collection.title) || '') + '» создана');
+                                Lampa.Activity.replace();
+                            });
+                    },
+                    onBack: function () { Lampa.Controller.toggle('content'); }
+                });
+            }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
+        }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
+    }
+
+    function renameCollection(col, items) {
+        function save(name) {
+            name = String(name || '').trim();
+            if (!name) return;
+            colPost('/qdl/collections/update', { id: col.id, title: name }, function () {
+                col.title = name;
+                Lampa.Noty.show('✓ Переименовано');
+                Lampa.Activity.replace();
+            });
+        }
+        // фронт Lampa качается в рантайме — текстовый ввод может отсутствовать, feature-detect
+        if (Lampa.Input && Lampa.Input.edit) {
+            Lampa.Input.edit({ title: 'Название коллекции', value: col.title || '', free: true, nosave: true }, function (v) { if (v) save(v); });
+        } else {
+            // fallback (и вообще удобнее на ТВ): варианты — общий префикс + названия фильмов внутри
+            var seen = {}, opts = [];
+            function add(name) {
+                name = String(name || '').trim();
+                if (name && !seen[name.toLowerCase()]) { seen[name.toLowerCase()] = 1; opts.push(name); }
+            }
+            if (items.length > 1) add(commonPrefixTitle(itemTitle(items[0]), itemTitle(items[1])));
+            items.forEach(function (t) { add(itemTitle(t)); });
+            if (!opts.length) { Lampa.Noty.show('Нет вариантов названия'); return; }
+            Lampa.Select.show({
+                title: 'Название коллекции',
+                items: opts.map(function (n) { return { title: n, name: n }; }),
+                onSelect: function (b) { save(b.name); },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }
+    }
+
+    function chooseCover(col, items) {
+        Lampa.Select.show({
+            title: 'Обложка коллекции',
+            items: items.map(function (t) {
+                return { title: (t.hash === col.cover ? '✓ ' : '') + itemTitle(t), hash: t.hash };
+            }),
+            onSelect: function (b) {
+                colPost('/qdl/collections/update', { id: col.id, cover: b.hash }, function () {
+                    col.cover = b.hash;
+                    Lampa.Noty.show('✓ Обложка обновлена');
+                    Lampa.Activity.replace();
+                });
+            },
+            onBack: function () { Lampa.Controller.toggle('content'); }
+        });
+    }
+
+    // long-press по карточке коллекции. «Удалить с файлами» тут сознательно НЕ даём:
+    // расформирование только разгруппировывает, файлы не трогает
+    function collectionMenu(col, items) {
+        Lampa.Select.show({
+            title: (col.title || 'Коллекция') + ' · фильмов: ' + items.length,
+            items: [
+                { title: 'Открыть', act: 'open' },
+                { title: '✏️ Переименовать', act: 'rename' },
+                { title: '🖼 Сменить обложку', act: 'cover' },
+                { title: '📤 Расформировать', act: 'dissolve' }
+            ],
+            onSelect: function (b) {
+                if (b.act === 'open') openCollection(col);
+                else if (b.act === 'rename') renameCollection(col, items);
+                else if (b.act === 'cover') chooseCover(col, items);
+                else if (b.act === 'dissolve') {
+                    Lampa.Select.show({
+                        title: 'Расформировать «' + (col.title || 'Коллекция') + '»? Фильмы останутся в «Загрузках»',
+                        items: [{ title: 'Расформировать', ok: true }, { title: 'Отмена' }],
+                        onSelect: function (a) {
+                            if (!a.ok) { Lampa.Controller.toggle('content'); return; }
+                            colPost('/qdl/collections/dissolve', { id: col.id }, function () {
+                                Lampa.Noty.show('Коллекция расформирована');
+                                Lampa.Activity.replace();
+                            });
+                        },
+                        onBack: function () { Lampa.Controller.toggle('content'); }
+                    });
+                }
+            },
+            onBack: function () { Lampa.Controller.toggle('content'); }
+        });
+    }
+
+    function quickMenu(t, ctx) {
         var items = [
             { title: 'Открыть карточку', act: 'page' },
             { title: '▶ Смотреть (оффлайн)', act: 'play' },
@@ -774,6 +1007,9 @@
         if (canTranscode(t)) items.push({ title: '🎬 Транскодировать в MP4 (для браузера)', act: 'mp4' });
         if (!t.local && t.state !== 'local')
             items.push({ title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'watch' });
+        // в под-гриде коллекции — «Убрать», в общем гриде/карточке — «Добавить»
+        if (ctx && ctx.collection) items.push({ title: '📁 Убрать из коллекции', act: 'uncol' });
+        else items.push({ title: '📁 Добавить в коллекцию', act: 'addcol' });
         items.push({ title: '🗑 Удалить (с файлами)', act: 'del' });
 
         Lampa.Select.show({
@@ -810,6 +1046,13 @@
                         else Lampa.Noty.show('🎬 Транскодирование запущено — это займёт заметное время, сообщу о прогрессе');
                         pollTranscode(t.hash, (t.meta && t.meta.title) || t.name);
                     }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
+                }
+                else if (b.act === 'addcol') addToCollection(t);
+                else if (b.act === 'uncol') {
+                    colPost('/qdl/collections/remove', { id: ctx.collection.id, hash: t.hash }, function (r) {
+                        if (r.deleted) { Lampa.Noty.show('Коллекция удалена — это был последний фильм'); Lampa.Activity.backward(); }
+                        else { Lampa.Noty.show('Убрано из коллекции'); Lampa.Activity.replace(); }
+                    });
                 }
                 else if (b.act === 'del') {
                     // подтверждение: одно случайное нажатие не должно безвозвратно удалять файлы

@@ -1920,6 +1920,7 @@ public class QbitController : BaseController
         mv(MetaPath(oldH), MetaPath(newH));
         mv(PosterPath(oldH), PosterPath(newH));
         mv(LinkPath(oldH), LinkPath(newH));
+        CollectionsMigrateHash(oldH, newH);
     }
 
     static string MagnetHash(string magnet)
@@ -2175,6 +2176,289 @@ public class QbitController : BaseController
     async public Task<ActionResult> NotificationsScan() { int n = await ScanEpisodeNotifications(); return Json(new { success = true, created = n }); }
     #endregion
 
+    #region /qdl/collections — коллекции фильмов в «Загрузках» (общие для всех клиентов)
+    // Хранение — collections.json в cachePath (по образцу watch.json): SQLite не подходит,
+    // EnsureCreated не добавляет таблицы в существующую БД. Инварианты: фильм максимум в ОДНОЙ
+    // коллекции (add переносит), cover ∈ hashes, пустая коллекция удаляется.
+    static string CollectionsFile => Path.Combine(ModInit.conf.cachePath, "collections.json");
+    static readonly object _colLock = new();   // отдельный от _watchLock, вложенно не брать
+    // id = "c" + Guid("N"): без префикса 32 hex-символа Guid формально матчат _hashRx
+    static readonly Regex _colIdRx = new Regex("^c[0-9a-f]{32}$", RegexOptions.Compiled);
+    static bool ValidColId(string id) => !string.IsNullOrEmpty(id) && _colIdRx.IsMatch(id);
+
+    static JArray LoadCollections()
+    {
+        try { if (System.IO.File.Exists(CollectionsFile)) return JArray.Parse(System.IO.File.ReadAllText(CollectionsFile)); } catch { }
+        return new JArray();
+    }
+    static void SaveCollections(JArray a)
+    {
+        try { Directory.CreateDirectory(ModInit.conf.cachePath); System.IO.File.WriteAllText(CollectionsFile, a.ToString(Newtonsoft.Json.Formatting.None)); } catch { }
+    }
+
+    static JObject FindCollection(JArray a, string id)
+    {
+        foreach (var t in a)
+            if (t is JObject col && col.Value<string>("id") == id) return col;
+        return null;
+    }
+
+    // Убрать хэш из всех коллекций массива: чинит cover, удаляет опустевшие. true = были изменения.
+    static bool RemoveHashFrom(JArray a, string hash)
+    {
+        bool changed = false;
+        for (int i = a.Count - 1; i >= 0; i--)
+        {
+            if (a[i] is not JObject col || col["hashes"] is not JArray hs) continue;
+            int before = hs.Count;
+            for (int j = hs.Count - 1; j >= 0; j--)
+                if (hs[j].Value<string>() == hash) hs.RemoveAt(j);
+            if (hs.Count == before) continue;
+            changed = true;
+            if (hs.Count == 0) { a.RemoveAt(i); continue; }
+            if (col.Value<string>("cover") == hash) col["cover"] = hs[0].Value<string>();
+        }
+        return changed;
+    }
+
+    static string TitleFromMeta(string hash)
+    {
+        try
+        {
+            if (ValidHash(hash) && System.IO.File.Exists(MetaPath(hash)))
+            {
+                var m = JObject.Parse(System.IO.File.ReadAllText(MetaPath(hash)));
+                string t = m.Value<string>("title") ?? m.Value<string>("name");
+                if (!string.IsNullOrWhiteSpace(t)) return t.Trim();
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    static string NormColTitle(string title, string fallbackHash)
+    {
+        if (string.IsNullOrWhiteSpace(title)) title = TitleFromMeta(fallbackHash) ?? "Коллекция";
+        title = title.Trim();
+        return title.Length > 120 ? title.Substring(0, 120) : title;
+    }
+
+    // null = невалидные данные. Первый хэш = обложка («первый добавленный фильм»).
+    static JObject ColCreate(string title, string[] hashes)
+    {
+        if (hashes == null) return null;
+        hashes = hashes.Where(h => !string.IsNullOrWhiteSpace(h)).Select(h => h.Trim()).Distinct().ToArray();
+        if (hashes.Length < 2 || hashes.Any(h => !ValidHash(h))) return null;
+
+        lock (_colLock)
+        {
+            var a = LoadCollections();
+            foreach (var h in hashes) RemoveHashFrom(a, h);   // 1 фильм — 1 коллекция
+            var col = new JObject
+            {
+                ["id"] = "c" + Guid.NewGuid().ToString("N"),
+                ["title"] = NormColTitle(title, hashes[0]),
+                ["cover"] = hashes[0],
+                ["hashes"] = new JArray(hashes),
+                ["created"] = DateTime.UtcNow.ToString("o")
+            };
+            a.Add(col);
+            SaveCollections(a);
+            return col;
+        }
+    }
+
+    static bool ColAdd(string id, string hash)
+    {
+        lock (_colLock)
+        {
+            var a = LoadCollections();
+            var col = FindCollection(a, id);
+            if (col == null || col["hashes"] is not JArray hs) return false;
+            if (hs.Any(x => x.Value<string>() == hash)) return true;   // уже внутри — no-op
+            RemoveHashFrom(a, hash);                                   // перенос из другой коллекции
+            hs.Add(hash);
+            if (string.IsNullOrEmpty(col.Value<string>("cover"))) col["cover"] = hash;
+            SaveCollections(a);
+            return true;
+        }
+    }
+
+    // deleted = true → убрали последний фильм, коллекция удалена
+    static (bool ok, bool deleted) ColRemove(string id, string hash)
+    {
+        lock (_colLock)
+        {
+            var a = LoadCollections();
+            var col = FindCollection(a, id);
+            if (col == null || col["hashes"] is not JArray hs) return (false, false);
+            int before = hs.Count;
+            for (int j = hs.Count - 1; j >= 0; j--)
+                if (hs[j].Value<string>() == hash) hs.RemoveAt(j);
+            if (hs.Count == before) return (true, false);   // хэша и не было
+            bool deleted = hs.Count == 0;
+            if (deleted) a.Remove(col);
+            else if (col.Value<string>("cover") == hash) col["cover"] = hs[0].Value<string>();
+            SaveCollections(a);
+            return (true, deleted);
+        }
+    }
+
+    // title и/или cover; cover обязан быть из hashes коллекции
+    static bool ColUpdate(string id, string title, string cover)
+    {
+        lock (_colLock)
+        {
+            var a = LoadCollections();
+            var col = FindCollection(a, id);
+            if (col == null || col["hashes"] is not JArray hs) return false;
+            if (!string.IsNullOrWhiteSpace(cover))
+            {
+                if (!ValidHash(cover) || !hs.Any(x => x.Value<string>() == cover)) return false;
+                col["cover"] = cover;
+            }
+            if (!string.IsNullOrWhiteSpace(title)) col["title"] = NormColTitle(title, col.Value<string>("cover"));
+            SaveCollections(a);
+            return true;
+        }
+    }
+
+    static bool ColDissolve(string id)
+    {
+        lock (_colLock)
+        {
+            var a = LoadCollections();
+            var col = FindCollection(a, id);
+            if (col == null) return false;
+            a.Remove(col);
+            SaveCollections(a);
+            return true;
+        }
+    }
+
+    // хук из PurgeCache: удалённый фильм исчезает из коллекций
+    static void CollectionsRemoveHash(string hash)
+    {
+        try { lock (_colLock) { var a = LoadCollections(); if (RemoveHashFrom(a, hash)) SaveCollections(a); } }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] collections purge: " + ex.Message); }
+    }
+
+    // хук из MigrateCache: re-grab сериала не выкидывает его из коллекции
+    static void CollectionsMigrateHash(string oldH, string newH)
+    {
+        try
+        {
+            lock (_colLock)
+            {
+                var a = LoadCollections();
+                bool changed = false;
+                foreach (var t in a)
+                {
+                    if (t is not JObject col || col["hashes"] is not JArray hs) continue;
+                    for (int j = 0; j < hs.Count; j++)
+                        if (hs[j].Value<string>() == oldH) { hs[j] = newH; changed = true; }
+                    if (col.Value<string>("cover") == oldH) { col["cover"] = newH; changed = true; }
+                }
+                if (changed) SaveCollections(a);
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] collections migrate: " + ex.Message); }
+    }
+
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/collections")]
+    public ActionResult CollectionsList()
+    {
+        try
+        {
+            JArray a;
+            lock (_colLock) { a = LoadCollections(); }
+            return ContentTo(a.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[QbitDownload] collections: " + ex);
+            return Json(new { error = "internal error" });
+        }
+    }
+
+    [HttpPost, AllowAnonymous]
+    [Route("qdl/collections/create")]
+    public ActionResult CollectionsCreate(string title = null, string hashes = null)
+    {
+        try
+        {
+            var col = ColCreate(title, (hashes ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries));
+            if (col == null) return BadRequest(new { error = "need >=2 valid hashes" });
+            // JObject нельзя класть в Json(): System.Text.Json сериализует JToken в мусор ("id":[])
+            return ContentTo("{\"success\":true,\"collection\":" + col.ToString(Newtonsoft.Json.Formatting.None) + "}", "application/json; charset=utf-8");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[QbitDownload] collections create: " + ex);
+            return Json(new { success = false, error = "internal error" });
+        }
+    }
+
+    [HttpPost, AllowAnonymous]
+    [Route("qdl/collections/add")]
+    public ActionResult CollectionsAdd(string id, string hash)
+    {
+        if (!ValidColId(id)) return BadRequest(new { error = "invalid id" });
+        if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
+        try { return Json(new { success = ColAdd(id, hash) }); }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[QbitDownload] collections add: " + ex);
+            return Json(new { success = false, error = "internal error" });
+        }
+    }
+
+    [HttpPost, AllowAnonymous]
+    [Route("qdl/collections/remove")]
+    public ActionResult CollectionsRemove(string id, string hash)
+    {
+        if (!ValidColId(id)) return BadRequest(new { error = "invalid id" });
+        if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
+        try
+        {
+            var (ok, deleted) = ColRemove(id, hash);
+            return Json(new { success = ok, deleted });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[QbitDownload] collections remove: " + ex);
+            return Json(new { success = false, error = "internal error" });
+        }
+    }
+
+    [HttpPost, AllowAnonymous]
+    [Route("qdl/collections/update")]
+    public ActionResult CollectionsUpdate(string id, string title = null, string cover = null)
+    {
+        if (!ValidColId(id)) return BadRequest(new { error = "invalid id" });
+        try { return Json(new { success = ColUpdate(id, title, cover) }); }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[QbitDownload] collections update: " + ex);
+            return Json(new { success = false, error = "internal error" });
+        }
+    }
+
+    [HttpPost, AllowAnonymous]
+    [Route("qdl/collections/dissolve")]
+    public ActionResult CollectionsDissolve(string id)
+    {
+        if (!ValidColId(id)) return BadRequest(new { error = "invalid id" });
+        try { return Json(new { success = ColDissolve(id) }); }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[QbitDownload] collections dissolve: " + ex);
+            return Json(new { success = false, error = "internal error" });
+        }
+    }
+    #endregion
+
     #region helpers
     static string MetaPath(string hash) => Path.Combine(ModInit.conf.cachePath, "meta", hash + ".json");
     static string PosterPath(string hash) => Path.Combine(ModInit.conf.cachePath, "img", hash + ".jpg");
@@ -2242,7 +2526,10 @@ public class QbitController : BaseController
             }
             catch (Exception ex) { Console.WriteLine("[QbitDownload] purge db: " + ex.Message); }
 
-            // 4) файловые артефакты — в последнюю очередь
+            // 4) коллекции: убрать фильм, опустевшие удалить
+            CollectionsRemoveHash(hash);
+
+            // 5) файловые артефакты — в последнюю очередь
             foreach (var p in new[] { MetaPath(hash), PosterPath(hash), LinkPath(hash), LocalPath(hash) })
                 try { if (System.IO.File.Exists(p)) System.IO.File.Delete(p); } catch { }
         }

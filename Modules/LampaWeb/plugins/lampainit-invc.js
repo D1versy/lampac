@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '1.1';
+window.qdl_fork_version = '1.3';   // 1.2: коллекции в «Загрузках»; 1.3: самолечение битых постеров (healPoster)
 
 
 // Лампа готова для использования 
