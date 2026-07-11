@@ -40,8 +40,11 @@ public class ApiController : BaseController
 
 
     #region Index
+    // setHeadersNoCache + ?v= на lampainit.js: браузеры/WebView (ТВ) кэшировали вход и старый
+    // lampainit.js (в нём наши патчи) — фиксы «не доезжали» до клиента без ручного Ctrl+F5.
+    // cacheVersion пересчитывается на каждый (ре)старт процесса → каждый деплой сбрасывает кэш сам.
     [HttpGet, AllowAnonymous]
-    [Staticache(5, always: true)]
+    [Staticache(5, always: true, setHeadersNoCache: true)]
     [Route("/")]
     public ActionResult Index()
     {
@@ -52,6 +55,7 @@ public class ApiController : BaseController
         {
             string html = IO.File.ReadAllText($"wwwroot/{ModInit.conf.index}");
             html = html.Replace("<head>", $"<head><base href=\"/{Regex.Match(ModInit.conf.index, "^([^/]+)/").Groups[1].Value}/\" />");
+            html = html.Replace("src=\"/lampainit.js\"", $"src=\"/lampainit.js?v={cacheVersion}\"");
 
             return ContentTo(html, "text/html; charset=utf-8");
         }

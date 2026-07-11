@@ -5,6 +5,13 @@
 
 var lampainit_invc = {};
 
+// Версия НАШЕГО форка (видна в консоли клиента: window.qdl_fork_version).
+// ⚠️ Правило владельца: при КАЖДОМ фиксе клиентских плагинов (qdl.js / lampainit-invc.js)
+// бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
+// (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
+// эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
+window.qdl_fork_version = '1.1';
+
 
 // Лампа готова для использования 
 lampainit_invc.appload = function appload() {
