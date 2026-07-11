@@ -183,7 +183,8 @@ function loadLampaInit(opts) {
 const QDL_TAIL = "if (window.appready) start();\n    else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') start(); });";
 const QDL_EXPORT = "window.__qdl = { esc: esc, names: names, slimCard: slimCard, cleanName: cleanName, videoFiles: videoFiles, baseName: baseName, isBrowser: isBrowser, isMobile: isMobile, streamUrl: streamUrl, posterUrl: posterUrl, relTime: relTime, badge: badge, chip: chip, getAudioPref: getAudioPref, setAudioPref: setAudioPref, updateNotiBadge: updateNotiBadge, ensureHeaderNoti: ensureHeaderNoti, buildHeaderNoti: buildHeaderNoti, normTitle: normTitle, isSerialName: isSerialName, isSeasonTail: isSeasonTail, findDownload: findDownload, addButton: addButton };";
 function qdlSource() {
-  const src = fs.readFileSync(QDL, 'utf8');
+  // CRLF→LF: после git checkout с autocrlf файл на диске может оказаться в CRLF — якорь с \n обязан находиться
+  const src = fs.readFileSync(QDL, 'utf8').replace(/\r\n/g, '\n');
   if (!src.includes(QDL_TAIL)) throw new Error('qdl.js tail anchor not found — harness needs updating');
   return src.replace(QDL_TAIL, QDL_EXPORT);
 }
