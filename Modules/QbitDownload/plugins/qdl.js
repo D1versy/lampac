@@ -170,6 +170,31 @@
         return null;
     }
 
+    // можно ли предложить транскод в MP4: завершённая раздача, ещё не заменённая локальным файлом
+    function canTranscode(t) {
+        return !!t && !t.local && t.state !== 'local' && (t.progress || 0) >= 1;
+    }
+
+    // поллинг прогресса транскода: тост каждые ~10%, финальный тост по done/error
+    var tcPolls = {};
+    function pollTranscode(hash, title) {
+        if (tcPolls[hash]) return;
+        var lastDecile = 0;
+        tcPolls[hash] = setInterval(function () {
+            req(API + '/qdl/transcode/status?hash=' + hash, function (s) {
+                s = s || {};
+                if (s.state === 'running') {
+                    var d = Math.floor((s.progress || 0) * 10);
+                    if (d > lastDecile) { lastDecile = d; Lampa.Noty.show('🎬 ' + (title || 'Транскодирование') + ': ' + (d * 10) + '%'); }
+                } else {
+                    clearInterval(tcPolls[hash]); delete tcPolls[hash];
+                    if (s.state === 'done') Lampa.Noty.show('✓ ' + (title || 'Загрузка') + ' — теперь MP4, торрент удалён');
+                    else if (s.state === 'error') Lampa.Noty.show('Транскодирование не удалось: ' + (s.error || 'ошибка'));
+                }
+            });
+        }, 5000);
+    }
+
     function tmdbSearch(name, cb) {
         try {
             var url = Lampa.TMDB.api('search/multi?api_key=' + tmdbKey() + '&language=ru-RU&query=' + encodeURIComponent(name));
@@ -438,9 +463,11 @@
             img.on('error', function () { this.src = './img/img_broken.svg'; });
 
             var view = el.find('.card__view'); if (!view.length) view = el;
-            view.append(pct < 100
-                ? '<div style="position:absolute;left:.4em;top:.4em;background:rgba(0,0,0,.75);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">' + pct + '%</div>'
-                : '<div style="position:absolute;left:.4em;top:.4em;background:rgba(20,160,40,.9);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">✓</div>');
+            view.append(t.local || t.state === 'local'
+                ? '<div style="position:absolute;left:.4em;top:.4em;background:rgba(30,120,220,.9);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">MP4</div>'
+                : pct < 100
+                    ? '<div style="position:absolute;left:.4em;top:.4em;background:rgba(0,0,0,.75);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">' + pct + '%</div>'
+                    : '<div style="position:absolute;left:.4em;top:.4em;background:rgba(20,160,40,.9);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">✓</div>');
 
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:enter', function () { openDownload(t); });
@@ -629,15 +656,19 @@
     }
 
     function quickMenu(t) {
+        var items = [
+            { title: 'Открыть карточку', act: 'page' },
+            { title: '▶ Смотреть (оффлайн)', act: 'play' },
+            { title: '🔊 Озвучка', act: 'audio' }
+        ];
+        if (canTranscode(t)) items.push({ title: '🎬 Транскодировать в MP4 (для браузера)', act: 'mp4' });
+        if (!t.local && t.state !== 'local')
+            items.push({ title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'watch' });
+        items.push({ title: '🗑 Удалить (с файлами)', act: 'del' });
+
         Lampa.Select.show({
             title: (t.meta && t.meta.title) || t.name,
-            items: [
-                { title: 'Открыть карточку', act: 'page' },
-                { title: '▶ Смотреть (оффлайн)', act: 'play' },
-                { title: '🔊 Озвучка', act: 'audio' },
-                { title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'watch' },
-                { title: '🗑 Удалить (с файлами)', act: 'del' }
-            ],
+            items: items,
             onSelect: function (b) {
                 if (b.act === 'page') openDownload(t);
                 else if (b.act === 'play') watch(t);
@@ -661,6 +692,13 @@
                             if (r && r.success) { t.watched = true; Lampa.Noty.show('✓ Слежу за новыми сериями'); }
                             else Lampa.Noty.show('Не вышло — перекачай раздачу и попробуй снова');
                         });
+                }
+                else if (b.act === 'mp4') {
+                    req(API + '/qdl/transcode?hash=' + t.hash, function (r) {
+                        if (!r || !r.success) { Lampa.Noty.show('Транскодирование: ' + ((r && r.error) || 'ошибка')); return; }
+                        Lampa.Noty.show('🎬 Транскодирование запущено — это займёт заметное время, сообщу о прогрессе');
+                        pollTranscode(t.hash, (t.meta && t.meta.title) || t.name);
+                    }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
                 }
                 else if (b.act === 'del')
                     req(API + '/qdl/delete?hash=' + t.hash + '&deleteFiles=true', function () {
