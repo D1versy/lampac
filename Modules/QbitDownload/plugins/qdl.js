@@ -106,6 +106,70 @@
         return s.trim();
     }
 
+    // нормализация названия для сравнения: нижний регистр, ё→е, всё кроме букв/цифр → один пробел
+    function normTitle(s) {
+        return String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-яё0-9]+/g, ' ').trim();
+    }
+
+    // в имени раздачи есть маркер сериала (S01/S01E05/Season/сезон)?
+    // ⚠️ \b в JS не работает с кириллицей (\w = только ASCII) → проверяем токены нормализованной строки
+    function isSerialName(name) {
+        var toks = normTitle(name).split(' ');
+        for (var i = 0; i < toks.length; i++) {
+            var t = toks[i];
+            if (t === 'season' || t === 'seasons' || /^сезон(ы|а|ов)?$/.test(t) || /^s\d{1,2}(e\d{1,3})?$/.test(t)) return true;
+        }
+        return false;
+    }
+
+    // хвост после названия начинается с сезонного маркера? («s01…», «season 3…», «3 сезон…»)
+    function isSeasonTail(rest) {
+        return /^(\d{1,2}\s+)?(s\d{1,2}(e\d{1,3})?|seasons?|сезон(ы|а|ов)?)(\s|$)/.test(rest);
+    }
+
+    // Найти загрузку для карточки. Проход A: строгий матч TMDB id + media_type — у TMDB id
+    // movie и tv живут в РАЗНЫХ пространствах, совпадение номера без типа = чужой объект.
+    // Проход B (back-link): только раздачи БЕЗ меты — раздачу, чья мета указывает на другую
+    // карточку, по имени не матчим и не трогаем; сравнение — ТОЧНОЕ равенство нормализованных
+    // названий (для tv допускается «название + сезонный хвост»), сериальные раздачи к фильмам
+    // не цепляем.
+    function findDownload(list, movie) {
+        list = list || [];
+        movie = movie || {};
+        var type = movie.media_type === 'tv' ? 'tv' : 'movie';
+        var i, j, x;
+
+        if (movie.id != null && movie.id !== '') {
+            for (i = 0; i < list.length; i++) {
+                x = list[i];
+                if (x && x.meta && String(x.meta.id) === String(movie.id)
+                    && (!x.meta.media_type || x.meta.media_type === type)) return x;   // старые меты без media_type — толерантно
+            }
+        }
+
+        var titles = [];
+        var src = [movie.title, movie.original_title, movie.name, movie.original_name];
+        for (i = 0; i < src.length; i++) {
+            var t = normTitle(src[i]);
+            if (t && titles.indexOf(t) === -1) titles.push(t);
+        }
+        if (!titles.length) return null;
+
+        for (i = 0; i < list.length; i++) {
+            x = list[i];
+            if (!x || (x.meta && x.meta.id)) continue;             // уже привязана к какой-то карточке
+            var raw = String(x.name || '');
+            if (type === 'movie' && isSerialName(raw)) continue;   // по СЫРОМУ имени: cleanName режет «(Season 3)» по скобке
+            var n = normTitle(cleanName(raw.replace(/\.(mkv|mp4|avi|ts|m4v|webm|mov)$/i, '')));
+            if (!n) continue;
+            for (j = 0; j < titles.length; j++) {
+                if (n === titles[j]) return x;
+                if (type === 'tv' && n.indexOf(titles[j] + ' ') === 0 && isSeasonTail(n.slice(titles[j].length + 1))) return x;
+            }
+        }
+        return null;
+    }
+
     function tmdbSearch(name, cb) {
         try {
             var url = Lampa.TMDB.api('search/multi?api_key=' + tmdbKey() + '&language=ru-RU&query=' + encodeURIComponent(name));
@@ -706,21 +770,12 @@
                 cont.append(btn);
             }
 
-            // фильм уже скачан → ЗЕЛЁНАЯ «Смотреть (загружено)» + привязка метаданных
+            // фильм уже скачан → ЗЕЛЁНАЯ «Смотреть (загружено)» + привязка метаданных.
+            // Матчинг строгий — findDownload (id+media_type; имя — только для раздач без меты)
             if (movie && movie.id && !$('.qdl-watch-btn', render).length) {
                 req(API + '/qdl/list', function (list) {
-                    list = list || [];
-                    var titles = [movie.title, movie.original_title, movie.name, movie.original_name]
-                        .filter(Boolean).map(function (s) { return String(s).toLowerCase().trim(); });
-
-                    var hit = list.filter(function (x) { return x.meta && String(x.meta.id) === String(movie.id); })[0];
-                    if (!hit) {
-                        hit = list.filter(function (x) {
-                            var n = cleanName(x.name).toLowerCase().trim();
-                            return n && titles.some(function (t) { return t === n || t.indexOf(n) === 0 || n.indexOf(t) === 0; });
-                        })[0];
-                        if (hit && !hit.meta) saveMeta(hit.hash, movie);   // back-link карточка → загрузка
-                    }
+                    var hit = findDownload(list, movie);
+                    if (hit && !hit.meta) saveMeta(hit.hash, movie);   // back-link карточка → безымянная загрузка
                     if (!hit || $('.qdl-watch-btn', render).length) return;
 
                     injectCss();

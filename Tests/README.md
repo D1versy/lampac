@@ -19,7 +19,7 @@ dotnet test Tests/QbitDownload.Tests/QbitDownload.Tests.csproj \
   --settings Tests/QbitDownload.Tests/coverlet.runsettings --collect:"XPlat Code Coverage"
 ```
 
-Текущий статус: **626 C# + 164 JS = 790 тестов, все зелёные.**
+Текущий статус: **626 C# + 204 JS = 830 тестов, все зелёные.**
 
 ## Как это устроено
 
@@ -44,7 +44,9 @@ dotnet test Tests/QbitDownload.Tests/QbitDownload.Tests.csproj \
 qBit-хелперы (`QbitAddMagnet/ResolveFile/ResolveDubFile`) через фейковый HTTP.
 
 **JS** — `slimCard` (детект tv/movie), `cleanName`, `videoFiles`, `esc`, `streamUrl`/`isBrowser` (HLS vs direct),
-`relTime`, premium-разблокировка и снятие бренда « - CUB» в `lampainit-invc.js`.
+`relTime`, premium-разблокировка и снятие бренда « - CUB» в `lampainit-invc.js`; матчинг «карточка ↔ загрузка»
+(`findDownload`/`normTitle`/`isSerialName` + jsdom-интеграция `addButton`, `qdl-match.test.js`) — строгий id+media_type,
+имя только для безметочных раздач (регрессия «Дюна ↔ Дюна: Пророчество»).
 
 Покрытие ядра `QbitController` (синхронная логика): **~57% строк / ~79% веток**; qBit-хелперы 89–100% веток;
 `Ep` и `SqlContext` — 100% строк. Непокрыто намеренно: HTTP-экшены контроллера (нужен end-to-end хост + фейк qBit)
