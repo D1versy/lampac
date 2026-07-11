@@ -91,6 +91,11 @@ public static class Access
 
     // ── purge / transcode queue (§Z) ──────────────────────────────────────
     public static void PurgeCache(string hash) => Call("PurgeCache", hash);
+    public static bool HlsCopyVideo(string codec) => (bool)Call("HlsCopyVideo", codec);
+    public static List<string> HlsArgs(string dir, string videoPath, string extAudio, string audioMap, bool copyVideo, int startSeg = -1)
+        => (List<string>)Call("HlsArgs", dir, videoPath, extAudio, audioMap, copyVideo, startSeg);
+    public static string BuildVodPlaylist(double duration) => (string)Call("BuildVodPlaylist", duration);
+    public static bool SegReady(string dir, int n) => (bool)Call("SegReady", dir, n);
     public static void CleanupTranscodeParts() => QbitController.CleanupTranscodeParts();   // public — напрямую
     public static int EnqueueTranscode(string hash, string src, string part, string final, double duration)
         => (int)Call("EnqueueTranscode", hash, src, part, final, duration);

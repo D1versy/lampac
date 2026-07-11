@@ -691,9 +691,23 @@ public class QbitController : BaseController
     }
     #endregion
 
-    #region /qdl/hls — HLS-транскод для браузера (звук EAC3/AC3/DTS → AAC, видео copy)
-    static readonly ConcurrentDictionary<string, byte> _hlsRunning = new();
-    static readonly ConcurrentDictionary<string, DateTime> _hlsFailed = new();   // негатив-кэш упавших ffmpeg
+    #region /qdl/hls — HLS-транскод для браузера (звук EAC3/AC3/DTS → AAC; видео copy, а старые кодеки → live-x264)
+    const int HlsSegSec = 6;      // длительность сегмента (-hls_time)
+    const int HlsAheadSegs = 3;   // запрос «чуть впереди» прогресса → ждём готовности, а не рестартим ffmpeg
+
+    // один запуск ffmpeg; при hlsSeek перезапускается с -ss в точку перемотки
+    sealed class HlsSession
+    {
+        public Process proc;
+        public int startSeg;          // с какого сегмента начат запуск (-start_number); -1 = легаси с начала
+        public string ffPlaylist;     // плейлист этого запуска (маркер прогресса); в VOD-режиме клиенту не отдаётся
+        public volatile bool killed;  // прибит рестартом → не считать фейлом
+    }
+    static readonly ConcurrentDictionary<string, HlsSession> _hlsRunning = new();
+    static readonly ConcurrentDictionary<string, object> _hlsLock = new();       // пер-ключ лок kill+start
+    static readonly ConcurrentDictionary<string, double> _hlsDur = new();        // длительность источника по key; 0 = ключ в легаси-режиме
+    static readonly ConcurrentDictionary<string, bool> _hlsCopyByPath = new();   // кэш решения copy/x264 по пути (ffprobe при каждом seek-рестарте недёшев)
+    static readonly ConcurrentDictionary<string, DateTime> _hlsFailed = new();   // негатив-кэш упавших ffmpeg (key, для seek-запусков key:startSeg)
     static readonly ConcurrentDictionary<string, DateTime> _hlsTouch = new();    // последняя активность (защита от удаления при просмотре)
     static readonly TimeSpan _hlsFailTtl = TimeSpan.FromMinutes(3);
     static readonly TimeSpan _hlsTouchTtl = TimeSpan.FromMinutes(30);
@@ -719,12 +733,59 @@ public class QbitController : BaseController
             // сегмент: отдаём с FileShare.ReadWrite (ffmpeg может ещё держать соседние файлы)
             if (file.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
             {
+                int n = int.Parse(file.Substring(3, file.Length - 6));
+                if (ModInit.conf.hlsSeek && !SegReady(dir, n))
+                {
+                    double sdur = _hlsDur.TryGetValue(key, out var dv) ? dv : LoadVodInfo(key, dir);
+                    if (sdur > 0)   // VOD-режим ключа (легаси-ключи: как раньше — мгновенный 404 ниже)
+                    {
+                        if (n * (double)HlsSegSec >= sdur) return NotFound();   // за концом файла
+                        if (_hlsFailed.TryGetValue(key + ":" + n, out var fa) && DateTime.UtcNow - fa < _hlsFailTtl) return StatusCode(503);
+
+                        _hlsRunning.TryGetValue(key, out var sess);
+                        bool covered = sess != null && sess.startSeg >= 0 && sess.startSeg <= n && n <= SegLastCompleted(sess) + HlsAheadSegs;
+                        if (!covered)   // дальний seek вперёд, назад на вычищенный сегмент или ffmpeg не запущен → рестарт с -ss
+                        {
+                            var (src, extAudio, audioMap) = await ResolveHlsInputs(hash, index, audio);
+                            if (src == null) return NotFound();
+                            CleanupHls();
+                            StartHls(key, dir, src, extAudio, audioMap, n);
+                        }
+                        for (int i = 0; i < 40 && !SegReady(dir, n); i++)   // short-poll до 10с вместо слепых ретраев hls.js
+                        {
+                            if (!_hlsRunning.ContainsKey(key)) break;   // ffmpeg вышел — дальше ждать нечего
+                            await Task.Delay(250);
+                            _hlsTouch[key] = DateTime.UtcNow;
+                        }
+                        if (!SegReady(dir, n)) return NotFound();
+                    }
+                }
                 if (!System.IO.File.Exists(target)) return NotFound();
                 var ts = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                 return File(ts, "video/mp2t", enableRangeProcessing: true);
             }
 
-            // playlist.m3u8 — генерим при первом запросе
+            // playlist.m3u8 — VOD-режим: сервер сам генерит полный плейлист по длительности,
+            // ffmpeg стартует только по запросам сегментов (перемотка не ждёт линейного транскода)
+            if (ModInit.conf.hlsSeek)
+            {
+                double dur = _hlsDur.TryGetValue(key, out var dv) ? dv : LoadVodInfo(key, dir);
+                if (dur <= 0 && !_hlsDur.ContainsKey(key))
+                {
+                    // режим ключа ещё не определён: резолвим источник и пробуем VOD
+                    var (src, _, _) = await ResolveHlsInputs(hash, index, audio);
+                    if (src == null) return NotFound();
+                    dur = HlsVodDuration(key, dir, src);
+                }
+                if (dur > 0)
+                {
+                    CleanupHls();
+                    return Content(BuildVodPlaylist(dur), "application/vnd.apple.mpegurl");
+                }
+                // dur == 0 → легаси-фолбэк (короткий источник, start_time сдвинут или ffprobe не смог)
+            }
+
+            // легаси: линейный event-плейлист, который пишет сам ffmpeg (hlsSeek=false или странный источник)
             if (!System.IO.File.Exists(target))
             {
                 // негатив-кэш: ffmpeg недавно упал на этом ключе → не спамим перезапуском
@@ -734,23 +795,8 @@ public class QbitController : BaseController
                     _hlsFailed.TryRemove(key, out _);
                 }
 
-                string src, extAudio = null, audioMap = "0:a:0?";
-                using (var c = await Qbit())
-                {
-                    src = await ResolveFile(c, hash, index);
-                    if (src == null) return NotFound();
-                    if (audio.StartsWith("e")) audioMap = "0:a:" + audio.Substring(1);       // встроенная дорожка N
-                    else if (audio.StartsWith("d"))                                            // внешняя озвучка по СТУДИИ — файл для ЭТОЙ серии
-                    {
-                        extAudio = await ResolveDubFile(c, hash, index, audio);
-                        if (!string.IsNullOrEmpty(extAudio)) audioMap = "1:a:0";
-                    }
-                    else if (audio.StartsWith("f"))                                            // back-compat: внешний файл по индексу
-                    {
-                        extAudio = await ResolveFile(c, hash, int.Parse(audio.Substring(1)));
-                        if (!string.IsNullOrEmpty(extAudio)) audioMap = "1:a:0";
-                    }
-                }
+                var (src, extAudio, audioMap) = await ResolveHlsInputs(hash, index, audio);
+                if (src == null) return NotFound();
 
                 CleanupHls();
                 StartHls(key, dir, src, extAudio, audioMap);
@@ -766,10 +812,7 @@ public class QbitController : BaseController
             }
 
             // ffmpeg продолжает ДОПИСЫВАТЬ playlist.m3u8 → читаем с FileShare.ReadWrite (иначе sharing violation → 500)
-            string m3u8;
-            using (var fs = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            using (var sr = new StreamReader(fs))
-                m3u8 = await sr.ReadToEndAsync();
+            string m3u8 = ReadShared(target);
 
             // event-плейлист растёт по мере нарезки → hls.js без подсказки стартует с «живого края»,
             // и фильм начинается НЕ с начала. EXT-X-START прибивает старт к нулю (явный seek не ломает).
@@ -1096,64 +1139,314 @@ public class QbitController : BaseController
         return null;
     }
 
-    static void StartHls(string key, string dir, string videoPath, string extAudio, string audioMap)
+    // Браузер декодирует только h264/vp9/av1. hevc сознательно копируем как раньше — для него
+    // путь §Y (оффлайн-транскод в MP4: живой x264 на 4K HEVC может не тянуть). Остальное
+    // (mpeg4/XviD, mpeg2video, vc1, wmv3, msmpeg4 — старые SD-рипы .avi) при copy даёт чёрный
+    // экран со звуком → кодируем в H.264 на лету (SD для CPU — копейки).
+    static readonly HashSet<string> _hlsCopyCodecs = new(StringComparer.OrdinalIgnoreCase) { "h264", "vp9", "av1", "hevc" };
+    static bool HlsCopyVideo(string codec) => string.IsNullOrWhiteSpace(codec) || _hlsCopyCodecs.Contains(codec.Trim());
+
+    static string ProbeVideoCodec(string path)
     {
-        if (!_hlsRunning.TryAdd(key, 1)) return;   // уже генерится
         try
         {
-            Directory.CreateDirectory(dir);
             var psi = new ProcessStartInfo
             {
-                FileName = ModInit.conf.ffmpeg,
+                FileName = ModInit.conf.ffprobe,
                 UseShellExecute = false,
-                RedirectStandardError = true,
                 RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 CreateNoWindow = true
             };
-            var args = new List<string> { "-y", "-i", videoPath };
-            if (!string.IsNullOrEmpty(extAudio)) { args.Add("-i"); args.Add(extAudio); }   // внешняя озвучка — вторым входом
-            args.AddRange(new[]
-            {
-                "-map", "0:v:0?", "-map", string.IsNullOrEmpty(audioMap) ? "0:a:0?" : audioMap,
-                "-c:v", "copy",                    // видео не трогаем (AVC браузер играет)
-                "-c:a", "aac", "-ac", "2", "-b:a", "256k",   // звук → AAC stereo
-                "-f", "hls", "-hls_time", "6", "-hls_playlist_type", "event",
-                "-hls_flags", "independent_segments",
-                "-hls_segment_filename", Path.Combine(dir, "seg%05d.ts"),
-                Path.Combine(dir, "playlist.m3u8")
-            });
-            foreach (var a in args) psi.ArgumentList.Add(a);
-
+            foreach (var a in new[] { "-v", "quiet", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1", path })
+                psi.ArgumentList.Add(a);
             var p = Process.Start(psi);
-            _ = Task.Run(async () =>
-            {
-                string err = "";
-                try
-                {
-                    var errTask = p.StandardError.ReadToEndAsync();
-                    var outTask = p.StandardOutput.ReadToEndAsync();
-                    await p.WaitForExitAsync();
-                    err = await errTask; await outTask;
-                }
-                catch { }
-                _hlsRunning.TryRemove(key, out _);
-                try
-                {
-                    bool ok = p.HasExited && p.ExitCode == 0 && System.IO.File.Exists(Path.Combine(dir, "playlist.m3u8"));
-                    if (!ok)
-                    {
-                        _hlsFailed[key] = DateTime.UtcNow;
-                        Console.WriteLine("[QbitDownload] hls ffmpeg failed key=" + key + " exit=" + (p.HasExited ? p.ExitCode.ToString() : "?") + ": " + (err ?? "").Trim());
-                    }
-                    else _hlsFailed.TryRemove(key, out _);
-                }
-                catch { }
-            });
+            string o = p.StandardOutput.ReadToEnd();
+            p.StandardError.ReadToEnd();
+            p.WaitForExit(15000);
+            return o.Trim();
         }
-        catch (Exception ex)
+        catch { }
+        return "";   // не смогли пробить → copy (прежнее поведение)
+    }
+
+    // Резолв входов ffmpeg: видеофайл + внешняя озвучка + маппинг аудио (общий для плейлиста и seek-рестарта)
+    static async Task<(string src, string extAudio, string audioMap)> ResolveHlsInputs(string hash, int index, string audio)
+    {
+        string src, extAudio = null, audioMap = "0:a:0?";
+        using (var c = await Qbit())
         {
-            Console.WriteLine("[QbitDownload] hls start: " + ex);
-            _hlsRunning.TryRemove(key, out _);
+            src = await ResolveFile(c, hash, index);
+            if (src == null) return (null, null, null);
+            if (audio.StartsWith("e")) audioMap = "0:a:" + audio.Substring(1);       // встроенная дорожка N
+            else if (audio.StartsWith("d"))                                            // внешняя озвучка по СТУДИИ — файл для ЭТОЙ серии
+            {
+                extAudio = await ResolveDubFile(c, hash, index, audio);
+                if (!string.IsNullOrEmpty(extAudio)) audioMap = "1:a:0";
+            }
+            else if (audio.StartsWith("f"))                                            // back-compat: внешний файл по индексу
+            {
+                extAudio = await ResolveFile(c, hash, int.Parse(audio.Substring(1)));
+                if (!string.IsNullOrEmpty(extAudio)) audioMap = "1:a:0";
+            }
+        }
+        return (src, extAudio, audioMap);
+    }
+
+    // файл может дописываться ffmpeg-ом → только FileShare.ReadWrite (иначе sharing violation)
+    static string ReadShared(string path)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var sr = new StreamReader(fs);
+        return sr.ReadToEnd();
+    }
+
+    // сегмент финализирован муксером: есть следующий по номеру ЛИБО он вписан в плейлист какого-нибудь запуска.
+    // Обрубок от убитого процесса не проходит проверку и будет перезаписан новым запуском (-y).
+    static bool SegReady(string dir, int n)
+    {
+        try
+        {
+            if (!System.IO.File.Exists(Path.Combine(dir, "seg" + n.ToString("D5") + ".ts"))) return false;
+            if (System.IO.File.Exists(Path.Combine(dir, "seg" + (n + 1).ToString("D5") + ".ts"))) return true;
+            foreach (var m in Directory.GetFiles(dir, "*.m3u8"))
+                if (ReadShared(m).Contains("seg" + n.ToString("D5") + ".ts")) return true;
+        }
+        catch { }
+        return false;
+    }
+
+    // последний финализированный сегмент запуска (startSeg + число EXTINF - 1); пока пусто — startSeg - 1
+    static int SegLastCompleted(HlsSession s)
+    {
+        try
+        {
+            if (s.ffPlaylist != null && System.IO.File.Exists(s.ffPlaylist))
+            {
+                int cnt = Regex.Matches(ReadShared(s.ffPlaylist), "#EXTINF").Count;
+                if (cnt > 0) return Math.Max(0, s.startSeg) + cnt - 1;
+            }
+        }
+        catch { }
+        return Math.Max(0, s.startSeg) - 1;
+    }
+
+    // виртуальный VOD-плейлист на всю длительность: hls.js сразу знает таймлайн и запрашивает segNNNNN напрямую.
+    // EXTINF ровно по 6с — фактические сегменты в copy-режиме режутся по keyframe, но -copyts даёт плееру
+    // истинные PTS, и он сам выравнивает таймлайн. EXT-X-START не нужен: VOD стартует с нуля по умолчанию.
+    static string BuildVodPlaylist(double duration)
+    {
+        int n = (int)Math.Ceiling(duration / HlsSegSec);
+        var sb = new StringBuilder();
+        sb.Append("#EXTM3U\n#EXT-X-VERSION:3\n");
+        sb.Append("#EXT-X-TARGETDURATION:" + (HlsSegSec + 1) + "\n");
+        sb.Append("#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n");
+        for (int i = 0; i < n; i++)
+        {
+            double len = i == n - 1 ? duration - (double)HlsSegSec * i : HlsSegSec;
+            sb.Append("#EXTINF:" + len.ToString("F6", System.Globalization.CultureInfo.InvariantCulture) + ",\n");
+            sb.Append("seg" + i.ToString("D5") + ".ts\n");
+        }
+        sb.Append("#EXT-X-ENDLIST\n");
+        return sb.ToString();
+    }
+
+    static (double duration, double start) ProbeFormat(string path)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = ModInit.conf.ffprobe,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            foreach (var a in new[] { "-v", "quiet", "-show_entries", "format=duration,start_time", "-of", "default=noprint_wrappers=1", path })
+                psi.ArgumentList.Add(a);
+            var p = Process.Start(psi);
+            string o = p.StandardOutput.ReadToEnd();
+            p.StandardError.ReadToEnd();
+            p.WaitForExit(15000);
+            double dur = 0, start = 0;
+            foreach (var line in o.Split('\n'))
+            {
+                var kv = line.Trim().Split('=');
+                if (kv.Length != 2) continue;
+                if (kv[0] == "duration") double.TryParse(kv[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out dur);
+                else if (kv[0] == "start_time") double.TryParse(kv[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out start);
+            }
+            return (dur, start);
+        }
+        catch { }
+        return (0, 0);
+    }
+
+    // длительность источника для VOD-режима; 0 = фолбэк в легаси (короткий файл, сдвинутый start_time — риск
+    // для copyts-сетки, — или ffprobe не смог). Решение кэшируется на key; info.json переживает рестарт контейнера.
+    static double HlsVodDuration(string key, string dir, string src)
+    {
+        return _hlsDur.GetOrAdd(key, _ =>
+        {
+            var (dur, start) = ProbeFormat(src);
+            if (dur <= 10 || start >= 1.0) return 0;
+            WipeLegacyHlsDir(key, dir);
+            try
+            {
+                Directory.CreateDirectory(dir);
+                System.IO.File.WriteAllText(Path.Combine(dir, "info.json"),
+                    "{\"duration\":" + dur.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}");
+            }
+            catch { }
+            return dur;
+        });
+    }
+
+    // восстановление VOD-режима из info.json (после рестарта контейнера _hlsDur пуст, а плеер уже держит плейлист)
+    static double LoadVodInfo(string key, string dir)
+    {
+        try
+        {
+            string f = Path.Combine(dir, "info.json");
+            if (System.IO.File.Exists(f))
+            {
+                double d = JObject.Parse(System.IO.File.ReadAllText(f)).Value<double?>("duration") ?? 0;
+                if (d > 0) { _hlsDur[key] = d; return d; }
+            }
+        }
+        catch { }
+        return 0;
+    }
+
+    // папки старого линейного режима нарезаны БЕЗ -copyts (muxdelay ~1.4с) — их сегменты несовместимы
+    // с новой сеткой, смешивать нельзя. Маркер нового формата — info.json.
+    static void WipeLegacyHlsDir(string key, string dir)
+    {
+        try
+        {
+            if (Directory.Exists(dir) && System.IO.File.Exists(Path.Combine(dir, "playlist.m3u8"))
+                && !System.IO.File.Exists(Path.Combine(dir, "info.json")) && !_hlsRunning.ContainsKey(key))
+                Directory.Delete(dir, true);
+        }
+        catch { }
+    }
+
+    // Сборка аргументов ffmpeg для HLS — чистая функция (тестируется в HlsCodecTests).
+    // startSeg = -1 → легаси: линейный транскод с начала (аргументы байт-в-байт как раньше).
+    // startSeg >= 0 → seek-запуск: -ss перед КАЖДЫМ входом (input seeking), -start_number, вывод в ff{N}.m3u8;
+    // -copyts сохраняет истинные PTS источника → сегменты разных запусков в одной папке взаимно согласованы.
+    static List<string> HlsArgs(string dir, string videoPath, string extAudio, string audioMap, bool copyVideo, int startSeg = -1)
+    {
+        string ss = startSeg > 0 ? (startSeg * (long)HlsSegSec).ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
+        var args = new List<string> { "-y" };
+        if (ss != null) args.AddRange(new[] { "-ss", ss });
+        args.AddRange(new[] { "-i", videoPath });
+        if (!string.IsNullOrEmpty(extAudio))   // внешняя озвучка — вторым входом
+        {
+            if (ss != null) args.AddRange(new[] { "-ss", ss });
+            args.AddRange(new[] { "-i", extAudio });
+        }
+        args.AddRange(new[] { "-map", "0:v:0?", "-map", string.IsNullOrEmpty(audioMap) ? "0:a:0?" : audioMap });
+        if (copyVideo)
+            args.AddRange(new[] { "-c:v", "copy" });   // AVC/VP9/AV1 браузер играет; hevc — см. §Y
+        else
+        {
+            args.AddRange(new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p" });   // XviD/MPEG-2/VC-1 → H.264 на лету
+            if (startSeg >= 0)   // при реэнкоде прибиваем keyframe к сетке сегментов (t под copyts абсолютное → нужен offset)
+                args.AddRange(new[] { "-force_key_frames", "expr:gte(t," + (startSeg * HlsSegSec) + "+n_forced*" + HlsSegSec + ")" });
+        }
+        args.AddRange(new[] { "-c:a", "aac", "-ac", "2", "-b:a", "256k" });   // звук → AAC stereo
+        if (startSeg >= 0)
+            args.AddRange(new[] { "-copyts", "-muxdelay", "0", "-avoid_negative_ts", "disabled" });
+        args.AddRange(new[]
+        {
+            "-f", "hls", "-hls_time", HlsSegSec.ToString(), "-hls_playlist_type", "event",
+            "-hls_flags", "independent_segments"
+        });
+        if (startSeg >= 0) args.AddRange(new[] { "-start_number", startSeg.ToString() });
+        args.AddRange(new[]
+        {
+            "-hls_segment_filename", Path.Combine(dir, "seg%05d.ts"),
+            Path.Combine(dir, startSeg >= 0 ? "ff" + startSeg + ".m3u8" : "playlist.m3u8")
+        });
+        return args;
+    }
+
+    static void StartHls(string key, string dir, string videoPath, string extAudio, string audioMap, int startSeg = -1)
+    {
+        lock (_hlsLock.GetOrAdd(key, _ => new object()))
+        {
+            if (_hlsRunning.TryGetValue(key, out var old))
+            {
+                // легаси уже генерится; либо конкурентный запрос уже перезапустил в позицию, покрывающую нужный сегмент
+                if (startSeg < 0 || (old.startSeg >= 0 && old.startSeg <= startSeg && startSeg <= SegLastCompleted(old) + HlsAheadSegs))
+                    return;
+                old.killed = true;
+                try { old.proc?.Kill(entireProcessTree: true); old.proc?.WaitForExit(3000); } catch { }
+                _hlsRunning.TryRemove(key, out _);
+            }
+
+            var sess = new HlsSession
+            {
+                startSeg = startSeg,
+                ffPlaylist = Path.Combine(dir, startSeg >= 0 ? "ff" + startSeg + ".m3u8" : "playlist.m3u8")
+            };
+            try
+            {
+                Directory.CreateDirectory(dir);
+                var psi = new ProcessStartInfo
+                {
+                    FileName = ModInit.conf.ffmpeg,
+                    UseShellExecute = false,
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+                bool copyVideo = _hlsCopyByPath.GetOrAdd(videoPath, p => HlsCopyVideo(ProbeVideoCodec(p)));
+                foreach (var a in HlsArgs(dir, videoPath, extAudio, audioMap, copyVideo, startSeg))
+                    psi.ArgumentList.Add(a);
+
+                var p = Process.Start(psi);
+                sess.proc = p;
+                _hlsRunning[key] = sess;
+                _ = Task.Run(async () =>
+                {
+                    string err = "";
+                    try
+                    {
+                        var errTask = p.StandardError.ReadToEndAsync();
+                        var outTask = p.StandardOutput.ReadToEndAsync();
+                        await p.WaitForExitAsync();
+                        err = await errTask; await outTask;
+                    }
+                    catch { }
+                    lock (_hlsLock.GetOrAdd(key, _ => new object()))
+                    {
+                        // убираем только СВОЮ сессию (рестарт мог уже положить новую)
+                        if (_hlsRunning.TryGetValue(key, out var cur) && ReferenceEquals(cur, sess))
+                            _hlsRunning.TryRemove(key, out _);
+                    }
+                    try
+                    {
+                        string fkey = sess.startSeg >= 0 ? key + ":" + sess.startSeg : key;   // фейл seek-запуска не должен блокировать весь ключ
+                        bool ok = p.HasExited && p.ExitCode == 0 && System.IO.File.Exists(sess.ffPlaylist);
+                        if (ok) _hlsFailed.TryRemove(fkey, out _);
+                        else if (!sess.killed)   // прибитый рестартом процесс — не фейл
+                        {
+                            _hlsFailed[fkey] = DateTime.UtcNow;
+                            Console.WriteLine("[QbitDownload] hls ffmpeg failed key=" + key + " startSeg=" + sess.startSeg + " exit=" + (p.HasExited ? p.ExitCode.ToString() : "?") + ": " + (err ?? "").Trim());
+                        }
+                    }
+                    catch { }
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[QbitDownload] hls start: " + ex);
+                if (_hlsRunning.TryGetValue(key, out var cur) && ReferenceEquals(cur, sess))
+                    _hlsRunning.TryRemove(key, out _);
+            }
         }
     }
 
@@ -1172,6 +1465,7 @@ public class QbitController : BaseController
                 try { Directory.Delete(d, true); } catch { }
                 _hlsTouch.TryRemove(key, out _);
                 _hlsFailed.TryRemove(key, out _);
+                _hlsDur.TryRemove(key, out _);   // источник заменён → длительность/режим переопределятся заново
             }
         }
         catch { }

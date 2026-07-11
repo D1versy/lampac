@@ -28,6 +28,10 @@ public class ModuleConf : ModuleBaseConf
     public string ffprobe { get; set; } = "/lampac/data/ffprobe";
     public long hlsCacheCapGb { get; set; } = 30;
 
+    // Быстрая перемотка HLS: виртуальный VOD-плейлист + перезапуск ffmpeg с -ss в точку seek.
+    // false = старое линейное поведение (event-плейлист, транскод строго с начала).
+    public bool hlsSeek { get; set; } = true;
+
     // Слежение за сериалами: как часто проверять обновление раздач (часы).
     public int watchIntervalHours { get; set; } = 6;
 
