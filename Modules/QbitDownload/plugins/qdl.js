@@ -175,21 +175,27 @@
         return !!t && !t.local && t.state !== 'local' && (t.progress || 0) >= 1;
     }
 
-    // поллинг прогресса транскода: тост каждые ~10%, финальный тост по done/error
+    // поллинг прогресса транскода: «в очереди (N)» один раз, тост каждые ~10%, финал по done/error.
+    // ⚠ ветка queued обязана продолжать поллинг, иначе полл тихо умрёт на стоящей в очереди задаче
     var tcPolls = {};
     function pollTranscode(hash, title) {
         if (tcPolls[hash]) return;
-        var lastDecile = 0;
+        var lastDecile = 0, toldQueued = false, sawAlive = false;
         tcPolls[hash] = setInterval(function () {
             req(API + '/qdl/transcode/status?hash=' + hash, function (s) {
                 s = s || {};
-                if (s.state === 'running') {
+                if (s.state === 'queued') {
+                    sawAlive = true;
+                    if (!toldQueued) { toldQueued = true; Lampa.Noty.show('🎬 ' + (title || 'Транскодирование') + ': в очереди (' + (s.position || 1) + ')'); }
+                } else if (s.state === 'running') {
+                    sawAlive = true;
                     var d = Math.floor((s.progress || 0) * 10);
                     if (d > lastDecile) { lastDecile = d; Lampa.Noty.show('🎬 ' + (title || 'Транскодирование') + ': ' + (d * 10) + '%'); }
                 } else {
                     clearInterval(tcPolls[hash]); delete tcPolls[hash];
                     if (s.state === 'done') Lampa.Noty.show('✓ ' + (title || 'Загрузка') + ' — теперь MP4, торрент удалён');
                     else if (s.state === 'error') Lampa.Noty.show('Транскодирование не удалось: ' + (s.error || 'ошибка'));
+                    else if (s.state === 'none' && sawAlive) Lampa.Noty.show('Транскодирование прервано (перезапуск сервера) — запусти ещё раз');
                 }
             });
         }, 5000);
@@ -253,6 +259,7 @@
     // выбор озвучки запоминается на сериал (по hash)
     function getAudioPref(hash) { try { return (Lampa.Storage.get('qdl_audio2', {}) || {})[hash]; } catch (e) { return null; } }
     function setAudioPref(hash, id) { try { var m = Lampa.Storage.get('qdl_audio2', {}) || {}; m[hash] = id; Lampa.Storage.set('qdl_audio2', m); } catch (e) {} }
+    function dropAudioPref(hash) { try { var m = Lampa.Storage.get('qdl_audio2', {}) || {}; if (m[hash] !== undefined) { delete m[hash]; Lampa.Storage.set('qdl_audio2', m); } } catch (e) {} }
 
     // определить озвучку (из памяти или спросить один раз), затем cb(audioId)
     function ensureAudio(hash, index, cb) {
@@ -312,7 +319,24 @@
             else playLocal(hash, vids.length ? vids[0].index : -1, name);
         }, function () { playLocal(hash, -1, name); });
     }
-    function watch(item) { watchByHash(item.hash, (item.meta && item.meta.title) || item.name); }
+
+    // гейт недокачанного: раздача с progress<1 — предупредить, что видна только скачанная часть.
+    // Для сериала предупреждение покажется даже если выбранная серия скачана (per-file прогресс вне скоупа)
+    function confirmPartial(item, run) {
+        var p = (item && typeof item.progress === 'number') ? item.progress : 1;   // нет данных → fail-open
+        if (p >= 1 || (item && (item.local || item.state === 'local'))) { run(); return; }
+        var pct = Math.round(p * 100);
+        Lampa.Select.show({
+            title: 'Ещё качается (' + pct + '%) — показана будет только скачанная часть',
+            items: [{ title: 'Смотреть всё равно', ok: true }, { title: 'Отмена' }],
+            onSelect: function (a) { if (a.ok) run(); else Lampa.Controller.toggle('content'); },
+            onBack: function () { Lampa.Controller.toggle('content'); }
+        });
+    }
+
+    function watch(item) {
+        confirmPartial(item, function () { watchByHash(item.hash, (item.meta && item.meta.title) || item.name); });
+    }
 
     // ───────── Открытие загрузки: НАСТОЯЩАЯ полная карточка (вся инфа), но в режиме «одна кнопка» ─────────
     function openDownload(item) {
@@ -322,10 +346,11 @@
                 url: '', component: 'full', id: m.id,
                 method: m.media_type === 'tv' ? 'tv' : 'movie',
                 card: m, source: m.source || 'tmdb',
-                qdl_hash: item.hash    // маркер: открыто из «Загрузок» → addButton оставит одну кнопку «Смотреть»
+                qdl_hash: item.hash,   // маркер: открыто из «Загрузок» → addButton оставит одну кнопку «Смотреть»
+                qdl_progress: (typeof item.progress === 'number' ? item.progress : 1)   // для гейта недокачанного на карточке
             });
         } else {
-            watchByHash(item.hash, item.name);   // нет метаданных → просто играем
+            confirmPartial(item, function () { watchByHash(item.hash, item.name); });   // нет метаданных → просто играем
         }
     }
 
@@ -696,15 +721,27 @@
                 else if (b.act === 'mp4') {
                     req(API + '/qdl/transcode?hash=' + t.hash, function (r) {
                         if (!r || !r.success) { Lampa.Noty.show('Транскодирование: ' + ((r && r.error) || 'ошибка')); return; }
-                        Lampa.Noty.show('🎬 Транскодирование запущено — это займёт заметное время, сообщу о прогрессе');
+                        if (r.queued > 1) Lampa.Noty.show('🎬 В очереди (' + r.queued + ') — сообщу о прогрессе');
+                        else Lampa.Noty.show('🎬 Транскодирование запущено — это займёт заметное время, сообщу о прогрессе');
                         pollTranscode(t.hash, (t.meta && t.meta.title) || t.name);
                     }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
                 }
-                else if (b.act === 'del')
-                    req(API + '/qdl/delete?hash=' + t.hash + '&deleteFiles=true', function () {
-                        Lampa.Noty.show('Удалено');
-                        Lampa.Activity.replace();
+                else if (b.act === 'del') {
+                    // подтверждение: одно случайное нажатие не должно безвозвратно удалять файлы
+                    Lampa.Select.show({
+                        title: 'Удалить «' + ((t.meta && t.meta.title) || t.name) + '» с файлами?',
+                        items: [{ title: 'Удалить', ok: true }, { title: 'Отмена' }],
+                        onSelect: function (a) {
+                            if (!a.ok) { Lampa.Controller.toggle('content'); return; }
+                            req(API + '/qdl/delete?hash=' + t.hash + '&deleteFiles=true', function () {
+                                dropAudioPref(t.hash);   // подчистить запомненную озвучку (localStorage)
+                                Lampa.Noty.show('Удалено');
+                                Lampa.Activity.replace();
+                            });
+                        },
+                        onBack: function () { Lampa.Controller.toggle('content'); }
                     });
+                }
             },
             onBack: function () { Lampa.Controller.toggle('content'); }
         });
@@ -740,14 +777,17 @@
             Lampa.Select.show({
                 title: 'Выбери раздачу для загрузки на диск',
                 items: list.slice(0, 60).map(function (t) {
+                    var codecBad = t.codec === 'hevc' || t.codec === 'av1';   // браузер такое не декодирует (§Y)
                     return {
                         title: t.title,
-                        subtitle: [(t.quality ? t.quality + 'p' : ''), t.size, t.tracker, (t.sid ? ('сидов: ' + t.sid) : '')].filter(Boolean).join('  •  '),
+                        subtitle: [(codecBad ? '⚠ ' + t.codec.toUpperCase() : ''), (t.quality ? t.quality + 'p' : ''), t.size, t.tracker, (t.sid ? ('сидов: ' + t.sid) : '')].filter(Boolean).join('  •  '),
                         t: t
                     };
                 }),
                 onSelect: function (a) {
                     Lampa.Controller.toggle('content');
+                    if (a.t.codec === 'hevc' || a.t.codec === 'av1')
+                        Lampa.Noty.show(a.t.codec.toUpperCase() + ': в браузере без транскода не заиграет (после загрузки — долгое нажатие → «Транскодировать в MP4»)');
                     var q = a.t.magnet
                         ? ('magnet=' + encodeURIComponent(a.t.magnet))
                         : ('parselink=' + encodeURIComponent(a.t.parselink || ''));
@@ -789,7 +829,11 @@
                 render.addClass('qdl-only');                 // CSS прячет все прочие кнопки
                 if (!$('.qdl-watch-btn', render).length) {
                     var w = $('<div class="full-start__button selector qdl-watch-btn">' + ICON + '<span>Смотреть</span></div>');
-                    w.on('hover:enter', function () { watchByHash(active.qdl_hash, movie.title || movie.name); });
+                    w.on('hover:enter', function () {
+                        // progress прокинут из openDownload; нет поля (восстановленная активность) → fail-open
+                        confirmPartial({ hash: active.qdl_hash, progress: (typeof active.qdl_progress === 'number' ? active.qdl_progress : 1) },
+                            function () { watchByHash(active.qdl_hash, movie.title || movie.name); });
+                    });
                     // удержание (long-press) на кнопке → меню управления (следить/удалить) — для дискаверабилити
                     w.on('hover:long', function () {
                         req(API + '/qdl/list', function (list) {

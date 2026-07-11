@@ -29,6 +29,10 @@ public class ModInit : IModuleLoaded
         }
         catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] db init: " + ex); }
 
+        // обрывки прерванных транскодов (*.part) — мусор после рестарта, чистим сразу
+        try { QbitController.CleanupTranscodeParts(); }
+        catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] part cleanup: " + ex); }
+
         // фоновое слежение за сериалами: первая проверка через 10 мин, далее каждые N часов
         int hours = (conf != null && conf.watchIntervalHours > 0) ? conf.watchIntervalHours : 6;
         _watchTimer?.Dispose();

@@ -39,9 +39,13 @@ public static class Access
         catch (TargetInvocationException tie) { throw tie.InnerException ?? tie; }
     }
 
+    static FieldInfo F(string name) =>
+        C.GetField(name, SF) ?? throw new MissingFieldException("QbitController." + name);
+
     // ── simple pure helpers ───────────────────────────────────────────────
     public static string HumanSize(long b) => (string)Call("HumanSize", b);
     public static int QualityFromTitle(string t) => (int)Call("QualityFromTitle", t);
+    public static string CodecFromTitle(string t) => (string)Call("CodecFromTitle", t);
     public static bool ValidHash(string h) => (bool)Call("ValidHash", h);
     public static string ConfinedCombine(string baseDir, string rel) => (string)Call("ConfinedCombine", baseDir, rel);
     public static string MimeType(string p) => (string)Call("MimeType", p);
@@ -84,6 +88,64 @@ public static class Access
             res.Add(((string, string, int))item);   // ValueTuple is a shared framework type — direct unbox
         return res;
     }
+
+    // ── purge / transcode queue (§Z) ──────────────────────────────────────
+    public static void PurgeCache(string hash) => Call("PurgeCache", hash);
+    public static void CleanupTranscodeParts() => QbitController.CleanupTranscodeParts();   // public — напрямую
+    public static int EnqueueTranscode(string hash, string src, string part, string final, double duration)
+        => (int)Call("EnqueueTranscode", hash, src, part, final, duration);
+    public static int QueuePosition(string hash) => (int)Call("QueuePosition", hash);
+    public static void KickWorker() => Call("KickWorker");
+
+    /// <summary>Job из приватного _tcJobs (null если нет).</summary>
+    public static TcJobView TcJob(string hash)
+    {
+        var dict = (IDictionary)F("_tcJobs").GetValue(null);
+        var raw = dict[hash];
+        return raw == null ? null : new TcJobView(raw);
+    }
+
+    /// <summary>Посадить job с нужным state в _tcJobs (для детерминированных дедуп-тестов).</summary>
+    public static void TcJobSet(string hash, string state)
+    {
+        var t = TcJobView.T;
+        var job = Activator.CreateInstance(t);
+        t.GetField("state").SetValue(job, state);
+        ((IDictionary)F("_tcJobs").GetValue(null))[hash] = job;
+    }
+
+    /// <summary>Положить элемент прямо в _tcQueue БЕЗ KickWorker (для тестов QueuePosition).</summary>
+    public static void TcEnqueueRaw(string hash)
+    {
+        var t = C.GetNestedType("TcQueueItem", BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("QbitController+TcQueueItem not found");
+        var it = Activator.CreateInstance(t);
+        t.GetField("hash").SetValue(it, hash);
+        var q = F("_tcQueue").GetValue(null);
+        q.GetType().GetMethod("Enqueue").Invoke(q, new[] { it });
+    }
+
+    /// <summary>Очередь пуста и воркер не крутится.</summary>
+    public static bool TcQueueIdle()
+    {
+        var q = F("_tcQueue").GetValue(null);
+        bool empty = (bool)q.GetType().GetProperty("IsEmpty").GetValue(q);
+        int worker = (int)F("_tcWorker").GetValue(null);
+        return empty && worker == 0;
+    }
+}
+
+/// <summary>Reflection view над приватным QbitController+TcJob (state/progress/error).</summary>
+public sealed class TcJobView
+{
+    internal static readonly Type T = typeof(QbitController).GetNestedType("TcJob", BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("QbitController+TcJob not found");
+    public readonly object Raw;
+    public TcJobView(object raw) { Raw = raw; }
+
+    public string state => (string)T.GetField("state").GetValue(Raw);
+    public double progress => (double)T.GetField("progress").GetValue(Raw);
+    public string error => (string)T.GetField("error").GetValue(Raw);
 }
 
 /// <summary>Reflection view over the private nested <c>QbitController+Ep</c> struct-like class.</summary>

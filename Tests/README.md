@@ -19,7 +19,7 @@ dotnet test Tests/QbitDownload.Tests/QbitDownload.Tests.csproj \
   --settings Tests/QbitDownload.Tests/coverlet.runsettings --collect:"XPlat Code Coverage"
 ```
 
-Текущий статус: **626 C# + 211 JS = 837 тестов, все зелёные.**
+Текущий статус: **650 C# + 224 JS = 874 теста, все зелёные.**
 
 ## Как это устроено
 
@@ -46,7 +46,13 @@ qBit-хелперы (`QbitAddMagnet/ResolveFile/ResolveDubFile`) через фе
 **JS** — `slimCard` (детект tv/movie), `cleanName`, `videoFiles`, `esc`, `streamUrl`/`isBrowser` (HLS vs direct),
 `relTime`, premium-разблокировка и снятие бренда « - CUB» в `lampainit-invc.js`; матчинг «карточка ↔ загрузка»
 (`findDownload`/`normTitle`/`isSerialName` + jsdom-интеграция `addButton`, `qdl-match.test.js`) — строгий id+media_type,
-имя только для безметочных раздач (регрессия «Дюна ↔ Дюна: Пророчество»).
+имя только для безметочных раздач (регрессия «Дюна ↔ Дюна: Пророчество»); UX-гарды и очередь транскода
+(`qdl-guards.test.js`): `confirmPartial` (гейт недокачанного), двухступенчатое удаление, `dropAudioPref`,
+бейдж «⚠ HEVC» в поиске, `pollTranscode` со статусом queued (полл не умирает на очереди).
+
+**C# (§Z)** — `CodecFromTitle`, `PurgeCache` (чистка сирот: порядок seriesKey→watch→db→файлы, гарды re-grab
+дублей и вырожденного ключа), очередь транскода (`EnqueueTranscode`/`QueuePosition`/выживаемость воркера),
+`CleanupTranscodeParts` — `ImprovementsTests.cs`.
 
 Покрытие ядра `QbitController` (синхронная логика): **~57% строк / ~79% веток**; qBit-хелперы 89–100% веток;
 `Ep` и `SqlContext` — 100% строк. Непокрыто намеренно: HTTP-экшены контроллера (нужен end-to-end хост + фейк qBit)

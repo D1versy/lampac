@@ -144,7 +144,11 @@ function loadQdl(opts) {
     navigator: opts.navigator || { userAgent: '' },
     $: opts.$ || make$(),
     fetch: opts.fetch || (() => Promise.resolve({ json: () => Promise.resolve({}) })),
-    console, setTimeout, clearTimeout, setInterval, clearInterval,
+    console,
+    setTimeout: opts.setTimeout || setTimeout,
+    clearTimeout: opts.clearTimeout || clearTimeout,
+    setInterval: opts.setInterval || setInterval,     // инъецируемы: poll-тесты дёргают тик руками
+    clearInterval: opts.clearInterval || clearInterval,
   };
   sandbox.window.Lampa = sandbox.Lampa;
   vm.createContext(sandbox);
@@ -181,7 +185,7 @@ function loadLampaInit(opts) {
 
 // ── shared qdl.js source transform (strip auto-start, export internal helpers) ──
 const QDL_TAIL = "if (window.appready) start();\n    else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') start(); });";
-const QDL_EXPORT = "window.__qdl = { esc: esc, names: names, slimCard: slimCard, cleanName: cleanName, videoFiles: videoFiles, baseName: baseName, isBrowser: isBrowser, isMobile: isMobile, streamUrl: streamUrl, posterUrl: posterUrl, relTime: relTime, badge: badge, chip: chip, getAudioPref: getAudioPref, setAudioPref: setAudioPref, updateNotiBadge: updateNotiBadge, ensureHeaderNoti: ensureHeaderNoti, buildHeaderNoti: buildHeaderNoti, normTitle: normTitle, isSerialName: isSerialName, isSeasonTail: isSeasonTail, findDownload: findDownload, addButton: addButton, canTranscode: canTranscode, quickMenu: quickMenu };";
+const QDL_EXPORT = "window.__qdl = { esc: esc, names: names, slimCard: slimCard, cleanName: cleanName, videoFiles: videoFiles, baseName: baseName, isBrowser: isBrowser, isMobile: isMobile, streamUrl: streamUrl, posterUrl: posterUrl, relTime: relTime, badge: badge, chip: chip, getAudioPref: getAudioPref, setAudioPref: setAudioPref, updateNotiBadge: updateNotiBadge, ensureHeaderNoti: ensureHeaderNoti, buildHeaderNoti: buildHeaderNoti, normTitle: normTitle, isSerialName: isSerialName, isSeasonTail: isSeasonTail, findDownload: findDownload, addButton: addButton, canTranscode: canTranscode, quickMenu: quickMenu, confirmPartial: confirmPartial, watch: watch, openDownload: openDownload, chooseAndDownload: chooseAndDownload, pollTranscode: pollTranscode, dropAudioPref: dropAudioPref };";
 function qdlSource() {
   // CRLF→LF: после git checkout с autocrlf файл на диске может оказаться в CRLF — якорь с \n обязан находиться
   const src = fs.readFileSync(QDL, 'utf8').replace(/\r\n/g, '\n');
