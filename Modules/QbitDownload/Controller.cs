@@ -588,6 +588,7 @@ public class QbitController : BaseController
                 if (deleteFiles && !string.IsNullOrEmpty(lp) && System.IO.File.Exists(lp))
                     try { System.IO.File.Delete(lp); } catch (Exception ex) { Console.WriteLine("[QbitDownload] delete local file: " + ex.Message); }
                 try { System.IO.File.Delete(LocalPath(hash)); } catch { }
+                DropHlsCache(hash);
                 return Json(new { success = true });
             }
 
@@ -598,6 +599,7 @@ public class QbitController : BaseController
                 new KeyValuePair<string, string>("deleteFiles", deleteFiles ? "true" : "false")
             });
             var r = await c.PostAsync("/api/v2/torrents/delete", form);
+            if (r.IsSuccessStatusCode) DropHlsCache(hash);
             return Json(new { success = r.IsSuccessStatusCode });
         }
         catch (Exception ex)
@@ -1134,6 +1136,26 @@ public class QbitController : BaseController
         }
     }
 
+    // сбросить HLS-кэш всех ключей раздачи (hash_index[_audio]) — источник заменён/удалён,
+    // иначе сервер продолжит отдавать сегменты, нарезанные из СТАРОГО файла (напр. HEVC до транскода)
+    static void DropHlsCache(string hash)
+    {
+        try
+        {
+            string root = ModInit.conf.hlsPath;
+            if (!Directory.Exists(root) || string.IsNullOrEmpty(hash)) return;
+            foreach (var d in Directory.GetDirectories(root, hash + "_*"))
+            {
+                string key = Path.GetFileName(d);
+                if (_hlsRunning.ContainsKey(key)) continue;   // активный ffmpeg не трогаем
+                try { Directory.Delete(d, true); } catch { }
+                _hlsTouch.TryRemove(key, out _);
+                _hlsFailed.TryRemove(key, out _);
+            }
+        }
+        catch { }
+    }
+
     // не даём HLS-кэшу (дублирует видео) разрастаться: при превышении капа чистим старые папки
     static void CleanupHls()
     {
@@ -1327,6 +1349,9 @@ public class QbitController : BaseController
                 }
             }
             catch { }
+
+            // HLS-кэш нарезан из СТАРОГО (HEVC) файла — сбросить, иначе браузер продолжит получать его сегменты
+            DropHlsCache(hash);
 
             job.progress = 1.0;
             job.state = "done";
