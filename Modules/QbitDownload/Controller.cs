@@ -755,6 +755,12 @@ public class QbitController : BaseController
             using (var fs = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             using (var sr = new StreamReader(fs))
                 m3u8 = await sr.ReadToEndAsync();
+
+            // event-плейлист растёт по мере нарезки → hls.js без подсказки стартует с «живого края»,
+            // и фильм начинается НЕ с начала. EXT-X-START прибивает старт к нулю (явный seek не ломает).
+            if (!m3u8.Contains("#EXT-X-START"))
+                m3u8 = m3u8.Replace("#EXTM3U", "#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES");
+
             return Content(m3u8, "application/vnd.apple.mpegurl");
         }
         catch (Exception ex)
