@@ -406,20 +406,23 @@ public class QbitController : BaseController
                     foreach (var lf in Directory.GetFiles(localDir, "*.json"))
                     {
                         string h = Path.GetFileNameWithoutExtension(lf);
-                        if (!ValidHash(h) || seen.Contains(h)) continue;
+                        if (!ValidHash(h) || seen.Contains(h)) continue;   // оверлей при живом торренте сюда не попадёт (hash уже в списке)
                         JObject loc = LoadLocal(h);
-                        string path = loc?.Value<string>("path");
-                        if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) continue;
+                        var lfs = LocalFiles(loc);
+                        lfs.RemoveAll(f => !System.IO.File.Exists(f.path));
+                        if (lfs.Count == 0) continue;
+                        long lsize = 0; foreach (var f in lfs) lsize += f.size;
+                        string cpath = loc.Value<string>("dir") ?? lfs[0].path;
                         var item = new JObject
                         {
                             ["hash"] = h,
-                            ["name"] = loc.Value<string>("name") ?? Path.GetFileName(path),
+                            ["name"] = loc.Value<string>("name") ?? Path.GetFileName(lfs[0].path),
                             ["progress"] = 1.0,
                             ["state"] = "local",
                             ["local"] = true,
-                            ["size"] = loc.Value<long?>("size") ?? 0,
-                            ["save_path"] = Path.GetDirectoryName(path),
-                            ["content_path"] = path,
+                            ["size"] = loc.Value<long?>("size") ?? lsize,
+                            ["save_path"] = lfs.Count == 1 ? Path.GetDirectoryName(lfs[0].path) : loc.Value<string>("dir"),
+                            ["content_path"] = cpath,
                             ["has_poster"] = System.IO.File.Exists(PosterPath(h)),
                             ["watched"] = false
                         };
@@ -449,25 +452,40 @@ public class QbitController : BaseController
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            // локальный транскод: один mp4-файл в том же формате ответа, что qBit files
+            // локальный транскод: файлы маркера в том же формате ответа, что qBit files.
+            // Оверлей (торрент жив) идёт обычным qBit-путём — клиент видит торрент-список,
+            // а подмена на mp4 происходит в ResolveFile при воспроизведении.
             var loc = LoadLocal(hash);
-            if (loc != null)
+            if (loc != null && !LocalIsOverlay(loc))
             {
-                string lp = loc.Value<string>("path");
-                if (string.IsNullOrEmpty(lp) || !System.IO.File.Exists(lp)) return ContentTo("[]", "application/json; charset=utf-8");
-                var one = new JArray { new JObject
+                var arr = new JArray();
+                foreach (var f in LocalFiles(loc))
                 {
-                    ["index"] = 0,
-                    ["name"] = Path.GetFileName(lp),
-                    ["size"] = new FileInfo(lp).Length,
-                    ["progress"] = 1.0,
-                    ["priority"] = 1
-                } };
-                return ContentTo(one.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+                    if (!System.IO.File.Exists(f.path)) continue;
+                    arr.Add(new JObject
+                    {
+                        ["index"] = f.index,
+                        ["name"] = f.name,
+                        ["size"] = f.size > 0 ? f.size : new FileInfo(f.path).Length,
+                        ["progress"] = 1.0,
+                        ["priority"] = 1
+                    });
+                }
+                return ContentTo(arr.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
             }
 
             using var c = await Qbit();
             string raw = await c.GetStringAsync($"/api/v2/torrents/files?hash={HttpUtility.UrlEncode(hash)}");
+            // оверлей-сирота: торрент удалили извне, а маркер остался → фолбэк на файлы маркера
+            if (loc != null && string.IsNullOrWhiteSpace(raw?.Trim('[', ']', ' ')))
+            {
+                var arr = new JArray();
+                foreach (var f in LocalFiles(loc))
+                    if (System.IO.File.Exists(f.path))
+                        arr.Add(new JObject { ["index"] = f.index, ["name"] = f.name, ["size"] = f.size, ["progress"] = 1.0, ["priority"] = 1 });
+                if (arr.Count > 0)
+                    return ContentTo(arr.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+            }
             return ContentTo(raw ?? "[]", "application/json; charset=utf-8");
         }
         catch (Exception ex)
@@ -501,25 +519,24 @@ public class QbitController : BaseController
     // Находит локальный путь к видеофайлу торрента (index<0 → самый большой). null если нет.
     static async Task<string> ResolveFile(HttpClient c, string hash, int index)
     {
-        // локальный (не-торрент) файл — транскод: путь хранится в маркере, qBit не спрашиваем
+        // локальный (не-торрент) файл — транскод: путь хранится в маркере, qBit не спрашиваем.
+        // Оверлей — идём в qBit (индексы клиента = торрент-индексы), подмена на mp4 ниже.
         var loc = LoadLocal(hash);
-        if (loc != null)
-        {
-            string lp = loc.Value<string>("path");
-            return (!string.IsNullOrEmpty(lp) && System.IO.File.Exists(lp)) ? lp : null;
-        }
+        var lfs = loc != null ? LocalFiles(loc) : null;
+        if (loc != null && !LocalIsOverlay(loc))
+            return PickLocal(lfs, index)?.path;
 
         string he = HttpUtility.UrlEncode(hash);
 
         string infoRaw = await c.GetStringAsync($"/api/v2/torrents/info?hashes={he}");
         var info = JArray.Parse(infoRaw);
-        if (info.Count == 0) return null;
+        if (info.Count == 0) return PickLocal(lfs ?? new List<LocalFile>(), index)?.path;   // оверлей-сирота: торрент удалён извне
         string savePath = info[0].Value<string>("save_path") ?? ModInit.conf.downloadsPath;
         string contentPath = info[0].Value<string>("content_path");
 
         string filesRaw = await c.GetStringAsync($"/api/v2/torrents/files?hash={he}");
         var files = JArray.Parse(filesRaw);
-        if (files.Count == 0) return null;
+        if (files.Count == 0) return PickLocal(lfs ?? new List<LocalFile>(), index)?.path;
 
         JToken file = null;
         if (index >= 0)
@@ -533,6 +550,11 @@ public class QbitController : BaseController
         if (file == null) return null;
 
         string rel = file.Value<string>("name");
+
+        // оверлей: серия уже транскожена → отдаём mp4-копию вместо торрент-оригинала (HEVC)
+        var ov = OverlayFor(lfs, rel);
+        if (ov != null) return ov.path;
+
         string full = null;
         if (files.Count == 1 && !string.IsNullOrEmpty(contentPath) && System.IO.File.Exists(contentPath))
             full = contentPath;
@@ -595,13 +617,11 @@ public class QbitController : BaseController
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            // локальный транскод: удаляем файл + маркер + все следы (в qBit его уже нет)
+            // локальный транскод: удаляем файлы + маркер + все следы (в qBit его уже нет)
             var loc = LoadLocal(hash);
-            if (loc != null)
+            if (loc != null && !LocalIsOverlay(loc))
             {
-                string lp = loc.Value<string>("path");
-                if (deleteFiles && !string.IsNullOrEmpty(lp) && System.IO.File.Exists(lp))
-                    try { System.IO.File.Delete(lp); } catch (Exception ex) { Console.WriteLine("[QbitDownload] delete local file: " + ex.Message); }
+                if (deleteFiles) DeleteLocalFiles(loc);
                 DropHlsCache(hash);
                 PurgeCache(hash);   // маркер local/<hash>.json удалит тоже
                 return Json(new { success = true });
@@ -614,7 +634,12 @@ public class QbitController : BaseController
                 new KeyValuePair<string, string>("deleteFiles", deleteFiles ? "true" : "false")
             });
             var r = await c.PostAsync("/api/v2/torrents/delete", form);
-            if (r.IsSuccessStatusCode) { DropHlsCache(hash); PurgeCache(hash); }
+            if (r.IsSuccessStatusCode)
+            {
+                if (loc != null && deleteFiles) DeleteLocalFiles(loc);   // оверлей: mp4-копии удаляем вместе с торрентом
+                DropHlsCache(hash);
+                PurgeCache(hash);
+            }
             return Json(new { success = r.IsSuccessStatusCode });
         }
         catch (Exception ex)
@@ -835,14 +860,16 @@ public class QbitController : BaseController
         if (!ValidHash(hash)) return BadRequest();
         try
         {
-            // локальный транскод: только встроенные дорожки (внешних озвучек у одиночного mp4 нет)
+            // локальный транскод: только встроенные дорожки (внешних озвучек у mp4-копий нет).
+            // Оверлей идёт qBit-путём: ResolveFile сам подменит видео на mp4, а внешние
+            // озвучки (d*) из живого торрента продолжают работать.
             var locA = LoadLocal(hash);
-            if (locA != null)
+            if (locA != null && !LocalIsOverlay(locA))
             {
                 var lopts = new JArray();
-                string lp = locA.Value<string>("path");
-                if (!string.IsNullOrEmpty(lp) && System.IO.File.Exists(lp))
-                    foreach (var a in ProbeAudio(lp)) lopts.Add(a);
+                var lfA = PickLocal(LocalFiles(locA), index);
+                if (lfA != null)
+                    foreach (var a in ProbeAudio(lfA.path)) lopts.Add(a);
                 return ContentTo(lopts.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
             }
 
@@ -1504,22 +1531,62 @@ public class QbitController : BaseController
     // Транскод: libx264 + AAC на все аудиодорожки (метаданные языка/студии сохраняются),
     // по успеху пишется local-маркер (тот же infohash — мета/постер/карточка не мигрируют),
     // затем торрент удаляется из qBittorrent вместе с исходными файлами.
-    sealed class TcJob { public volatile string state = "running"; public double progress; public volatile string error; }
-    sealed class TcQueueItem { public string hash, src, part, final; public double duration; }
+    sealed class TcJob
+    {
+        public volatile string state = "running"; public double progress; public volatile string error;
+        public volatile string file;       // имя текущей серии (для тостов клиента)
+        public volatile int fileDone;      // готово файлов
+        public volatile int filesTotal;    // всего файлов (1 = фильм, статус без новых полей)
+    }
+    sealed class TcFile { public int index; public string src, part, final; public long size; public double duration; }
+    sealed class TcQueueItem
+    {
+        public string hash;
+        public bool finalize;              // true: по успеху удалить торрент + снять слежение; false: оверлей (торрент жив)
+        public string name;                // имя раздачи (для маркера сериала)
+        public string dir;                 // папка mp4-копий сериала; null = фильм (старый плоский маркер)
+        public List<TcFile> files;         // серии; может РАСТИ во время работы (авто-транскод докачавшихся) — доступ под _tcEnqLock
+    }
     static readonly ConcurrentDictionary<string, TcJob> _tcJobs = new();
-    static readonly ConcurrentQueue<TcQueueItem> _tcQueue = new();   // очередь: транскоды идут по одному (CPU)
-    static readonly object _tcEnqLock = new();                       // дедуп одновременных запросов одного hash
+    static readonly ConcurrentQueue<TcQueueItem> _tcQueue = new();   // очередь: транскоды идут по одному
+    static readonly object _tcEnqLock = new();                       // дедуп + синхронизация списка files
     static int _tcWorker = 0;                                        // 1 = воркер-цикл жив
+    static volatile TcQueueItem _tcCurrent;                          // выполняемый элемент (для дозаписи серий)
 
-    // поставить в очередь; возвращает позицию (1 = следующий). Повторный hash не дублируется.
+    // Совместимость: старая сигнатура одиночного файла (фильм) — используется прежним путём и тестами.
     static int EnqueueTranscode(string hash, string src, string part, string final, double duration)
+        => EnqueueTranscode(hash, finalize: true, name: null, dir: null,
+            new List<TcFile> { new TcFile { index = -1, src = src, part = part, final = final, duration = duration } });
+
+    // Поставить файлы в очередь; повторные (hash, index) не дублируются, новые серии
+    // ДОЗАПИСЫВАЮТСЯ в queued/running элемент того же hash (воркер дочитает список).
+    static int EnqueueTranscode(string hash, bool finalize, string name, string dir, List<TcFile> files)
     {
         lock (_tcEnqLock)
         {
-            if (!(_tcJobs.TryGetValue(hash, out var ex) && (ex.state == "queued" || ex.state == "running")))
+            TcQueueItem target = (_tcCurrent != null && _tcCurrent.hash == hash) ? _tcCurrent : null;
+            if (target == null)
+                foreach (var q in _tcQueue.ToArray())
+                    if (q.hash == hash) { target = q; break; }
+
+            if (target != null)
             {
-                _tcJobs[hash] = new TcJob { state = "queued", progress = 0 };
-                _tcQueue.Enqueue(new TcQueueItem { hash = hash, src = src, part = part, final = final, duration = duration });
+                target.files ??= new List<TcFile>();
+                var covered = new HashSet<int>();
+                foreach (var f in target.files) covered.Add(f.index);
+                foreach (var f in files)
+                    if (!covered.Contains(f.index)) { target.files.Add(f); covered.Add(f.index); }
+                if (finalize) target.finalize = true;   // эскалация оверлея до финализации
+                if (_tcJobs.TryGetValue(hash, out var jr)) jr.filesTotal = target.files.Count;
+            }
+            else if (_tcJobs.TryGetValue(hash, out var ex) && (ex.state == "queued" || ex.state == "running"))
+            {
+                // job числится активным, но элемента нет — не дублируем (прежняя семантика дедупа)
+            }
+            else
+            {
+                _tcJobs[hash] = new TcJob { state = "queued", progress = 0, filesTotal = files.Count };
+                _tcQueue.Enqueue(new TcQueueItem { hash = hash, finalize = finalize, name = name, dir = dir, files = files });
             }
         }
         KickWorker();
@@ -1542,23 +1609,28 @@ public class QbitController : BaseController
         {
             try
             {
-                while (_tcQueue.TryDequeue(out var it))
+                while (true)
                 {
-                    _tcJobs.TryGetValue(it.hash, out var job);
-                    if (job == null || job.state != "queued") continue;   // защита от рассинхрона
-                    if (!System.IO.File.Exists(it.src))                   // раздачу удалили, пока стояла в очереди
+                    TcQueueItem it;
+                    TcJob job;
+                    lock (_tcEnqLock)   // dequeue + захват _tcCurrent атомарно: дозапись серий не теряется
                     {
-                        job.error = "файл не найден (удалён, пока стоял в очереди)";
-                        job.state = "error";
-                        continue;
+                        if (!_tcQueue.TryDequeue(out it)) break;
+                        _tcJobs.TryGetValue(it.hash, out job);
+                        if (job == null || job.state != "queued") continue;   // защита от рассинхрона
+                        _tcCurrent = it;
                     }
                     job.state = "running";
-                    try { await RunTranscode(it.hash, it.src, it.part, it.final, it.duration, job); }
+                    try { await RunTranscodeSeries(it, job); }
                     catch (Exception ex)
                     {
                         job.error = "internal";
                         job.state = "error";
                         Console.WriteLine("[QbitDownload] tc worker: " + ex);
+                    }
+                    finally
+                    {
+                        lock (_tcEnqLock) { if (ReferenceEquals(_tcCurrent, it)) _tcCurrent = null; }
                     }
                 }
             }
@@ -1572,44 +1644,91 @@ public class QbitController : BaseController
 
     [HttpGet, HttpPost, AllowAnonymous]
     [Route("qdl/transcode")]
-    async public Task<ActionResult> Transcode(string hash)
+    async public Task<ActionResult> Transcode(string hash, string mode = null)
     {
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            if (LoadLocal(hash) != null) return Json(new { success = false, error = "уже сконвертировано в MP4" });
-            if (_tcJobs.TryGetValue(hash, out var j0) && (j0.state == "running" || j0.state == "queued"))
+            var loc0 = LoadLocal(hash);
+            if (loc0 != null && !LocalIsOverlay(loc0)) return Json(new { success = false, error = "уже сконвертировано в MP4" });
+            if (_tcJobs.TryGetValue(hash, out var j0) && (j0.state == "running" || j0.state == "queued") && mode != "finalize" && mode != "overlay")
                 return Json(new { success = true, already = true, queued = QueuePosition(hash) });
 
             // валидация на request-time — мгновенный отклик «раздача ещё качается» и т.п.
-            string src;
-            using (var c = await Qbit())
-            {
-                string he = HttpUtility.UrlEncode(hash);
-                var info = JArray.Parse(await c.GetStringAsync($"/api/v2/torrents/info?hashes={he}"));
-                if (info.Count == 0) return Json(new { success = false, error = "раздача не найдена" });
-                if ((info[0].Value<double?>("progress") ?? 0) < 0.999) return Json(new { success = false, error = "раздача ещё качается" });
+            using var c = await Qbit();
+            string he = HttpUtility.UrlEncode(hash);
+            var info = JArray.Parse(await c.GetStringAsync($"/api/v2/torrents/info?hashes={he}"));
+            if (info.Count == 0) return Json(new { success = false, error = "раздача не найдена" });
+            double torrentProgress = info[0].Value<double?>("progress") ?? 0;
+            string torrentName = info[0].Value<string>("name") ?? hash;
 
-                var files = JArray.Parse(await c.GetStringAsync($"/api/v2/torrents/files?hash={he}"));
-                int nvid = 0;
-                foreach (var f in files)
-                    if (Regex.IsMatch(f.Value<string>("name") ?? "", "\\.(mkv|mp4|avi|ts|m4v|webm|mov)$", RegexOptions.IgnoreCase)) nvid++;
-                if (nvid != 1) return Json(new { success = false, error = "поддерживаются только однофайловые загрузки (фильмы)" });
+            var files = JArray.Parse(await c.GetStringAsync($"/api/v2/torrents/files?hash={he}"));
+            var vids = new List<JToken>();
+            foreach (var f in files)
+                if (Regex.IsMatch(f.Value<string>("name") ?? "", "\\.(mkv|mp4|avi|ts|m4v|webm|mov)$", RegexOptions.IgnoreCase)) vids.Add(f);
+            if (vids.Count == 0) return Json(new { success = false, error = "видеофайлы не найдены" });
 
-                src = await ResolveFile(c, hash, -1);
-            }
-            if (src == null) return Json(new { success = false, error = "файл не найден на диске" });
-
-            double duration = ProbeDuration(src);
             string outDir = Path.Combine(ModInit.conf.downloadsPath, "transcoded");
             Directory.CreateDirectory(outDir);
-            string baseName = Path.GetFileNameWithoutExtension(src);
-            foreach (var ch in Path.GetInvalidFileNameChars()) baseName = baseName.Replace(ch, '_');
-            string final = Path.Combine(outDir, baseName + ".mp4");
-            if (System.IO.File.Exists(final)) final = Path.Combine(outDir, baseName + "." + hash.Substring(0, 8) + ".mp4");
 
-            int pos = EnqueueTranscode(hash, src, final + ".part", final, duration);
-            return Json(new { success = true, queued = pos });
+            if (vids.Count == 1)
+            {
+                // фильм — прежний путь (старый плоский маркер, финализация всегда)
+                if (torrentProgress < 0.999) return Json(new { success = false, error = "раздача ещё качается" });
+                string src = await ResolveFile(c, hash, -1);
+                if (src == null) return Json(new { success = false, error = "файл не найден на диске" });
+
+                double duration = ProbeDuration(src);
+                string baseName = Path.GetFileNameWithoutExtension(src);
+                foreach (var ch in Path.GetInvalidFileNameChars()) baseName = baseName.Replace(ch, '_');
+                string final = Path.Combine(outDir, baseName + ".mp4");
+                if (System.IO.File.Exists(final)) final = Path.Combine(outDir, baseName + "." + hash.Substring(0, 8) + ".mp4");
+
+                int pos = EnqueueTranscode(hash, src, final + ".part", final, duration);
+                return Json(new { success = true, queued = pos });
+            }
+
+            // сериал: оверлей (торрент+слежение живут, серии подменяются mp4) или финализация (как фильм)
+            bool watchedNow;
+            lock (_watchLock)
+            {
+                watchedNow = false;
+                foreach (var m in LoadWatch()) if (m.Value<string>("hash") == hash) { watchedNow = true; break; }
+            }
+            bool finalize = mode == "finalize" || (mode != "overlay" && !watchedNow);
+            if (finalize && torrentProgress < 0.999) return Json(new { success = false, error = "раздача ещё качается" });
+
+            vids.Sort((a, b) => NaturalCompare(a.Value<string>("name") ?? "", b.Value<string>("name") ?? ""));
+            string dir = Path.Combine(outDir, SafeFileBase(torrentName) + "." + hash.Substring(0, 8));
+            var lfs0 = loc0 != null ? LocalFiles(loc0) : null;
+
+            var items = new List<TcFile>();
+            int skippedDownloading = 0;
+            foreach (var f in vids)
+            {
+                string n = f.Value<string>("name") ?? "";
+                if ((f.Value<double?>("progress") ?? 0) < 0.999) { skippedDownloading++; continue; }   // докачается → авто-транскод
+                if (OverlayFor(lfs0, n) != null) continue;                                             // серия уже транскожена
+                string src = await ResolveFile(c, hash, f.Value<int?>("index") ?? -1);
+                if (src == null) continue;
+                string final = Path.Combine(dir, SafeFileBase(n) + ".mp4");
+                items.Add(new TcFile
+                {
+                    index = f.Value<int?>("index") ?? -1,
+                    src = src, part = final + ".part", final = final,
+                    size = f.Value<long?>("size") ?? 0
+                });
+            }
+            if (items.Count == 0 && !finalize)
+                return Json(new { success = false, error = skippedDownloading > 0 ? "нет докачанных серий" : "все серии уже сконвертированы" });
+            if (items.Count == 0 && finalize && lfs0 != null)
+            {
+                // всё уже транскожено оверлеем — финализируем без работы: одним пустым элементом
+                items = new List<TcFile>();
+            }
+
+            int qpos = EnqueueTranscode(hash, finalize, torrentName, dir, items);
+            return Json(new { success = true, queued = qpos, files = items.Count, skipped = skippedDownloading });
         }
         catch (Exception ex)
         {
@@ -1626,31 +1745,37 @@ public class QbitController : BaseController
         if (_tcJobs.TryGetValue(hash, out var j))
         {
             if (j.state == "queued") return Json(new { state = "queued", position = QueuePosition(hash) });
+            if (j.filesTotal > 1)   // сериал: клиенту видно «серия i/N»
+                return Json(new { state = j.state, progress = Math.Round(j.progress, 3), error = j.error, file = j.file, fileDone = j.fileDone, filesTotal = j.filesTotal });
             return Json(new { state = j.state, progress = Math.Round(j.progress, 3), error = j.error });
         }
-        if (LoadLocal(hash) != null) return Json(new { state = "done", progress = 1.0 });
+        var locS = LoadLocal(hash);
+        if (locS != null && !LocalIsOverlay(locS)) return Json(new { state = "done", progress = 1.0 });
         return Json(new { state = "none" });   // в т.ч. после рестарта: очередь в памяти, клиент покажет «прервано»
     }
 
     // аргументы MP4-транскода: CPU (x264, как раньше) или NVENC на хостовом GPU-воркере.
     // nvenc p6+cq19+AQ визуально сравним с x264 fast crf19, скорость ~5-10× выше; HEVC декодится NVDEC-ом
-    static List<string> Mp4Args(string src, string part, bool nvenc = false)
+    static List<string> Mp4Args(string src, string part, bool copyVideo = false, bool nvenc = false)
     {
         var args = new List<string> { "-y" };
-        if (nvenc) args.AddRange(new[] { "-hwaccel", "cuda" });
+        if (nvenc && !copyVideo) args.AddRange(new[] { "-hwaccel", "cuda" });
         args.AddRange(new[]
         {
             "-i", src,
             "-map", "0:v:0", "-map", "0:a?",
             "-dn", "-sn", "-map_chapters", "-1"            // data/субтитры в mp4 не тащим
         });
-        if (nvenc)
+        if (copyVideo)
+            args.AddRange(new[] { "-c:v", "copy" });       // видео уже h264 → ремукс (IO-bound, минуты вместо часов)
+        else if (nvenc)
             args.AddRange(new[] { "-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-spatial-aq", "1", "-temporal-aq", "1", "-b_ref_mode", "middle" });
         else
             args.AddRange(new[] { "-c:v", "libx264", "-preset", "fast", "-crf", "19" });
+        if (!copyVideo)
+            args.AddRange(new[] { "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1" });   // только при энкоде
         args.AddRange(new[]
         {
-            "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
             "-c:a", "aac", "-ac", "2", "-b:a", "256k",     // как в HLS-ветке; язык/название дорожек ffmpeg переносит сам
             "-movflags", "+faststart",
             "-f", "mp4",
@@ -1660,92 +1785,245 @@ public class QbitController : BaseController
         return args;
     }
 
-    static async Task RunTranscode(string hash, string src, string part, string final, double duration, TcJob job)
+    // общий прогресс сериала: взвешивание по размерам файлов (размеры бесплатны из qBit
+    // и хорошо коррелируют со временем обработки); totalBytes<=0 → прогресс текущего файла
+    static double TcOverallProgress(long doneBytes, long totalBytes, long curSize, double curFileProgress)
     {
-        try
+        double p = totalBytes <= 0
+            ? curFileProgress
+            : (doneBytes + Math.Clamp(curFileProgress, 0, 1) * curSize) / (double)totalBytes;
+        return Math.Min(0.99, Math.Max(0, p));
+    }
+
+    // Один файл: h264 → ремукс (copy), иначе NVENC/CPU-энкод. Возвращает null = ок, иначе текст ошибки.
+    static async Task<string> RunTranscodeItem(TcFile f, TcJob job, Func<double, double> overall)
+    {
+        double duration = f.duration > 0 ? f.duration : ProbeDuration(f.src);
+        bool copyV = ProbeVideoCodec(f.src) == "h264";
+        Directory.CreateDirectory(Path.GetDirectoryName(f.part));
+
+        IFfJob ff = copyV
+            ? FfJob.StartLocal(Mp4Args(f.src, f.part, copyVideo: true))              // ремукс IO-bound — GPU не нужен
+            : FfJob.Start(nv => Mp4Args(f.src, f.part, copyVideo: false, nvenc: nv), "mp4");
+        bool cpuRetried = !copyV && ff is LocalFfJob;   // локальный энкод ретраить некуда
+        bool copyRetried = false;
+
+        while (true)
         {
-            var ff = FfJob.Start(nv => Mp4Args(src, part, nv), "mp4");
-            bool retried = ff is LocalFfJob;   // локальный запуск ретраить некуда
-
-            while (true)
+            while (!ff.HasExited)
             {
-                while (!ff.HasExited)
-                {
-                    await Task.Delay(1000);
-                    if (duration > 0 && ff.OutTimeUs > 0)
-                        job.progress = Math.Min(0.99, ff.OutTimeUs / 1_000_000.0 / duration);
-                }
-                if (ff.ExitCode == 0 || retried) break;
+                await Task.Delay(1000);
+                if (duration > 0 && ff.OutTimeUs > 0)
+                    job.progress = overall(ff.OutTimeUs / 1_000_000.0 / duration);
+            }
+            if (ff.ExitCode == 0) break;
 
+            if (copyV && !copyRetried)
+            {
+                // ремукс не удался (кривой контейнер/таймстампы) → полный транскод
+                Console.WriteLine("[QbitDownload] transcode: remux failed (exit=" + ff.ExitCode + "), полный транскод: " + Path.GetFileName(f.src));
+                copyRetried = true; copyV = false;
+                try { if (System.IO.File.Exists(f.part)) System.IO.File.Delete(f.part); } catch { }
+                ff = FfJob.Start(nv => Mp4Args(f.src, f.part, copyVideo: false, nvenc: nv), "mp4");
+                cpuRetried = ff is LocalFfJob;
+                continue;
+            }
+            if (!cpuRetried)
+            {
                 // удалённый джоб не дожил (воркер умер / nvenc-фейл) → один повтор локально на CPU
                 Console.WriteLine("[QbitDownload] transcode: ffworker job failed (exit=" + ff.ExitCode + "), повтор на CPU: " + Tail(ff.StderrTail, 400));
-                try { if (System.IO.File.Exists(part)) System.IO.File.Delete(part); } catch { }
-                job.progress = 0;
-                retried = true;
-                ff = FfJob.StartLocal(Mp4Args(src, part, nvenc: false));
+                cpuRetried = true;
+                try { if (System.IO.File.Exists(f.part)) System.IO.File.Delete(f.part); } catch { }
+                ff = FfJob.StartLocal(Mp4Args(f.src, f.part, copyVideo: false, nvenc: false));
+                continue;
             }
-            string err = ff.StderrTail;
+            break;
+        }
 
-            if (ff.ExitCode != 0 || !System.IO.File.Exists(part) || new FileInfo(part).Length < 1_000_000)
+        if (ff.ExitCode != 0 || !System.IO.File.Exists(f.part) || new FileInfo(f.part).Length < 1_000_000)
+        {
+            try { if (System.IO.File.Exists(f.part)) System.IO.File.Delete(f.part); } catch { }
+            Console.WriteLine("[QbitDownload] transcode failed file=" + Path.GetFileName(f.src) + " exit=" + ff.ExitCode + ": " + Tail(ff.StderrTail, 800));
+            return "ffmpeg exit=" + ff.ExitCode;
+        }
+        System.IO.File.Move(f.part, f.final, true);
+        return null;
+    }
+
+    // Вся раздача: цикл по файлам (список может расти — авто-транскод докачавшихся серий),
+    // резюм по готовым mp4, затем финализация (маркер / удаление торрента / слежение / HLS-кэш).
+    static async Task RunTranscodeSeries(TcQueueItem it, TcJob job)
+    {
+        var done = new List<TcFile>();
+        string failErr = null;
+        try
+        {
+            for (int i = 0; ; i++)
             {
-                try { if (System.IO.File.Exists(part)) System.IO.File.Delete(part); } catch { }
-                job.error = "ffmpeg exit=" + ff.ExitCode;
+                TcFile f;
+                long totalBytes = 0;
+                lock (_tcEnqLock)
+                {
+                    if (i >= it.files.Count) { _tcCurrent = null; break; }   // под локом: дозапись либо видит нас, либо создаст новый элемент
+                    f = it.files[i];
+                    job.filesTotal = it.files.Count;
+                    foreach (var x in it.files) totalBytes += x.size;
+                }
+                job.fileDone = i;
+                job.file = Path.GetFileNameWithoutExtension(f.final);
+
+                // резюм после обрыва/рестарта: готовая серия не переделывается
+                if (System.IO.File.Exists(f.final) && new FileInfo(f.final).Length > 1_000_000) { done.Add(f); continue; }
+
+                if (!System.IO.File.Exists(f.src))
+                {
+                    failErr = "файл не найден (удалён, пока стоял в очереди)";
+                    break;
+                }
+
+                long doneBytes = 0;
+                foreach (var x in done) doneBytes += x.size;
+                long curSize = f.size;
+                string err = await RunTranscodeItem(f, job, p => TcOverallProgress(doneBytes, totalBytes, curSize, p));
+                if (err != null)
+                {
+                    failErr = job.filesTotal > 1
+                        ? "серия " + (i + 1) + " из " + job.filesTotal + " (" + Path.GetFileNameWithoutExtension(f.final) + "): " + err
+                        : err;
+                    break;
+                }
+                done.Add(f);
+                job.fileDone = i + 1;
+            }
+
+            if (failErr != null)
+            {
+                // торрент НЕ трогаем, готовые mp4 ОСТАВЛЯЕМ — повторный запуск дорежет только недостающее
+                job.error = failErr;
                 job.state = "error";
-                Console.WriteLine("[QbitDownload] transcode failed hash=" + hash + " exit=" + ff.ExitCode + ": " + Tail(err, 800));
+                Console.WriteLine("[QbitDownload] transcode failed hash=" + it.hash + ": " + failErr);
                 return;
             }
 
-            System.IO.File.Move(part, final, true);
-
             // маркер пишем ДО удаления торрента — ни на секунду не остаёмся без записи в «Загрузках»
             Directory.CreateDirectory(Path.Combine(ModInit.conf.cachePath, "local"));
-            var loc = new JObject
+            if (it.dir == null && it.files.Count == 1 && it.finalize)
             {
-                ["name"] = Path.GetFileName(final),
-                ["path"] = final,
-                ["size"] = new FileInfo(final).Length,
-                ["added"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-            };
-            System.IO.File.WriteAllText(LocalPath(hash), loc.ToString(Newtonsoft.Json.Formatting.None));
-
-            try
-            {
-                using var c = await Qbit();
-                var form = new FormUrlEncodedContent(new[]
+                // фильм: старый плоский формат (обратная совместимость, поведение байт-в-байт)
+                string final = it.files[0].final;
+                var loc = new JObject
                 {
-                    new KeyValuePair<string, string>("hashes", hash),
-                    new KeyValuePair<string, string>("deleteFiles", "true")
-                });
-                await c.PostAsync("/api/v2/torrents/delete", form);
+                    ["name"] = Path.GetFileName(final),
+                    ["path"] = final,
+                    ["size"] = new FileInfo(final).Length,
+                    ["added"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                };
+                System.IO.File.WriteAllText(LocalPath(it.hash), loc.ToString(Newtonsoft.Json.Formatting.None));
             }
-            catch (Exception ex) { Console.WriteLine("[QbitDownload] transcode: torrent delete failed: " + ex.Message); }
-
-            // из слежения тоже убираем (перекачка новой версии раздачи затёрла бы замену)
-            try
+            else
             {
-                lock (_watchLock)
+                // сериал: новый формат, merge с существующим оверлеем (дозаписываем новые серии)
+                var prev = LoadLocal(it.hash);
+                var all = prev != null ? LocalFiles(prev) : new List<LocalFile>();
+                foreach (var f in done)
                 {
-                    var a = LoadWatch(); var b = new JArray();
-                    foreach (var m in a) if (m.Value<string>("hash") != hash) b.Add(m);
-                    if (b.Count != a.Count) SaveWatch(b);
+                    string fname = Path.GetFileName(f.final);
+                    if (!System.IO.File.Exists(f.final)) continue;
+                    bool exists = false;
+                    foreach (var e in all) if (SafeFileBase(e.name) == SafeFileBase(fname)) { exists = true; break; }
+                    if (!exists) all.Add(new LocalFile { name = fname, path = f.final, size = new FileInfo(f.final).Length });
                 }
+                all.Sort((a, b) => NaturalCompare(a.name, b.name));
+                long total = 0; var farr = new JArray();
+                for (int k = 0; k < all.Count; k++)
+                {
+                    total += all[k].size;
+                    farr.Add(new JObject { ["index"] = k, ["name"] = all[k].name, ["path"] = all[k].path, ["size"] = all[k].size });
+                }
+                var loc = new JObject
+                {
+                    ["name"] = it.name ?? prev?.Value<string>("name"),
+                    ["dir"] = it.dir ?? prev?.Value<string>("dir"),
+                    ["size"] = total,
+                    ["added"] = prev?.Value<long?>("added") ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                    ["overlay"] = !it.finalize,
+                    ["files"] = farr
+                };
+                System.IO.File.WriteAllText(LocalPath(it.hash), loc.ToString(Newtonsoft.Json.Formatting.None));
             }
-            catch { }
 
-            // HLS-кэш нарезан из СТАРОГО (HEVC) файла — сбросить, иначе браузер продолжит получать его сегменты
-            DropHlsCache(hash);
+            if (it.finalize)
+            {
+                try
+                {
+                    using var c = await Qbit();
+                    var form = new FormUrlEncodedContent(new[]
+                    {
+                        new KeyValuePair<string, string>("hashes", it.hash),
+                        new KeyValuePair<string, string>("deleteFiles", "true")
+                    });
+                    await c.PostAsync("/api/v2/torrents/delete", form);
+                }
+                catch (Exception ex) { Console.WriteLine("[QbitDownload] transcode: torrent delete failed: " + ex.Message); }
+
+                // из слежения тоже убираем (перекачка новой версии раздачи затёрла бы замену)
+                try
+                {
+                    lock (_watchLock)
+                    {
+                        var a = LoadWatch(); var b = new JArray();
+                        foreach (var m in a) if (m.Value<string>("hash") != it.hash) b.Add(m);
+                        if (b.Count != a.Count) SaveWatch(b);
+                    }
+                }
+                catch { }
+            }
+
+            // HLS-кэш нарезан из СТАРЫХ (HEVC) файлов — сбросить, иначе браузер продолжит получать их сегменты
+            DropHlsCache(it.hash);
 
             job.progress = 1.0;
             job.state = "done";
-            Console.WriteLine("[QbitDownload] transcode done hash=" + hash + " -> " + final);
+            Console.WriteLine("[QbitDownload] transcode done hash=" + it.hash + " files=" + done.Count + (it.finalize ? " (финализация)" : " (оверлей)"));
         }
         catch (Exception ex)
         {
             job.error = "internal";
             job.state = "error";
             Console.WriteLine("[QbitDownload] transcode run: " + ex);
-            try { if (System.IO.File.Exists(part)) System.IO.File.Delete(part); } catch { }
         }
+    }
+
+    // Оверлей-раздача: серии, докачавшиеся ПОСЛЕ транскода, автоматически конвертируются в mp4.
+    // Вызывается из ScanEpisodeNotifications (раз в notifyScanIntervalMinutes) — files уже загружены.
+    static async Task AutoTranscodeOverlay(HttpClient c, string hash, JArray files)
+    {
+        var loc = LoadLocal(hash);
+        if (loc == null || !LocalIsOverlay(loc)) return;
+        string dir = loc.Value<string>("dir");
+        if (string.IsNullOrEmpty(dir)) return;
+        var lfs = LocalFiles(loc);
+
+        var fresh = new List<TcFile>();
+        foreach (var f in files)
+        {
+            string n = f.Value<string>("name") ?? "";
+            if (!_videoExtRx.IsMatch(n)) continue;
+            if ((f.Value<double?>("progress") ?? 0) < 0.999) continue;   // серия ещё качается
+            if (OverlayFor(lfs, n) != null) continue;                    // уже транскожена
+            string src = await ResolveFile(c, hash, f.Value<int?>("index") ?? -1);
+            if (src == null) continue;
+            string final = Path.Combine(dir, SafeFileBase(n) + ".mp4");
+            fresh.Add(new TcFile
+            {
+                index = f.Value<int?>("index") ?? -1,
+                src = src, part = final + ".part", final = final,
+                size = f.Value<long?>("size") ?? 0
+            });
+        }
+        if (fresh.Count == 0) return;
+        Console.WriteLine("[QbitDownload] auto-transcode: " + (loc.Value<string>("name") ?? hash) + " — новых серий: " + fresh.Count);
+        EnqueueTranscode(hash, finalize: false, loc.Value<string>("name"), dir, fresh);
     }
 
     // уборка обрывков транскода после рестарта контейнера: .part пишет только RunTranscode,
@@ -1756,7 +2034,7 @@ public class QbitController : BaseController
         {
             string tdir = Path.Combine(ModInit.conf.downloadsPath, "transcoded");
             if (!Directory.Exists(tdir)) return;
-            foreach (var f in Directory.GetFiles(tdir, "*.part"))
+            foreach (var f in Directory.GetFiles(tdir, "*.part", SearchOption.AllDirectories))   // и в подпапках сериалов
                 try { System.IO.File.Delete(f); Console.WriteLine("[QbitDownload] removed stale " + Path.GetFileName(f)); } catch { }
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] part cleanup: " + ex.Message); }
@@ -1927,6 +2205,7 @@ public class QbitController : BaseController
         mv(MetaPath(oldH), MetaPath(newH));
         mv(PosterPath(oldH), PosterPath(newH));
         mv(LinkPath(oldH), LinkPath(newH));
+        mv(LocalPath(oldH), LocalPath(newH));   // оверлей-маркер транскода следует за re-grab (пути внутри абсолютные)
         CollectionsMigrateHash(oldH, newH);
     }
 
@@ -2121,6 +2400,10 @@ public class QbitController : BaseController
                         db.seen.Add(new SeenModel { seriesKey = sk, epkey = key });
                         seenKeys.Add(key);
                     }
+
+                    // оверлей-транскод: докачавшиеся серии автоматически конвертируем в mp4 (см. §транскод сериалов)
+                    try { await AutoTranscodeOverlay(c, hash, files); }
+                    catch (Exception ex) { Console.WriteLine("[QbitDownload] auto-transcode: " + ex.Message); }
                 }
                 catch (Exception ex) { Console.WriteLine("[QbitDownload] noti scan item: " + ex); }
             }
@@ -2482,6 +2765,93 @@ public class QbitController : BaseController
         }
         catch { }
         return null;
+    }
+
+    // один файл локального маркера (после транскода)
+    sealed class LocalFile { public int index; public string name; public string path; public long size; }
+
+    // Нормализация обоих форматов маркера: старый {name,path,size,added} → один файл (index 0),
+    // новый {files:[{index,name,path,size}],...} → как есть. Существование на диске НЕ проверяется.
+    static List<LocalFile> LocalFiles(JObject loc)
+    {
+        var res = new List<LocalFile>();
+        if (loc == null) return res;
+        if (loc["files"] is JArray arr)
+        {
+            foreach (var f in arr)
+            {
+                string p = f.Value<string>("path");
+                if (string.IsNullOrEmpty(p)) continue;
+                res.Add(new LocalFile
+                {
+                    index = f.Value<int?>("index") ?? res.Count,
+                    name = f.Value<string>("name") ?? Path.GetFileName(p),
+                    path = p,
+                    size = f.Value<long?>("size") ?? 0
+                });
+            }
+        }
+        else
+        {
+            string p = loc.Value<string>("path");
+            if (!string.IsNullOrEmpty(p))
+                res.Add(new LocalFile { index = 0, name = Path.GetFileName(p), path = p, size = loc.Value<long?>("size") ?? 0 });
+        }
+        return res;
+    }
+
+    // Оверлей: торрент ЖИВ (слежение продолжается), files — транскод-копии отдельных серий.
+    // false/нет поля = финальный маркер (торрент удалён, карточка живёт только маркером).
+    static bool LocalIsOverlay(JObject loc) => loc?.Value<bool?>("overlay") == true;
+
+    // выбор файла маркера: по index, иначе самый большой; null если файла нет на диске
+    static LocalFile PickLocal(List<LocalFile> files, int index)
+    {
+        LocalFile pick = null;
+        if (index >= 0)
+            foreach (var f in files)
+                if (f.index == index) { pick = f; break; }
+        if (pick == null)
+            foreach (var f in files)
+                if (pick == null || f.size > pick.size) pick = f;
+        return (pick != null && System.IO.File.Exists(pick.path)) ? pick : null;
+    }
+
+    // база имени файла без видеорасширения + те же замены недопустимых символов, что при создании
+    // mp4-выхода — стабильный ключ соответствия «торрент-файл ↔ транскод-копия» (расширение меняется)
+    static string SafeFileBase(string fileName)
+    {
+        string n = (fileName ?? "").Replace('\\', '/');
+        n = n.Substring(n.LastIndexOf('/') + 1);
+        n = Regex.Replace(n, "\\.(mkv|mp4|avi|ts|m2ts|webm|mov|m4v)$", "", RegexOptions.IgnoreCase);
+        foreach (var ch in Path.GetInvalidFileNameChars()) n = n.Replace(ch, '_');
+        return n;
+    }
+
+    // оверлей: транскод-копия для торрент-файла (по стабильной базе имени); null если серии ещё нет
+    static LocalFile OverlayFor(List<LocalFile> files, string torrentFileName)
+    {
+        if (files == null || files.Count == 0) return null;
+        string key = SafeFileBase(torrentFileName);
+        foreach (var f in files)
+            if (SafeFileBase(f.name) == key && System.IO.File.Exists(f.path))
+                return f;
+        return null;
+    }
+
+    // удалить все файлы маркера + опустевшую папку сериала
+    static void DeleteLocalFiles(JObject loc)
+    {
+        foreach (var f in LocalFiles(loc))
+            try { if (System.IO.File.Exists(f.path)) System.IO.File.Delete(f.path); }
+            catch (Exception ex) { Console.WriteLine("[QbitDownload] delete local file: " + ex.Message); }
+        try
+        {
+            string dir = loc?.Value<string>("dir");
+            if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir) && Directory.GetFileSystemEntries(dir).Length == 0)
+                Directory.Delete(dir);
+        }
+        catch { }
     }
 
     // Полная уборка следов раздачи после удаления: файлы кэша, запись watch.json, seen/noti в qdl.db.

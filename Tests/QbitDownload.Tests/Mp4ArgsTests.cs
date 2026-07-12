@@ -63,10 +63,55 @@ public class Mp4ArgsTests
     {
         foreach (bool nv in new[] { false, true })
         {
-            var a = Access.Mp4Args("/downloads/m.mkv", "/downloads/transcoded/m.mp4.part", nv);
+            var a = Access.Mp4Args("/downloads/m.mkv", "/downloads/transcoded/m.mp4.part", copyVideo: false, nvenc: nv);
             Assert.True(Sub(a, "-map", "0:v:0", "-map", "0:a?") >= 0, "все аудиодорожки, одно видео");
             Assert.True(Sub(a, "-dn", "-sn", "-map_chapters", "-1") >= 0, "data/субтитры не тащим");
             Assert.Equal("-y", a[0]);
         }
+    }
+
+    // ── copy-ветка (ремукс h264-серий сериала: видео не перекодируется) ──
+
+    [Fact]
+    public void Copy_args_remux_video_untouched()
+    {
+        var a = Access.Mp4Args("/downloads/ep.mkv", "/downloads/transcoded/S.x/ep.mp4.part", copyVideo: true);
+        Assert.True(Sub(a, "-c:v", "copy") >= 0);
+        Assert.DoesNotContain("libx264", a);
+        Assert.DoesNotContain("h264_nvenc", a);
+        Assert.DoesNotContain("-hwaccel", a);       // декод не нужен
+        Assert.DoesNotContain("-pix_fmt", a);       // энкод-опции неприменимы к copy
+        Assert.DoesNotContain("-profile:v", a);
+        // аудио и контейнер — как у энкод-веток
+        Assert.True(Sub(a, "-c:a", "aac", "-ac", "2", "-b:a", "256k") >= 0);
+        Assert.True(Sub(a, "-movflags", "+faststart") >= 0);
+        Assert.True(Sub(a, "-progress", "pipe:1", "-nostats") >= 0);
+        Assert.Equal("/downloads/transcoded/S.x/ep.mp4.part", a[a.Count - 1]);
+    }
+
+    [Fact]
+    public void Copy_wins_over_nvenc_flag()
+    {
+        // copyVideo главнее: даже с nvenc=true видео копируется, hwaccel не добавляется
+        var a = Access.Mp4Args("/downloads/ep.mkv", "/out/ep.mp4.part", copyVideo: true, nvenc: true);
+        Assert.True(Sub(a, "-c:v", "copy") >= 0);
+        Assert.DoesNotContain("h264_nvenc", a);
+        Assert.DoesNotContain("-hwaccel", a);
+    }
+
+    // ── общий прогресс сериала (взвешивание по размерам) ──
+
+    [Fact]
+    public void Overall_progress_weights_by_size()
+    {
+        // готово 100 из 300 байт, текущий файл 100 байт на 50% → (100+50)/300 = 0.5
+        Assert.Equal(0.5, Access.TcOverallProgress(100, 300, 100, 0.5), 3);
+        // нет размеров (фильм старым путём) → прогресс текущего файла
+        Assert.Equal(0.42, Access.TcOverallProgress(0, 0, 0, 0.42), 3);
+        // кап 0.99 (100% только после File.Move и маркера)
+        Assert.Equal(0.99, Access.TcOverallProgress(300, 300, 0, 1.0), 3);
+        // мусорные значения не выходят за границы
+        Assert.Equal(0.99, Access.TcOverallProgress(100, 100, 100, 5.0), 3);
+        Assert.Equal(0.0, Access.TcOverallProgress(0, 100, 100, -1), 3);
     }
 }

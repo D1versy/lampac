@@ -42,9 +42,13 @@
             '.qdl-watch-btn{background:rgba(20,160,40,.92) !important;color:#fff !important}' +
             '.qdl-watch-btn.focus{background:#19b531 !important;color:#fff !important}' +
             '.qdl-watch-btn span{color:#fff !important}' +
-            // режим «Загрузки»: в полной карточке прячем все кнопки, кроме нашей «Смотреть»
-            '.qdl-only .full-start__buttons .full-start__button:not(.qdl-watch-btn),' +
-            '.qdl-only .full-start-new__buttons .full-start__button:not(.qdl-watch-btn){display:none !important}' +
+            // режим «Загрузки»: в полной карточке прячем все кнопки, кроме наших «Смотреть»/«Продолжить»
+            '.qdl-only .full-start__buttons .full-start__button:not(.qdl-watch-btn):not(.qdl-continue-btn),' +
+            '.qdl-only .full-start-new__buttons .full-start__button:not(.qdl-watch-btn):not(.qdl-continue-btn){display:none !important}' +
+            // «Продолжить: Серия N» — синяя, чтобы отличалась от зелёной «Смотреть»
+            '.qdl-continue-btn{background:rgba(25,100,210,.92) !important;color:#fff !important}' +
+            '.qdl-continue-btn.focus{background:#2b7de9 !important;color:#fff !important}' +
+            '.qdl-continue-btn span{color:#fff !important}' +
             // DMCA-карточка (CUB блокирует): остаются только «Скачать» и «Смотреть (загружено)»
             '.qdl-dmca .full-start__buttons .full-start__button:not(.qdl-download):not(.qdl-watch-btn),' +
             '.qdl-dmca .full-start-new__buttons .full-start__button:not(.qdl-download):not(.qdl-watch-btn){display:none !important}' +
@@ -290,10 +294,19 @@
                 } else if (s.state === 'running') {
                     sawAlive = true;
                     var d = Math.floor((s.progress || 0) * 10);
-                    if (d > lastDecile) { lastDecile = d; Lampa.Noty.show('🎬 ' + (title || 'Транскодирование') + ': ' + (d * 10) + '%'); }
+                    if (d > lastDecile) {
+                        lastDecile = d;
+                        var msg = '🎬 ' + (title || 'Транскодирование') + ': ';
+                        if (s.filesTotal > 1) msg += 'серия ' + Math.min((s.fileDone || 0) + 1, s.filesTotal) + '/' + s.filesTotal + ' — ' + (d * 10) + '%';
+                        else msg += (d * 10) + '%';
+                        Lampa.Noty.show(msg);
+                    }
                 } else {
                     clearInterval(tcPolls[hash]); delete tcPolls[hash];
-                    if (s.state === 'done') Lampa.Noty.show('✓ ' + (title || 'Загрузка') + ' — теперь MP4, торрент удалён');
+                    if (s.state === 'done') {
+                        if (s.filesTotal > 1) Lampa.Noty.show('✓ ' + (title || 'Сериал') + ' — серии теперь MP4 (' + s.filesTotal + ')');
+                        else Lampa.Noty.show('✓ ' + (title || 'Загрузка') + ' — теперь MP4, торрент удалён');
+                    }
                     else if (s.state === 'error') Lampa.Noty.show('Транскодирование не удалось: ' + (s.error || 'ошибка'));
                     else if (s.state === 'none' && sawAlive) Lampa.Noty.show('Транскодирование прервано (перезапуск сервера) — запусти ещё раз');
                 }
@@ -339,6 +352,59 @@
     }
     function baseName(p) { return String(p || '').split('/').pop().split('\\').pop(); }
 
+    // ───────── Прогресс просмотра серий (штатный Lampa.Timeline, локально устройству) ─────────
+    // Ключ стабилен до/после транскода: infohash сохраняется (маркер наследует hash),
+    // база имени сохраняется (меняется только расширение mkv→mp4)
+    function stripExt(n) { return String(n || '').replace(/\.(mkv|mp4|avi|ts|m4v|webm|mov)$/i, ''); }
+    function epTimelineHash(hash, fileName) { return Lampa.Utils.hash(hash + ':' + stripExt(baseName(fileName))); }
+    // {percent 0-100, time, duration, handler} или заглушка, если Timeline недоступен
+    function epView(hash, fileName) {
+        try { return Lampa.Timeline.view(epTimelineHash(hash, fileName)); }
+        catch (e) { return { percent: 0, time: 0, duration: 0 }; }
+    }
+
+    // короткое имя серии для кнопки «Продолжить»
+    function epShort(name) {
+        var b = stripExt(baseName(name)), m;
+        m = /S(\d+)[\s._-]*E(\d+)/i.exec(b);
+        if (m) return 'S' + parseInt(m[1], 10) + ' · Серия ' + parseInt(m[2], 10);
+        m = /(?:серия|episode|ep)[\s._#-]*(\d{1,4})/i.exec(b);
+        if (m) return 'Серия ' + parseInt(m[1], 10);
+        m = /(?:^|[\s._[(-])(\d{1,3})(?:[\s._\])-]|$)/.exec(b);
+        if (m) return 'Серия ' + parseInt(m[1], 10);
+        return b.length > 24 ? b.slice(0, 24) + '…' : b;
+    }
+
+    // Что продолжать: (1) ПОСЛЕДНЯЯ серия на паузе (5–90%) — досмотреть её;
+    // (2) иначе серия после последней досмотренной (≥90%), которая ещё не досмотрена;
+    // (3) прогресса нет / всё досмотрено → null (кнопка не показывается)
+    function chooseContinue(vids, viewFn) {
+        var i, p;
+        for (i = vids.length - 1; i >= 0; i--) {
+            p = (viewFn(vids[i]) || {}).percent || 0;
+            if (p >= 5 && p < 90) return vids[i];
+        }
+        var last = -1;
+        for (i = vids.length - 1; i >= 0; i--) {
+            if (((viewFn(vids[i]) || {}).percent || 0) >= 90) { last = i; break; }
+        }
+        if (last >= 0) {
+            for (i = last + 1; i < vids.length; i++)
+                if (((viewFn(vids[i]) || {}).percent || 0) < 90) return vids[i];
+        }
+        return null;
+    }
+
+    // плейлист сериала: у каждого элемента свой timeline → плеер пишет прогресс сам,
+    // «следующая серия» внутри плеера продолжает вести отметки
+    function buildPlaylist(hash, vids, audio) {
+        return vids.map(function (f) {
+            var item = { title: baseName(f.name), url: streamUrl(hash, f.index, audio) };
+            try { item.timeline = Lampa.Timeline.view(epTimelineHash(hash, f.name)); } catch (e) {}
+            return item;
+        });
+    }
+
     // ТВ (нативный плеер) тянет оригинал (EAC3 ок), всё остальное (десктоп/мобайл-браузер) — HLS (звук→AAC).
     // ВАЖНО: Platform.is('browser') слишком узок (на Linux-десктопе platform='' → false). Берём инверсию tv().
     function isBrowser() {
@@ -378,32 +444,48 @@
         }, function () { cb(null); });
     }
 
-    function rawPlay(hash, index, title, audio) {
-        var url = streamUrl(hash, index, audio);
-        Lampa.Player.play({ title: title || 'Загрузка', url: url });
-        Lampa.Player.playlist([{ title: title || 'Загрузка', url: url }]);
+    function rawPlay(hash, index, title, audio, fileName) {
+        var item = { title: title || 'Загрузка', url: streamUrl(hash, index, audio) };
+        try { item.timeline = Lampa.Timeline.view(epTimelineHash(hash, fileName || title)); } catch (e) {}
+        Lampa.Player.play(item);
+        Lampa.Player.playlist([item]);
     }
 
     // ───────── Воспроизведение локального файла (оффлайн) ─────────
-    function playLocal(hash, index, title) {
-        ensureAudio(hash, index, function (audio) { rawPlay(hash, index, title, audio); });
+    function playLocal(hash, index, title, fileName) {
+        ensureAudio(hash, index, function (audio) { rawPlay(hash, index, title, audio, fileName); });
+    }
+
+    // сыграть конкретную серию с полным плейлистом (элемент плейлиста — тот же инстанс timeline)
+    function playEpisode(hash, vids, target) {
+        ensureAudio(hash, target.index, function (audio) {
+            var playlist = buildPlaylist(hash, vids, audio);
+            for (var i = 0; i < vids.length; i++)
+                if (vids[i].index === target.index) { Lampa.Player.play(playlist[i]); break; }
+            Lampa.Player.playlist(playlist);
+        });
     }
 
     function chooseEpisode(hash, name) {
         req(API + '/qdl/files?hash=' + hash, function (files) {
             var vids = videoFiles(files);
             if (!vids.length) { Lampa.Noty.show('Видеофайлы не найдены'); return; }
-            if (vids.length === 1) { playLocal(hash, vids[0].index, baseName(vids[0].name)); return; }
+            if (vids.length === 1) { playLocal(hash, vids[0].index, baseName(vids[0].name), vids[0].name); return; }
 
             ensureAudio(hash, vids[0].index, function (audio) {   // озвучку выбираем один раз на сериал
-                var playlist = vids.map(function (f) {
-                    return { title: baseName(f.name), url: streamUrl(hash, f.index, audio) };
-                });
+                var playlist = buildPlaylist(hash, vids, audio);
+                var view = function (f) { return epView(hash, f.name); };
+                var cur = chooseContinue(vids, view);
                 Lampa.Select.show({
                     title: 'Серии — ' + (name || ''),
-                    items: vids.map(function (f) { return { title: baseName(f.name), index: f.index }; }),
+                    items: vids.map(function (f, i) {
+                        var p = (view(f) || {}).percent || 0, pre = '';
+                        if (p >= 90) pre = '✓ ';                                   // досмотрена
+                        else if (p >= 5) pre = '► ' + Math.round(p) + '% · ';      // на паузе
+                        return { title: pre + baseName(f.name), i: i, selected: cur ? vids[i] === cur : i === 0 };
+                    }),
                     onSelect: function (a) {
-                        Lampa.Player.play({ title: a.title, url: streamUrl(hash, a.index, audio) });
+                        Lampa.Player.play(playlist[a.i]);   // сам элемент плейлиста: его timeline пишет прогресс
                         Lampa.Player.playlist(playlist);
                     },
                     onBack: function () { Lampa.Controller.toggle('content'); }
@@ -416,7 +498,7 @@
         req(API + '/qdl/files?hash=' + hash, function (files) {
             var vids = videoFiles(files);
             if (vids.length > 1) chooseEpisode(hash, name);
-            else playLocal(hash, vids.length ? vids[0].index : -1, name);
+            else playLocal(hash, vids.length ? vids[0].index : -1, name, vids.length ? vids[0].name : null);
         }, function () { playLocal(hash, -1, name); });
     }
 
@@ -998,6 +1080,35 @@
         });
     }
 
+    // Запуск транскода. Сериал под слежением — выбор режима: оверлей (торрент и слежение
+    // живут, новые серии транскодятся автоматически) или финализация (как фильм).
+    function startTranscode(t) {
+        var title = (t.meta && t.meta.title) || t.name;
+        var run = function (mode) {
+            req(API + '/qdl/transcode?hash=' + t.hash + (mode ? '&mode=' + mode : ''), function (r) {
+                if (!r || !r.success) { Lampa.Noty.show('Транскодирование: ' + ((r && r.error) || 'ошибка')); return; }
+                if (r.queued > 1) Lampa.Noty.show('🎬 В очереди (' + r.queued + ') — сообщу о прогрессе');
+                else if (r.files > 1) Lampa.Noty.show('🎬 Транскодирование запущено (' + r.files + ' серий) — сообщу о прогрессе');
+                else Lampa.Noty.show('🎬 Транскодирование запущено — это займёт заметное время, сообщу о прогрессе');
+                pollTranscode(t.hash, title);
+            }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
+        };
+        if (!t.watched) { run(null); return; }
+        req(API + '/qdl/files?hash=' + t.hash, function (files) {
+            if (videoFiles(files).length < 2) { run(null); return; }
+            Lampa.Select.show({
+                title: 'Сериал под слежением — как транскодировать?',
+                items: [
+                    { title: '🔔 Оставить слежение: новые серии транскодятся сами', subtitle: 'торрент остаётся (место ×2, пока идёт сериал)', mode: 'overlay' },
+                    { title: '✔ Завершить: торрент удалится, слежение снимется', subtitle: 'новые серии перестанут приходить', mode: 'finalize' },
+                    { title: 'Отмена' }
+                ],
+                onSelect: function (a) { if (a.mode) run(a.mode); else Lampa.Controller.toggle('content'); },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }, function () { run(null); });
+    }
+
     function quickMenu(t, ctx) {
         var items = [
             { title: 'Открыть карточку', act: 'page' },
@@ -1039,14 +1150,7 @@
                             else Lampa.Noty.show('Не вышло — перекачай раздачу и попробуй снова');
                         });
                 }
-                else if (b.act === 'mp4') {
-                    req(API + '/qdl/transcode?hash=' + t.hash, function (r) {
-                        if (!r || !r.success) { Lampa.Noty.show('Транскодирование: ' + ((r && r.error) || 'ошибка')); return; }
-                        if (r.queued > 1) Lampa.Noty.show('🎬 В очереди (' + r.queued + ') — сообщу о прогрессе');
-                        else Lampa.Noty.show('🎬 Транскодирование запущено — это займёт заметное время, сообщу о прогрессе');
-                        pollTranscode(t.hash, (t.meta && t.meta.title) || t.name);
-                    }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
-                }
+                else if (b.act === 'mp4') startTranscode(t);
                 else if (b.act === 'addcol') addToCollection(t);
                 else if (b.act === 'uncol') {
                     colPost('/qdl/collections/remove', { id: ctx.collection.id, hash: t.hash }, function (r) {
@@ -1132,6 +1236,23 @@
         }, function () { Lampa.Noty.show('Ошибка поиска раздач'); });
     }
 
+    // «▶ Продолжить: Серия N» на карточке сериала — только когда есть что продолжать
+    // (недосмотренная серия или следующая после досмотренных). Прогресс — Lampa.Timeline (это устройство).
+    function addContinueButton(render, cont, hash, name, gateItem) {
+        req(API + '/qdl/files?hash=' + hash, function (files) {
+            var vids = videoFiles(files);
+            if (vids.length < 2) return;
+            var target = chooseContinue(vids, function (f) { return epView(hash, f.name); });
+            if (!target || $('.qdl-continue-btn', render).length) return;
+            var label = 'Продолжить · ' + epShort(target.name);
+            var b = $('<div class="full-start__button selector qdl-continue-btn">' + ICON + '<span>' + esc(label) + '</span></div>');
+            b.on('hover:enter', function () {
+                confirmPartial(gateItem, function () { playEpisode(hash, vids, target); });
+            });
+            cont.prepend(b);
+        });
+    }
+
     function addButton(e) {
         try {
             if (e.type !== 'complite' || !e.object || !e.object.activity) return;
@@ -1171,6 +1292,9 @@
                     });
                     cont.prepend(w);
                 }
+                // сериал с прогрессом просмотра → вторая кнопка «Продолжить: Серия N»
+                addContinueButton(render, cont, active.qdl_hash, movie.title || movie.name,
+                    { hash: active.qdl_hash, progress: (typeof active.qdl_progress === 'number' ? active.qdl_progress : 1) });
                 return;   // НЕ добавляем «Скачать», прочие кнопки скрыты
             }
 
@@ -1205,6 +1329,7 @@
                     var play = $('<div class="full-start__button selector qdl-watch-btn">' + ICON + '<span>Смотреть (загружено)</span></div>');
                     play.on('hover:enter', function () { watch(hit); });
                     cont.prepend(play);
+                    addContinueButton(render, cont, hit.hash, (hit.meta && hit.meta.title) || hit.name, hit);
                 });
             }
         } catch (err) { console.log('qdl: addButton', err); }

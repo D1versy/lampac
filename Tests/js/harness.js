@@ -99,7 +99,16 @@ function makeLampa(over) {
     Template: { get: () => makeEl() },
     Scroll: function () { this.render = () => makeEl(); this.body = () => makeEl(); this.append = () => {}; this.minus = () => {}; this.update = () => {}; this.destroy = () => {}; },
     Lang: { add() {} },
-    Utils: { putScriptAsync() {} },
+    Utils: { putScriptAsync() {}, hash: (s) => 'h' + String(s) },
+    // Timeline-стаб: view() выдаёт стабильный объект на hash (как настоящий Lampa.Timeline)
+    Timeline: {
+      _store: {},
+      view(h) {
+        const s = L.Timeline._store;
+        if (!s[h]) s[h] = { hash: h, percent: 0, time: 0, duration: 0, handler() {} };
+        return s[h];
+      },
+    },
   };
   return deepAssign(L, over || {});
 }
@@ -185,7 +194,7 @@ function loadLampaInit(opts) {
 
 // ── shared qdl.js source transform (strip auto-start, export internal helpers) ──
 const QDL_TAIL = "if (window.appready) start();\n    else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') start(); });";
-const QDL_EXPORT = "window.__qdl = { esc: esc, names: names, slimCard: slimCard, cleanName: cleanName, videoFiles: videoFiles, baseName: baseName, isBrowser: isBrowser, isMobile: isMobile, streamUrl: streamUrl, posterUrl: posterUrl, relTime: relTime, badge: badge, chip: chip, getAudioPref: getAudioPref, setAudioPref: setAudioPref, updateNotiBadge: updateNotiBadge, ensureHeaderNoti: ensureHeaderNoti, buildHeaderNoti: buildHeaderNoti, normTitle: normTitle, isSerialName: isSerialName, isSeasonTail: isSeasonTail, findDownload: findDownload, addButton: addButton, canTranscode: canTranscode, quickMenu: quickMenu, confirmPartial: confirmPartial, watch: watch, openDownload: openDownload, chooseAndDownload: chooseAndDownload, pollTranscode: pollTranscode, dropAudioPref: dropAudioPref, rewriteCubUrl: rewriteCubUrl, isDmca: isDmca, whenDmca: whenDmca, setDmcaList: setDmcaList, noteCubDomain: noteCubDomain, groupDownloads: groupDownloads, commonPrefixTitle: commonPrefixTitle, buildCollectionPicker: buildCollectionPicker, itemTitle: itemTitle, addToCollection: addToCollection, collectionMenu: collectionMenu, renameCollection: renameCollection, chooseCover: chooseCover, healPoster: healPoster, ComponentDownloads: ComponentDownloads, touchCollections: touchCollections };";
+const QDL_EXPORT = "window.__qdl = { esc: esc, names: names, slimCard: slimCard, cleanName: cleanName, videoFiles: videoFiles, baseName: baseName, isBrowser: isBrowser, isMobile: isMobile, streamUrl: streamUrl, posterUrl: posterUrl, relTime: relTime, badge: badge, chip: chip, getAudioPref: getAudioPref, setAudioPref: setAudioPref, updateNotiBadge: updateNotiBadge, ensureHeaderNoti: ensureHeaderNoti, buildHeaderNoti: buildHeaderNoti, normTitle: normTitle, isSerialName: isSerialName, isSeasonTail: isSeasonTail, findDownload: findDownload, addButton: addButton, canTranscode: canTranscode, quickMenu: quickMenu, confirmPartial: confirmPartial, watch: watch, openDownload: openDownload, chooseAndDownload: chooseAndDownload, pollTranscode: pollTranscode, dropAudioPref: dropAudioPref, rewriteCubUrl: rewriteCubUrl, isDmca: isDmca, whenDmca: whenDmca, setDmcaList: setDmcaList, noteCubDomain: noteCubDomain, groupDownloads: groupDownloads, commonPrefixTitle: commonPrefixTitle, buildCollectionPicker: buildCollectionPicker, itemTitle: itemTitle, addToCollection: addToCollection, collectionMenu: collectionMenu, renameCollection: renameCollection, chooseCover: chooseCover, healPoster: healPoster, ComponentDownloads: ComponentDownloads, touchCollections: touchCollections, stripExt: stripExt, epTimelineHash: epTimelineHash, epView: epView, epShort: epShort, chooseContinue: chooseContinue, buildPlaylist: buildPlaylist, chooseEpisode: chooseEpisode, watchByHash: watchByHash, playEpisode: playEpisode, startTranscode: startTranscode, addContinueButton: addContinueButton };";
 function qdlSource() {
   // CRLF→LF: после git checkout с autocrlf файл на диске может оказаться в CRLF — якорь с \n обязан находиться
   const src = fs.readFileSync(QDL, 'utf8').replace(/\r\n/g, '\n');

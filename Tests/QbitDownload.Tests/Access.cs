@@ -106,17 +106,97 @@ public static class Access
     public static bool HlsCopyVideo(string codec) => (bool)Call("HlsCopyVideo", codec);
     public static List<string> HlsArgs(string dir, string videoPath, string extAudio, string audioMap, bool copyVideo, int startSeg = -1, bool nvenc = false)
         => (List<string>)Call("HlsArgs", dir, videoPath, extAudio, audioMap, copyVideo, startSeg, nvenc);
-    public static List<string> Mp4Args(string src, string part, bool nvenc = false)
-        => (List<string>)Call("Mp4Args", src, part, nvenc);
+    public static List<string> Mp4Args(string src, string part, bool copyVideo = false, bool nvenc = false)
+        => (List<string>)Call("Mp4Args", src, part, copyVideo, nvenc);
+    public static double TcOverallProgress(long doneBytes, long totalBytes, long curSize, double curFileProgress)
+        => (double)Call("TcOverallProgress", doneBytes, totalBytes, curSize, curFileProgress);
+    public static string SafeFileBase(string fileName) => (string)Call("SafeFileBase", fileName);
+
+    // нормализатор локального маркера (LocalFiles возвращает приватный LocalFile → раскладываем рефлексией)
+    public static List<(int index, string name, string path, long size)> LocalFilesOf(JObject loc)
+    {
+        var raw = (IEnumerable)Call("LocalFiles", loc);
+        var t = typeof(QbitController).GetNestedType("LocalFile", BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("QbitController+LocalFile not found");
+        var res = new List<(int, string, string, long)>();
+        foreach (var item in raw)
+            res.Add(((int)t.GetField("index").GetValue(item), (string)t.GetField("name").GetValue(item),
+                     (string)t.GetField("path").GetValue(item), (long)t.GetField("size").GetValue(item)));
+        return res;
+    }
+    public static bool LocalIsOverlay(JObject loc) => (bool)Call("LocalIsOverlay", loc);
     public static string BuildVodPlaylist(double duration) => (string)Call("BuildVodPlaylist", duration);
     public static bool SegReady(string dir, int n) => (bool)Call("SegReady", dir, n);
     public static JArray LoadWatch() => (JArray)Call("LoadWatch");
     public static void SaveWatch(JArray a) => Call("SaveWatch", a);
     public static void CleanupTranscodeParts() => QbitController.CleanupTranscodeParts();   // public — напрямую
+
+    // у EnqueueTranscode ДВЕ перегрузки по 5 параметров (фильм/сериал) — выбираем по типу 2-го
+    static MethodInfo EnqM(Type second) => C.GetMethods(SF)
+        .First(m => m.Name == "EnqueueTranscode" && m.GetParameters().Length == 5 && m.GetParameters()[1].ParameterType == second);
     public static int EnqueueTranscode(string hash, string src, string part, string final, double duration)
-        => (int)Call("EnqueueTranscode", hash, src, part, final, duration);
+    {
+        try { return (int)EnqM(typeof(string)).Invoke(null, new object[] { hash, src, part, final, duration }); }
+        catch (TargetInvocationException tie) { throw tie.InnerException ?? tie; }
+    }
+    public static int EnqueueTranscodeSeries(string hash, bool finalize, string name, string dir, IList files)
+    {
+        try { return (int)EnqM(typeof(bool)).Invoke(null, new object[] { hash, finalize, name, dir, files }); }
+        catch (TargetInvocationException tie) { throw tie.InnerException ?? tie; }
+    }
     public static int QueuePosition(string hash) => (int)Call("QueuePosition", hash);
     public static void KickWorker() => Call("KickWorker");
+
+    // ── сериальная очередь (TcFile/TcQueueItem — приватные вложенные типы) ──
+    internal static readonly Type TcFileT = C.GetNestedType("TcFile", BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("QbitController+TcFile not found");
+
+    public static object MakeTcFile(int index, string src, string part, string final, long size)
+    {
+        var f = Activator.CreateInstance(TcFileT);
+        TcFileT.GetField("index").SetValue(f, index);
+        TcFileT.GetField("src").SetValue(f, src);
+        TcFileT.GetField("part").SetValue(f, part);
+        TcFileT.GetField("final").SetValue(f, final);
+        TcFileT.GetField("size").SetValue(f, size);
+        return f;
+    }
+
+    public static IList MakeTcFileList(params object[] items)
+    {
+        var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(TcFileT));
+        foreach (var it in items) list.Add(it);
+        return list;
+    }
+
+    /// <summary>Заблокировать/разблокировать воркер очереди (детерминированные тесты без запуска ffmpeg).</summary>
+    public static void TcWorkerSet(int v) => F("_tcWorker").SetValue(null, v);
+
+    public static void TcQueueClear()
+    {
+        var q = F("_tcQueue").GetValue(null);
+        var tryDeq = q.GetType().GetMethod("TryDequeue");
+        var args = new object[1];
+        while ((bool)tryDeq.Invoke(q, args)) { }
+        F("_tcCurrent").SetValue(null, null);
+    }
+
+    /// <summary>Снимок очереди: (hash, finalize, индексы файлов) по каждому элементу.</summary>
+    public static List<(string hash, bool finalize, List<int> indexes)> TcQueueSnapshot()
+    {
+        var q = F("_tcQueue").GetValue(null);
+        var arr = (Array)q.GetType().GetMethod("ToArray").Invoke(q, null);
+        var itemT = C.GetNestedType("TcQueueItem", BindingFlags.NonPublic);
+        var res = new List<(string, bool, List<int>)>();
+        foreach (var it in arr)
+        {
+            var files = (IList)itemT.GetField("files").GetValue(it);
+            var idx = new List<int>();
+            if (files != null) foreach (var f in files) idx.Add((int)TcFileT.GetField("index").GetValue(f));
+            res.Add(((string)itemT.GetField("hash").GetValue(it), (bool)itemT.GetField("finalize").GetValue(it), idx));
+        }
+        return res;
+    }
 
     /// <summary>Job из приватного _tcJobs (null если нет).</summary>
     public static TcJobView TcJob(string hash)
@@ -167,6 +247,9 @@ public sealed class TcJobView
     public string state => (string)T.GetField("state").GetValue(Raw);
     public double progress => (double)T.GetField("progress").GetValue(Raw);
     public string error => (string)T.GetField("error").GetValue(Raw);
+    public string file => (string)T.GetField("file").GetValue(Raw);
+    public int fileDone => (int)T.GetField("fileDone").GetValue(Raw);
+    public int filesTotal => (int)T.GetField("filesTotal").GetValue(Raw);
 }
 
 /// <summary>Reflection view over the private nested <c>QbitController+Ep</c> struct-like class.</summary>
