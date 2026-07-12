@@ -72,6 +72,43 @@ public class HlsCodecTests
         Assert.True(Sub(a, "-map", "0:v:0?", "-map", "1:a:0?") >= 0, "звук берётся из второго входа");
     }
 
+    // ── nvenc-вариант (GPU-воркер на хосте, §ffworker) ──
+
+    [Fact]
+    public void Args_nvenc_transcode_uses_h264_nvenc_with_hwaccel()
+    {
+        var a = Access.HlsArgs("/hls/k", "/downloads/old.avi", null, null, copyVideo: false, startSeg: 100, nvenc: true);
+        Assert.True(Sub(a, "-hwaccel", "cuda") >= 0, "NVDEC-декод до входа");
+        Assert.True(Sub(a, "-hwaccel", "cuda") < a.IndexOf("-i"), "-hwaccel — входная опция, до -i");
+        Assert.True(Sub(a, "-c:v", "h264_nvenc") >= 0);
+        Assert.DoesNotContain("libx264", a);
+        Assert.Contains("yuv420p", a);   // 10-бит → 8-бит для браузера
+        // сетка keyframe сохранена — иначе сегменты разных запусков несовместимы
+        Assert.True(Sub(a, "-force_key_frames", "expr:gte(t,600+n_forced*6)") >= 0);
+        // copyts-блок seek-запуска не потерян
+        Assert.True(Sub(a, "-copyts", "-muxdelay", "0", "-avoid_negative_ts", "disabled") >= 0);
+    }
+
+    [Fact]
+    public void Args_nvenc_flag_ignored_in_copy_mode()
+    {
+        // видео copy — кодек не нужен, hwaccel не добавляется
+        var a = Access.HlsArgs("/hls/k", "/downloads/x.mkv", null, null, copyVideo: true, startSeg: -1, nvenc: true);
+        Assert.True(Sub(a, "-c:v", "copy") >= 0);
+        Assert.DoesNotContain("-hwaccel", a);
+        Assert.DoesNotContain("h264_nvenc", a);
+    }
+
+    [Fact]
+    public void Args_default_stays_cpu_byte_identical()
+    {
+        // без nvenc аргументы байт-в-байт как до внедрения воркера (фолбэк = сегодняшнее поведение)
+        var a = Access.HlsArgs("/hls/k", "/downloads/old.avi", null, null, copyVideo: false);
+        Assert.DoesNotContain("-hwaccel", a);
+        Assert.DoesNotContain("h264_nvenc", a);
+        Assert.True(Sub(a, "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p") >= 0);
+    }
+
     [Fact]
     public void Args_audio_and_hls_muxing_are_stable()
     {

@@ -32,6 +32,14 @@ public class ModuleConf : ModuleBaseConf
     // false = старое линейное поведение (event-плейлист, транскод строго с начала).
     public bool hlsSeek { get; set; } = true;
 
+    // Нативный GPU ffmpeg-воркер на Windows-хосте (NVENC на RTX 3090 Ti) — служба ffmpeg-worker.
+    // NVENC в Docker/WSL2 не работает, поэтому тяжёлый транскод уходит на хост; данные через общие
+    // тома, по HTTP только управление. Пусто = выключено, всё работает на CPU как раньше.
+    public string ffworkerUrl { get; set; } = "";        // "http://host.docker.internal:9119"
+    public string ffworkerToken { get; set; } = "";
+    public int ffworkerTimeoutMs { get; set; } = 3000;
+    public bool ffworkerHlsHevc { get; set; } = false;   // задел: live-HLS транскод HEVC через GPU (следующая итерация)
+
     // Слежение за сериалами: как часто проверять обновление раздач (часы).
     public int watchIntervalHours { get; set; } = 6;
 

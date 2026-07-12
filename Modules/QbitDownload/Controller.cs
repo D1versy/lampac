@@ -698,7 +698,7 @@ public class QbitController : BaseController
     // один запуск ffmpeg; при hlsSeek перезапускается с -ss в точку перемотки
     sealed class HlsSession
     {
-        public Process proc;
+        public IFfJob job;            // локальный процесс или джоб хостового GPU-воркера
         public int startSeg;          // с какого сегмента начат запуск (-start_number); -1 = легаси с начала
         public string ffPlaylist;     // плейлист этого запуска (маркер прогресса); в VOD-режиме клиенту не отдаётся
         public volatile bool killed;  // прибит рестартом → не считать фейлом
@@ -1336,10 +1336,12 @@ public class QbitController : BaseController
     // startSeg = -1 → легаси: линейный транскод с начала (аргументы байт-в-байт как раньше).
     // startSeg >= 0 → seek-запуск: -ss перед КАЖДЫМ входом (input seeking), -start_number, вывод в ff{N}.m3u8;
     // -copyts сохраняет истинные PTS источника → сегменты разных запусков в одной папке взаимно согласованы.
-    static List<string> HlsArgs(string dir, string videoPath, string extAudio, string audioMap, bool copyVideo, int startSeg = -1)
+    static List<string> HlsArgs(string dir, string videoPath, string extAudio, string audioMap, bool copyVideo, int startSeg = -1, bool nvenc = false)
     {
         string ss = startSeg > 0 ? (startSeg * (long)HlsSegSec).ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
         var args = new List<string> { "-y" };
+        if (nvenc && !copyVideo)   // NVDEC-декод (на хостовом воркере); неподдерживаемые кодеки ffmpeg сам тихо декодит на CPU
+            args.AddRange(new[] { "-hwaccel", "cuda" });
         if (ss != null) args.AddRange(new[] { "-ss", ss });
         args.AddRange(new[] { "-i", videoPath });
         if (!string.IsNullOrEmpty(extAudio))   // внешняя озвучка — вторым входом
@@ -1352,7 +1354,11 @@ public class QbitController : BaseController
             args.AddRange(new[] { "-c:v", "copy" });   // AVC/VP9/AV1 браузер играет; hevc — см. §Y
         else
         {
-            args.AddRange(new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p" });   // XviD/MPEG-2/VC-1 → H.264 на лету
+            // XviD/MPEG-2/VC-1 → H.264 на лету: NVENC на хостовом воркере, иначе x264 на CPU
+            if (nvenc)
+                args.AddRange(new[] { "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0", "-profile:v", "high", "-pix_fmt", "yuv420p" });
+            else
+                args.AddRange(new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p" });
             if (startSeg >= 0)   // при реэнкоде прибиваем keyframe к сетке сегментов (t под copyts абсолютное → нужен offset)
                 args.AddRange(new[] { "-force_key_frames", "expr:gte(t," + (startSeg * HlsSegSec) + "+n_forced*" + HlsSegSec + ")" });
         }
@@ -1383,7 +1389,7 @@ public class QbitController : BaseController
                 if (startSeg < 0 || (old.startSeg >= 0 && old.startSeg <= startSeg && startSeg <= SegLastCompleted(old) + HlsAheadSegs))
                     return;
                 old.killed = true;
-                try { old.proc?.Kill(entireProcessTree: true); old.proc?.WaitForExit(3000); } catch { }
+                try { old.job?.Kill(); } catch { }
                 _hlsRunning.TryRemove(key, out _);
             }
 
@@ -1395,30 +1401,19 @@ public class QbitController : BaseController
             try
             {
                 Directory.CreateDirectory(dir);
-                var psi = new ProcessStartInfo
-                {
-                    FileName = ModInit.conf.ffmpeg,
-                    UseShellExecute = false,
-                    RedirectStandardError = true,
-                    RedirectStandardOutput = true,
-                    CreateNoWindow = true
-                };
                 bool copyVideo = _hlsCopyByPath.GetOrAdd(videoPath, p => HlsCopyVideo(ProbeVideoCodec(p)));
-                foreach (var a in HlsArgs(dir, videoPath, extAudio, audioMap, copyVideo, startSeg))
-                    psi.ArgumentList.Add(a);
 
-                var p = Process.Start(psi);
-                sess.proc = p;
+                // видео copy — дёшево, остаётся в контейнере; реэнкод (XviD/MPEG-2/VC-1) — на GPU-воркер, если жив
+                var job = FfJob.Start(nv => HlsArgs(dir, videoPath, extAudio, audioMap, copyVideo, startSeg, nvenc: nv), "hls", preferRemote: !copyVideo);
+                sess.job = job;
                 _hlsRunning[key] = sess;
                 _ = Task.Run(async () =>
                 {
                     string err = "";
                     try
                     {
-                        var errTask = p.StandardError.ReadToEndAsync();
-                        var outTask = p.StandardOutput.ReadToEndAsync();
-                        await p.WaitForExitAsync();
-                        err = await errTask; await outTask;
+                        await job.WaitForExitAsync();
+                        err = job.StderrTail;
                     }
                     catch { }
                     lock (_hlsLock.GetOrAdd(key, _ => new object()))
@@ -1430,12 +1425,12 @@ public class QbitController : BaseController
                     try
                     {
                         string fkey = sess.startSeg >= 0 ? key + ":" + sess.startSeg : key;   // фейл seek-запуска не должен блокировать весь ключ
-                        bool ok = p.HasExited && p.ExitCode == 0 && System.IO.File.Exists(sess.ffPlaylist);
+                        bool ok = job.HasExited && job.ExitCode == 0 && System.IO.File.Exists(sess.ffPlaylist);
                         if (ok) _hlsFailed.TryRemove(fkey, out _);
                         else if (!sess.killed)   // прибитый рестартом процесс — не фейл
                         {
                             _hlsFailed[fkey] = DateTime.UtcNow;
-                            Console.WriteLine("[QbitDownload] hls ffmpeg failed key=" + key + " startSeg=" + sess.startSeg + " exit=" + (p.HasExited ? p.ExitCode.ToString() : "?") + ": " + (err ?? "").Trim());
+                            Console.WriteLine("[QbitDownload] hls ffmpeg failed key=" + key + " startSeg=" + sess.startSeg + " exit=" + (job.HasExited ? job.ExitCode.ToString() : "?") + ": " + (err ?? "").Trim());
                         }
                     }
                     catch { }
@@ -1637,54 +1632,66 @@ public class QbitController : BaseController
         return Json(new { state = "none" });   // в т.ч. после рестарта: очередь в памяти, клиент покажет «прервано»
     }
 
+    // аргументы MP4-транскода: CPU (x264, как раньше) или NVENC на хостовом GPU-воркере.
+    // nvenc p6+cq19+AQ визуально сравним с x264 fast crf19, скорость ~5-10× выше; HEVC декодится NVDEC-ом
+    static List<string> Mp4Args(string src, string part, bool nvenc = false)
+    {
+        var args = new List<string> { "-y" };
+        if (nvenc) args.AddRange(new[] { "-hwaccel", "cuda" });
+        args.AddRange(new[]
+        {
+            "-i", src,
+            "-map", "0:v:0", "-map", "0:a?",
+            "-dn", "-sn", "-map_chapters", "-1"            // data/субтитры в mp4 не тащим
+        });
+        if (nvenc)
+            args.AddRange(new[] { "-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-spatial-aq", "1", "-temporal-aq", "1", "-b_ref_mode", "middle" });
+        else
+            args.AddRange(new[] { "-c:v", "libx264", "-preset", "fast", "-crf", "19" });
+        args.AddRange(new[]
+        {
+            "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
+            "-c:a", "aac", "-ac", "2", "-b:a", "256k",     // как в HLS-ветке; язык/название дорожек ffmpeg переносит сам
+            "-movflags", "+faststart",
+            "-f", "mp4",
+            "-progress", "pipe:1", "-nostats",
+            part
+        });
+        return args;
+    }
+
     static async Task RunTranscode(string hash, string src, string part, string final, double duration, TcJob job)
     {
         try
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = ModInit.conf.ffmpeg,
-                UseShellExecute = false,
-                RedirectStandardError = true,
-                RedirectStandardOutput = true,
-                CreateNoWindow = true
-            };
-            foreach (var a in new[]
-            {
-                "-y", "-i", src,
-                "-map", "0:v:0", "-map", "0:a?",
-                "-dn", "-sn", "-map_chapters", "-1",           // data/субтитры в mp4 не тащим
-                "-c:v", "libx264", "-preset", "fast", "-crf", "19",
-                "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
-                "-c:a", "aac", "-ac", "2", "-b:a", "256k",     // как в HLS-ветке; язык/название дорожек ffmpeg переносит сам
-                "-movflags", "+faststart",
-                "-f", "mp4",
-                "-progress", "pipe:1", "-nostats",
-                part
-            }) psi.ArgumentList.Add(a);
+            var ff = FfJob.Start(nv => Mp4Args(src, part, nv), "mp4");
+            bool retried = ff is LocalFfJob;   // локальный запуск ретраить некуда
 
-            var p = Process.Start(psi);
-            var errTask = p.StandardError.ReadToEndAsync();
-
-            string line;
-            while ((line = await p.StandardOutput.ReadLineAsync()) != null)
+            while (true)
             {
-                if (duration > 0 && line.StartsWith("out_time_ms="))
+                while (!ff.HasExited)
                 {
-                    // несмотря на имя, ffmpeg пишет тут МИКРОсекунды
-                    if (long.TryParse(line.Substring("out_time_ms=".Length), out long us) && us > 0)
-                        job.progress = Math.Min(0.99, us / 1_000_000.0 / duration);
+                    await Task.Delay(1000);
+                    if (duration > 0 && ff.OutTimeUs > 0)
+                        job.progress = Math.Min(0.99, ff.OutTimeUs / 1_000_000.0 / duration);
                 }
-            }
-            await p.WaitForExitAsync();
-            string err = await errTask;
+                if (ff.ExitCode == 0 || retried) break;
 
-            if (p.ExitCode != 0 || !System.IO.File.Exists(part) || new FileInfo(part).Length < 1_000_000)
+                // удалённый джоб не дожил (воркер умер / nvenc-фейл) → один повтор локально на CPU
+                Console.WriteLine("[QbitDownload] transcode: ffworker job failed (exit=" + ff.ExitCode + "), повтор на CPU: " + Tail(ff.StderrTail, 400));
+                try { if (System.IO.File.Exists(part)) System.IO.File.Delete(part); } catch { }
+                job.progress = 0;
+                retried = true;
+                ff = FfJob.StartLocal(Mp4Args(src, part, nvenc: false));
+            }
+            string err = ff.StderrTail;
+
+            if (ff.ExitCode != 0 || !System.IO.File.Exists(part) || new FileInfo(part).Length < 1_000_000)
             {
                 try { if (System.IO.File.Exists(part)) System.IO.File.Delete(part); } catch { }
-                job.error = "ffmpeg exit=" + p.ExitCode;
+                job.error = "ffmpeg exit=" + ff.ExitCode;
                 job.state = "error";
-                Console.WriteLine("[QbitDownload] transcode failed hash=" + hash + " exit=" + p.ExitCode + ": " + Tail(err, 800));
+                Console.WriteLine("[QbitDownload] transcode failed hash=" + hash + " exit=" + ff.ExitCode + ": " + Tail(err, 800));
                 return;
             }
 

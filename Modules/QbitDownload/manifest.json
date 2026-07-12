@@ -5,6 +5,7 @@
     "ModuleConf.cs",
     "ModInit.cs",
     "SqlContext.cs",
+    "FfWorker.cs",
     "Controller.cs"
   ]
 }

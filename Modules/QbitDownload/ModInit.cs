@@ -33,6 +33,10 @@ public class ModInit : IModuleLoaded
         try { QbitController.CleanupTranscodeParts(); }
         catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] part cleanup: " + ex); }
 
+        // GPU-воркер: добить джобы прошлого запуска контейнера (fire-and-forget, best-effort)
+        try { FfWorker.ReapOrphans(); }
+        catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] ffworker reap: " + ex); }
+
         // фоновое слежение за сериалами: первая проверка через 10 мин, далее каждые N часов
         int hours = (conf != null && conf.watchIntervalHours > 0) ? conf.watchIntervalHours : 6;
         _watchTimer?.Dispose();

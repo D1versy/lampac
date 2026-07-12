@@ -104,8 +104,10 @@ public static class Access
     public static void PurgeCache(string hash) => Call("PurgeCache", hash);
     public static void MigrateCache(string oldH, string newH) => Call("MigrateCache", oldH, newH);
     public static bool HlsCopyVideo(string codec) => (bool)Call("HlsCopyVideo", codec);
-    public static List<string> HlsArgs(string dir, string videoPath, string extAudio, string audioMap, bool copyVideo, int startSeg = -1)
-        => (List<string>)Call("HlsArgs", dir, videoPath, extAudio, audioMap, copyVideo, startSeg);
+    public static List<string> HlsArgs(string dir, string videoPath, string extAudio, string audioMap, bool copyVideo, int startSeg = -1, bool nvenc = false)
+        => (List<string>)Call("HlsArgs", dir, videoPath, extAudio, audioMap, copyVideo, startSeg, nvenc);
+    public static List<string> Mp4Args(string src, string part, bool nvenc = false)
+        => (List<string>)Call("Mp4Args", src, part, nvenc);
     public static string BuildVodPlaylist(double duration) => (string)Call("BuildVodPlaylist", duration);
     public static bool SegReady(string dir, int n) => (bool)Call("SegReady", dir, n);
     public static JArray LoadWatch() => (JArray)Call("LoadWatch");

@@ -40,6 +40,7 @@
     <Compile Include="..\..\Modules\QbitDownload\ModuleConf.cs" Link="Module\ModuleConf.cs" />
     <Compile Include="..\..\Modules\QbitDownload\ModInit.cs" Link="Module\ModInit.cs" />
     <Compile Include="..\..\Modules\QbitDownload\SqlContext.cs" Link="Module\SqlContext.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\FfWorker.cs" Link="Module\FfWorker.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Controller.cs" Link="Module\Controller.cs" />
   </ItemGroup>
 
