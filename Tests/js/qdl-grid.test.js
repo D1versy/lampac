@@ -78,6 +78,40 @@ test('грид: коллекция первой (стопка + бейдж), ч�
   assert.ok(cards.eq(0).find('.card__img').attr('src').indexOf('/qdl/poster?hash=' + HA) !== -1, 'обложка = постер первого фильма');
 });
 
+test('грид: единая сортировка по дате загрузки — свежая одиночка выше коллекции', () => {
+  // Риддик скачан позже всех серий «Дюны» → он первый, коллекция второй
+  const { html } = mount({}, {
+    list: [{ ...F1, added: 100 }, { ...F2, added: 200 }, { ...F3, added: 300 }],
+    collections: [COL],
+  });
+  assert.deepStrictEqual(cardTitles(html), ['Риддик', 'Дюна']);
+  assert.ok(!html.find('.card').eq(0).hasClass('qdl-col-card'), 'одиночка первой');
+});
+
+test('грид: свежескачанная серия поднимает коллекцию наверх', () => {
+  // дата коллекции = max(added) её элементов: серия F2 новее Риддика → коллекция первая
+  const { html } = mount({}, {
+    list: [{ ...F1, added: 100 }, { ...F2, added: 400 }, { ...F3, added: 300 }],
+    collections: [COL],
+  });
+  assert.deepStrictEqual(cardTitles(html), ['Дюна', 'Риддик']);
+  assert.ok(html.find('.card').eq(0).hasClass('qdl-col-card'), 'коллекция первая');
+});
+
+test('gridOrder: элементы без added уходят вниз, при всех-нулях прежний порядок (коллекции → одиночки)', () => {
+  const { qdl } = mount({}, {});
+  // без added — как раньше: коллекции первыми, одиночки следом
+  const g0 = qdl.groupDownloads([F1, F2, F3, F4], [COL]);
+  const o0 = qdl.gridOrder(g0);
+  assert.ok(o0[0].col, 'коллекция первой при равных датах');
+  assert.deepStrictEqual(Array.from(o0.slice(1), (e) => e.item.hash), [HC, HD]);
+  // элемент без added (0) — ниже датированных
+  const g1 = qdl.groupDownloads([{ ...F3, added: 50 }, F4], []);
+  const o1 = qdl.gridOrder(g1);
+  assert.strictEqual(o1[0].item.hash, HC);
+  assert.strictEqual(o1[1].item.hash, HD, 'без added → вниз');
+});
+
 test('грид: пусто → сообщение-подсказка, карточек нет', () => {
   const { html } = mount({}, { list: [], collections: [] });
   assert.strictEqual(html.find('.card').length, 0);

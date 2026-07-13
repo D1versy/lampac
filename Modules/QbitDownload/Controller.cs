@@ -386,7 +386,8 @@ public class QbitController : BaseController
                     ["save_path"] = t.Value<string>("save_path"),
                     ["content_path"] = t.Value<string>("content_path"),
                     ["has_poster"] = ValidHash(h) && System.IO.File.Exists(PosterPath(h)),
-                    ["watched"] = watched.Contains(h)
+                    ["watched"] = watched.Contains(h),
+                    ["added"] = t.Value<long?>("added_on") ?? 0
                 };
                 if (ValidHash(h) && System.IO.File.Exists(MetaPath(h)))
                 {
@@ -424,7 +425,8 @@ public class QbitController : BaseController
                             ["save_path"] = lfs.Count == 1 ? Path.GetDirectoryName(lfs[0].path) : loc.Value<string>("dir"),
                             ["content_path"] = cpath,
                             ["has_poster"] = System.IO.File.Exists(PosterPath(h)),
-                            ["watched"] = false
+                            ["watched"] = false,
+                            ["added"] = loc.Value<long?>("added") ?? MarkerFallbackAdded(lf)
                         };
                         if (System.IO.File.Exists(MetaPath(h)))
                             try { item["meta"] = JObject.Parse(System.IO.File.ReadAllText(MetaPath(h))); } catch { }
@@ -434,7 +436,9 @@ public class QbitController : BaseController
             }
             catch (Exception ex) { Console.WriteLine("[QbitDownload] list local: " + ex.Message); }
 
-            return ContentTo(result.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+            // единый порядок по дате загрузки (новое сверху) — локальные транскоды не хвостом
+            var ordered = new JArray(result.OrderByDescending(x => x.Value<long?>("added") ?? 0));
+            return ContentTo(ordered.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
         }
         catch (Exception ex)
         {
@@ -1905,7 +1909,17 @@ public class QbitController : BaseController
                 return;
             }
 
-            // маркер пишем ДО удаления торрента — ни на секунду не остаёмся без записи в «Загрузках»
+            // маркер пишем ДО удаления торрента — ни на секунду не остаёмся без записи в «Загрузках».
+            // added_on снимаем с живого торрента: сортировка по дате загрузки, транскод позицию не меняет
+            long? addedOn = null;
+            try
+            {
+                using var qc = await Qbit();
+                var ti = JArray.Parse(await qc.GetStringAsync($"/api/v2/torrents/info?hashes={HttpUtility.UrlEncode(it.hash)}"));
+                if (ti.Count > 0) addedOn = ti[0].Value<long?>("added_on");
+            }
+            catch { }
+
             Directory.CreateDirectory(Path.Combine(ModInit.conf.cachePath, "local"));
             if (it.dir == null && it.files.Count == 1 && it.finalize)
             {
@@ -1916,7 +1930,7 @@ public class QbitController : BaseController
                     ["name"] = Path.GetFileName(final),
                     ["path"] = final,
                     ["size"] = new FileInfo(final).Length,
-                    ["added"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                    ["added"] = addedOn ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds()
                 };
                 System.IO.File.WriteAllText(LocalPath(it.hash), loc.ToString(Newtonsoft.Json.Formatting.None));
             }
@@ -1945,7 +1959,8 @@ public class QbitController : BaseController
                     ["name"] = it.name ?? prev?.Value<string>("name"),
                     ["dir"] = it.dir ?? prev?.Value<string>("dir"),
                     ["size"] = total,
-                    ["added"] = prev?.Value<long?>("added") ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                    // addedOn первым: после re-grab prev.added — старая дата, торрент в списке показывался с новой
+                    ["added"] = addedOn ?? prev?.Value<long?>("added") ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                     ["overlay"] = !it.finalize,
                     ["files"] = farr
                 };
@@ -2756,6 +2771,14 @@ public class QbitController : BaseController
     // локальный (не-торрент) файл: транскод занял место раздачи, КЛЮЧ — тот же infohash,
     // поэтому meta/постер/привязка к карточке продолжают работать без миграции
     static string LocalPath(string hash) => Path.Combine(ModInit.conf.cachePath, "local", hash + ".json");
+
+    // фолбэк даты загрузки для маркеров без поля added (созданы руками/битые)
+    static long MarkerFallbackAdded(string markerPath)
+    {
+        try { return new DateTimeOffset(System.IO.File.GetLastWriteTimeUtc(markerPath)).ToUnixTimeSeconds(); }
+        catch { return 0; }
+    }
+
     static JObject LoadLocal(string hash)
     {
         try

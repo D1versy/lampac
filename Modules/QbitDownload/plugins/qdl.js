@@ -665,11 +665,13 @@
                 else
                     cg.items.forEach(function (t) { comp.append(t, { collection: cg.col }); });
             } else {
-                // главный грид: коллекции первыми, затем фильмы вне коллекций
+                // главный грид: коллекции и фильмы вперемешку, по дате загрузки (новое сверху)
                 if (!g.cols.length && !g.singles.length)
                     body.append($('<div style="padding:2em;font-size:1.4em;opacity:.7">В «Загрузках» пока пусто. Нажми «Скачать» на карточке фильма.</div>'));
-                g.cols.forEach(function (c) { comp.appendCollection(c); });
-                g.singles.forEach(function (t) { comp.append(t); });
+                gridOrder(g).forEach(function (e) {
+                    if (e.col) comp.appendCollection(e.col);
+                    else comp.append(e.item);
+                });
             }
 
             this.activity.loader(false);
@@ -924,10 +926,22 @@
             if (!items.length) return;
             items.forEach(function (t) { inCol[t.hash] = true; });
             var cover = items.filter(function (t) { return t.hash === col.cover; })[0] || items[0];
-            cols.push({ col: col, items: items, cover: cover });
+            var added = 0;
+            items.forEach(function (t) { var a = +t.added || 0; if (a > added) added = a; });
+            cols.push({ col: col, items: items, cover: cover, added: added });
         });
         var singles = list.filter(function (t) { return t && t.hash && !inCol[t.hash]; });
         return { cols: cols, singles: singles };
+    }
+
+    // коллекции и одиночки вперемешку, по дате загрузки desc (дата коллекции = самая свежая её серия);
+    // тай-брейк — прежний порядок (коллекции, затем одиночки): не полагаемся на стабильность sort старых TV
+    function gridOrder(g) {
+        var entries = [];
+        g.cols.forEach(function (c) { entries.push({ col: c, added: +c.added || 0, idx: entries.length }); });
+        g.singles.forEach(function (t) { entries.push({ item: t, added: +t.added || 0, idx: entries.length }); });
+        entries.sort(function (a, b) { return (b.added - a.added) || (a.idx - b.idx); });
+        return entries;
     }
 
     // автоимя коллекции: общий пословный префикс («Дюна» + «Дюна: Часть вторая» → «Дюна»)
