@@ -1777,7 +1777,7 @@ public class QbitController : BaseController
         else
             args.AddRange(new[] { "-c:v", "libx264", "-preset", "fast", "-crf", "19" });
         if (!copyVideo)
-            args.AddRange(new[] { "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1" });   // только при энкоде
+            args.AddRange(new[] { "-pix_fmt", "yuv420p", "-profile:v", "high" });   // только при энкоде; level не форсить: 4.1 невалиден для 4K (NVENC падает «Invalid Level», x264 молча игнорирует), энкодер сам берёт минимальный (1080p→4.0, 4K→5.1)
         args.AddRange(new[]
         {
             "-c:a", "aac", "-ac", "2", "-b:a", "256k",     // как в HLS-ветке; язык/название дорожек ffmpeg переносит сам

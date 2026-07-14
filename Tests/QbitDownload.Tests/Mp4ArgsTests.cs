@@ -6,7 +6,9 @@ namespace QbitDownload.Tests;
 /// <summary>
 /// Аргументы MP4-транскода (Mp4Args — чистая сборка): CPU-ветка обязана быть
 /// байт-в-байт как до внедрения GPU-воркера (это фолбэк), nvenc-ветка — h264_nvenc
-/// с NVDEC-декодом и совместимым с браузером выходом (yuv420p, high 4.1, faststart).
+/// с NVDEC-декодом и совместимым с браузером выходом (yuv420p, high, faststart).
+/// -level НЕ форсится: 4.1 невалиден для 4K — NVENC падал «Invalid Level» (exit=-22),
+/// x264 молча игнорировал; энкодер сам берёт минимальный уровень по разрешению.
 /// </summary>
 public class Mp4ArgsTests
 {
@@ -31,7 +33,7 @@ public class Mp4ArgsTests
             "-map", "0:v:0", "-map", "0:a?",
             "-dn", "-sn", "-map_chapters", "-1",
             "-c:v", "libx264", "-preset", "fast", "-crf", "19",
-            "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
+            "-pix_fmt", "yuv420p", "-profile:v", "high",
             "-c:a", "aac", "-ac", "2", "-b:a", "256k",
             "-movflags", "+faststart",
             "-f", "mp4",
@@ -51,7 +53,8 @@ public class Mp4ArgsTests
         Assert.True(Sub(a, "-rc", "vbr", "-cq", "19", "-b:v", "0") >= 0);
         Assert.DoesNotContain("libx264", a);
         // выход обязан остаться браузеро-совместимым и стримабельным
-        Assert.True(Sub(a, "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1") >= 0);
+        Assert.True(Sub(a, "-pix_fmt", "yuv420p", "-profile:v", "high") >= 0);
+        Assert.DoesNotContain("-level", a);         // 4K: форс 4.1 ронял NVENC («Invalid Level»)
         Assert.True(Sub(a, "-c:a", "aac", "-ac", "2", "-b:a", "256k") >= 0);
         Assert.True(Sub(a, "-movflags", "+faststart") >= 0);
         Assert.True(Sub(a, "-progress", "pipe:1", "-nostats") >= 0, "прогресс парсит воркер");
