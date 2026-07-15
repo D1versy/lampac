@@ -6,7 +6,7 @@
         <tizen:operation name="http://samsung.com/appcontrol/operation/eden_resume"/>
     </tizen:app-control>
     <tizen:application id="0SG81L944p.Lampa" package="0SG81L944p" required_version="2.3"/>
-    <author>Yumata Kun</author>
+    <author>d1versy</author>
     <content src="index.html"/>
     <feature name="http://tizen.org/feature/screen.size.normal.1080.1920"/>
     <feature name="http://www.samsungdforum.com/feature/Voice_Recognition"/>
@@ -14,7 +14,7 @@
     <icon src="icon.png"/>
     <tizen:metadata key="http://samsung.com/tv/metadata/use.preview" value="bg_service"/>
     <tizen:metadata key="http://samsung.com/tv/metadata/prelaunch.support" value="true"/>
-    <name>Lampa</name>
+    <name>D1Vision</name>
     <tizen:privilege name="http://tizen.org/privilege/recorder"/>
     <tizen:privilege name="http://tizen.org/privilege/network.get"/>
     <tizen:privilege name="http://developer.samsung.com/privilege/microphone"/>
@@ -39,9 +39,9 @@
     <tizen:profile name="tv-samsung"/>
     <tizen:service id="0SG81L944p.service" auto-restart="true">
         <tizen:content src="service/service.js"/>
-        <tizen:name>Lampa</tizen:name>
+        <tizen:name>D1Vision</tizen:name>
         <tizen:icon src="icon.png"/>
-        <tizen:description>Lampa implementing</tizen:description>
+        <tizen:description>D1Vision service</tizen:description>
         <tizen:metadata key="meta-key" value="meta-value"/>
         <tizen:category name="http://tizen.org/category/service"/>
     </tizen:service>

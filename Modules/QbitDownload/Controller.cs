@@ -80,6 +80,42 @@ public class QbitController : BaseController
     }
     #endregion
 
+    #region /d1vision/hosts.json — OTA-список хостов + бренд для клиентских оболочек
+    // Клиенты (D1Vision mac/ios, LAMPA-App android, Tizen-виджет) после успешного старта кэшируют
+    // этот список нативно и на следующем запуске ДОБАВЛЯЮТ его к своему зашитому bootstrap-списку
+    // (OTA только дополняет bootstrap — защита от «окирпичивания» при опечатке в конфиге).
+    // Значения — brand/clientHosts из init.conf (секция QbitDownload), меняются без пересборки.
+    // Канонический документ: E:\Media-server\claude\08-clients.md.
+    // Дефолт здесь, а не в ModuleConf: populate-мердж init.conf ДОПОЛНЯЕТ преинициализированные
+    // коллекции (дубли). Distinct — страховка на случай дублей уже в самом init.conf.
+    static readonly List<string> defaultClientHosts = new List<string>
+    {
+        "http://192.168.87.24:9118",
+        "http://tv.d1versy.com:9118",
+        "http://tv2.d1versy.com:9118"
+    };
+
+    [HttpGet, AllowAnonymous]
+    [Route("d1vision/hosts.json")]
+    public ActionResult D1VisionHosts()
+    {
+        SetHeadersNoCache();
+        // Фильтруем null/пустые (в init.conf может оказаться "clientHosts": [null] или "") — иначе
+        // мусор уедет клиентам в hosts[]; если после фильтра пусто — падаем на дефолты.
+        var hosts = (ModInit.conf.clientHosts ?? Enumerable.Empty<string>())
+            .Where(h => !string.IsNullOrWhiteSpace(h)).Distinct().ToList();
+        if (hosts.Count == 0)
+            hosts = defaultClientHosts;
+        var payload = new JObject
+        {
+            ["ver"] = 1,
+            ["brand"] = ModInit.conf.brand ?? "D1Vision",
+            ["hosts"] = new JArray(hosts)
+        };
+        return ContentTo(payload.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
+    #endregion
+
     #region /qdl/search — раздачи через нативный индексатор Lampa (правильный фильм + все трекеры)
     [HttpGet, AllowAnonymous]
     [Route("qdl/search")]

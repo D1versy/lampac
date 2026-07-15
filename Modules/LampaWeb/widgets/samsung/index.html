@@ -3,7 +3,7 @@
     <meta charset="UTF-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Lampa</title>
+    <title>D1Vision</title>
 
     <meta name="referrer" content="never">
     
@@ -26,8 +26,10 @@
     <script src="./vender/keypad/keypad.js"></script>
     <script src="http://www.youtube.com/iframe_api" async></script>
     
+     <!-- loader.js резолвит живой хост (мульти-хост фолбек D1Vision) и сам грузит с него
+          lampainit.js + app.min.js; статичный тег {localhost}/lampainit.js убран — при фолбеке
+          он бил в мёртвый primary-адрес -->
      <script src="loader.js"></script>
-	 <script src="{localhost}/lampainit.js"></script>
 
 </body>
 </html>

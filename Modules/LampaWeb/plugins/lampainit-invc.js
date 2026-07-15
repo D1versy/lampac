@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '1.5';   // 1.4: транскод сериалов (оверлей/финализация) + «Продолжить: Серия N»; 1.5: единая сортировка «Загрузок» по дате загрузки
+window.qdl_fork_version = '1.6';   // 1.5: единая сортировка «Загрузок» по дате загрузки; 1.6: платформы D1Vision (UA-токены d1vision_*, форс-ключи переехали на сервер) + OTA /d1vision/hosts.json + бренд
 
 
 // Лампа готова для использования 
@@ -19,6 +19,24 @@ lampainit_invc.appload = function appload() {
   // TorrServer — указываем на внешний контейнер (стабильный, MatriX latest, кэш на D)
   Lampa.Storage.set('torrserver_url', 'http://192.168.87.24:8090');
   Lampa.Storage.set('torrserver_auth', 'false');
+
+  // ── D1Vision: бренд вкладки/окна ──
+  // Актуальный бренд приезжает из /d1vision/hosts.json (init.conf → QbitDownload.brand):
+  // смена названия проекта = правка init.conf, без пересборки чего-либо. Сам список hosts
+  // из того же ответа потребляют НАТИВНЫЕ оболочки (кэшируют у себя) — вебу он не нужен.
+  var applyBrandTitle = function () {
+    try {
+      if (window.d1vision_brand && document.title !== window.d1vision_brand)
+        document.title = window.d1vision_brand;
+    } catch (e) {}
+  };
+  applyBrandTitle();
+  try {
+    fetch('{localhost}/d1vision/hosts.json').then(function (r) { return r.json(); }).then(function (j) {
+      if (j && j.brand) window.d1vision_brand = j.brand;
+      applyBrandTitle();
+    }).catch(function () {});
+  } catch (e) {}
 
   // (разблокировка premium авторитетно ставится в appready — после Profile.check, который стирает account_user)
   // нейтральные строки вместо CUB/Premium (best-effort; основной эффект даёт скрытие CSS)
@@ -145,6 +163,44 @@ lampainit_invc.first_initiale = function firstinitiale() {
   // Lampa.Storage.set('source', 'tmdb');
 };
 
+
+// ── ДО загрузки Lampa: платформенные сущности D1Vision ──
+// Нативные оболочки добавляют в UA токен "d1vision_<platform>/<версия>" (mac|ios|android|tizen);
+// Tizen-виджет вместо UA сеет localStorage['d1vision_platform']='tizen' в loader.js.
+// По токену сервер выставляет платформенные ключи, которые раньше форсил КАЖДЫЙ клиент у себя
+// (BridgeConfig в LampaKit, и т.п.) — теперь единая точка правды здесь: поведение платформ
+// меняется по воздуху, без пересборки бинарей. Канон: E:\Media-server\claude\08-clients.md.
+// «4 замка» маршрутизации плеера (claude/07-mac-app.md): оболочки с мостом window.AndroidJS
+// живут на андроидной ветке запуска плеера, поэтому mac/ios/android получают одинаковые
+// андроидные ключи; ЧЕСТНАЯ идентичность платформы — d1vision_platform (window + localStorage).
+// Старые бинари без токена, но с lampa_client в UA → 'android': их собственный форс-скрипт
+// пишет ровно те же значения, операция идемпотентна — обратная совместимость при миграции.
+window.d1vision_brand = window.d1vision_brand || 'D1Vision';   // дефолт; актуальное значение приезжает из /d1vision/hosts.json (init.conf → QbitDownload.brand)
+try {
+  var d1ua = navigator.userAgent || '';
+  var d1tok = /d1vision_(mac|ios|android|tizen)\/(\S+)/i.exec(d1ua);
+  // Из localStorage доверяем ТОЛЬКО 'tizen' (его легитимно сеет loader.js виджета — у Tizen
+  // нет UA-токена). mac/ios/android определяем ИСКЛЮЧИТЕЛЬНО по UA-токену: иначе залипшее в
+  // одном браузере значение (импорт настроек, общий профиль) навсегда форсило бы андроидные
+  // ключи в обычном вебе. Чужое залипшее значение самоисцеляется перезаписью на строке ниже.
+  var d1saved = localStorage.getItem('d1vision_platform');
+  var d1plat = d1tok ? d1tok[1].toLowerCase()
+             : (d1saved === 'tizen' ? 'tizen'
+             : (/lampa_client/i.test(d1ua) ? 'android' : 'web'));
+  window.d1vision_platform = d1plat;
+  window.d1vision_client_version = d1tok ? d1tok[2] : '';
+  localStorage.setItem('d1vision_platform', d1plat);
+
+  // Оболочки с нативным мостом AndroidJS → андроидный маршрут плеера (замки 2 и 3).
+  // tizen и web НЕ трогаем: там платформу определяет сама Lampa, нативного моста нет.
+  if (d1plat === 'mac' || d1plat === 'ios' || d1plat === 'android') {
+    localStorage.setItem('platform', 'android');
+    localStorage.setItem('player', 'android');
+    localStorage.setItem('player_torrent', 'android');
+    localStorage.setItem('player_iptv', 'android');
+    localStorage.setItem('internal_torrclient', 'true');
+  }
+} catch (e) {}
 
 // ── ДО загрузки Lampa: ранний seed premium ──
 // hasPremium() = countDays(Date.now(), account_user.premium) > 0. premium = метка в будущем (мс).

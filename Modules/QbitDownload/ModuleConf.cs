@@ -1,10 +1,22 @@
 using Shared.Models.Module;
+using System.Collections.Generic;
 
 namespace QbitDownload;
 
 public class ModuleConf : ModuleBaseConf
 {
     public bool enable { get; set; } = true;
+
+    // ── D1Vision: бренд и OTA-список хостов для клиентских оболочек (mac/ios/android/tizen) ──
+    // Отдаются клиентам через GET /d1vision/hosts.json. Клиенты кэшируют список нативно и
+    // ДОБАВЛЯЮТ его к зашитому bootstrap-списку (никогда не заменяют — защита от «окирпичивания»).
+    // Боевые значения — в init.conf (секция QbitDownload), перечитывается на лету.
+    // ⚠️ clientHosts БЕЗ дефолта-инициализатора: ModuleInvoke.Init популейтит JSON поверх готового
+    // инстанса, и Json.NET ДОПОЛНЯЕТ уже заполненную коллекцию (получались дубли хостов).
+    // Дефолтный список живёт в Controller.cs (defaultClientHosts).
+    // Канонический документ: E:\Media-server\claude\08-clients.md.
+    public string brand { get; set; } = "D1Vision";
+    public List<string> clientHosts { get; set; }
 
     // qBittorrent WebUI
     public string qbitHost { get; set; } = "http://qbittorrent:8080";
