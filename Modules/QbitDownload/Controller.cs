@@ -116,6 +116,33 @@ public class QbitController : BaseController
     }
     #endregion
 
+    #region /d1vision/apps — раздача бинарных билдов клиентов (OTA app updates)
+    // Мини-стат-сервер поверх смонтированного тома clientBuildsPath: отдаёт и манифесты
+    // (manifest.json у Android, appcast.xml у Sparkle/Mac), и сами бинари (APK/DMG). Один
+    // роут на всё: publish-скрипт кладёт файл в client-builds/<platform>/, клиент качает его
+    // отсюда. Путь защищён ConfinedCombine (traversal), большие файлы — с Range (докачка
+    // апдейтером). Канон: E:\Media-server\claude\08-clients.md.
+    [HttpGet, AllowAnonymous]
+    [Route("d1vision/apps/{platform}/{**file}")]
+    public ActionResult D1VisionAppBuild(string platform, string file)
+    {
+        if (string.IsNullOrWhiteSpace(platform) || string.IsNullOrWhiteSpace(file))
+            return NotFound();
+
+        string baseDir = ModInit.conf.clientBuildsPath ?? "/client-builds";
+        string full = ConfinedCombine(baseDir, $"{platform}/{file}");
+        if (full == null || !System.IO.File.Exists(full))
+            return NotFound();
+
+        // Манифесты (json/xml) должны быть всегда свежими; бинари версионированы именем — можно кэшировать.
+        string ext = Path.GetExtension(full).ToLowerInvariant();
+        if (ext == ".json" || ext == ".xml")
+            SetHeadersNoCache();
+
+        return PhysicalFile(full, MimeType(full), enableRangeProcessing: true);
+    }
+    #endregion
+
     #region /qdl/search — раздачи через нативный индексатор Lampa (правильный фильм + все трекеры)
     [HttpGet, AllowAnonymous]
     [Route("qdl/search")]
@@ -644,6 +671,13 @@ public class QbitController : BaseController
             case ".ts": return "video/mp2t";
             case ".webm": return "video/webm";
             case ".mov": return "video/quicktime";
+            // клиентские билды/манифесты (OTA app updates)
+            case ".apk": return "application/vnd.android.package-archive";
+            case ".dmg": return "application/x-apple-diskimage";
+            case ".wgt":
+            case ".zip": return "application/octet-stream";
+            case ".xml": return "application/xml; charset=utf-8";
+            case ".json": return "application/json; charset=utf-8";
             default: return "application/octet-stream";
         }
     }

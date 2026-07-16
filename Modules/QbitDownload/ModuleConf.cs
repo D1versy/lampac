@@ -18,6 +18,11 @@ public class ModuleConf : ModuleBaseConf
     public string brand { get; set; } = "D1Vision";
     public List<string> clientHosts { get; set; }
 
+    // Каталог с бинарными билдами клиентов для самообновления (OTA app updates): смонтированный
+    // том, лежат manifest.json/appcast.xml + сами APK/DMG. Отдаётся через GET /d1vision/apps/<platform>/<file>.
+    // Билды кладёт publish-скрипт (Android) / make-dmg.sh (Mac). См. E:\Media-server\claude\08-clients.md.
+    public string clientBuildsPath { get; set; } = "/client-builds";
+
     // qBittorrent WebUI
     public string qbitHost { get; set; } = "http://qbittorrent:8080";
     public string qbitUser { get; set; } = "admin";
