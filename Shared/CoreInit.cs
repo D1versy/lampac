@@ -384,6 +384,9 @@ public class CoreInit
 
     public StaticacheConf Staticache { get; set; } = new StaticacheConf();
 
+    /// <summary>D1Vision: периметр внешнего доступа (ключи платформ — в init.conf, вне git)</summary>
+    public D1vConf d1v { get; set; } = new D1vConf();
+
     public WafConf WAF = new WafConf()
     {
         enable = true,

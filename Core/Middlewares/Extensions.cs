@@ -34,6 +34,11 @@ public static class Extensions
         return builder.UseMiddleware<RequestInfo>();
     }
 
+    public static IApplicationBuilder UseD1VPerimeter(this IApplicationBuilder builder)
+    {
+        return builder.UseMiddleware<D1VPerimeter>();
+    }
+
     public static IApplicationBuilder UseAnonymousRequest(this IApplicationBuilder builder)
     {
         return builder.UseMiddleware<AnonymousRequest>();

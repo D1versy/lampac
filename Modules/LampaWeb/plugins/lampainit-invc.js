@@ -10,14 +10,16 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '1.6';   // 1.5: единая сортировка «Загрузок» по дате загрузки; 1.6: платформы D1Vision (UA-токены d1vision_*, форс-ключи переехали на сервер) + OTA /d1vision/hosts.json + бренд
+window.qdl_fork_version = '1.7';   // 1.6: платформы D1Vision (UA-токены, форс-ключи на сервере) + OTA hosts.json + бренд; 1.7: torrserver_url → location.origin+'/ts' (прокси lampac, работает и извне через домен)
 
 
 // Лампа готова для использования 
 lampainit_invc.appload = function appload() {
   Lampa.Utils.putScriptAsync(["{localhost}/qdl.js?v={version}"]);  // QbitDownload: кнопка «Скачать» + раздел «Загрузки» ({version} = cache-buster, подставляет сервер)
-  // TorrServer — указываем на внешний контейнер (стабильный, MatriX latest, кэш на D)
-  Lampa.Storage.set('torrserver_url', 'http://192.168.87.24:8090');
+  // TorrServer — через прокси lampac (/ts/* → контейнер torrserver, модуль TorrServer external_url).
+  // location.origin: в LAN → http://192.168.87.24:9118/ts, извне → https://tv.d1versy.com:9443/ts —
+  // работает отовсюду и не светит LAN-IP (раньше тут был хардкод http://192.168.87.24:8090).
+  Lampa.Storage.set('torrserver_url', location.origin + '/ts');
   Lampa.Storage.set('torrserver_auth', 'false');
 
   // ── D1Vision: бренд вкладки/окна ──

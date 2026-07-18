@@ -24,21 +24,29 @@ namespace TorrServer;
 public class TorrServerController : BaseController
 {
     #region HttpClient
-    private static readonly HttpClient httpClient = new HttpClient(new SocketsHttpHandler
+    // D1Vision: базовый адрес — ModInit.tsuri (внешний контейнер либо локальный бинарь);
+    // Basic-auth ts:{tspass} нужен только локальному режиму (--httpauth), внешний TS без auth.
+    private static readonly HttpClient httpClient = CreateHttpClient();
+
+    static HttpClient CreateHttpClient()
     {
-        AllowAutoRedirect = true,
-        AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
-        SslOptions = { RemoteCertificateValidationCallback = (sender, cert, chain, sslPolicyErrors) => true },
-        MaxConnectionsPerServer = 100
-    })
-    {
-        BaseAddress = new Uri($"http://{CoreInit.conf.listen.localhost}:{ModInit.conf.tsport}"),
-        DefaultRequestHeaders =
+        var client = new HttpClient(new SocketsHttpHandler
         {
-            Authorization = new AuthenticationHeaderValue("Basic", CrypTo.Base64($"ts:{ModInit.tspass}")),
-        },
-        Timeout = TimeSpan.FromSeconds(30)
-    };
+            AllowAutoRedirect = true,
+            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+            SslOptions = { RemoteCertificateValidationCallback = (sender, cert, chain, sslPolicyErrors) => true },
+            MaxConnectionsPerServer = 100
+        })
+        {
+            BaseAddress = new Uri(ModInit.tsuri),
+            Timeout = TimeSpan.FromSeconds(30)
+        };
+
+        if (string.IsNullOrEmpty(ModInit.conf.external_url))
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", CrypTo.Base64($"ts:{ModInit.tspass}"));
+
+        return client;
+    }
     #endregion
 
     #region ts.js
@@ -186,7 +194,7 @@ public class TorrServerController : BaseController
     async public Task TorAPI(AccsUser user = null)
     {
         string pathRequest = Regex.Replace(HttpContext.Request.Path.Value, "^/ts", "");
-        string servUri = $"http://{CoreInit.conf.listen.localhost}:{ModInit.conf.tsport}{Regex.Replace(pathRequest, "[^a-zA-Z0-9\\./]", "") + HttpContext.Request.QueryString.Value}";
+        string servUri = $"{ModInit.tsuri}{Regex.Replace(pathRequest, "[^a-zA-Z0-9\\./]", "") + HttpContext.Request.QueryString.Value}";
 
         using (var ctsHttp = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted))
         {

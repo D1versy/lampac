@@ -32,6 +32,11 @@ public class ModInit : IModuleLoaded
     public static string tspath;
 
     public static Process tsprocess;
+
+    /// <summary>Базовый URL TorrServer: внешний (external_url) либо локально запущенный бинарь.</summary>
+    public static string tsuri => string.IsNullOrEmpty(conf?.external_url)
+        ? $"http://{CoreInit.conf.listen.localhost}:{conf.tsport}"
+        : conf.external_url.TrimEnd('/');
     #endregion
 
     #region loaded
@@ -46,6 +51,14 @@ public class ModInit : IModuleLoaded
             CoreInit.conf.WAF.limit_map.Insert(0, m);
 
         CoreInit.BaseModPathWhiteList.Add("/ts/");
+
+        // D1Vision: внешний TorrServer (контейнер) — свой бинарь не качаем и не запускаем,
+        // контроллер проксирует /ts/* на external_url. Всё ниже относится только к локальному режиму.
+        if (!string.IsNullOrEmpty(conf.external_url))
+        {
+            Log.Information("TorrServer: external mode, proxy target {url}", tsuri);
+            return;
+        }
 
         #region homedir
         homedir = Directory.GetCurrentDirectory();

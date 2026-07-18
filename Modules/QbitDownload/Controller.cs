@@ -91,8 +91,8 @@ public class QbitController : BaseController
     static readonly List<string> defaultClientHosts = new List<string>
     {
         "http://192.168.87.24:9118",
-        "http://tv.d1versy.com:9118",
-        "http://tv2.d1versy.com:9118"
+        "https://tv.d1versy.com:9443",
+        "https://tv2.d1versy.com:9443"
     };
 
     [HttpGet, AllowAnonymous]

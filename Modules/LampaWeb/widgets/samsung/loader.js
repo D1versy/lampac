@@ -9,7 +9,7 @@ console.log('Start load');
 // {localhost} — адрес, с которого реально скачан .wgt (сервер подставляет при сборке); идёт первым.
 // LAN-литерал добавлен явно: если .wgt скачан с tv.d1versy.com, {localhost}→tv и без литерала
 // LAN-хост потерялся бы из bootstrap. Дедуп в d1vHosts() схлопнет повтор, порядок сохранится.
-var D1V_BOOTSTRAP = ['{localhost}', 'http://192.168.87.24:9118', 'http://tv.d1versy.com:9118', 'http://tv2.d1versy.com:9118'];
+var D1V_BOOTSTRAP = ['{localhost}', 'http://192.168.87.24:9118', 'https://tv.d1versy.com:9443', 'https://tv2.d1versy.com:9443'];
 var activeHost = D1V_BOOTSTRAP[0];
 var appStarted = false;
 

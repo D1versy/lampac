@@ -623,6 +623,10 @@ public class Startup
         app.UseModHeaders();
         app.UseRequestInfo();
 
+        // D1Vision: периметр внешнего доступа — сразу после RequestInfo (нужен IsLocalRequest)
+        // и ДО Map("/nws")/Staticache/StaticFiles, чтобы покрыть ВСЁ (ws, кэш, статику, /proxy, /ts).
+        app.UseD1VPerimeter();
+
         if (mods.nws)
         {
             app.Map("/nws", nwsApp =>
