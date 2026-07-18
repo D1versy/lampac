@@ -13,6 +13,30 @@ var D1V_BOOTSTRAP = ['{localhost}', 'http://192.168.87.24:9118', 'https://tv.d1v
 var activeHost = D1V_BOOTSTRAP[0];
 var appStarted = false;
 
+// Ключ периметра платформы tizen: сервер подставляет при сборке .wgt из init.conf d1v.keys.
+// Без ключа (пусто или старый сервер не заменил плейсхолдер) LAN работает как раньше,
+// а tv/tv2 из интернета закрыты периметром (проба честно сфейлится).
+var D1V_KEY = '{d1vkey}';
+
+// Grace-окно приоритета гонки хостов и общий бюджет старта — единый контракт клиентов D1Vision.
+var D1V_GRACE_MS  = 300;
+var D1V_BUDGET_MS = 15000;
+
+// Подпись URL ключом периметра. Только наши WAN-домены (d1versy.com) — LAN открыт без ключа,
+// на сторонние хосты ключ утекать не должен. Виджет живёт на file://, cookie не гарантирована,
+// поэтому подписываем КАЖДЫЙ URL к хостам; подписанный запрос заодно посеет cookie для XHR приложения.
+function d1vSign(url) {
+    // Литерал плейсхолдера разорван конкатенацией: иначе серверный Replace («{d1vkey}» → ключ)
+    // заменил бы и его, и сравнение стало бы всегда истинным.
+    if (!D1V_KEY || D1V_KEY === '{' + 'd1vkey' + '}') return url;   // ключа нет / старый сервер не заменил
+    // Матчим именно ХОСТ (суффикс .d1versy.com), а не подстроку URL — иначе ключ
+    // утёк бы на tv.d1versy.com.evil.tld из отравленного OTA-списка.
+    var m = url.match(/^https?:\/\/([^\/?#:]+)/i);
+    var h = m && m[1].toLowerCase();
+    if (!h || (h !== 'd1versy.com' && h.slice(-12) !== '.d1versy.com')) return url;
+    return url + (url.indexOf('?') === -1 ? '?' : '&') + 'd1v=' + encodeURIComponent(D1V_KEY);
+}
+
 // Честная платформа для серверного платформенного блока (lampainit-invc.js):
 // у Tizen свой UA, поэтому вместо UA-токена сеем ключ напрямую — ДО загрузки lampainit/app.
 try { window.localStorage.setItem('d1vision_platform', 'tizen'); } catch (e) {}
@@ -40,7 +64,7 @@ function saveOtaHosts() {
         } catch (e) {}
     };
     request.onerror = function () {};
-    request.open('GET', activeHost + '/d1vision/hosts.json?v' + Math.random());
+    request.open('GET', d1vSign(activeHost + '/d1vision/hosts.json?v' + Math.random()));
     request.send();
 }
 
@@ -59,10 +83,10 @@ function createScript(src,error){
 function startAppWithDeepLink(){
     // lampainit.js грузим с ТОГО ЖЕ хоста, что и app (раньше был статичный тег {localhost} в
     // index.html — при уходе на фолбек-хост он бил в мёртвый адрес и плагины не приезжали)
-    createScript(activeHost + '/lampainit.js?v' + Math.random(), function(){
+    createScript(d1vSign(activeHost + '/lampainit.js?v' + Math.random()), function(){
         console.log('lampainit load fail');
     })
-    createScript(activeHost + '/lampa-main/app.min.js?v' + Math.random(), function(){
+    createScript(d1vSign(activeHost + '/lampa-main/app.min.js?v' + Math.random()), function(){
         console.log('Protocol https fail');
 
         loadFromLocal()
@@ -84,7 +108,7 @@ function saveToLocal(){
 
     };
 
-    request.open('GET', activeHost + '/lampa-main/app.min.js?v' + Math.random());
+    request.open('GET', d1vSign(activeHost + '/lampa-main/app.min.js?v' + Math.random()));
     request.send();
 }
 
@@ -111,11 +135,6 @@ function loadFromLocal(){
         })
     }
 }
-
-var timeLeft = 15;
-var timerId  = setInterval(countdown, 1000);
-var probeIdx = 0;
-var probing  = false;   // проба (2.5с) длиннее тика (1с) — не запускаем параллельные пробы
 
 function checkConnection(url, successCb, errorCb) {
     var xhr = new XMLHttpRequest();
@@ -149,14 +168,16 @@ function checkConnection(url, successCb, errorCb) {
         errorCb && errorCb(xhr);
     };
     xhr.send(null);
+
+    return xhr;   // для xhr.abort() — гонка глушит проигравших
 }
 
-// Единая точка старта: гарда от двойного запуска (успешная проба могла прилететь
+// Единая точка старта: гарда от двойного запуска (победа гонки могла прилететь
 // одновременно с 15-секундным таймаутом — раньше это грозило двойной вставкой скриптов).
 function startOnce(host) {
     if (appStarted) return;
     appStarted = true;
-    clearTimeout(timerId);
+    clearTimeout(budgetTimer);
 
     if (host) {
         activeHost = host;
@@ -171,32 +192,65 @@ function startOnce(host) {
     }
 }
 
-function countdown() {
-    if (timeLeft == 0) {
-        if (!probing) startOnce(null);   // бюджет исчерпан — стартуем с primary (onerror уведёт в кэш)
-        return;
+// ── Гонка хостов (контракт D1Vision, одинаков на всех клиентах) ──
+// Все пробы стартуют ОДНОВРЕМЕННО; приоритет = позиция в списке. Успех кандидата,
+// выше которого живых не осталось, побеждает мгновенно; менее приоритетный успех
+// ждёт старших не дольше grace 300 мс (LAN не проигрывает интернет-хосту из-за
+// джиттера). Проигравшие пробы отменяются. onDone(host|null): null — все мертвы.
+function raceHosts(hosts, onDone) {
+    var failed = [], xhrs = [], best = -1, failCount = 0, decided = false, graceTimer = null;
+
+    function allHigherFailed(i) {
+        for (var k = 0; k < i; k++) if (!failed[k]) return false;
+        return true;
     }
-    timeLeft--;
 
-    if (probing) return;   // предыдущая проба (до 2.5с) ещё идёт — ждём её колбэк
+    function decide(idx) {
+        if (decided) return;
+        decided = true;
+        if (graceTimer) clearTimeout(graceTimer);
+        for (var k = 0; k < xhrs.length; k++)   // отмена проигравших; abort дёрнет onerror —
+            if (k !== idx && xhrs[k]) try { xhrs[k].abort(); } catch (e) {}   // гарды executed/decided гасят
+        onDone(idx >= 0 ? hosts[idx] : null);
+    }
 
-    // перебор хостов по кругу: {localhost}/LAN → tv → tv2 → OTA-кэш → снова …
-    var hosts = d1vHosts();
-    var probeHost = hosts[probeIdx % hosts.length];
-    probeIdx++;
-    probing = true;
+    function onResult(i, ok) {
+        if (decided) return;
+        xhrs[i] = null;
+        if (ok) {
+            if (allHigherFailed(i)) return decide(i);
+            if (best === -1 || i < best) best = i;
+            if (!graceTimer) graceTimer = setTimeout(function () { decide(best); }, D1V_GRACE_MS);
+        } else {
+            failed[i] = true;
+            failCount++;
+            if (best !== -1 && allHigherFailed(best)) return decide(best);
+            if (failCount === hosts.length && best === -1) decide(-1);
+        }
+    }
 
-    // контракт D1Vision: пробуем лёгкий /lampainit.js (не тяжёлый app.min.js)
-    checkConnection(
-        probeHost + '/lampainit.js?v' + Math.random(),
-        function () {
-            probing = false;
-            startOnce(probeHost);
-        },
-        function () {
-            probing = false;
-            console.log('No Network: ' + probeHost);
-        });
+    for (var i = 0; i < hosts.length; i++) (function (i) {   // ВСЕ пробы разом
+        // контракт D1Vision: пробуем лёгкий /lampainit.js (не тяжёлый app.min.js)
+        xhrs[i] = checkConnection(
+            d1vSign(hosts[i] + '/lampainit.js?v' + Math.random()),
+            function () { onResult(i, true); },
+            function () { console.log('No Network: ' + hosts[i]); onResult(i, false); });
+    })(i);
 }
 
-countdown();
+// Оркестрация: гонка → победитель стартует приложение; все мертвы → новая гонка через 1 с,
+// пока в бюджете остаётся время хотя бы на одну полную пробу (~2.5 с + запас);
+// бюджет исчерпан — budgetTimer стартует с primary (onerror уведёт в localStorage-кэш).
+var raceStart   = new Date().getTime();
+var budgetTimer = setTimeout(function () { startOnce(null); }, D1V_BUDGET_MS);
+
+function runRace() {
+    if (appStarted) return;
+    raceHosts(d1vHosts(), function (host) {
+        if (host) return startOnce(host);
+        if (new Date().getTime() - raceStart < D1V_BUDGET_MS - 3000) setTimeout(runRace, 1000);
+        // иначе — доживаем до budgetTimer
+    });
+}
+
+runRace();

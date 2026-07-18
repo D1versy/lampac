@@ -303,6 +303,11 @@ public class ApiController : BaseController
     #endregion
 
     #region Widgets
+    // Генерация .wgt: два одновременных запроса /samsung.wgt работали бы в одной
+    // publish-директории (перетирание файлов между заменой плейсхолдеров и подсчётом
+    // хэшей → битая подпись; CreateNew-режим зипа → 500). Запрос редкий — простой lock.
+    static readonly object wgtGenLock = new object();
+
     [HttpGet, AllowAnonymous]
     [Route("samsung.wgt")]
     public ActionResult SamsWgt(string overwritehost)
@@ -310,74 +315,106 @@ public class ApiController : BaseController
         if (!ModInit.conf.widgets.samsung)
             return NotFound();
 
-        string cache = $"cache/widgets/samsung/{Shared.Services.Utilities.CrypTo.md5(overwritehost ?? host + "v4")}";
+        // D1Vision: ключ периметра платформы tizen — подставляется в loader.js ({d1vkey}),
+        // чтобы пробы/скрипты виджета проходили периметр на внешних хостах (tv/tv2).
+        // Ключа нет → пустая строка: LAN работает без ключа, WAN закрыт (как и раньше).
+        // conf читается ОДИН раз в локальную переменную: init.conf перечитывается на лету,
+        // повторное обращение к CoreInit.conf может увидеть уже другой объект (NRE).
+        string tizenKey = "";
+        var d1vKeys = CoreInit.conf?.d1v?.keys;
+        if (d1vKeys != null && d1vKeys.TryGetValue("tizen", out string tk) && !string.IsNullOrEmpty(tk))
+        {
+            // Ключ уходит сырым Replace в одинарно-кавычный JS-литерал loader.js —
+            // кавычка/бэкслеш в значении синтаксически убили бы весь loader.js
+            // (виджет умер бы даже в LAN). Пропускаем только безопасный алфавит.
+            if (Regex.IsMatch(tk, @"^[0-9A-Za-z_\-]+$"))
+                tizenKey = tk;
+        }
+
+        // Версия v5 (гонка хостов + {d1vkey}); ключ в кэш-ключе — смена ключа в init.conf
+        // перегенерит .wgt без ручной чистки. Скобки обязательны: раньше "v4" клеился только
+        // к host и при ?overwritehost= версия в кэш-ключе не участвовала вовсе.
+        string cache = $"cache/widgets/samsung/{Shared.Services.Utilities.CrypTo.md5((overwritehost ?? host) + ":v5:" + Shared.Services.Utilities.CrypTo.md5(tizenKey))}";
         string wgt = $"{cache}.wgt";
 
         if (IO.File.Exists(wgt))
             return File(IO.File.OpenRead(wgt), "application/octet-stream");
 
-        var widgetDirectory = $"{ModInit.modpath}/widgets/samsung";
-        var publishDirectory = $"{cache}/publish";
-
-        IO.Directory.CreateDirectory(publishDirectory);
-
-        foreach (string inFilePath in IO.Directory.GetFiles(widgetDirectory, "*", IO.SearchOption.AllDirectories))
+        lock (wgtGenLock)
         {
-            string outFile = inFilePath.Replace(widgetDirectory, publishDirectory);
-            IO.Directory.CreateDirectory(IO.Path.GetDirectoryName(outFile));
-            IO.File.Copy(inFilePath, outFile, true);
-        }
-
-        string index = IO.File.ReadAllText($"{publishDirectory}/index.html");
-        IO.File.WriteAllText($"{publishDirectory}/index.html", index.Replace("{localhost}", overwritehost ?? host));
-
-        string loader = IO.File.ReadAllText($"{publishDirectory}/loader.js");
-        IO.File.WriteAllText($"{publishDirectory}/loader.js", loader.Replace("{localhost}", overwritehost ?? host));
-
-        string app = IO.File.ReadAllText($"{publishDirectory}/app.js");
-        IO.File.WriteAllText($"{publishDirectory}/app.js", app.Replace("{localhost}", overwritehost ?? host));
-
-        string gethash(string file)
-        {
-            using (var sha = System.Security.Cryptography.SHA512.Create())
+            if (!IO.File.Exists(wgt))
             {
-                return Convert.ToBase64String(sha.ComputeHash(IO.File.ReadAllBytes(file)));
+                var widgetDirectory = $"{ModInit.modpath}/widgets/samsung";
+                var publishDirectory = $"{cache}/publish";
+
+                IO.Directory.CreateDirectory(publishDirectory);
+
+                foreach (string inFilePath in IO.Directory.GetFiles(widgetDirectory, "*", IO.SearchOption.AllDirectories))
+                {
+                    string outFile = inFilePath.Replace(widgetDirectory, publishDirectory);
+                    IO.Directory.CreateDirectory(IO.Path.GetDirectoryName(outFile));
+                    IO.File.Copy(inFilePath, outFile, true);
+                }
+
+                string index = IO.File.ReadAllText($"{publishDirectory}/index.html");
+                IO.File.WriteAllText($"{publishDirectory}/index.html", index.Replace("{localhost}", overwritehost ?? host));
+
+                string loader = IO.File.ReadAllText($"{publishDirectory}/loader.js");
+                IO.File.WriteAllText($"{publishDirectory}/loader.js", loader.Replace("{localhost}", overwritehost ?? host).Replace("{d1vkey}", tizenKey));
+
+                string app = IO.File.ReadAllText($"{publishDirectory}/app.js");
+                IO.File.WriteAllText($"{publishDirectory}/app.js", app.Replace("{localhost}", overwritehost ?? host));
+
+                string gethash(string file)
+                {
+                    using (var sha = System.Security.Cryptography.SHA512.Create())
+                    {
+                        return Convert.ToBase64String(sha.ComputeHash(IO.File.ReadAllBytes(file)));
+                    }
+                }
+
+                string indexhashsha512 = gethash($"{publishDirectory}/index.html");
+                string loaderhashsha512 = gethash($"{publishDirectory}/loader.js");
+                string apphashsha512 = gethash($"{publishDirectory}/app.js");
+                string confighashsha512 = gethash($"{publishDirectory}/config.xml");
+                string iconhashsha512 = gethash($"{publishDirectory}/icon.png");
+                string logohashsha512 = gethash($"{publishDirectory}/logo_appname_fg.png");
+
+                string author_sigxml = IO.File.ReadAllText($"{widgetDirectory}/author-signature.xml");
+                author_sigxml = author_sigxml
+                    .Replace("loaderhashsha512", loaderhashsha512)
+                    .Replace("apphashsha512", apphashsha512)
+                    .Replace("iconhashsha512", iconhashsha512)
+                    .Replace("logohashsha512", logohashsha512)
+                    .Replace("confighashsha512", confighashsha512)
+                    .Replace("indexhashsha512", indexhashsha512);
+
+                IO.File.WriteAllText($"{publishDirectory}/author-signature.xml", author_sigxml);
+
+                string authorsignaturehashsha512 = gethash($"{publishDirectory}/author-signature.xml");
+                string sigxml1 = IO.File.ReadAllText($"{publishDirectory}/signature1.xml");
+                sigxml1 = sigxml1
+                    .Replace("loaderhashsha512", loaderhashsha512)
+                    .Replace("apphashsha512", apphashsha512)
+                    .Replace("confighashsha512", confighashsha512)
+                    .Replace("authorsignaturehashsha512", authorsignaturehashsha512)
+                    .Replace("iconhashsha512", iconhashsha512)
+                    .Replace("logohashsha512", logohashsha512)
+                    .Replace("indexhashsha512", indexhashsha512);
+
+                IO.File.WriteAllText($"{publishDirectory}/signature1.xml", sigxml1);
+
+                // Зипуем во временный файл и переименовываем атомарно: читатель, увидевший
+                // File.Exists(wgt), никогда не откроет недописанный архив.
+                string tmp = $"{wgt}.tmp";
+                if (IO.File.Exists(tmp))
+                    IO.File.Delete(tmp);
+                IO.Compression.ZipFile.CreateFromDirectory(publishDirectory, tmp);
+                IO.File.Move(tmp, wgt);
+
+                IO.Directory.Delete(cache, true);
             }
         }
-
-        string indexhashsha512 = gethash($"{publishDirectory}/index.html");
-        string loaderhashsha512 = gethash($"{publishDirectory}/loader.js");
-        string apphashsha512 = gethash($"{publishDirectory}/app.js");
-        string confighashsha512 = gethash($"{publishDirectory}/config.xml");
-        string iconhashsha512 = gethash($"{publishDirectory}/icon.png");
-        string logohashsha512 = gethash($"{publishDirectory}/logo_appname_fg.png");
-
-        string author_sigxml = IO.File.ReadAllText($"{widgetDirectory}/author-signature.xml");
-        author_sigxml = author_sigxml
-            .Replace("loaderhashsha512", loaderhashsha512)
-            .Replace("apphashsha512", apphashsha512)
-            .Replace("iconhashsha512", iconhashsha512)
-            .Replace("logohashsha512", logohashsha512)
-            .Replace("confighashsha512", confighashsha512)
-            .Replace("indexhashsha512", indexhashsha512);
-
-        IO.File.WriteAllText($"{publishDirectory}/author-signature.xml", author_sigxml);
-
-        string authorsignaturehashsha512 = gethash($"{publishDirectory}/author-signature.xml");
-        string sigxml1 = IO.File.ReadAllText($"{publishDirectory}/signature1.xml");
-        sigxml1 = sigxml1
-            .Replace("loaderhashsha512", loaderhashsha512)
-            .Replace("apphashsha512", apphashsha512)
-            .Replace("confighashsha512", confighashsha512)
-            .Replace("authorsignaturehashsha512", authorsignaturehashsha512)
-            .Replace("iconhashsha512", iconhashsha512)
-            .Replace("logohashsha512", logohashsha512)
-            .Replace("indexhashsha512", indexhashsha512);
-
-        IO.File.WriteAllText($"{publishDirectory}/signature1.xml", sigxml1);
-        IO.Compression.ZipFile.CreateFromDirectory(publishDirectory, wgt);
-
-        IO.Directory.Delete(cache, true);
 
         return File(IO.File.OpenRead(wgt), "application/octet-stream");
     }
