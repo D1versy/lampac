@@ -104,8 +104,10 @@ public static class Access
     public static void PurgeCache(string hash) => Call("PurgeCache", hash);
     public static void MigrateCache(string oldH, string newH) => Call("MigrateCache", oldH, newH);
     public static bool HlsCopyVideo(string codec) => (bool)Call("HlsCopyVideo", codec);
-    public static List<string> HlsArgs(string dir, string videoPath, string extAudio, string audioMap, bool copyVideo, int startSeg = -1, bool nvenc = false)
-        => (List<string>)Call("HlsArgs", dir, videoPath, extAudio, audioMap, copyVideo, startSeg, nvenc);
+    public static List<string> HlsArgs(string dir, string videoPath, string extAudio, string audioMap, bool copyVideo, int startSeg = -1, bool nvenc = false, QbitController.HlsMobileOpts mobile = null)
+        => (List<string>)Call("HlsArgs", dir, videoPath, extAudio, audioMap, copyVideo, startSeg, nvenc, mobile);
+    public static bool IsHdrTransfer(string t) => (bool)Call("IsHdrTransfer", t);
+    public static string SignHlsPlaylist(string m3u8, string d1v) => (string)Call("SignHlsPlaylist", m3u8, d1v);
     public static List<string> Mp4Args(string src, string part, bool copyVideo = false, bool nvenc = false)
         => (List<string>)Call("Mp4Args", src, part, copyVideo, nvenc);
     public static double TcOverallProgress(long doneBytes, long totalBytes, long curSize, double curFileProgress)

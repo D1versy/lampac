@@ -412,11 +412,24 @@
         var ua = navigator.userAgent || '';
         return !/Tizen|Web0?S|webOS|SMART-TV|SmartTV|HbbTV|AppleTV|CrKey|Android TV|NetCast|VIDAA|MSX/i.test(ua);
     }
+    // «Мобильный» профиль (_m): live-720p с капом битрейта — телефон на сотовой сети.
+    // Флаг сети ставит нативная iOS-оболочка (window.d1vision_network = 'cellular'|'wifi',
+    // обновляется при смене сети); остальные платформы флага не имеют → всегда старый путь.
+    // qdl_mobile_quality: 'auto' (дефолт) | 'off' | 'always' — страховка/ручной форс через Lampa.Storage.
+    function mobileHls() {
+        try {
+            var mode = Lampa.Storage.get('qdl_mobile_quality', 'auto');
+            if (mode === 'off') return false;
+            if (mode === 'always') return true;
+            return window.d1vision_platform === 'ios' && window.d1vision_network === 'cellular';
+        } catch (e) { return false; }
+    }
     // audio: 'o' (ориг) | 'eN' (встроенная) | 'd<id>' (озвучка по студии). Внешняя → ВСЕГДА HLS (домешиваем).
     function streamUrl(hash, index, audio) {
         var ext = audio && (audio.charAt(0) === 'f' || audio.charAt(0) === 'd');
-        if (ext || isBrowser()) {
-            var k = hash + '_' + (index >= 0 ? index : -1) + (audio && audio !== 'o' ? '_' + audio : '');
+        var mob = mobileHls();   // пересиливает и ТВ-ветку оригинала: нативу на сотовой — 720p-HLS
+        if (ext || mob || isBrowser()) {
+            var k = hash + '_' + (index >= 0 ? index : -1) + (audio && audio !== 'o' ? '_' + audio : '') + (mob ? '_m' : '');
             return API + '/qdl/hls/' + k + '/playlist.m3u8';
         }
         return API + '/qdl/stream?hash=' + hash + (index >= 0 ? '&index=' + index : '');

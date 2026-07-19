@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '1.7';   // 1.6: платформы D1Vision (UA-токены, форс-ключи на сервере) + OTA hosts.json + бренд; 1.7: torrserver_url → location.origin+'/ts' (прокси lampac, работает и извне через домен)
+window.qdl_fork_version = '1.8';   // 1.7: torrserver_url → location.origin+'/ts' (прокси lampac, работает и извне через домен); 1.8: мобильный HLS-профиль _m (iOS на сотовой → live-720p, window.d1vision_network от оболочки)
 
 
 // Лампа готова для использования 

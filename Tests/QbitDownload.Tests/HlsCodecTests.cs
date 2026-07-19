@@ -83,7 +83,10 @@ public class HlsCodecTests
         Assert.True(Sub(a, "-c:v", "h264_nvenc") >= 0);
         Assert.DoesNotContain("libx264", a);
         Assert.Contains("yuv420p", a);   // 10-бит → 8-бит для браузера
-        // сетка keyframe сохранена — иначе сегменты разных запусков несовместимы
+        // сетка keyframe сохранена — иначе сегменты разных запусков несовместимы.
+        // -forced-idr 1 обязателен: без него NVENC даёт не-IDR I-кадры → муксер не режет по сетке
+        // (реальные сегменты по 250 кадров ~10.4с вместо 6с — найдено вживую 2026-07-19)
+        Assert.True(Sub(a, "-forced-idr", "1") >= 0);
         Assert.True(Sub(a, "-force_key_frames", "expr:gte(t,600+n_forced*6)") >= 0);
         // copyts-блок seek-запуска не потерян
         Assert.True(Sub(a, "-copyts", "-muxdelay", "0", "-avoid_negative_ts", "disabled") >= 0);

@@ -320,3 +320,98 @@ test('chip: null/undefined text => empty (esc coerces nullish to "")', () => {
   assert.ok(qdl.chip(null).includes('></span>'));
   assert.ok(qdl.chip(undefined).includes('></span>'));
 });
+
+// ─────────────────────────── mobileHls / мобильный профиль _m ───────────────────────────
+// «iOS на сотовой» → live-720p HLS (ключ _m). Флаг сети ставит нативная оболочка
+// (window.d1vision_network); все прочие платформы флага не имеют → поведение прежнее.
+
+const tvLampa = () => H.makeLampa({ Platform: { tv: () => true } });
+
+test('mobileHls: ios + cellular => true (авто-режим)', () => {
+  const { qdl } = H.loadQdl({
+    lampa: tvLampa(),
+    windowExtra: { d1vision_platform: 'ios', d1vision_network: 'cellular' },
+  });
+  assert.strictEqual(qdl.mobileHls(), true);
+});
+
+test('mobileHls: ios + wifi => false', () => {
+  const { qdl } = H.loadQdl({
+    lampa: tvLampa(),
+    windowExtra: { d1vision_platform: 'ios', d1vision_network: 'wifi' },
+  });
+  assert.strictEqual(qdl.mobileHls(), false);
+});
+
+test('mobileHls: другие платформы (mac/android/web) => false даже при cellular-флаге', () => {
+  for (const p of ['mac', 'android', 'tizen', 'web', undefined]) {
+    const { qdl } = H.loadQdl({
+      lampa: tvLampa(),
+      windowExtra: { d1vision_platform: p, d1vision_network: 'cellular' },
+    });
+    assert.strictEqual(qdl.mobileHls(), false, 'platform=' + p);
+  }
+});
+
+test('mobileHls: без флага сети (старый бинарь оболочки) => false', () => {
+  const { qdl } = H.loadQdl({
+    lampa: tvLampa(),
+    windowExtra: { d1vision_platform: 'ios' },
+  });
+  assert.strictEqual(qdl.mobileHls(), false);
+});
+
+test('mobileHls: qdl_mobile_quality=off глушит даже ios+cellular', () => {
+  const lampa = tvLampa();
+  lampa.Storage.set('qdl_mobile_quality', 'off');
+  const { qdl } = H.loadQdl({
+    lampa,
+    windowExtra: { d1vision_platform: 'ios', d1vision_network: 'cellular' },
+  });
+  assert.strictEqual(qdl.mobileHls(), false);
+});
+
+test('mobileHls: qdl_mobile_quality=always форсит на любой платформе', () => {
+  const lampa = tvLampa();
+  lampa.Storage.set('qdl_mobile_quality', 'always');
+  const { qdl } = H.loadQdl({ lampa, windowExtra: {} });
+  assert.strictEqual(qdl.mobileHls(), true);
+});
+
+test('streamUrl: ios+cellular на ТВ-платформе => HLS с суффиксом _m (пересиливает оригинал)', () => {
+  const { qdl } = H.loadQdl({
+    lampa: tvLampa(),
+    windowExtra: { d1vision_platform: 'ios', d1vision_network: 'cellular' },
+  });
+  assert.strictEqual(qdl.streamUrl('HASH', 0, 'o'), API + '/qdl/hls/HASH_0_m/playlist.m3u8');
+  assert.strictEqual(qdl.streamUrl('H', -1), API + '/qdl/hls/H_-1_m/playlist.m3u8');
+});
+
+test('streamUrl: mobile + встроенная озвучка e2 => суффикс _m ПОСЛЕ audio', () => {
+  const { qdl } = H.loadQdl({
+    lampa: tvLampa(),
+    windowExtra: { d1vision_platform: 'ios', d1vision_network: 'cellular' },
+  });
+  assert.strictEqual(qdl.streamUrl('H', 1, 'e2'), API + '/qdl/hls/H_1_e2_m/playlist.m3u8');
+});
+
+test('streamUrl: mobile + внешняя озвучка d-id => _m после d-суффикса', () => {
+  const { qdl } = H.loadQdl({
+    lampa: tvLampa(),
+    windowExtra: { d1vision_platform: 'ios', d1vision_network: 'cellular' },
+  });
+  assert.strictEqual(qdl.streamUrl('H', 2, 'd123'), API + '/qdl/hls/H_2_d123_m/playlist.m3u8');
+});
+
+test('streamUrl: ios на wifi => прежний оригинал /qdl/stream (регрессия)', () => {
+  const { qdl } = H.loadQdl({
+    lampa: tvLampa(),
+    windowExtra: { d1vision_platform: 'ios', d1vision_network: 'wifi' },
+  });
+  assert.strictEqual(qdl.streamUrl('HASH', 0, 'o'), API + '/qdl/stream?hash=HASH&index=0');
+});
+
+test('streamUrl: браузер без mobile-флагов => HLS БЕЗ _m (регрессия)', () => {
+  const { qdl } = H.loadQdl({ lampa: H.makeLampa({ Platform: { tv: () => false } }) });
+  assert.strictEqual(qdl.streamUrl('HASH', 0, 'o'), API + '/qdl/hls/HASH_0/playlist.m3u8');
+});

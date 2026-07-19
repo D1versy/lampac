@@ -175,10 +175,17 @@ test('lampainit: appready swallows Storage.listener.follow throwing', () => {
 // ─────────────────────────── appload() (lines 10-83) ───────────────────────────
 
 test('lampainit: appload sets torrserver_url and torrserver_auth in Storage', () => {
+  // с 1.7 torrserver_url = location.origin + '/ts' (прокси lampac, работает и извне через домен)
   const { mod, lampa } = H.loadLampaInit();
   mod.appload();
-  assert.strictEqual(lampa.Storage.get('torrserver_url'), 'http://192.168.87.24:8090');
+  assert.strictEqual(lampa.Storage.get('torrserver_url'), 'http://192.168.87.24:9118/ts');
   assert.strictEqual(lampa.Storage.get('torrserver_auth'), 'false'); // string 'false', not boolean
+});
+
+test('lampainit: appload torrserver_url следует за origin (извне — домен)', () => {
+  const { mod, lampa } = H.loadLampaInit({ location: { origin: 'https://tv.d1versy.com:9443', hostname: 'tv.d1versy.com' } });
+  mod.appload();
+  assert.strictEqual(lampa.Storage.get('torrserver_url'), 'https://tv.d1versy.com:9443/ts');
 });
 
 test('lampainit: appload calls Lampa.Utils.putScriptAsync for qdl.js', () => {

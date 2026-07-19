@@ -790,7 +790,7 @@ public class QbitController : BaseController
     }
     #endregion
 
-    #region /qdl/hls — HLS-транскод для браузера (звук EAC3/AC3/DTS → AAC; видео copy, а старые кодеки → live-x264)
+    #region /qdl/hls — HLS-транскод для браузера (звук EAC3/AC3/DTS → AAC; видео copy, старые кодеки → live-x264; ключ _m → мобильный 720p-профиль)
     const int HlsSegSec = 6;      // длительность сегмента (-hls_time)
     const int HlsAheadSegs = 3;   // запрос «чуть впереди» прогресса → ждём готовности, а не рестартим ffmpeg
 
@@ -815,14 +815,16 @@ public class QbitController : BaseController
     [Route("qdl/hls/{key}/{file}")]
     async public Task<ActionResult> Hls(string key, string file)
     {
-        var mk = Regex.Match(key ?? "", "^([0-9a-fA-F]{40}|[0-9A-Za-z]{32})_(-?\\d+)(?:_(o|e\\d+|d[0-9a-f]{8}|f\\d+))?$");
+        var mk = Regex.Match(key ?? "", "^([0-9a-fA-F]{40}|[0-9A-Za-z]{32})_(-?\\d+)(?:_(o|e\\d+|d[0-9a-f]{8}|f\\d+))?(?:_(m))?$");
         if (!mk.Success) return BadRequest();
         if (!Regex.IsMatch(file ?? "", "^(playlist\\.m3u8|seg\\d{1,6}\\.ts)$")) return BadRequest();
 
         string hash = mk.Groups[1].Value;
         int index = int.Parse(mk.Groups[2].Value);
         string audio = mk.Groups[3].Success ? mk.Groups[3].Value : "o";   // o=ориг, eN=встроенная дорожка, fN=внешний файл-озвучка
-        string dir = Path.Combine(ModInit.conf.hlsPath, key);
+        bool mobile = mk.Groups[4].Success;   // «мобильный» профиль (_m): live-даунскейл + кап битрейта (телефон на сотовой)
+        if (mobile && !ModInit.conf.hlsMobile) return NotFound();   // профиль выключен в конфиге
+        string dir = Path.Combine(ModInit.conf.hlsPath, key);      // ключ содержит _m → своя кэш-папка, с обычным HLS не смешивается
         string target = Path.Combine(dir, file);
 
         try
@@ -848,7 +850,7 @@ public class QbitController : BaseController
                             var (src, extAudio, audioMap) = await ResolveHlsInputs(hash, index, audio);
                             if (src == null) return NotFound();
                             CleanupHls();
-                            StartHls(key, dir, src, extAudio, audioMap, n);
+                            StartHls(key, dir, src, extAudio, audioMap, n, mobile);
                         }
                         for (int i = 0; i < 40 && !SegReady(dir, n); i++)   // short-poll до 10с вместо слепых ретраев hls.js
                         {
@@ -909,7 +911,7 @@ public class QbitController : BaseController
                 if (src == null) return NotFound();
 
                 CleanupHls();
-                StartHls(key, dir, src, extAudio, audioMap);
+                StartHls(key, dir, src, extAudio, audioMap, mobile: mobile);
 
                 // ждём появления плейлиста + первого сегмента (event-playlist растёт по мере транскода)
                 for (int i = 0; i < 60; i++)
@@ -1453,11 +1455,64 @@ public class QbitController : BaseController
         catch { }
     }
 
+    // Параметры «мобильного» профиля (_m). Отдельный класс, чтобы HlsArgs осталась чистой
+    // функцией (тесты собирают опции сами, без ModInit.conf); боевые значения — BuildMobileOpts.
+    public sealed class HlsMobileOpts
+    {
+        public int height = 720;       // даунскейл до высоты (SD не апскейлится)
+        public int cq = 28;            // NVENC -cq (обычный HLS-реэнкод — 23)
+        public int crf = 25;           // CPU-фолбэк libx264 -crf (обычный — 21)
+        public int maxrateKbps = 2500; // кап для сотового канала; -bufsize = 2×maxrate
+        public int audioKbps = 128;    // AAC (обычный HLS — 256k)
+        public bool hdr;               // HDR10/HLG-источник → tone-mapping в bt709
+    }
+
+    static readonly ConcurrentDictionary<string, bool> _hlsHdrByPath = new();   // кэш HDR-детекта по пути (ffprobe недёшев)
+
+    static HlsMobileOpts BuildMobileOpts(string videoPath) => new HlsMobileOpts
+    {
+        height = ModInit.conf.hlsMobileHeight,
+        cq = ModInit.conf.hlsMobileCq,
+        crf = ModInit.conf.hlsMobileCrf,
+        maxrateKbps = ModInit.conf.hlsMobileMaxrateKbps,
+        audioKbps = ModInit.conf.hlsMobileAudioKbps,
+        hdr = _hlsHdrByPath.GetOrAdd(videoPath, p => IsHdrTransfer(ProbeVideoColorTransfer(p)))
+    };
+
+    // HDR-передача (PQ/HLG): даунскейл без тонмапа дал бы блёклую картинку (§AH — бэклог закрыт для _m)
+    static bool IsHdrTransfer(string t) => !string.IsNullOrWhiteSpace(t) &&
+        (t.Trim().Equals("smpte2084", StringComparison.OrdinalIgnoreCase) || t.Trim().Equals("arib-std-b67", StringComparison.OrdinalIgnoreCase));
+
+    static string ProbeVideoColorTransfer(string path)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = ModInit.conf.ffprobe,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            foreach (var a in new[] { "-v", "quiet", "-select_streams", "v:0", "-show_entries", "stream=color_transfer", "-of", "default=noprint_wrappers=1:nokey=1", path })
+                psi.ArgumentList.Add(a);
+            var p = Process.Start(psi);
+            string o = p.StandardOutput.ReadToEnd();
+            p.StandardError.ReadToEnd();
+            p.WaitForExit(15000);
+            return o.Trim();
+        }
+        catch { }
+        return "";   // не смогли пробить → считаем SDR (простой scale, как раньше)
+    }
+
     // Сборка аргументов ffmpeg для HLS — чистая функция (тестируется в HlsCodecTests).
     // startSeg = -1 → легаси: линейный транскод с начала (аргументы байт-в-байт как раньше).
     // startSeg >= 0 → seek-запуск: -ss перед КАЖДЫМ входом (input seeking), -start_number, вывод в ff{N}.m3u8;
     // -copyts сохраняет истинные PTS источника → сегменты разных запусков в одной папке взаимно согласованы.
-    static List<string> HlsArgs(string dir, string videoPath, string extAudio, string audioMap, bool copyVideo, int startSeg = -1, bool nvenc = false)
+    // mobile != null → профиль _m: всегда реэнкод (copyVideo=false) с даунскейлом и капом битрейта.
+    static List<string> HlsArgs(string dir, string videoPath, string extAudio, string audioMap, bool copyVideo, int startSeg = -1, bool nvenc = false, HlsMobileOpts mobile = null)
     {
         string ss = startSeg > 0 ? (startSeg * (long)HlsSegSec).ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
         var args = new List<string> { "-y" };
@@ -1475,15 +1530,31 @@ public class QbitController : BaseController
             args.AddRange(new[] { "-c:v", "copy" });   // AVC/VP9/AV1 браузер играет; hevc — см. §Y
         else
         {
-            // XviD/MPEG-2/VC-1 → H.264 на лету: NVENC на хостовом воркере, иначе x264 на CPU
-            if (nvenc)
-                args.AddRange(new[] { "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0", "-profile:v", "high", "-pix_fmt", "yuv420p" });
+            if (mobile != null)
+            {
+                // Профиль _m: даунскейл (SD не апскейлим) + кап битрейта под сотовый канал.
+                // HDR10/HLG → SDR bt709 через zscale+tonemap (CPU-фильтр: после -hwaccel cuda без
+                // -hwaccel_output_format кадры и так в системной памяти, hwdownload не нужен).
+                args.AddRange(new[] { "-vf", mobile.hdr
+                    ? "zscale=w=-2:h=" + mobile.height + ":t=linear:npl=100,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:p=bt709:r=tv,format=yuv420p"
+                    : "scale=-2:min(" + mobile.height + "\\,ih)" });
+                string maxrate = mobile.maxrateKbps + "k", bufsize = (mobile.maxrateKbps * 2) + "k";
+                if (nvenc)   // -maxrate при -rc vbr -cq — жёсткий VBV-потолок; -level не форсим (§AH)
+                    args.AddRange(new[] { "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", mobile.cq.ToString(), "-b:v", "0", "-maxrate", maxrate, "-bufsize", bufsize, "-forced-idr", "1", "-profile:v", "high", "-pix_fmt", "yuv420p" });
+                else
+                    args.AddRange(new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", mobile.crf.ToString(), "-maxrate", maxrate, "-bufsize", bufsize, "-pix_fmt", "yuv420p" });
+            }
+            // XviD/MPEG-2/VC-1 → H.264 на лету: NVENC на хостовом воркере, иначе x264 на CPU.
+            // ⚠️ -forced-idr 1 ОБЯЗАТЕЛЕН: без него force_key_frames даёт не-IDR I-кадры, муксер
+            // по ним НЕ режет → сегменты по 250 кадров (~10.4с) вместо 6с — сетка VOD разъезжается.
+            else if (nvenc)
+                args.AddRange(new[] { "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0", "-forced-idr", "1", "-profile:v", "high", "-pix_fmt", "yuv420p" });
             else
                 args.AddRange(new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p" });
             if (startSeg >= 0)   // при реэнкоде прибиваем keyframe к сетке сегментов (t под copyts абсолютное → нужен offset)
                 args.AddRange(new[] { "-force_key_frames", "expr:gte(t," + (startSeg * HlsSegSec) + "+n_forced*" + HlsSegSec + ")" });
         }
-        args.AddRange(new[] { "-c:a", "aac", "-ac", "2", "-b:a", "256k" });   // звук → AAC stereo
+        args.AddRange(new[] { "-c:a", "aac", "-ac", "2", "-b:a", mobile != null ? mobile.audioKbps + "k" : "256k" });   // звук → AAC stereo
         if (startSeg >= 0)
             args.AddRange(new[] { "-copyts", "-muxdelay", "0", "-avoid_negative_ts", "disabled" });
         args.AddRange(new[]
@@ -1500,7 +1571,7 @@ public class QbitController : BaseController
         return args;
     }
 
-    static void StartHls(string key, string dir, string videoPath, string extAudio, string audioMap, int startSeg = -1)
+    static void StartHls(string key, string dir, string videoPath, string extAudio, string audioMap, int startSeg = -1, bool mobile = false)
     {
         lock (_hlsLock.GetOrAdd(key, _ => new object()))
         {
@@ -1522,10 +1593,12 @@ public class QbitController : BaseController
             try
             {
                 Directory.CreateDirectory(dir);
-                bool copyVideo = _hlsCopyByPath.GetOrAdd(videoPath, p => HlsCopyVideo(ProbeVideoCodec(p)));
+                // mobile: всегда реэнкод; общий кэш решения copy/x264 (_hlsCopyByPath, по пути) не трогаем — не отравить обычный профиль
+                bool copyVideo = !mobile && _hlsCopyByPath.GetOrAdd(videoPath, p => HlsCopyVideo(ProbeVideoCodec(p)));
+                HlsMobileOpts mopts = mobile ? BuildMobileOpts(videoPath) : null;
 
-                // видео copy — дёшево, остаётся в контейнере; реэнкод (XviD/MPEG-2/VC-1) — на GPU-воркер, если жив
-                var job = FfJob.Start(nv => HlsArgs(dir, videoPath, extAudio, audioMap, copyVideo, startSeg, nvenc: nv), "hls", preferRemote: !copyVideo);
+                // видео copy — дёшево, остаётся в контейнере; реэнкод (XviD/MPEG-2/VC-1, профиль _m) — на GPU-воркер, если жив
+                var job = FfJob.Start(nv => HlsArgs(dir, videoPath, extAudio, audioMap, copyVideo, startSeg, nvenc: nv, mobile: mopts), "hls", preferRemote: !copyVideo);
                 sess.job = job;
                 _hlsRunning[key] = sess;
                 _ = Task.Run(async () =>

@@ -55,7 +55,17 @@ public class ModuleConf : ModuleBaseConf
     public string ffworkerUrl { get; set; } = "";        // "http://host.docker.internal:9119"
     public string ffworkerToken { get; set; } = "";
     public int ffworkerTimeoutMs { get; set; } = 3000;
-    public bool ffworkerHlsHevc { get; set; } = false;   // задел: live-HLS транскод HEVC через GPU (следующая итерация)
+
+    // «Мобильный» HLS-профиль (ключ с суффиксом _m): live-даунскейл + кап битрейта для телефона
+    // на сотовой сети (iOS-клиент строит _m-ключ при cellular, см. claude/08 репо-оркестрации).
+    // Всегда реэнкод (включая h264/hevc — NVDEC декодит), уходит на GPU-воркер, CPU-фолбэк libx264.
+    // Этот блок закрывает и прежний задел ffworkerHlsHevc (live-GPU-HLS для HEVC).
+    public bool hlsMobile { get; set; } = true;              // false → 404 на _m-ключи
+    public int hlsMobileHeight { get; set; } = 720;          // -vf scale до высоты (SD не апскейлится)
+    public int hlsMobileCq { get; set; } = 28;               // NVENC -cq (обычный HLS-реэнкод — 23)
+    public int hlsMobileCrf { get; set; } = 25;              // CPU-фолбэк libx264 -crf (обычный — 21)
+    public int hlsMobileMaxrateKbps { get; set; } = 2500;    // -maxrate; -bufsize = 2×maxrate
+    public int hlsMobileAudioKbps { get; set; } = 128;       // звук AAC (обычный HLS — 256k)
 
     // Слежение за сериалами: как часто проверять обновление раздач (часы).
     public int watchIntervalHours { get; set; } = 6;
