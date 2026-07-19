@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '1.8';   // 1.7: torrserver_url → location.origin+'/ts' (прокси lampac, работает и извне через домен); 1.8: мобильный HLS-профиль _m (iOS на сотовой → live-720p, window.d1vision_network от оболочки)
+window.qdl_fork_version = '1.9';   // 1.8: мобильный HLS-профиль _m (iOS на сотовой → live-720p, window.d1vision_network от оболочки); 1.9: фиксы ревью _m (Storage-catch не глушит платформенную ветку; сервер: HDR-кэш не травится пустой пробой, hlsMobile=false → 302 вместо 404)
 
 
 // Лампа готова для использования 

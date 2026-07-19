@@ -142,4 +142,68 @@ public class HlsMobileTests
         string signed = Access.SignHlsPlaylist("seg00000.ts\n", "a b&c");
         Assert.Contains("seg00000.ts?d1v=a%20b%26c", signed);
     }
+
+    // ── HDR-кэш: пустая проба (недокачанный файл) НЕ отравляет вердикт навсегда ──
+
+    [Fact]
+    public void Hdr_probe_failure_is_not_cached()
+    {
+        // несуществующий путь → ffprobe падает → пустая проба → SDR на этот раз, но БЕЗ записи в кэш
+        string path = "/no/such/file-" + System.Guid.NewGuid().ToString("N") + ".mkv";
+        Assert.False(Access.ProbeHdrCached(path));
+        Assert.False(Access.HlsHdrCacheHas(path), "пустая проба не должна кэшироваться — иначе HDR-фильм навсегда останется «SDR» после докачки");
+    }
+
+    // ── idle-kill: зритель ушёл (нет запросов сегментов) → ffmpeg глушится ──
+
+    static int SetIdleTtl(int v)
+    {
+        if (QbitDownload.ModInit.conf == null) QbitDownload.ModInit.conf = new QbitDownload.ModuleConf();
+        int prev = QbitDownload.ModInit.conf.hlsIdleKillSec;
+        QbitDownload.ModInit.conf.hlsIdleKillSec = v;
+        return prev;
+    }
+
+    [Fact]
+    public void IdleKill_reaps_stale_vod_session()
+    {
+        int prev = SetIdleTtl(180);
+        try
+        {
+            var sess = Access.HlsSessionSeed("idletest_stale", startSeg: 5, touchAgeSec: 600);
+            Access.KillIdleHls();
+            Assert.False(Access.HlsRunningHas("idletest_stale"), "простоявшая VOD-сессия должна быть убита");
+            Assert.True(Access.HlsSessionKilled(sess), "killed=true — прибита нами, не фейл");
+            Assert.False(Access.HlsFailedHas("idletest_stale"), "негатив-кэш не должен пополняться");
+        }
+        finally { SetIdleTtl(prev); Access.HlsRunningRemove("idletest_stale"); }
+    }
+
+    [Fact]
+    public void IdleKill_keeps_active_and_legacy_sessions()
+    {
+        int prev = SetIdleTtl(180);
+        try
+        {
+            Access.HlsSessionSeed("idletest_fresh", startSeg: 5, touchAgeSec: 10);    // зритель активен
+            Access.HlsSessionSeed("idletest_legacy", startSeg: -1, touchAgeSec: 600); // легаси: рестарт только с нуля — не трогаем
+            Access.KillIdleHls();
+            Assert.True(Access.HlsRunningHas("idletest_fresh"));
+            Assert.True(Access.HlsRunningHas("idletest_legacy"));
+        }
+        finally { SetIdleTtl(prev); Access.HlsRunningRemove("idletest_fresh"); Access.HlsRunningRemove("idletest_legacy"); }
+    }
+
+    [Fact]
+    public void IdleKill_disabled_by_zero_ttl()
+    {
+        int prev = SetIdleTtl(0);
+        try
+        {
+            Access.HlsSessionSeed("idletest_off", startSeg: 5, touchAgeSec: 600);
+            Access.KillIdleHls();
+            Assert.True(Access.HlsRunningHas("idletest_off"), "hlsIdleKillSec=0 → старое поведение, ничего не глушим");
+        }
+        finally { SetIdleTtl(prev); Access.HlsRunningRemove("idletest_off"); }
+    }
 }

@@ -810,6 +810,37 @@ public class QbitController : BaseController
     static readonly ConcurrentDictionary<string, DateTime> _hlsTouch = new();    // последняя активность (защита от удаления при просмотре)
     static readonly TimeSpan _hlsFailTtl = TimeSpan.FromMinutes(3);
     static readonly TimeSpan _hlsTouchTtl = TimeSpan.FromMinutes(30);
+    static readonly System.Threading.Timer _hlsIdleTimer = new(_ => KillIdleHls(), null, 60_000, 30_000);   // держим ссылку от GC
+
+    // Зритель закрыл приложение/поставил долгую паузу — запросы сегментов прекратились, а ffmpeg
+    // молотил бы до конца файла (для _m-профиля это весь фильм на GPU впустую). Глушим VOD-сессии
+    // без активности дольше hlsIdleKillSec: любой следующий запрос сегмента перезапустит транскод
+    // с -ss в нужную точку (штатный путь §AD, ~3-5 с). Легаси-сессии (startSeg<0, линейный
+    // event-плейлист) не трогаем — их рестарт умеет только с нуля.
+    static void KillIdleHls()
+    {
+        try
+        {
+            int ttl = ModInit.conf?.hlsIdleKillSec ?? 0;
+            if (ttl <= 0) return;
+            var now = DateTime.UtcNow;
+            foreach (var kv in _hlsRunning)
+            {
+                if (kv.Value.startSeg < 0) continue;
+                if (_hlsTouch.TryGetValue(kv.Key, out var t) && (now - t).TotalSeconds < ttl) continue;
+                lock (_hlsLock.GetOrAdd(kv.Key, _ => new object()))
+                {
+                    if (!_hlsRunning.TryGetValue(kv.Key, out var sess) || !ReferenceEquals(sess, kv.Value)) continue;   // сессию уже сменил рестарт
+                    if (_hlsTouch.TryGetValue(kv.Key, out var t2) && (now - t2).TotalSeconds < ttl) continue;           // успели вернуться
+                    sess.killed = true;   // прибит нами, не фейл — негатив-кэш не трогаем
+                    try { sess.job?.Kill(); } catch { }
+                    _hlsRunning.TryRemove(kv.Key, out _);
+                    Console.WriteLine("[QbitDownload] hls idle-kill key=" + kv.Key + " (нет запросов " + ttl + "с)");
+                }
+            }
+        }
+        catch { }
+    }
 
     [HttpGet, AllowAnonymous]
     [Route("qdl/hls/{key}/{file}")]
@@ -823,7 +854,24 @@ public class QbitController : BaseController
         int index = int.Parse(mk.Groups[2].Value);
         string audio = mk.Groups[3].Success ? mk.Groups[3].Value : "o";   // o=ориг, eN=встроенная дорожка, fN=внешний файл-озвучка
         bool mobile = mk.Groups[4].Success;   // «мобильный» профиль (_m): live-даунскейл + кап битрейта (телефон на сотовой)
-        if (mobile && !ModInit.conf.hlsMobile) return NotFound();   // профиль выключен в конфиге
+
+        // Ключ периметра, предъявленный запросом (query или cookie). Нужен дважды: для подписи
+        // сегментных строк плейлиста (VLC резолвит относительные URI БЕЗ query базового URL,
+        // RFC 3986 — снаружи периметр зарезал бы сегменты 404-ом) и для редиректа ниже.
+        // В LAN ключа нет → ответы байт-в-байт прежние.
+        string d1vKey = Request.Query.TryGetValue("d1v", out var d1vq) && d1vq.Count > 0 ? d1vq[0] : null;
+        if (string.IsNullOrEmpty(d1vKey))
+        {
+            string cn = CoreInit.conf?.d1v?.cookieName;
+            if (!string.IsNullOrEmpty(cn)) Request.Cookies.TryGetValue(cn, out d1vKey);
+        }
+
+        // Профиль выключен в конфиге → 302 на обычный ключ (деградация к оригинальному
+        // качеству), а НЕ 404: клиент с уже построенным _m-URL не должен терять воспроизведение.
+        if (mobile && !ModInit.conf.hlsMobile)
+            return Redirect("/qdl/hls/" + key.Substring(0, key.Length - 2) + "/" + file
+                + (string.IsNullOrEmpty(d1vKey) ? "" : "?d1v=" + Uri.EscapeDataString(d1vKey)));
+
         string dir = Path.Combine(ModInit.conf.hlsPath, key);      // ключ содержит _m → своя кэш-папка, с обычным HLS не смешивается
         string target = Path.Combine(dir, file);
 
@@ -864,17 +912,6 @@ public class QbitController : BaseController
                 if (!System.IO.File.Exists(target)) return NotFound();
                 var ts = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                 return File(ts, "video/mp2t", enableRangeProcessing: true);
-            }
-
-            // Ключ периметра, предъявленный запросом (query или cookie). VLC резолвит относительные
-            // сегментные URI БЕЗ query базового URL (RFC 3986) → снаружи периметр зарезал бы сегменты
-            // 404-ом. Фикс: дописываем ?d1v= к сегментным строкам самого плейлиста (генерится
-            // per-request, на диск не пишется). В LAN ключа нет → плейлист байт-в-байт прежний.
-            string d1vKey = Request.Query.TryGetValue("d1v", out var d1vq) && d1vq.Count > 0 ? d1vq[0] : null;
-            if (string.IsNullOrEmpty(d1vKey))
-            {
-                string cn = CoreInit.conf?.d1v?.cookieName;
-                if (!string.IsNullOrEmpty(cn)) Request.Cookies.TryGetValue(cn, out d1vKey);
             }
 
             // playlist.m3u8 — VOD-режим: сервер сам генерит полный плейлист по длительности,
@@ -1476,8 +1513,21 @@ public class QbitController : BaseController
         crf = ModInit.conf.hlsMobileCrf,
         maxrateKbps = ModInit.conf.hlsMobileMaxrateKbps,
         audioKbps = ModInit.conf.hlsMobileAudioKbps,
-        hdr = _hlsHdrByPath.GetOrAdd(videoPath, p => IsHdrTransfer(ProbeVideoColorTransfer(p)))
+        hdr = ProbeHdrCached(videoPath)
     };
+
+    // HDR-вердикт кэшируется ТОЛЬКО при непустой пробе: пустой color_transfer (недокачанный/
+    // занятый файл, упавший ffprobe) иначе навсегда пометил бы HDR-фильм как SDR —
+    // блёклая картинка после докачки без единого признака поломки. Пустая проба → SDR
+    // на ЭТОТ запуск, перепроба при следующем StartHls.
+    static bool ProbeHdrCached(string path)
+    {
+        if (_hlsHdrByPath.TryGetValue(path, out bool cached)) return cached;
+        string t = ProbeVideoColorTransfer(path);
+        bool hdr = IsHdrTransfer(t);
+        if (!string.IsNullOrWhiteSpace(t)) _hlsHdrByPath[path] = hdr;
+        return hdr;
+    }
 
     // HDR-передача (PQ/HLG): даунскейл без тонмапа дал бы блёклую картинку (§AH — бэклог закрыт для _m)
     static bool IsHdrTransfer(string t) => !string.IsNullOrWhiteSpace(t) &&

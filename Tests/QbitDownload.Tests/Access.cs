@@ -108,6 +108,27 @@ public static class Access
         => (List<string>)Call("HlsArgs", dir, videoPath, extAudio, audioMap, copyVideo, startSeg, nvenc, mobile);
     public static bool IsHdrTransfer(string t) => (bool)Call("IsHdrTransfer", t);
     public static string SignHlsPlaylist(string m3u8, string d1v) => (string)Call("SignHlsPlaylist", m3u8, d1v);
+    public static bool ProbeHdrCached(string path) => (bool)Call("ProbeHdrCached", path);
+    public static bool HlsHdrCacheHas(string path) => ((IDictionary)F("_hlsHdrByPath").GetValue(null)).Contains(path);
+
+    // ── idle-kill HLS-сессий (зритель ушёл → глушим ffmpeg) ───────────────
+    internal static readonly Type HlsSessT = C.GetNestedType("HlsSession", BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("QbitController+HlsSession not found");
+
+    /// <summary>Посадить фиктивную HLS-сессию (без реального ffmpeg) с меткой активности N секунд назад.</summary>
+    public static object HlsSessionSeed(string key, int startSeg, int touchAgeSec)
+    {
+        var s = Activator.CreateInstance(HlsSessT);
+        HlsSessT.GetField("startSeg").SetValue(s, startSeg);
+        ((IDictionary)F("_hlsRunning").GetValue(null))[key] = s;
+        ((IDictionary)F("_hlsTouch").GetValue(null))[key] = DateTime.UtcNow.AddSeconds(-touchAgeSec);
+        return s;
+    }
+    public static bool HlsRunningHas(string key) => ((IDictionary)F("_hlsRunning").GetValue(null)).Contains(key);
+    public static void HlsRunningRemove(string key) => ((IDictionary)F("_hlsRunning").GetValue(null)).Remove(key);
+    public static bool HlsSessionKilled(object sess) => (bool)HlsSessT.GetField("killed").GetValue(sess);
+    public static bool HlsFailedHas(string key) => ((IDictionary)F("_hlsFailed").GetValue(null)).Contains(key);
+    public static void KillIdleHls() => Call("KillIdleHls");
     public static List<string> Mp4Args(string src, string part, bool copyVideo = false, bool nvenc = false)
         => (List<string>)Call("Mp4Args", src, part, copyVideo, nvenc);
     public static double TcOverallProgress(long doneBytes, long totalBytes, long curSize, double curFileProgress)

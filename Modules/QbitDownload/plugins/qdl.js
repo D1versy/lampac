@@ -417,12 +417,11 @@
     // обновляется при смене сети); остальные платформы флага не имеют → всегда старый путь.
     // qdl_mobile_quality: 'auto' (дефолт) | 'off' | 'always' — страховка/ручной форс через Lampa.Storage.
     function mobileHls() {
-        try {
-            var mode = Lampa.Storage.get('qdl_mobile_quality', 'auto');
-            if (mode === 'off') return false;
-            if (mode === 'always') return true;
-            return window.d1vision_platform === 'ios' && window.d1vision_network === 'cellular';
-        } catch (e) { return false; }
+        var mode = 'auto';
+        try { mode = Lampa.Storage.get('qdl_mobile_quality', 'auto') || 'auto'; } catch (e) {}   // Storage упал → авто; платформенную ветку не глушим
+        if (mode === 'off') return false;
+        if (mode === 'always') return true;
+        return window.d1vision_platform === 'ios' && window.d1vision_network === 'cellular';
     }
     // audio: 'o' (ориг) | 'eN' (встроенная) | 'd<id>' (озвучка по студии). Внешняя → ВСЕГДА HLS (домешиваем).
     function streamUrl(hash, index, audio) {

@@ -60,12 +60,17 @@ public class ModuleConf : ModuleBaseConf
     // на сотовой сети (iOS-клиент строит _m-ключ при cellular, см. claude/08 репо-оркестрации).
     // Всегда реэнкод (включая h264/hevc — NVDEC декодит), уходит на GPU-воркер, CPU-фолбэк libx264.
     // Этот блок закрывает и прежний задел ffworkerHlsHevc (live-GPU-HLS для HEVC).
-    public bool hlsMobile { get; set; } = true;              // false → 404 на _m-ключи
+    public bool hlsMobile { get; set; } = true;              // false → 302 с _m-ключей на обычные (деградация к оригиналу)
     public int hlsMobileHeight { get; set; } = 720;          // -vf scale до высоты (SD не апскейлится)
     public int hlsMobileCq { get; set; } = 28;               // NVENC -cq (обычный HLS-реэнкод — 23)
     public int hlsMobileCrf { get; set; } = 25;              // CPU-фолбэк libx264 -crf (обычный — 21)
     public int hlsMobileMaxrateKbps { get; set; } = 2500;    // -maxrate; -bufsize = 2×maxrate
     public int hlsMobileAudioKbps { get; set; } = 128;       // звук AAC (обычный HLS — 256k)
+
+    // Глушить live-HLS-транскод, если зритель перестал запрашивать сегменты (закрыл приложение,
+    // длинная пауза): иначе ffmpeg молотит до конца файла впустую (для _m — весь фильм на GPU).
+    // Возврат зрителя = штатный VOD-рестарт с -ss (~3-5 с). 0 = не глушить (старое поведение).
+    public int hlsIdleKillSec { get; set; } = 180;
 
     // Слежение за сериалами: как часто проверять обновление раздач (часы).
     public int watchIntervalHours { get; set; } = 6;

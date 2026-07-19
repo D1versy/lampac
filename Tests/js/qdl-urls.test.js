@@ -400,7 +400,8 @@ test('streamUrl: mobile + внешняя озвучка d-id => _m после d-
     lampa: tvLampa(),
     windowExtra: { d1vision_platform: 'ios', d1vision_network: 'cellular' },
   });
-  assert.strictEqual(qdl.streamUrl('H', 2, 'd123'), API + '/qdl/hls/H_2_d123_m/playlist.m3u8');
+  // боевой формат id студии — d + 8 hex (StudioId), серверный регекс ключа ждёт ровно его
+  assert.strictEqual(qdl.streamUrl('H', 2, 'd0a1b2c3f'), API + '/qdl/hls/H_2_d0a1b2c3f_m/playlist.m3u8');
 });
 
 test('streamUrl: ios на wifi => прежний оригинал /qdl/stream (регрессия)', () => {
