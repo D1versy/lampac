@@ -2,7 +2,8 @@ console.log('Start load');
 
 // ── D1Vision: bootstrap-список хостов ──
 // {localhost} подставляет сервер при сборке .wgt (ApiController SamsWgt, ?overwritehost= меняет);
-// tv/tv2 — фолбек-домены (задел на будущее, DNS может ещё не существовать — проба дёшево фейлится).
+// tv — внешний вход (Caddy+периметр, нужен ключ D1V_KEY); tv2 — резерв, A-запись пока
+// чужая (проба дёшево фейлится). Изнутри LAN домены не отвечают (hairpin NAT нет) — норм.
 // OTA: после успешного коннекта кэшируем /d1vision/hosts.json в localStorage['d1vision_hosts'];
 // кэш только ДОПОЛНЯЕТ bootstrap-список, никогда не заменяет (защита от «окирпичивания»).
 // Канонический документ: E:\Media-server\claude\08-clients.md (репо медиасервера).
