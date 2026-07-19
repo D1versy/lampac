@@ -87,7 +87,7 @@ public class HlsCodecTests
         // -forced-idr 1 обязателен: без него NVENC даёт не-IDR I-кадры → муксер не режет по сетке
         // (реальные сегменты по 250 кадров ~10.4с вместо 6с — найдено вживую 2026-07-19)
         Assert.True(Sub(a, "-forced-idr", "1") >= 0);
-        Assert.True(Sub(a, "-force_key_frames", "expr:gte(t,600+n_forced*6)") >= 0);
+        Assert.True(Sub(a, "-force_key_frames", "expr:gte(t,n_forced*6)") >= 0);   // t относительное — без offset точки старта
         // copyts-блок seek-запуска не потерян
         Assert.True(Sub(a, "-copyts", "-muxdelay", "0", "-avoid_negative_ts", "disabled") >= 0);
     }

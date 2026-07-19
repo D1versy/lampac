@@ -828,7 +828,11 @@ public class QbitController : BaseController
             {
                 if (kv.Value.startSeg < 0) continue;
                 if (_hlsTouch.TryGetValue(kv.Key, out var t) && (now - t).TotalSeconds < ttl) continue;
-                lock (_hlsLock.GetOrAdd(kv.Key, _ => new object()))
+                // TryEnter, а не lock: если ключ занят рестартом (тот под локом мог зависнуть в
+                // пробе/Kill) — не блокируем весь пасс таймера, уедем на следующий тик.
+                var lk = _hlsLock.GetOrAdd(kv.Key, _ => new object());
+                if (!System.Threading.Monitor.TryEnter(lk)) continue;
+                try
                 {
                     if (!_hlsRunning.TryGetValue(kv.Key, out var sess) || !ReferenceEquals(sess, kv.Value)) continue;   // сессию уже сменил рестарт
                     if (_hlsTouch.TryGetValue(kv.Key, out var t2) && (now - t2).TotalSeconds < ttl) continue;           // успели вернуться
@@ -837,6 +841,7 @@ public class QbitController : BaseController
                     _hlsRunning.TryRemove(kv.Key, out _);
                     Console.WriteLine("[QbitDownload] hls idle-kill key=" + kv.Key + " (нет запросов " + ttl + "с)");
                 }
+                finally { System.Threading.Monitor.Exit(lk); }
             }
         }
         catch { }
@@ -886,6 +891,15 @@ public class QbitController : BaseController
                 if (ModInit.conf.hlsSeek && !SegReady(dir, n))
                 {
                     double sdur = _hlsDur.TryGetValue(key, out var dv) ? dv : LoadVodInfo(key, dir);
+                    if (sdur <= 0 && !_hlsDur.ContainsKey(key))
+                    {
+                        // «холодный» ключ: сегмент запросили раньше плейлиста (напр. клиент
+                        // прилетел сюда 302-редиректом с _m при выключенном профиле) — VOD-режим
+                        // ещё не инициализирован. Определяем длительность здесь, иначе рестарт с
+                        // -ss недоступен и любой сегмент отдал бы 404.
+                        var (s0, _, _) = await ResolveHlsInputs(hash, index, audio);
+                        if (s0 != null) sdur = HlsVodDuration(key, dir, s0);
+                    }
                     if (sdur > 0)   // VOD-режим ключа (легаси-ключи: как раньше — мгновенный 404 ниже)
                     {
                         if (n * (double)HlsSegSec >= sdur) return NotFound();   // за концом файла
@@ -1585,8 +1599,12 @@ public class QbitController : BaseController
                 // Профиль _m: даунскейл (SD не апскейлим) + кап битрейта под сотовый канал.
                 // HDR10/HLG → SDR bt709 через zscale+tonemap (CPU-фильтр: после -hwaccel cuda без
                 // -hwaccel_output_format кадры и так в системной памяти, hwdownload не нужен).
+                // HDR: setparams-префикс форсит bt2020 primaries/matrix — у веб-рипов часто проставлен
+                // только transfer (smpte2084), а без primaries/matrix zscale не строит путь колор-
+                // спейсов и падает (exit -22 → 503 навсегда). Реальный HDR10/HLG всегда bt2020,
+                // так что для корректно затегированных значения просто совпадают. Проверено на бинаре.
                 args.AddRange(new[] { "-vf", mobile.hdr
-                    ? "zscale=w=-2:h=" + mobile.height + ":t=linear:npl=100,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:p=bt709:r=tv,format=yuv420p"
+                    ? "setparams=colorspace=bt2020nc:color_primaries=bt2020,zscale=w=-2:h=" + mobile.height + ":t=linear:npl=100,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:p=bt709:r=tv,format=yuv420p"
                     : "scale=-2:min(" + mobile.height + "\\,ih)" });
                 string maxrate = mobile.maxrateKbps + "k", bufsize = (mobile.maxrateKbps * 2) + "k";
                 if (nvenc)   // -maxrate при -rc vbr -cq — жёсткий VBV-потолок; -level не форсим (§AH)
@@ -1601,8 +1619,15 @@ public class QbitController : BaseController
                 args.AddRange(new[] { "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0", "-forced-idr", "1", "-profile:v", "high", "-pix_fmt", "yuv420p" });
             else
                 args.AddRange(new[] { "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p" });
-            if (startSeg >= 0)   // при реэнкоде прибиваем keyframe к сетке сегментов (t под copyts абсолютное → нужен offset)
-                args.AddRange(new[] { "-force_key_frames", "expr:gte(t," + (startSeg * HlsSegSec) + "+n_forced*" + HlsSegSec + ")" });
+            if (startSeg >= 0)   // при реэнкоде прибиваем keyframe к сетке сегментов
+                // ⚠️ t в force_key_frames — ОТНОСИТЕЛЬНОЕ время энкода (от первого кадра этого
+                // процесса), НЕ абсолютный PTS источника; -copyts на него НЕ влияет (он про муксер).
+                // Seek-запуск — свежий ffmpeg с -ss, его t=0 = сегмент startSeg → сетка n_forced*6
+                // ложится ровно на startSeg*6, startSeg*6+6, … Прежний offset (startSeg*6+…) не
+                // срабатывал никогда (t не доживал до absolute-значения) → сегменты по GOP 250
+                // (~10.4с) мимо VOD-сетки на ЛЮБОЙ перемотке. Проверено на бинаре: с offset 10.4с,
+                // без offset 6.006с (23.976/25/29.97/59.94).
+                args.AddRange(new[] { "-force_key_frames", "expr:gte(t,n_forced*" + HlsSegSec + ")" });
         }
         args.AddRange(new[] { "-c:a", "aac", "-ac", "2", "-b:a", mobile != null ? mobile.audioKbps + "k" : "256k" });   // звук → AAC stereo
         if (startSeg >= 0)

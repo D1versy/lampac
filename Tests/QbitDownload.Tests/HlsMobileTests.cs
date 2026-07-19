@@ -36,8 +36,9 @@ public class HlsMobileTests
         Assert.True(Sub(a, "-vf", "scale=-2:min(720\\,ih)") >= 0, "даунскейл без апскейла SD");
         Assert.True(Sub(a, "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "28", "-b:v", "0", "-maxrate", "2500k", "-bufsize", "5000k", "-forced-idr", "1", "-profile:v", "high", "-pix_fmt", "yuv420p") >= 0);
         Assert.DoesNotContain("-level", a);   // §AH: level не форсим никогда
-        // keyframe-сетка и copyts-блок seek-запуска обязаны сохраниться — иначе сегменты несовместимы с VOD-нарезкой
-        Assert.True(Sub(a, "-force_key_frames", "expr:gte(t,600+n_forced*6)") >= 0);
+        // keyframe-сетка и copyts-блок seek-запуска обязаны сохраниться — иначе сегменты несовместимы с VOD-нарезкой.
+        // t относительное время энкода → без offset точки старта (проверено на бинаре: с offset сегменты 10.4с)
+        Assert.True(Sub(a, "-force_key_frames", "expr:gte(t,n_forced*6)") >= 0);
         Assert.True(Sub(a, "-copyts", "-muxdelay", "0", "-avoid_negative_ts", "disabled") >= 0);
         // звук пожат под сотовый канал
         Assert.True(Sub(a, "-c:a", "aac", "-ac", "2", "-b:a", "128k") >= 0);
@@ -47,8 +48,10 @@ public class HlsMobileTests
     public void Mobile_hdr_uses_tonemap_chain()
     {
         var a = Access.HlsArgs("/hls/k", "/downloads/hdr.mkv", null, null, copyVideo: false, startSeg: 0, nvenc: true, mobile: Opts(hdr: true));
-        Assert.True(Sub(a, "-vf", "zscale=w=-2:h=720:t=linear:npl=100,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:p=bt709:r=tv,format=yuv420p") >= 0,
-            "HDR10/HLG → SDR bt709, иначе картинка блёклая");
+        // setparams-префикс форсит bt2020 primaries/matrix: у веб-рипов часто проставлен только
+        // transfer, без него zscale падает (exit -22 → 503 навсегда). Проверено на бинаре.
+        Assert.True(Sub(a, "-vf", "setparams=colorspace=bt2020nc:color_primaries=bt2020,zscale=w=-2:h=720:t=linear:npl=100,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:p=bt709:r=tv,format=yuv420p") >= 0,
+            "HDR10/HLG → SDR bt709 с форсом bt2020 на входе");
         Assert.True(Sub(a, "-c:v", "h264_nvenc") >= 0);
     }
 

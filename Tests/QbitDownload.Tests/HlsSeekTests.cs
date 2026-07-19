@@ -68,13 +68,20 @@ public class HlsSeekTests
     }
 
     [Fact]
-    public void Reencode_seek_forces_keyframe_grid_with_offset()
+    public void Reencode_seek_forces_keyframe_grid_relative_to_encode_start()
     {
-        // t под copyts — абсолютное медиа-время → сетке нужен offset точки старта, иначе каждый кадр станет ключевым
-        var a = Access.HlsArgs("/hls/k", "/downloads/old.avi", null, null, copyVideo: false, startSeg: 100);
-        Assert.True(Sub(a, "-force_key_frames", "expr:gte(t,600+n_forced*6)") >= 0);
+        // t в force_key_frames — ОТНОСИТЕЛЬНОЕ время энкода (от первого кадра процесса), НЕ
+        // абсолютный PTS: seek-запуск (свежий ffmpeg с -ss) имеет t=0 на сегменте startSeg, поэтому
+        // сетка n_forced*6 ложится ровно на startSeg*6+6k. Offset (startSeg*6+…) не срабатывал бы
+        // никогда → сегменты по GOP 250 мимо VOD-сетки. Одинаково для любого startSeg.
+        foreach (int ss in new[] { 0, 100 })
+        {
+            var a = Access.HlsArgs("/hls/k", "/downloads/old.avi", null, null, copyVideo: false, startSeg: ss);
+            Assert.True(Sub(a, "-force_key_frames", "expr:gte(t,n_forced*6)") >= 0);
+            Assert.DoesNotContain("600+n_forced", string.Join(" ", a));   // регресс: без offset точки старта
+        }
 
-        // copy-режим и легаси-реэнкод — без принудительных keyframe
+        // copy-режим и легаси-реэнкод (startSeg<0) — без принудительных keyframe
         Assert.DoesNotContain("-force_key_frames", Access.HlsArgs("/hls/k", "/downloads/x.mkv", null, null, copyVideo: true, startSeg: 100));
         Assert.DoesNotContain("-force_key_frames", Access.HlsArgs("/hls/k", "/downloads/old.avi", null, null, copyVideo: false));
     }
