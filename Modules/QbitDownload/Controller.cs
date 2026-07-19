@@ -864,6 +864,17 @@ public class QbitController : BaseController
                 return File(ts, "video/mp2t", enableRangeProcessing: true);
             }
 
+            // Ключ периметра, предъявленный запросом (query или cookie). VLC резолвит относительные
+            // сегментные URI БЕЗ query базового URL (RFC 3986) → снаружи периметр зарезал бы сегменты
+            // 404-ом. Фикс: дописываем ?d1v= к сегментным строкам самого плейлиста (генерится
+            // per-request, на диск не пишется). В LAN ключа нет → плейлист байт-в-байт прежний.
+            string d1vKey = Request.Query.TryGetValue("d1v", out var d1vq) && d1vq.Count > 0 ? d1vq[0] : null;
+            if (string.IsNullOrEmpty(d1vKey))
+            {
+                string cn = CoreInit.conf?.d1v?.cookieName;
+                if (!string.IsNullOrEmpty(cn)) Request.Cookies.TryGetValue(cn, out d1vKey);
+            }
+
             // playlist.m3u8 — VOD-режим: сервер сам генерит полный плейлист по длительности,
             // ffmpeg стартует только по запросам сегментов (перемотка не ждёт линейного транскода)
             if (ModInit.conf.hlsSeek)
@@ -879,7 +890,7 @@ public class QbitController : BaseController
                 if (dur > 0)
                 {
                     CleanupHls();
-                    return Content(BuildVodPlaylist(dur), "application/vnd.apple.mpegurl");
+                    return Content(SignHlsPlaylist(BuildVodPlaylist(dur), d1vKey), "application/vnd.apple.mpegurl");
                 }
                 // dur == 0 → легаси-фолбэк (короткий источник, start_time сдвинут или ffprobe не смог)
             }
@@ -918,7 +929,7 @@ public class QbitController : BaseController
             if (!m3u8.Contains("#EXT-X-START"))
                 m3u8 = m3u8.Replace("#EXTM3U", "#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES");
 
-            return Content(m3u8, "application/vnd.apple.mpegurl");
+            return Content(SignHlsPlaylist(m3u8, d1vKey), "application/vnd.apple.mpegurl");
         }
         catch (Exception ex)
         {
@@ -1350,6 +1361,15 @@ public class QbitController : BaseController
         }
         sb.Append("#EXT-X-ENDLIST\n");
         return sb.ToString();
+    }
+
+    // Дописать ключ периметра к сегментным строкам плейлиста: VLC (и любой плеер) резолвит
+    // относительные URI без query базового URL → извне сегменты получили бы 404 от периметра.
+    // Ключа нет (LAN) → плейлист не меняется.
+    static string SignHlsPlaylist(string m3u8, string d1v)
+    {
+        if (string.IsNullOrEmpty(d1v) || string.IsNullOrEmpty(m3u8)) return m3u8;
+        return Regex.Replace(m3u8, "^(seg\\d{1,6}\\.ts)$", "$1?d1v=" + Uri.EscapeDataString(d1v), RegexOptions.Multiline);
     }
 
     static (double duration, double start) ProbeFormat(string path)
