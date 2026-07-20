@@ -79,6 +79,33 @@ public class EpisodeHunterTests
         Assert.Equal(0, HunterAccess.DominantSeason(new JArray(File(0, "Show 01.mkv"))));   // сезона нет
     }
 
+    // ── строгий гейт имени (коллизия «Лаки» ↔ «Счастливчик Люк / Лаки Люк / Lucky Luke») ──
+    [Theory]
+    [InlineData("Лаки / Lucky [2024, WEB-DL 1080p]", true)]              // тот же сериал
+    [InlineData("Lucky | Лаки [2024]", true)]
+    [InlineData("Лаки. Сезон 1 / Lucky. Season 1 [2024]", true)]         // сезон в сегменте не мешает
+    [InlineData("Счастливчик Люк / Лаки Люк / Lucky Luke [1984]", false)] // ЧУЖОЙ мультсериал — отсев
+    [InlineData("Лаки Люк (Lucky Luke) 1x03", false)]                    // «лакилюк» ≠ «лаки»
+    public void NameMatchesSeries_KillsCollision(string title, bool expected)
+        => Assert.Equal(expected, HunterAccess.NameMatchesSeries(title, "лаки", "lucky"));
+
+    [Fact]
+    public void NameMatchesSeries_NoContext_Passes()
+        => Assert.True(HunterAccess.NameMatchesSeries("Что угодно", null, null));
+
+    [Fact]
+    public void FilterDonorCandidates_RejectsWrongShow_ByName()
+    {
+        // мультсериал проходит по сезону/сидам/весу, но имя не совпадает → НЕ донор
+        var scored = new JArray(
+            Cand("Счастливчик Люк / Лаки Люк / Lucky Luke [1984, Сезон 1, 1-8 из 8] 1080p", 10),
+            Cand("Лаки / Lucky [2024, 1-8 из 8] 1080p", 10));
+        var h = HunterAccess.MakeHuntCtx(MainHash, 1, new[] { MainHash }, null, 3, 1080, 150, 8, "лаки", "lucky");
+        var res = HunterAccess.FilterDonorCandidates(scored, h);
+        Assert.Single(res);
+        Assert.StartsWith("Лаки / Lucky", res[0].Value<string>("title"));
+    }
+
     // ── гейты кандидатов ─────────────────────────────────────────────────
     static JObject Cand(string title, int sid, string magnet = null, string parselink = "http://t/parsemagnet?id=1",
                         int quality = 1080, long sizeBytes = 12_000_000_000, double score = 50)

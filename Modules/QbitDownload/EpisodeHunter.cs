@@ -161,6 +161,7 @@ public partial class QbitController
         public HashSet<string> knownHashes;    // основная + текущие доноры (lower)
         public HashSet<string> blacklistKeys;  // btih/parselink активного blacklist
         public int minSeeds, minQuality, minMb, maxGb;
+        public string titleNorm, originalNorm;  // нормализованные названия сериала для строгого гейта имени
     }
 
     sealed class EpFile { public int index; public int ep; public int season; public string epkey; public long size; public string name; }
@@ -206,13 +207,38 @@ public partial class QbitController
         return DonorCover.Maybe;
     }
 
-    // Жёсткие гейты кандидата-донора: сиды/качество/сезон/вес серии/не-свои/не-blacklist.
+    // СТРОГИЙ гейт имени для донора: раздача — это ТОТ ЖЕ сериал (а не однофамилец).
+    // Обычный скоринг матчит Contains по ПОЛНОМУ названию → «Счастливчик Люк / Лаки Люк / Lucky Luke»
+    // прошёл бы для запроса «Лаки». Для автодонора этого мало (лишний рип — не беда, ЧУЖОЙ сериал — беда):
+    // разбиваем название по «/» и «|», из каждого сегмента срезаем сезон/год/скобки и требуем ТОЧНОГО
+    // равенства нормализованного сегмента названию сериала (рус ИЛИ ориг). «Счастливчик Люк»/«Лаки Люк»/
+    // «Lucky Luke» → «счастливчиклюк»/«лакилюк»/«luckyluke» ≠ «лаки»/«lucky» → отсев. «Лаки / Lucky» → совпало.
+    static readonly System.Text.RegularExpressions.Regex _yearInName = new System.Text.RegularExpressions.Regex(@"(?i)(19|20)\d{2}", System.Text.RegularExpressions.RegexOptions.Compiled);
+    static bool NameMatchesSeries(string title, string titleNorm, string originalNorm)
+    {
+        if (string.IsNullOrEmpty(titleNorm) && string.IsNullOrEmpty(originalNorm)) return true;   // нет контекста имён — не гейтим
+        foreach (var raw in (title ?? "").Split('/', '|'))
+        {
+            string seg = raw;
+            int b = seg.IndexOfAny(new[] { '[', '(' });
+            if (b >= 0) seg = seg.Substring(0, b);
+            seg = _yearInName.Replace(StripSeasonMarks(seg), " ");
+            string n = Shared.Services.Utilities.SearchNameTo.Convert(seg);
+            if (string.IsNullOrEmpty(n)) continue;
+            if ((!string.IsNullOrEmpty(titleNorm) && n == titleNorm) ||
+                (!string.IsNullOrEmpty(originalNorm) && n == originalNorm)) return true;
+        }
+        return false;
+    }
+
+    // Жёсткие гейты кандидата-донора: имя (строго!)/сиды/качество/сезон/вес серии/не-свои/не-blacklist.
     static List<JObject> FilterDonorCandidates(JArray scored, HuntCtx h)
     {
         var res = new List<JObject>();
         foreach (var t in scored.OfType<JObject>())
         {
             string title = t.Value<string>("title") ?? "";
+            if (!NameMatchesSeries(title, h.titleNorm, h.originalNorm)) continue;   // ЧУЖОЙ сериал (коллизия имени) — не донор
             if ((t.Value<int?>("sid") ?? 0) < h.minSeeds) continue;
 
             int q = t.Value<int?>("quality") ?? 0;
@@ -509,7 +535,9 @@ public partial class QbitController
             minSeeds = conf.donorMinSeeds,
             minQuality = conf.donorMinQuality,
             minMb = conf.epSizeMinMb,
-            maxGb = conf.epSizeMaxGb
+            maxGb = conf.epSizeMaxGb,
+            titleNorm = Shared.Services.Utilities.SearchNameTo.Convert(ctitle),
+            originalNorm = Shared.Services.Utilities.SearchNameTo.Convert(ctx?.Value<string>("title_original"))
         };
         if (donors != null)
             foreach (var d in donors.OfType<JObject>())
@@ -535,7 +563,9 @@ public partial class QbitController
         int grabbed = 0, probes = 0;
         long minB = conf.epSizeMinMb * 1024L * 1024, maxB = conf.epSizeMaxGb * 1024L * 1024 * 1024;
 
-        foreach (var cand in OrderByCover(eligible, season, wanted))
+        // ТОЛЬКО топ-1 из выдачи Лампа-торрента (по требованию владельца: не перебирать всё, брать
+        // единственную самую релевантную альтернативу). Не подошла по файлам → в этот проход больше не ищем.
+        foreach (var cand in OrderByCover(eligible, season, wanted).Take(1))
         {
             if (probes >= Math.Max(1, conf.donorProbesPerRun)) break;
             if (((m["donors"] as JArray)?.Count ?? 0) >= conf.donorMaxPerSeries) break;

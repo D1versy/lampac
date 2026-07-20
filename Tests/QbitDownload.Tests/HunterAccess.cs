@@ -47,7 +47,8 @@ public static class HunterAccess
         => (HashSet<int>)Access.Call("InventoryEps", mainFiles, donors, season);
 
     public static object MakeHuntCtx(string mainHash, int season, IEnumerable<string> known, IEnumerable<string> blacklist,
-                                     int minSeeds, int minQuality, int minMb, int maxGb)
+                                     int minSeeds, int minQuality, int minMb, int maxGb,
+                                     string titleNorm = null, string originalNorm = null)
     {
         var h = Activator.CreateInstance(HuntCtxT);
         HuntCtxT.GetField("mainHash").SetValue(h, mainHash);
@@ -58,8 +59,13 @@ public static class HunterAccess
         HuntCtxT.GetField("minQuality").SetValue(h, minQuality);
         HuntCtxT.GetField("minMb").SetValue(h, minMb);
         HuntCtxT.GetField("maxGb").SetValue(h, maxGb);
+        HuntCtxT.GetField("titleNorm").SetValue(h, titleNorm);
+        HuntCtxT.GetField("originalNorm").SetValue(h, originalNorm);
         return h;
     }
+
+    public static bool NameMatchesSeries(string title, string titleNorm, string originalNorm)
+        => (bool)Access.Call("NameMatchesSeries", title, titleNorm, originalNorm);
 
     public static List<JObject> FilterDonorCandidates(JArray scored, object huntCtx)
         => (List<JObject>)Access.Call("FilterDonorCandidates", scored, huntCtx);
