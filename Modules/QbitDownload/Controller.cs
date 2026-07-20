@@ -20,7 +20,7 @@ using System.Web;
 
 namespace QbitDownload;
 
-public class QbitController : BaseController
+public partial class QbitController : BaseController
 {
     static readonly Regex _hashRx = new Regex("^([0-9a-fA-F]{40}|[0-9A-Za-z]{32})$", RegexOptions.Compiled);
     static bool ValidHash(string h) => !string.IsNullOrEmpty(h) && _hashRx.IsMatch(h);
@@ -147,19 +147,31 @@ public class QbitController : BaseController
     [HttpGet, AllowAnonymous]
     [Route("qdl/search")]
     async public Task<ActionResult> Search(string query, string title = null, string title_original = null,
-                                           int year = 0, int is_serial = -1, string apikey = null)
+                                           int year = 0, int is_serial = -1, int season = 0, string apikey = null)
+    {
+        var sorted = await SearchScored(query, title, title_original, year, is_serial, season, apikey);
+        return ContentTo(sorted.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
+
+    // Весь пайплайн поиска (2 прохода + дедуп + скоринг) — статический: переиспользуется
+    // фоновыми контурами (EpisodeHunter, предложение переключения в CheckWatches).
+    static async Task<JArray> SearchScored(string query, string title, string title_original,
+                                           int year, int is_serial, int season, string apikey)
     {
         string search = !string.IsNullOrWhiteSpace(query) ? query
                       : !string.IsNullOrWhiteSpace(title) ? title : title_original;
         if (string.IsNullOrWhiteSpace(search))
-            return ContentTo("[]", "application/json; charset=utf-8");
+            return new JArray();
+
+        // фоновые вызовы приходят без клиентского jackett_key — подставляем серверный (если задан)
+        if (string.IsNullOrWhiteSpace(apikey)) apikey = ModInit.conf.indexerApikey;
 
         // Проход 1 — с типом от TMDB (movie→1 / tv→2): точная, хорошо ранжированная выдача (как было).
         // Проход 2 — ШИРОКИЙ (is_serial=0, ветка «всё подряд» JackettApi): ровно то, что находит нативный
         // «Смотреть через торрент» — опрашивает ВСЕ трекеры, включая аниме (AniLibria/AnimeLayer/Anifilm)
         // и всё, что узкие ветки «фильм/сериал» пропускают. Аниме TMDB отдаёт как media_type='tv' →
         // is_serial=2 его теряет, а «через торрент» находит именно широкой веткой. Мержим «и ту, и свою»
-        // выдачу с дедупом по btih/parselink, сортировка по сидам. См. claude/06 §A2.
+        // выдачу с дедупом по btih/parselink. См. claude/06 §A2.
         var passes = new List<Task<JArray>> { FetchIndexer(query, title, title_original, year, is_serial, apikey) };
         if (is_serial >= 1)
             passes.Add(FetchIndexer(query, title, title_original, year, 0, apikey));
@@ -178,14 +190,29 @@ public class QbitController : BaseController
                 result.Add(t);
             }
 
+        // Умный порядок: релевантность (имя/год/тип/сезон/полнота/свежесть) доминирует над сидами;
+        // ⭐ rec + why у лучшей прошедшей гейты. Kill-switch searchScoring → старая сортировка по сидам.
+        if (ModInit.conf.searchScoring)
+        {
+            var ctx = new ScoreCtx
+            {
+                titleNorm = Shared.Services.Utilities.SearchNameTo.Convert(!string.IsNullOrWhiteSpace(title) ? title : query),
+                originalNorm = Shared.Services.Utilities.SearchNameTo.Convert(title_original),
+                year = year,
+                isSerial = is_serial >= 2,
+                wantSeason = season,
+                preferredQuality = ModInit.conf.preferredQuality
+            };
+            return TorrentScoring.SortAndMark(result, ctx, ModInit.conf.recommendMinSeeds);
+        }
+
         // самые «живые» раздачи сверху (надёжнее докачиваются)
-        var sorted = new JArray(result.OrderByDescending(x => x.Value<int?>("sid") ?? 0));
-        return ContentTo(sorted.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+        return new JArray(result.OrderByDescending(x => x.Value<int?>("sid") ?? 0));
     }
 
     // один запрос к нативному индексатору Lampa (jackett-совместимый) с полным TMDB-контекстом.
-    // Возвращает нормализованные раздачи; дедуп/сортировку/мерж проходов делает Search.
-    async Task<JArray> FetchIndexer(string query, string title, string title_original, int year, int is_serial, string apikey)
+    // Возвращает нормализованные раздачи; дедуп/сортировку/мерж проходов делает SearchScored.
+    static async Task<JArray> FetchIndexer(string query, string title, string title_original, int year, int is_serial, string apikey)
     {
         string search = !string.IsNullOrWhiteSpace(query) ? query
                       : !string.IsNullOrWhiteSpace(title) ? title : title_original;
@@ -216,7 +243,7 @@ public class QbitController : BaseController
                         if (string.IsNullOrWhiteSpace(mag) && string.IsNullOrWhiteSpace(link)) continue;   // нечего качать
 
                         string ttl = t.Value<string>("Title") ?? "";
-                        result.Add(new JObject
+                        var it = new JObject
                         {
                             ["title"] = ttl,
                             ["magnet"] = mag,
@@ -225,8 +252,17 @@ public class QbitController : BaseController
                             ["sid"] = t.Value<int?>("Seeders") ?? 0,
                             ["size"] = HumanSize(t.Value<long?>("Size") ?? 0),
                             ["quality"] = QualityFromTitle(ttl),
-                            ["codec"] = CodecFromTitle(ttl)
-                        });
+                            ["codec"] = CodecFromTitle(ttl),
+                            // мета для скоринга/охоты (раньше выбрасывалась)
+                            ["pir"] = t.Value<int?>("Peers") ?? 0,
+                            ["date"] = t.Value<string>("PublishDate"),
+                            ["sizeBytes"] = t.Value<long?>("Size") ?? 0
+                        };
+                        if (t["Category"] is JArray catArr)
+                            it["cats"] = catArr;
+                        if (t["Info"] is JObject info)
+                            it["info"] = info;   // только typesearch=red; в jackett-режиме отсутствует
+                        result.Add(it);
                     }
                 }
             }
@@ -267,7 +303,8 @@ public class QbitController : BaseController
     #region /qdl/add — добавить magnet/.torrent в qBittorrent (резолв parselink при необходимости)
     [HttpGet, HttpPost, AllowAnonymous]
     [Route("qdl/add")]
-    async public Task<ActionResult> Add(string magnet = null, string parselink = null, string title = null, string query = null)
+    async public Task<ActionResult> Add(string magnet = null, string parselink = null, string title = null, string query = null,
+                                        string title_original = null, int year = 0, int is_serial = -1, int season = 0)
     {
         try
         {
@@ -401,13 +438,24 @@ public class QbitController : BaseController
                 if (hm.Success) hash = hm.Groups[1].Value.ToLower();
             }
 
-            // сохраняем исходный указатель на раздачу — нужен для слежения за сериалом (пере-резолв)
+            // сохраняем исходный указатель на раздачу — нужен для слежения за сериалом (пере-резолв),
+            // плюс TMDB-контекст поиска (ctx) — фундамент охоты за сериями и переключения раздачи
             if (ok && !string.IsNullOrEmpty(hash) && !string.IsNullOrWhiteSpace(origLink))
             {
                 try
                 {
                     Directory.CreateDirectory(Path.Combine(ModInit.conf.cachePath, "links"));
-                    System.IO.File.WriteAllText(LinkPath(hash), new JObject { ["link"] = origLink, ["query"] = query }.ToString(Newtonsoft.Json.Formatting.None));
+                    var lj = new JObject { ["link"] = origLink, ["query"] = query };
+                    if (!string.IsNullOrWhiteSpace(query) || !string.IsNullOrWhiteSpace(title_original) || year > 0 || is_serial >= 0)
+                        lj["ctx"] = new JObject
+                        {
+                            ["title"] = query,                    // клиент шлёт query = название карточки
+                            ["title_original"] = title_original,
+                            ["year"] = year,
+                            ["is_serial"] = is_serial,
+                            ["season"] = season
+                        };
+                    System.IO.File.WriteAllText(LinkPath(hash), lj.ToString(Newtonsoft.Json.Formatting.None));
                 }
                 catch { }
             }
@@ -433,12 +481,19 @@ public class QbitController : BaseController
             string raw = await c.GetStringAsync($"/api/v2/torrents/info?category={HttpUtility.UrlEncode(ModInit.conf.category)}&sort=added_on&reverse=true");
 
             var watched = new HashSet<string>();
-            foreach (var w in LoadWatch()) { var wh = w.Value<string>("hash"); if (!string.IsNullOrEmpty(wh)) watched.Add(wh); }
+            var donorHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var w in LoadWatch())
+            {
+                var wh = w.Value<string>("hash"); if (!string.IsNullOrEmpty(wh)) watched.Add(wh);
+                if (w["donors"] is JArray ds)   // страховка: доноры и так в другой категории qBit
+                    foreach (var d in ds) { var dh = d.Value<string>("hash"); if (!string.IsNullOrEmpty(dh)) donorHashes.Add(dh); }
+            }
 
             var result = new JArray();
             foreach (var t in JArray.Parse(raw))
             {
                 string h = t.Value<string>("hash") ?? "";
+                if (donorHashes.Contains(h)) continue;   // раздачи-доноры (охота) — не карточки «Загрузок»
                 var item = new JObject
                 {
                     ["hash"] = h,
@@ -696,6 +751,7 @@ public class QbitController : BaseController
             if (loc != null && !LocalIsOverlay(loc))
             {
                 if (deleteFiles) DeleteLocalFiles(loc);
+                try { using var c2 = await Qbit(); await DeleteDonorsOf(c2, hash); } catch { }   // хвосты охоты, если были
                 DropHlsCache(hash);
                 PurgeCache(hash);   // маркер local/<hash>.json удалит тоже
                 return Json(new { success = true });
@@ -711,6 +767,7 @@ public class QbitController : BaseController
             if (r.IsSuccessStatusCode)
             {
                 if (loc != null && deleteFiles) DeleteLocalFiles(loc);   // оверлей: mp4-копии удаляем вместе с торрентом
+                await DeleteDonorsOf(c, hash);   // каскад: раздачи-доноры этой загрузки (охота) — с файлами
                 DropHlsCache(hash);
                 PurgeCache(hash);
             }
@@ -2336,6 +2393,48 @@ public class QbitController : BaseController
         try { Directory.CreateDirectory(ModInit.conf.cachePath); System.IO.File.WriteAllText(WatchFile, a.ToString(Newtonsoft.Json.Formatting.None)); } catch { }
     }
 
+    // Единый async-гейт для ФОНОВЫХ операций над watch.json (CheckWatches / HuntAll / ScanEpisodeNotifications):
+    // каждая делает LoadWatch → минуты сетевого I/O → SaveWatch, поэтому без общей сериализации фоновые проходы
+    // перезатирают правки друг друга (потеря доноров / воскрешение старого hash). `lock` не переживает await,
+    // поэтому SemaphoreSlim + skip-if-busy (заменяет прежние отдельные гарды _hunting/_scanning).
+    static readonly SemaphoreSlim _watchGate = new SemaphoreSlim(1, 1);
+
+    static HashSet<string> WatchHashes(JArray a)
+    {
+        var s = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in a) { var h = m.Value<string>("hash"); if (!string.IsNullOrEmpty(h)) s.Add(h); }
+        return s;
+    }
+
+    // Сохранение из фонового прохода с реконсиляцией интерактивных правок. Пока шёл проход (минуты),
+    // WatchAdd/WatchRemove могли добавить/убрать записи под _watchLock. Под _watchLock перечитываем
+    // актуальный файл и применяем ТОЛЬКО эти интерактивные дельты (по членству hash) к рабочему списку,
+    // затем пишем — иначе слепой SaveWatch затёр бы их. originalHashes — hash-и на старте прохода
+    // (чтобы отличить интерактивный add от нашего же re-grab, сменившего hash записи).
+    static void SaveWatchReconciled(JArray working, HashSet<string> originalHashes)
+    {
+        lock (_watchLock)
+        {
+            var fresh = LoadWatch();
+            var workingHashes = WatchHashes(working);
+            var freshHashes = WatchHashes(fresh);
+            // интерактивный ADD: запись есть в свежем файле, не было в нашем снимке и нет в рабочем → добавить
+            foreach (var f in fresh)
+            {
+                var h = f.Value<string>("hash");
+                if (string.IsNullOrEmpty(h)) continue;
+                if (!originalHashes.Contains(h) && !workingHashes.Contains(h)) { working.Add(f); workingHashes.Add(h); }
+            }
+            // интерактивный REMOVE: запись была в снимке, исчезла из свежего, всё ещё в рабочем как есть → убрать
+            for (int i = working.Count - 1; i >= 0; i--)
+            {
+                var h = working[i].Value<string>("hash");
+                if (!string.IsNullOrEmpty(h) && originalHashes.Contains(h) && !freshHashes.Contains(h)) working.RemoveAt(i);
+            }
+            SaveWatch(working);
+        }
+    }
+
     [HttpGet, HttpPost, AllowAnonymous]
     [Route("qdl/watch")]
     async public Task<ActionResult> WatchAdd(string hash)
@@ -2343,11 +2442,12 @@ public class QbitController : BaseController
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            string link = null, query = null;
+            string link = null, query = null; JObject ctx = null;
             if (System.IO.File.Exists(LinkPath(hash)))
             {
                 var lj = JObject.Parse(System.IO.File.ReadAllText(LinkPath(hash)));
                 link = lj.Value<string>("link"); query = lj.Value<string>("query");
+                ctx = lj["ctx"] as JObject;   // TMDB-контекст поиска (может отсутствовать у старых записей)
             }
             if (string.IsNullOrWhiteSpace(link))
                 return Json(new { success = false, error = "no link" });   // перекачай раздачу, чтобы включить слежение
@@ -2362,7 +2462,9 @@ public class QbitController : BaseController
                 foreach (var m in a) if (m.Value<string>("hash") == hash) { exists = true; break; }
                 if (!exists)
                 {
-                    a.Add(new JObject { ["hash"] = hash, ["link"] = link, ["query"] = query, ["id"] = meta.Value<int?>("id"), ["title"] = meta.Value<string>("title") });
+                    var w = new JObject { ["hash"] = hash, ["link"] = link, ["query"] = query, ["id"] = meta.Value<int?>("id"), ["title"] = meta.Value<string>("title") };
+                    if (ctx != null) w["ctx"] = ctx;
+                    a.Add(w);
                     SaveWatch(a);
                     added = true;
                 }
@@ -2377,20 +2479,31 @@ public class QbitController : BaseController
 
     [HttpGet, AllowAnonymous]
     [Route("qdl/watch/remove")]
-    public ActionResult WatchRemove(string hash)
+    async public Task<ActionResult> WatchRemove(string hash)
     {
         try
         {
-            string link = null; int seriesId = 0;
+            string link = null; int seriesId = 0; JArray donors = null;
             lock (_watchLock)
             {
                 var a = LoadWatch(); var b = new JArray();
                 foreach (var m in a)
                 {
                     if (m.Value<string>("hash") != hash) b.Add(m);
-                    else { link = m.Value<string>("link"); seriesId = m.Value<int?>("id") ?? 0; }
+                    else { link = m.Value<string>("link"); seriesId = m.Value<int?>("id") ?? 0; donors = m["donors"] as JArray; }
                 }
                 SaveWatch(b);
+            }
+            // каскад: без слежения раздачи-доноры (охота) не нужны — удаляем с файлами
+            if (donors != null && donors.Count > 0)
+            {
+                try
+                {
+                    using var c = await Qbit();
+                    foreach (var d in donors.OfType<JObject>())
+                        await QbitDeleteDonorSafe(c, d.Value<string>("hash"));   // удаляет с файлами ТОЛЬКО если категория донорская
+                }
+                catch (Exception ex) { Console.WriteLine("[QbitDownload] watch remove donors: " + ex.Message); }
             }
             // сбрасываем базу отсечения, чтобы повторное включение слежения перебазировалось заново (историю noti сохраняем)
             try { string sk = SeriesKey(seriesId, link); using var db = new SqlContext(); db.seen.Where(x => x.seriesKey == sk).ExecuteDelete(); } catch { }
@@ -2412,7 +2525,14 @@ public class QbitController : BaseController
     public static async Task<int> CheckWatches()
     {
         int regrabbed = 0;
-        JArray list; lock (_watchLock) { list = LoadWatch(); }
+        // общий фоновый гейт: сериализуем с HuntAll/ScanEpisodeNotifications (иначе они перезатирают
+        // watch.json друг друга). Гейт НЕ реентрантный, поэтому ScanEpisodeNotifications зовём ПОСЛЕ release.
+        if (await _watchGate.WaitAsync(0))
+        {
+        try
+        {
+        JArray list; HashSet<string> orig;
+        lock (_watchLock) { list = LoadWatch(); orig = WatchHashes(list); }
         bool changed = false;
 
         foreach (var m in list)
@@ -2424,8 +2544,19 @@ public class QbitController : BaseController
                 if (string.IsNullOrWhiteSpace(link) || string.IsNullOrWhiteSpace(curHash)) continue;
 
                 string magnet = await ResolveMagnetStatic(link);
+                if (string.IsNullOrWhiteSpace(magnet)) continue;   // трекер лежит/таймаут — застой НЕ засчитываем
                 string newHash = MagnetHash(magnet);
-                if (string.IsNullOrWhiteSpace(newHash) || newHash.Equals(curHash, StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.IsNullOrWhiteSpace(newHash)) continue;
+
+                if (newHash.Equals(curHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    // топик не обновился → счётчик застоя; на пороге — поискать более полную раздачу
+                    m["stale"] = (m.Value<int?>("stale") ?? 0) + 1;
+                    changed = true;
+                    try { await ConsiderSwitch((JObject)m); }
+                    catch (Exception ex) { Console.WriteLine("[QbitDownload] switch consider: " + ex); }
+                    continue;
+                }
 
                 using var c = await Qbit();
                 if (!await QbitAddMagnet(c, magnet)) continue;     // qBit перепроверит и дотянет новые серии
@@ -2439,15 +2570,21 @@ public class QbitController : BaseController
 
                 MigrateCache(curHash, newHash);
                 m["hash"] = newHash;
+                m["stale"] = 0;
+                m["pendingSwitch"] = null;   // топик ожил — предложение переключения снимается
                 changed = true; regrabbed++;
                 Console.WriteLine("[QbitDownload] watch: re-grab " + m.Value<string>("title") + " " + curHash + "->" + newHash);
             }
             catch (Exception ex) { Console.WriteLine("[QbitDownload] watch item: " + ex); }
         }
 
-        if (changed) lock (_watchLock) { SaveWatch(list); }
+        if (changed) SaveWatchReconciled(list, orig);
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] checkwatches: " + ex); }
+        finally { _watchGate.Release(); }
+        }
 
-        // после возможного re-grab — заодно собрать уведомления о докачавшихся сериях
+        // после возможного re-grab — заодно собрать уведомления о докачавшихся сериях (берёт гейт сам)
         try { await ScanEpisodeNotifications(); } catch (Exception ex) { Console.WriteLine("[QbitDownload] post-checkwatches scan: " + ex); }
         return regrabbed;
     }
@@ -2514,26 +2651,18 @@ public class QbitController : BaseController
         return false;
     }
 
-    static async Task<bool> QbitAddMagnet(HttpClient c, string magnet)
-    {
-        var content = new MultipartFormDataContent
-        {
-            { new StringContent(magnet), "urls" },
-            { new StringContent(ModInit.conf.downloadsPath), "savepath" },
-            { new StringContent(ModInit.conf.category), "category" }
-        };
-        var r = await c.PostAsync("/api/v2/torrents/add", content);
-        string body = (await r.Content.ReadAsStringAsync())?.Trim() ?? "";
-        if ((int)r.StatusCode == 409 || body.Equals("Conflict", StringComparison.OrdinalIgnoreCase)) return true;
-        if (!r.IsSuccessStatusCode) return false;
-        if (body == "Ok." || body.Length == 0) return true;
-        if (body.StartsWith("{")) { try { var j = JObject.Parse(body); return (j.Value<int?>("success_count") ?? 0) > 0 || (j.Value<int?>("pending_count") ?? 0) > 0; } catch { return false; } }
-        return false;
-    }
+    // основная категория, дефолтное поведение — тонкая обёртка над QbitAddMagnetEx (EpisodeHunter.cs)
+    static Task<bool> QbitAddMagnet(HttpClient c, string magnet) => QbitAddMagnetEx(c, magnet, ModInit.conf.category);
     #endregion
 
     #region /qdl/notifications — уведомления о докачавшихся сериях отслеживаемых сериалов
-    static int _scanning = 0;
+    // серия без явного маркера сезона в имени файла («… 13.mkv») получает сезон из доминирующего:
+    // иначе основная (S02E13 → s2e13) и донор ([Group] Show - 13 → e13) дают разные epkey и дублируют уведомление
+    static Ep NormSeason(Ep e, int dom)
+    {
+        if (e != null && e.any && e.kind == null && e.season < 0 && dom > 0) e.season = dom;
+        return e;
+    }
 
     // стабильный ключ сериала (переживает смену infohash при re-grab): TMDB id, иначе хэш link
     static string SeriesKey(int seriesId, string link)
@@ -2582,10 +2711,11 @@ public class QbitController : BaseController
             var files = JArray.Parse(filesRaw);
             using var db = new SqlContext();
             var existing = new HashSet<string>(db.seen.Where(x => x.seriesKey == seriesKey).Select(x => x.epkey));
+            int dom = DominantSeason(files);
             foreach (var f in files)
             {
                 if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
-                string key = EpKey(ParseEp(BaseNoExt(f)));
+                string key = EpKey(NormSeason(ParseEp(BaseNoExt(f)), dom));
                 if (key == null || !existing.Add(key)) continue;
                 db.seen.Add(new SeenModel { seriesKey = seriesKey, epkey = key });
             }
@@ -2597,15 +2727,28 @@ public class QbitController : BaseController
     // основной сканер: для каждой отслеживаемой раздачи — новые докачавшиеся серии → записи в noti
     public static async Task<int> ScanEpisodeNotifications()
     {
-        if (Interlocked.Exchange(ref _scanning, 1) == 1) return 0;   // не запускаем параллельно (таймер + CheckWatches)
+        if (!await _watchGate.WaitAsync(0)) return 0;   // общий фоновый гейт (был _scanning)
         int created = 0;
         try
         {
-            JArray list; lock (_watchLock) { list = LoadWatch(); }
+            JArray list; HashSet<string> orig;
+            lock (_watchLock) { list = LoadWatch(); orig = WatchHashes(list); }
             if (list.Count == 0) return 0;
 
             using var c = await Qbit();
             using var db = new SqlContext();
+
+            // run-scoped дедуп: два watch-элемента одного сериала (два рипа, оба watched) делят seriesKey;
+            // без этого оба стейджат одну (sk,epkey) → SaveChanges падает на UNIQUE-индексе и откатывает ВСЮ
+            // пачку уведомлений. seenKeys грузятся ДО персиста, поэтому нужен общий на прогон набор.
+            var staged = new HashSet<string>();
+            bool StageSeen(string sk2, string key2)
+            {
+                if (!staged.Add("S|" + sk2 + "|" + key2)) return false;
+                db.seen.Add(new SeenModel { seriesKey = sk2, epkey = key2 });
+                return true;
+            }
+            bool StageNoti(string sk2, string key2) => staged.Add("N|" + sk2 + "|" + key2);
 
             foreach (var m in list)
             {
@@ -2626,20 +2769,21 @@ public class QbitController : BaseController
 
                     var seenKeys = new HashSet<string>(db.seen.Where(x => x.seriesKey == sk).Select(x => x.epkey));
                     bool baseline = seenKeys.Count == 0;   // первый проход (или старая запись до фичи) → только база, без уведомлений
+                    int dom = DominantSeason(files);
 
                     foreach (var f in files)
                     {
                         if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
-                        var ep = ParseEp(BaseNoExt(f));
+                        var ep = NormSeason(ParseEp(BaseNoExt(f)), dom);
                         string key = EpKey(ep);
                         if (key == null || seenKeys.Contains(key)) continue;
 
-                        if (baseline) { db.seen.Add(new SeenModel { seriesKey = sk, epkey = key }); seenKeys.Add(key); continue; }
+                        if (baseline) { StageSeen(sk, key); seenKeys.Add(key); continue; }
 
                         double progress = f.Value<double?>("progress") ?? 0;
                         if (progress < 0.999) continue;   // серия ещё качается
 
-                        if (IsEpisodeLike(ep))
+                        if (IsEpisodeLike(ep) && StageNoti(sk, key))
                         {
                             db.noti.Add(new NotiModel
                             {
@@ -2650,9 +2794,44 @@ public class QbitController : BaseController
                             created++;
                             Console.WriteLine("[QbitDownload] notify: " + title + " — " + EpLabel(ep));
                         }
-                        db.seen.Add(new SeenModel { seriesKey = sk, epkey = key });
+                        StageSeen(sk, key);
                         seenKeys.Add(key);
                     }
+
+                    // серии, докачавшиеся у ДОНОРОВ (охота по всем раздачам): уведомление с пометкой.
+                    // hash в noti — ОСНОВНОЙ (openNotification ищет карточку по нему). На baseline-проходе
+                    // доноров пропускаем: их серии не должны молча осесть в базе без уведомления.
+                    var donors = m["donors"] as JArray;
+                    if (!baseline && donors != null)
+                        foreach (var d in donors.OfType<JObject>())
+                        {
+                            string dh = d.Value<string>("hash");
+                            if (!ValidHash(dh)) continue;
+                            var dfiles = await QbitFiles(c, dh);
+                            if (dfiles == null) continue;
+                            int ddom = DominantSeason(dfiles);
+                            foreach (var f in dfiles)
+                            {
+                                if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
+                                if ((f.Value<double?>("progress") ?? 0) < 0.999) continue;   // серия ещё качается (или prio 0)
+                                var ep = NormSeason(ParseEp(BaseNoExt(f)), ddom > 0 ? ddom : dom);
+                                string key = EpKey(ep);
+                                if (key == null || seenKeys.Contains(key)) continue;
+                                if (IsEpisodeLike(ep) && StageNoti(sk, key))
+                                {
+                                    db.noti.Add(new NotiModel
+                                    {
+                                        seriesKey = sk, seriesId = seriesId, hash = hash, title = title,
+                                        season = ep.season, episode = ep.ep, kind = ep.kind, epkey = key,
+                                        label = EpLabel(ep) + " · временно с другой раздачи", created = DateTime.UtcNow, read = false
+                                    });
+                                    created++;
+                                    Console.WriteLine("[QbitDownload] notify (donor): " + title + " — " + EpLabel(ep));
+                                }
+                                StageSeen(sk, key);
+                                seenKeys.Add(key);
+                            }
+                        }
 
                     // оверлей-транскод: докачавшиеся серии автоматически конвертируем в mp4 (см. §транскод сериалов)
                     try { await AutoTranscodeOverlay(c, hash, files); }
@@ -2663,9 +2842,14 @@ public class QbitController : BaseController
 
             try { db.SaveChanges(); }
             catch (Exception ex) { Console.WriteLine("[QbitDownload] noti save: " + ex); }
+
+            // замещение: основная догнала и докачала свою версию серии → файл донора убираем,
+            // опустевшие/мёртвые доноры удаляем целиком (EpisodeHunter.ScanReplacements)
+            try { await ScanReplacements(c, list, orig); }
+            catch (Exception ex) { Console.WriteLine("[QbitDownload] replacements: " + ex); }
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] noti scan: " + ex); }
-        finally { Interlocked.Exchange(ref _scanning, 0); }
+        finally { _watchGate.Release(); }
         return created;
     }
 

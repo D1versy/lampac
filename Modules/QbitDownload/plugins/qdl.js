@@ -350,6 +350,27 @@
         return (files || []).filter(function (f) { return /\.(mkv|mp4|avi|ts|m4v|webm|mov)$/i.test(f.name || ''); })
             .sort(function (a, b) { return String(a.name).localeCompare(String(b.name), undefined, { numeric: true }); });
     }
+
+    // объединённый список /qdl/episodes уже отсортирован сервером (season, ep) — имена донора и
+    // основной вперемешку сортируются НЕПРАВИЛЬНО, поэтому при наличии epkey порядок не трогаем
+    function mergedVideoFiles(files) {
+        files = files || [];
+        var hasEp = false;
+        for (var i = 0; i < files.length; i++) if (files[i] && files[i].epkey) { hasEp = true; break; }
+        if (!hasEp) return videoFiles(files);
+        return files.filter(function (f) { return /\.(mkv|mp4|avi|ts|m4v|webm|mov)$/i.test((f && f.name) || ''); });
+    }
+
+    // серия может лежать в раздаче-доноре (охота) — стрим/аудио строим от её hash
+    function srcHash(f, hash) { return (f && f.hash) || hash; }
+
+    // объединённый плейлист сериала; фолбэк на /qdl/files (старый сервер / ошибка)
+    function fetchEpisodes(hash, cb, err) {
+        req(API + '/qdl/episodes?hash=' + hash, function (files) {
+            if (files && files.length !== undefined) cb(files);
+            else req(API + '/qdl/files?hash=' + hash, cb, err);
+        }, function () { req(API + '/qdl/files?hash=' + hash, cb, err); });
+    }
     function baseName(p) { return String(p || '').split('/').pop().split('\\').pop(); }
 
     // ───────── Прогресс просмотра серий (штатный Lampa.Timeline, локально устройству) ─────────
@@ -361,6 +382,24 @@
     function epView(hash, fileName) {
         try { return Lampa.Timeline.view(epTimelineHash(hash, fileName)); }
         catch (e) { return { percent: 0, time: 0, duration: 0 }; }
+    }
+
+    // Новый стабильный ключ таймлайна: f.tl (seriesKey:sSeE с сервера /qdl/episodes) не зависит
+    // ни от hash раздачи, ни от имени файла → прогресс переживает замещение донор→основная и re-grab.
+    // Файлы без tl (экстры, старый сервер) — легаси-ключ hash:имя.
+    function epTimelineKey(f, hash) {
+        return f && f.tl ? Lampa.Utils.hash('qdltl:' + f.tl) : epTimelineHash(srcHash(f, hash), f && f.name);
+    }
+    // Миграция без потери: если по новому ключу прогресса ещё нет, а по легаси есть — берём легаси.
+    function pickTimeline(hash, f) {
+        try {
+            var nv = Lampa.Timeline.view(epTimelineKey(f, hash));
+            if (f && f.tl && !(nv.percent > 0)) {
+                var legacy = Lampa.Timeline.view(epTimelineHash(srcHash(f, hash), f.name));
+                if (legacy.percent > 0) return legacy;
+            }
+            return nv;
+        } catch (e) { return { percent: 0, time: 0, duration: 0 }; }
     }
 
     // короткое имя серии для кнопки «Продолжить»
@@ -396,11 +435,15 @@
     }
 
     // плейлист сериала: у каждого элемента свой timeline → плеер пишет прогресс сам,
-    // «следующая серия» внутри плеера продолжает вести отметки
-    function buildPlaylist(hash, vids, audio) {
+    // «следующая серия» внутри плеера продолжает вести отметки. Серии доноров играют со своего hash.
+    // audioHash — раздача, для которой выбрана озвучка: audio-id ('eN' встроенная / 'd<id>' студия)
+    // специфичен для КОНКРЕТНОГО рипа, поэтому к файлам ДРУГОЙ раздачи (донор) его не применяем —
+    // иначе несуществующая дорожка → не тот язык или отказ HLS. Чужим — дефолтная дорожка (null).
+    function buildPlaylist(hash, vids, audio, audioHash) {
         return vids.map(function (f) {
-            var item = { title: baseName(f.name), url: streamUrl(hash, f.index, audio) };
-            try { item.timeline = Lampa.Timeline.view(epTimelineHash(hash, f.name)); } catch (e) {}
+            var a = (audioHash == null || srcHash(f, hash) === audioHash) ? audio : null;
+            var item = { title: baseName(f.name) + (f.source === 'donor' ? ' · врем.' : ''), url: streamUrl(srcHash(f, hash), f.index, a) };
+            try { item.timeline = pickTimeline(hash, f); } catch (e) {}
             return item;
         });
     }
@@ -470,23 +513,23 @@
 
     // сыграть конкретную серию с полным плейлистом (элемент плейлиста — тот же инстанс timeline)
     function playEpisode(hash, vids, target) {
-        ensureAudio(hash, target.index, function (audio) {
-            var playlist = buildPlaylist(hash, vids, audio);
+        ensureAudio(srcHash(target, hash), target.index, function (audio) {
+            var playlist = buildPlaylist(hash, vids, audio, srcHash(target, hash));
             for (var i = 0; i < vids.length; i++)
-                if (vids[i].index === target.index) { Lampa.Player.play(playlist[i]); break; }
+                if (vids[i] === target || (vids[i].index === target.index && srcHash(vids[i], hash) === srcHash(target, hash))) { Lampa.Player.play(playlist[i]); break; }
             Lampa.Player.playlist(playlist);
         });
     }
 
     function chooseEpisode(hash, name) {
-        req(API + '/qdl/files?hash=' + hash, function (files) {
-            var vids = videoFiles(files);
+        fetchEpisodes(hash, function (files) {
+            var vids = mergedVideoFiles(files);
             if (!vids.length) { Lampa.Noty.show('Видеофайлы не найдены'); return; }
-            if (vids.length === 1) { playLocal(hash, vids[0].index, baseName(vids[0].name), vids[0].name); return; }
+            if (vids.length === 1) { playLocal(srcHash(vids[0], hash), vids[0].index, baseName(vids[0].name), vids[0].name); return; }
 
-            ensureAudio(hash, vids[0].index, function (audio) {   // озвучку выбираем один раз на сериал
-                var playlist = buildPlaylist(hash, vids, audio);
-                var view = function (f) { return epView(hash, f.name); };
+            ensureAudio(srcHash(vids[0], hash), vids[0].index, function (audio) {   // озвучку выбираем один раз на сериал
+                var playlist = buildPlaylist(hash, vids, audio, srcHash(vids[0], hash));
+                var view = function (f) { return pickTimeline(hash, f); };
                 var cur = chooseContinue(vids, view);
                 Lampa.Select.show({
                     title: 'Серии — ' + (name || ''),
@@ -494,7 +537,8 @@
                         var p = (view(f) || {}).percent || 0, pre = '';
                         if (p >= 90) pre = '✓ ';                                   // досмотрена
                         else if (p >= 5) pre = '► ' + Math.round(p) + '% · ';      // на паузе
-                        return { title: pre + baseName(f.name), i: i, selected: cur ? vids[i] === cur : i === 0 };
+                        var suf = f.source === 'donor' ? ' · врем.' : '';          // серия с раздачи-донора (охота)
+                        return { title: pre + baseName(f.name) + suf, i: i, selected: cur ? vids[i] === cur : i === 0 };
                     }),
                     onSelect: function (a) {
                         Lampa.Player.play(playlist[a.i]);   // сам элемент плейлиста: его timeline пишет прогресс
@@ -507,10 +551,10 @@
     }
 
     function watchByHash(hash, name) {
-        req(API + '/qdl/files?hash=' + hash, function (files) {
-            var vids = videoFiles(files);
+        fetchEpisodes(hash, function (files) {
+            var vids = mergedVideoFiles(files);
             if (vids.length > 1) chooseEpisode(hash, name);
-            else playLocal(hash, vids.length ? vids[0].index : -1, name, vids.length ? vids[0].name : null);
+            else playLocal(vids.length ? srcHash(vids[0], hash) : hash, vids.length ? vids[0].index : -1, name, vids.length ? vids[0].name : null);
         }, function () { playLocal(hash, -1, name); });
     }
 
@@ -824,14 +868,37 @@
 
             // на самом первом опросе (lastId===0) не спамим историей — только запоминаем точку отсчёта
             if (lastId > 0) {
-                if (fresh.length === 1) Lampa.Noty.show('📺 ' + esc(fresh[0].title) + ' — ' + esc(fresh[0].label) + ' скачана');
-                else Lampa.Noty.show('📺 Скачано новых серий: ' + fresh.length);
+                // SWITCH (предложение сменить раздачу) / INFO — это НЕ «скачанная серия»: свой тост без «скачана»
+                var special = fresh.filter(function (x) { return x.kind === 'SWITCH' || x.kind === 'INFO'; });
+                var dl = fresh.filter(function (x) { return x.kind !== 'SWITCH' && x.kind !== 'INFO'; });
+                special.forEach(function (x) { Lampa.Noty.show((x.kind === 'SWITCH' ? '🔀 ' : '📺 ') + esc(x.title) + ' — ' + esc(x.label)); });
+                if (dl.length === 1) Lampa.Noty.show('📺 ' + esc(dl[0].title) + ' — ' + esc(dl[0].label) + ' скачана');
+                else if (dl.length > 1) Lampa.Noty.show('📺 Скачано новых серий: ' + dl.length);
             }
         });
     }
 
-    // открыть карточку загрузки из уведомления (по hash)
+    // открыть карточку загрузки из уведомления (по hash);
+    // kind=SWITCH — предложение переключить заброшенную раздачу на более полную (подтверждение)
     function openNotification(n) {
+        if (n && n.kind === 'SWITCH') {
+            Lampa.Select.show({
+                title: (n.title ? n.title + ': ' : '') + (n.label || 'Переключить на более полную раздачу?'),
+                items: [
+                    { title: 'Переключить (сезон перекачается)', ok: true },
+                    { title: 'Оставить как есть' }
+                ],
+                onSelect: function (a) {
+                    Lampa.Controller.toggle('content');
+                    req(API + '/qdl/watch/switch?hash=' + n.hash + '&accept=' + (a.ok ? 1 : 0), function (r) {
+                        if (a.ok) Lampa.Noty.show(r && r.success ? '✓ Переключено — сезон перекачивается' : 'Не вышло: ' + ((r && r.error) || 'ошибка'));
+                        else Lampa.Noty.show('Оставили текущую раздачу');
+                    }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
+                },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+            return;
+        }
         req(API + '/qdl/list', function (list) {
             var it = (list || []).filter(function (x) { return x.hash === n.hash; })[0];
             if (it) openDownload(it);
@@ -1206,6 +1273,41 @@
     }
 
     // ───────── Поиск раздач + кнопка «Скачать» ─────────
+    // короткая дата раздачи для списка: дд.мм.гг
+    function shortDate(iso) {
+        try {
+            var d = new Date(iso);
+            if (isNaN(d.getTime())) return '';
+            var y = d.getFullYear();
+            if (y < 2000 || y > 2100) return '';   // битые PublishDate не показываем
+            var p = function (n) { return (n < 10 ? '0' : '') + n; };
+            return p(d.getDate()) + '.' + p(d.getMonth() + 1) + '.' + String(y).slice(2);
+        } catch (e) { return ''; }
+    }
+
+    // строка под раздачей: ⭐-рекомендуемая получает серверное «почему» (why), остальные — факты.
+    // Порядок списка — серверный (умный скоринг), клиент НЕ пересортировывает.
+    function torrentSubtitle(t, isSerial) {
+        var codecBad = t.codec === 'hevc' || t.codec === 'av1';   // браузер такое не декодирует (§Y)
+        var parts = [];
+        if (codecBad) parts.push('⚠ ' + t.codec.toUpperCase());
+        if (isSerial === 2 && t.watchable) parts.push('🔔');       // login-трекер: работает докачка/слежение
+        if (t.rec && t.why) {
+            parts.push(t.why);
+            if (t.size) parts.push(t.size);
+            if (t.tracker) parts.push(t.tracker);
+        } else {
+            if (t.ep && t.ep.total) parts.push('серии: ' + t.ep.have + ' из ' + t.ep.total + (t.ep.ongoing ? ' ▶' : ''));
+            if (t.quality) parts.push(t.quality + 'p');
+            if (t.size) parts.push(t.size);
+            if (t.tracker) parts.push(t.tracker);
+            if (t.sid) parts.push('сидов: ' + t.sid);
+            var d = t.date ? shortDate(t.date) : '';
+            if (d) parts.push(d);
+        }
+        return parts.filter(Boolean).join('  •  ');
+    }
+
     function chooseAndDownload(movie) {
         movie = movie || {};
         var title = movie.title || movie.name || '';
@@ -1213,6 +1315,7 @@
         var year = ((movie.release_date || movie.first_air_date || '') + '').slice(0, 4);
         // сериал → is_serial=2, фильм → 1 (как в нативном поиске Lampa)
         var isSerial = (movie.media_type === 'tv' || movie.original_name || movie.number_of_seasons) ? 2 : 1;
+        var season = movie.number_of_seasons || '';
         var search = title || original;
         if (!search) { Lampa.Noty.show('Не удалось определить название'); return; }
 
@@ -1227,6 +1330,7 @@
             + (original ? '&title_original=' + encodeURIComponent(original) : '')
             + (year ? '&year=' + year : '')
             + '&is_serial=' + isSerial
+            + (season ? '&season=' + season : '')
             + (apikey ? '&apikey=' + encodeURIComponent(apikey) : '');
 
         req(url, function (list) {
@@ -1235,10 +1339,9 @@
             Lampa.Select.show({
                 title: 'Выбери раздачу для загрузки на диск',
                 items: list.slice(0, 60).map(function (t) {
-                    var codecBad = t.codec === 'hevc' || t.codec === 'av1';   // браузер такое не декодирует (§Y)
                     return {
-                        title: t.title,
-                        subtitle: [(codecBad ? '⚠ ' + t.codec.toUpperCase() : ''), (t.quality ? t.quality + 'p' : ''), t.size, t.tracker, (t.sid ? ('сидов: ' + t.sid) : '')].filter(Boolean).join('  •  '),
+                        title: (t.rec ? '⭐ ' : '') + t.title,
+                        subtitle: torrentSubtitle(t, isSerial),
                         t: t
                     };
                 }),
@@ -1250,7 +1353,12 @@
                         ? ('magnet=' + encodeURIComponent(a.t.magnet))
                         : ('parselink=' + encodeURIComponent(a.t.parselink || ''));
                     Lampa.Noty.show('Добавляю в загрузки…');
-                    req(API + '/qdl/add?' + q + '&title=' + encodeURIComponent(a.t.title || title) + '&query=' + encodeURIComponent(title), function (r) {
+                    // TMDB-контекст уезжает в links/<hash>.json (ctx) — фундамент охоты за сериями
+                    req(API + '/qdl/add?' + q + '&title=' + encodeURIComponent(a.t.title || title) + '&query=' + encodeURIComponent(title)
+                        + (original ? '&title_original=' + encodeURIComponent(original) : '')
+                        + (year ? '&year=' + year : '')
+                        + '&is_serial=' + isSerial
+                        + (season ? '&season=' + season : ''), function (r) {
                         if (r && r.success) {
                             if (r.hash) saveMeta(r.hash, movie);   // кэшируем метаданные+постер
                             Lampa.Noty.show(r.duplicate ? 'Уже в «Загрузках»' : '✓ Добавлено в «Загрузки»');
@@ -1265,10 +1373,10 @@
     // «▶ Продолжить: Серия N» на карточке сериала — только когда есть что продолжать
     // (недосмотренная серия или следующая после досмотренных). Прогресс — Lampa.Timeline (это устройство).
     function addContinueButton(render, cont, hash, name, gateItem) {
-        req(API + '/qdl/files?hash=' + hash, function (files) {
-            var vids = videoFiles(files);
+        fetchEpisodes(hash, function (files) {
+            var vids = mergedVideoFiles(files);
             if (vids.length < 2) return;
-            var target = chooseContinue(vids, function (f) { return epView(hash, f.name); });
+            var target = chooseContinue(vids, function (f) { return pickTimeline(hash, f); });
             if (!target || $('.qdl-continue-btn', render).length) return;
             var label = 'Продолжить · ' + epShort(target.name);
             var b = $('<div class="full-start__button selector qdl-continue-btn">' + ICON + '<span>' + esc(label) + '</span></div>');

@@ -74,15 +74,15 @@ test('confirmPartial: «Отмена» → run не вызван + возвра�
 
 // ─────────────────────────────── watch / openDownload ───────────────────────────────
 
-test('watch: недокачанный item → гейт; скачанный → сразу /qdl/files', () => {
+test('watch: недокачанный item → гейт; скачанный → сразу список серий (/qdl/episodes)', () => {
   const { qdl, calls } = rig();
   qdl.watch({ hash: 'a1', progress: 0.4, name: 'X' });
   assert.strictEqual(calls.selects.length, 1, 'гейт показан');
-  assert.strictEqual(calls.reqs.filter((u) => u.indexOf('/qdl/files') !== -1).length, 0);
+  assert.strictEqual(calls.reqs.filter((u) => u.indexOf('/qdl/episodes') !== -1).length, 0);
 
   qdl.watch({ hash: 'b2', progress: 1, name: 'Y' });
   assert.strictEqual(calls.selects.length, 1, 'второго Select нет');
-  assert.strictEqual(calls.reqs.filter((u) => u.indexOf('/qdl/files?hash=b2') !== -1).length, 1);
+  assert.strictEqual(calls.reqs.filter((u) => u.indexOf('/qdl/episodes?hash=b2') !== -1).length, 1);
 });
 
 test('openDownload: с метой → Activity.push содержит qdl_progress; без меты и progress<1 → гейт', () => {
@@ -187,6 +187,58 @@ test('поиск: выбор HEVC → предупреждение, но /qdl/ad
   const notyBefore = r.calls.noty.length;
   menu.onSelect(menu.items[1]);   // h264
   assert.ok(!r.calls.noty.slice(notyBefore).some((m) => m.indexOf('HEVC') === 0), 'для h264 предупреждения нет');
+});
+
+// ─────────────────────────────── chooseAndDownload: умная выдача (⭐/🔔/серии/дата) ───────────────────────────────
+
+test('поиск: ⭐ у rec + why в subtitle; 🔔 у watchable-сериала; «серии: N из M»; дата', () => {
+  const r = searchRig([
+    { title: 'A relevant', rec: true, why: 'точное имя · сезон 2 · серии 8 из 12 · 47 сидов', watchable: true,
+      quality: 1080, size: '5 GB', tracker: 'rutracker', sid: 47, parselink: 'http://x/parsemagnet?id=1',
+      ep: { have: 8, total: 12, ongoing: true }, date: '2026-07-15T10:00:00Z' },
+    { title: 'B plain', quality: 1080, size: '4 GB', tracker: 'rutor', sid: 9, watchable: false,
+      ep: { have: 12, total: 12, ongoing: false }, date: '2026-01-02T10:00:00Z', magnet: 'magnet:?xt=urn:btih:b' },
+  ]);
+  r.qdl.chooseAndDownload({ title: 'Сериал', media_type: 'tv', number_of_seasons: 2 });
+  const items = last(r.calls.selects).items;
+
+  assert.ok(items[0].title.indexOf('⭐ ') === 0, '⭐ только у rec');
+  assert.ok(items[1].title.indexOf('⭐') === -1);
+  assert.ok(items[0].subtitle.indexOf('точное имя') !== -1, 'why в subtitle у rec');
+  assert.ok(items[0].subtitle.indexOf('🔔') !== -1, '🔔 у watchable-сериала');
+  assert.ok(items[1].subtitle.indexOf('🔔') === -1);
+  assert.ok(items[1].subtitle.indexOf('серии: 12 из 12') !== -1);
+  assert.ok(items[1].subtitle.indexOf('02.01.26') !== -1, 'короткая дата раздачи');
+});
+
+test('поиск: url содержит season, /qdl/add увозит TMDB-контекст (title_original/year/is_serial/season)', () => {
+  const r = searchRig([
+    { title: 'A', quality: 1080, size: '5 GB', tracker: 'tr', sid: 10, magnet: 'magnet:?xt=urn:btih:a' },
+  ]);
+  r.qdl.chooseAndDownload({ title: 'Сериал', original_name: 'The Serial', first_air_date: '2024-01-01', media_type: 'tv', number_of_seasons: 2 });
+
+  const searchUrl = r.calls.reqs.filter((u) => u.indexOf('/qdl/search') !== -1)[0];
+  assert.ok(searchUrl.indexOf('&season=2') !== -1, 'season уходит в поиск');
+  assert.ok(searchUrl.indexOf('&is_serial=2') !== -1);
+
+  const menu = last(r.calls.selects);
+  menu.onSelect(menu.items[0]);
+  const addUrl = r.calls.reqs.filter((u) => u.indexOf('/qdl/add') !== -1)[0];
+  assert.ok(addUrl.indexOf('title_original=The%20Serial') !== -1);
+  assert.ok(addUrl.indexOf('&year=2024') !== -1);
+  assert.ok(addUrl.indexOf('&is_serial=2') !== -1);
+  assert.ok(addUrl.indexOf('&season=2') !== -1);
+});
+
+test('поиск: старый ответ сервера БЕЗ новых полей рендерится как раньше (регрессия)', () => {
+  const r = searchRig([
+    { title: 'A x264', codec: 'h264', quality: 1080, size: '6 GB', tracker: 'tr', sid: 8, magnet: 'magnet:?xt=urn:btih:c' },
+  ]);
+  r.qdl.chooseAndDownload({ title: 'Кино', media_type: 'movie' });
+  const items = last(r.calls.selects).items;
+  assert.strictEqual(items[0].title, 'A x264', 'без ⭐');
+  assert.ok(items[0].subtitle.indexOf('1080p') !== -1 && items[0].subtitle.indexOf('сидов: 8') !== -1);
+  assert.ok(items[0].subtitle.indexOf('🔔') === -1, 'для фильма 🔔 не показываем');
 });
 
 // ─────────────────────────────── pollTranscode: очередь ───────────────────────────────

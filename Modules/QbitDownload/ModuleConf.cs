@@ -78,4 +78,31 @@ public class ModuleConf : ModuleBaseConf
     // Уведомления о скачанных сериях: как часто сканировать прогресс файлов отслеживаемых раздач (минуты).
     // Дёшево (локальные запросы к qBit, без пере-резолва трекеров) → можно часто.
     public int notifyScanIntervalMinutes { get; set; } = 15;
+
+    // ── Умная выдача /qdl/search (TorrentScoring) ──
+    public bool searchScoring { get; set; } = true;        // false = старая сортировка только по сидам
+    public int preferredQuality { get; set; } = 2160;      // согласовано с video_quality_default клиента
+    public int recommendMinSeeds { get; set; } = 5;        // гейт «⭐ рекомендуемая»
+    public string indexerApikey { get; set; } = "";        // apikey JacRed для ФОНОВЫХ поисков (охота/переключение); пусто = без ключа
+
+    // ── Охота за сериями по всем раздачам (EpisodeHunter): новая серия на ЛЮБОЙ раздаче →
+    //    докачиваем её файл с лучшего «донора», при догоне основной — замещаем её версией ──
+    public bool episodeHunt { get; set; } = true;          // фича в целом (слежение и так opt-in per сериал)
+    public int episodeHuntIntervalHours { get; set; } = 4; // интервал HuntAll (кламп ≥1: не долбим трекеры)
+    public int donorMinSeeds { get; set; } = 3;
+    public int donorMinQuality { get; set; } = 1080;       // ниже — ждём основную (0 = любое)
+    public int epSizeMinMb { get; set; } = 150;            // оценка веса ОДНОЙ серии: не обрезок…
+    public int epSizeMaxGb { get; set; } = 8;              // …и не ремукс по 40 ГБ
+    public int donorMaxPerSeries { get; set; } = 3;
+    public int donorProbesPerRun { get; set; } = 3;        // проб add-paused за проход на сериал
+    public int donorMetadataTimeoutSec { get; set; } = 90;
+    public int donorStaleDays { get; set; } = 7;           // донор не докачал за N дней → снять и в blacklist
+    public int donorBlacklistTtlDays { get; set; } = 30;   // пустышки (нет серии); meta-timeout — всегда 1 день
+    public string donorCategory { get; set; } = "";        // пусто → category + "-donor"
+
+    // ── Заброшенная основная раздача: предложение переключиться на более полную ──
+    public string watchAutoSwitch { get; set; } = "notify"; // off | notify (уведомление+подтверждение) | auto
+    public int watchStaleChecks { get; set; } = 8;          // проверок без смены infohash (~2 суток при 6ч)
+    public int watchSwitchCooldownDays { get; set; } = 7;   // не чаще одного переключения в неделю
+    public bool switchDeleteOldFiles { get; set; } = false; // другой рип = другие файлы; старые по умолчанию оставляем
 }

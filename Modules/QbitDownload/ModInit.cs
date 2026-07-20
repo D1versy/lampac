@@ -12,6 +12,7 @@ public class ModInit : IModuleLoaded
     public static ModuleConf conf;
     static System.Threading.Timer _watchTimer;
     static System.Threading.Timer _notifyTimer;
+    static System.Threading.Timer _huntTimer;
 
     public void Loaded(InitspaceModel baseconf)
     {
@@ -37,6 +38,12 @@ public class ModInit : IModuleLoaded
         try { FfWorker.ReapOrphans(); }
         catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] ffworker reap: " + ex); }
 
+        // осиротевшие доноры охоты (add в qBit прошёл, watch.json не сохранился до рестарта) — убрать
+        _ = System.Threading.Tasks.Task.Run(async () => {
+            try { await QbitController.ReconcileDonors(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] donor reconcile: " + ex); }
+        });
+
         // фоновое слежение за сериалами: первая проверка через 10 мин, далее каждые N часов
         int hours = (conf != null && conf.watchIntervalHours > 0) ? conf.watchIntervalHours : 6;
         _watchTimer?.Dispose();
@@ -54,6 +61,16 @@ public class ModInit : IModuleLoaded
             try { await QbitController.ScanEpisodeNotifications(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] notify timer: " + ex); }
         }, null, System.TimeSpan.FromMinutes(2), System.TimeSpan.FromMinutes(notifyMin));
+
+        // охота за сериями по всем раздачам (EpisodeHunter): дорого (опрос индексатора → всех
+        // трекеров), поэтому свой редкий таймер; кламп ≥1 ч. Первый запуск через 15 мин.
+        int huntHours = (conf != null && conf.episodeHuntIntervalHours > 0) ? System.Math.Max(1, conf.episodeHuntIntervalHours) : 4;
+        _huntTimer?.Dispose();
+        _huntTimer = new System.Threading.Timer(async _ =>
+        {
+            try { await QbitController.HuntAll(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] hunt timer: " + ex); }
+        }, null, System.TimeSpan.FromMinutes(15), System.TimeSpan.FromHours(huntHours));
     }
 
     public void Dispose()
@@ -63,6 +80,8 @@ public class ModInit : IModuleLoaded
         _watchTimer = null;
         _notifyTimer?.Dispose();
         _notifyTimer = null;
+        _huntTimer?.Dispose();
+        _huntTimer = null;
     }
 
     void updateConf()

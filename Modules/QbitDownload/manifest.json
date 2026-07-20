@@ -6,6 +6,8 @@
     "ModInit.cs",
     "SqlContext.cs",
     "FfWorker.cs",
+    "TorrentScoring.cs",
+    "EpisodeHunter.cs",
     "Controller.cs"
   ]
 }

@@ -82,12 +82,16 @@ test('epShort: SxxExx, «серия N», голый номер, длинный �
 // ─────────────────────────────── пикер серий: отметки, selected, timeline ───────────────────────────────
 
 function fakeReqFiles(files) {
-  // /qdl/files → список серий; /qdl/audio → пусто (без пикера озвучки); прочее → пусто
+  // /qdl/episodes (новый объединённый) и /qdl/files (легаси) → список серий;
+  // /qdl/audio → пусто (без пикера озвучки); прочее → пусто
   return {
     Reguest: function () {
       this.timeout = () => {};
       this.clear = () => {};
-      this.silent = (url, ok) => { ok(String(url).indexOf('/qdl/files') !== -1 ? files : []); };
+      this.silent = (url, ok) => {
+        const u = String(url);
+        ok(u.indexOf('/qdl/files') !== -1 || u.indexOf('/qdl/episodes') !== -1 ? files : []);
+      };
     },
   };
 }
