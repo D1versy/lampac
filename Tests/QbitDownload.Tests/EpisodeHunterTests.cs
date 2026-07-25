@@ -275,6 +275,9 @@ public class EpisodeHunterTests
     [Fact]
     public void Blacklist_TtlPrune_AndKeys()
     {
+        // BlacklistAdd штампует until от РЕАЛЬНОГО UtcNow, поэтому и «сейчас» здесь реальное
+        // (фиксированная дата делала тест бомбой замедленного действия — краснел сам по себе).
+        var now = DateTime.UtcNow;
         var item = new JObject();
         HunterAccess.BlacklistAdd(item, DonorHash, "http://t/parsemagnet?id=3", "no-episode", 30);
         HunterAccess.BlacklistAdd(item, "cccccccccccccccccccccccccccccccccccccccc", null, "meta-timeout", 1);
@@ -283,12 +286,12 @@ public class EpisodeHunterTests
         Assert.Contains(DonorHash, keys);
         Assert.Contains("http://t/parsemagnet?id=3", keys);
 
-        HunterAccess.PruneBlacklist(item, Now.AddDays(2));   // meta-timeout (1 день) протух
+        HunterAccess.PruneBlacklist(item, now.AddDays(2));   // meta-timeout (1 день) протух
         keys = HunterAccess.BlacklistKeys(item);
         Assert.Contains(DonorHash, keys);
         Assert.DoesNotContain("cccccccccccccccccccccccccccccccccccccccc", keys);
 
-        HunterAccess.PruneBlacklist(item, Now.AddDays(40));   // всё протухло
+        HunterAccess.PruneBlacklist(item, now.AddDays(40));   // всё протухло
         Assert.Empty(HunterAccess.BlacklistKeys(item));
     }
 

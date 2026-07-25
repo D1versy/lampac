@@ -16,6 +16,12 @@ namespace QbitDownload;
 // Донор покрывает ли серию — вердикт ТОЛЬКО по названию раздачи (до добавления в qBit).
 public enum DonorCover { Yes, No, Maybe }
 
+// Итог add в qBit. Дубликат (торрент уже сидит) РАЗЛИЧАЕТСЯ отдельно: на дубликате qBit НЕ меняет
+// категорию/теги существующего торрента. Инцидент 2026-07-25 («Укрытие»): перерегистрацию раздачи
+// уже качала охота донором, re-grab «добавил» её как основную, категория осталась донорской — и
+// уборка доноров сняла «донора» С ФАЙЛАМИ, то есть весь сериал. Вызывающий обязан разбирать Duplicate.
+public enum QbitAddStatus { Failed, Added, Duplicate }
+
 // ───────────────────────────────────────────────────────────────────────────────
 // EpisodeHunter — охота за сериями по ВСЕМ раздачам («мини-Sonarr» уровня эпизодов).
 //
@@ -34,10 +40,15 @@ public partial class QbitController
     static string DonorCategory => string.IsNullOrWhiteSpace(ModInit.conf.donorCategory)
         ? ModInit.conf.category + "-donor" : ModInit.conf.donorCategory;
 
+    // Тег донора в qBit (виден и глазами в WebUI). Снимается при промоушене донора в основную.
+    const string DonorTag = "qdl-donor";
+
     #region qBit-хелперы (инъецируемый HttpClient — тестируются FakeQbit)
     // Расширенный add: категория/теги/остановка после метаданных (qBit >= 4.6 понимает stopCondition;
     // старые версии игнорируют — фолбэк в QbitWaitFiles). Разбор ответа — как в /qdl/add (v4/v5).
-    static async Task<bool> QbitAddMagnetEx(HttpClient c, string magnet, string category, string tags = null, bool stopAfterMeta = false)
+    // ВАЖНО: дубликат отдаётся отдельным статусом — на нём qBit НЕ применяет переданные категорию/теги
+    // к уже сидящему торренту (см. комментарий у QbitAddStatus).
+    static async Task<QbitAddStatus> QbitAddMagnetStatus(HttpClient c, string magnet, string category, string tags = null, bool stopAfterMeta = false)
     {
         var content = new MultipartFormDataContent
         {
@@ -50,12 +61,26 @@ public partial class QbitController
 
         var r = await c.PostAsync("/api/v2/torrents/add", content);
         string body = (await r.Content.ReadAsStringAsync())?.Trim() ?? "";
-        if ((int)r.StatusCode == 409 || body.Equals("Conflict", StringComparison.OrdinalIgnoreCase)) return true;   // дубликат — работаем с существующим
-        if (!r.IsSuccessStatusCode) return false;
-        if (body == "Ok." || body.Length == 0) return true;
-        if (body.StartsWith("{")) { try { var j = JObject.Parse(body); return (j.Value<int?>("success_count") ?? 0) > 0 || (j.Value<int?>("pending_count") ?? 0) > 0 || (j.Value<int?>("duplicate_count") ?? 0) > 0; } catch { return false; } }
-        return false;
+        if ((int)r.StatusCode == 409 || body.Equals("Conflict", StringComparison.OrdinalIgnoreCase)) return QbitAddStatus.Duplicate;
+        if (!r.IsSuccessStatusCode) return QbitAddStatus.Failed;
+        if (body == "Ok." || body.Length == 0) return QbitAddStatus.Added;
+        if (body.StartsWith("{"))
+        {
+            try
+            {
+                var j = JObject.Parse(body);
+                if ((j.Value<int?>("success_count") ?? 0) > 0 || (j.Value<int?>("pending_count") ?? 0) > 0) return QbitAddStatus.Added;
+                if ((j.Value<int?>("duplicate_count") ?? 0) > 0) return QbitAddStatus.Duplicate;
+            }
+            catch { }
+            return QbitAddStatus.Failed;
+        }
+        return QbitAddStatus.Failed;
     }
+
+    // «Добавилось ли вообще» (дубликат = да). Кому важна разница — берёт QbitAddMagnetStatus.
+    static async Task<bool> QbitAddMagnetEx(HttpClient c, string magnet, string category, string tags = null, bool stopAfterMeta = false)
+        => await QbitAddMagnetStatus(c, magnet, category, tags, stopAfterMeta) != QbitAddStatus.Failed;
 
     static async Task<JArray> QbitFiles(HttpClient c, string hash)
     {
@@ -140,16 +165,125 @@ public partial class QbitController
     static async Task<string> QbitCategory(HttpClient c, string hash)
         => (await QbitTorrentInfo(c, hash))?.Value<string>("category");
 
+    static string NormPath(string p) => string.IsNullOrWhiteSpace(p) ? null : p.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
+
+    // Лежат ли два торрента в одних и тех же файлах на диске: совпадающий content_path или один
+    // внутри другого. Общий корень загрузок (downloadsPath) пересечением НЕ считается — в нём лежит всё.
+    static bool PathsOverlap(string a, string b)
+    {
+        string x = NormPath(a), y = NormPath(b);
+        if (x == null || y == null) return false;
+        string root = NormPath(ModInit.conf.downloadsPath);
+        if (root != null && (x == root || y == root)) return false;
+        return x == y || x.StartsWith(y + "/", StringComparison.Ordinal) || y.StartsWith(x + "/", StringComparison.Ordinal);
+    }
+
     // Удалить донора С ФАЙЛАМИ, но ТОЛЬКО если он реально в донорской категории. Защита от катастрофы:
     // если из-за коллизии infohash в watch.donors просочилась пользовательская загрузка (категория lampa)
     // или чужой торрент — мы НЕ удаляем его файлы. Никогда не delete-with-files вслепую по записи донора.
-    static async Task QbitDeleteDonorSafe(HttpClient c, string hash)
+    //
+    // mainHash — основная раздача этой watch-записи, две дополнительные страховки (инцидент 2026-07-25):
+    //   1) донор И ЕСТЬ основная (топик перерегистрировали, re-grab пере-резолвил основную в тот же
+    //      infohash) → не трогаем совсем;
+    //   2) донор пишет в ту же папку, что основная (тот же рип/перерегистрация) → снимаем торрент,
+    //      но файлы оставляем: они же и есть файлы основной.
+    static async Task QbitDeleteDonorSafe(HttpClient c, string hash, string mainHash = null)
     {
         if (!ValidHash(hash)) return;
-        string cat = await QbitCategory(c, hash);
-        if (cat == null) return;   // торрента уже нет — нечего удалять
-        if (cat == DonorCategory) { await QbitDelete(c, hash, true); return; }
-        Console.WriteLine("[QbitDownload] hunt: НЕ удаляю " + hash + " с файлами — категория «" + cat + "» не донорская");
+        if (!string.IsNullOrEmpty(mainHash) && hash.Equals(mainHash, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("[QbitDownload] hunt: НЕ удаляю " + hash + " — это сама основная раздача");
+            return;
+        }
+
+        var info = await QbitTorrentInfo(c, hash);
+        if (info == null) return;   // торрента уже нет — нечего удалять
+        string cat = info.Value<string>("category");
+        if (cat != DonorCategory)
+        {
+            Console.WriteLine("[QbitDownload] hunt: НЕ удаляю " + hash + " с файлами — категория «" + cat + "» не донорская");
+            return;
+        }
+
+        bool shared = false;
+        if (ValidHash(mainHash))
+        {
+            var mi = await QbitTorrentInfo(c, mainHash);
+            shared = mi != null && PathsOverlap(info.Value<string>("content_path"), mi.Value<string>("content_path"));
+        }
+        await QbitDelete(c, hash, !shared);
+        if (shared) Console.WriteLine("[QbitDownload] hunt: донор " + hash + " снят БЕЗ файлов — общая папка с основной");
+    }
+
+    // Донор оказался той самой раздачей, в которую пере-резолвился топик основной (перерегистрация).
+    // Снимать его нельзя — это теперь ЕДИНСТВЕННАЯ копия сериала. Переводим в основную категорию,
+    // снимаем донорский тег и возвращаем в загрузку ВСЕ файлы: у донора всё, кроме серии-цели, было
+    // выключено через filePrio=0, иначе «основная» осталась бы качать одну серию.
+    static async Task<bool> PromoteDonorToMain(HttpClient c, string hash)
+    {
+        try
+        {
+            var r = await c.PostAsync("/api/v2/torrents/setCategory", new FormUrlEncodedContent(new[]
+            {
+                new KeyValuePair<string, string>("hashes", hash),
+                new KeyValuePair<string, string>("category", ModInit.conf.category)
+            }));
+            try
+            {
+                await c.PostAsync("/api/v2/torrents/removeTags", new FormUrlEncodedContent(new[]
+                {
+                    new KeyValuePair<string, string>("hashes", hash),
+                    new KeyValuePair<string, string>("tags", DonorTag)
+                }));
+            }
+            catch { }
+
+            var files = await QbitFiles(c, hash);
+            if (files != null)
+            {
+                var all = files.Select(f => f.Value<int?>("index") ?? -1).Where(i => i >= 0).ToList();
+                await QbitFilePrio(c, hash, all, 1);
+            }
+            await QbitStartTorrent(c, hash);
+            return r.IsSuccessStatusCode;
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] promote donor: " + ex.Message); return false; }
+    }
+
+    // Записи о доноре с таким infohash во ВСЕХ watch-записях (тот же торрент мог числиться донором
+    // и у соседнего сериала). Возвращает, сколько записей снято.
+    static int DropDonorRefs(IEnumerable<JObject> items, string hash)
+    {
+        int n = 0;
+        foreach (var m in items ?? Enumerable.Empty<JObject>())
+        {
+            if (m["donors"] is not JArray ds) continue;
+            for (int i = ds.Count - 1; i >= 0; i--)
+                if (!string.IsNullOrEmpty(hash) && hash.Equals(ds[i].Value<string>("hash"), StringComparison.OrdinalIgnoreCase))
+                { ds.RemoveAt(i); n++; }
+        }
+        return n;
+    }
+
+    static bool IsDonorRef(IEnumerable<JObject> items, string hash)
+        => (items ?? Enumerable.Empty<JObject>()).Any(m => (m["donors"] as JArray)?.OfType<JObject>()
+            .Any(d => !string.IsNullOrEmpty(hash) && hash.Equals(d.Value<string>("hash"), StringComparison.OrdinalIgnoreCase)) == true);
+
+    // Общая пост-обработка «в основную категорию добавили торрент, который уже сидел донором охоты»
+    // (re-grab перерегистрированного топика, переключение раздачи). Промоутим его и стираем донорские
+    // записи — иначе контур замещения снял бы «донора» с файлами. Вызывать СРАЗУ после add.
+    static async Task<bool> PromoteIfDonor(HttpClient c, string newHash, IEnumerable<JObject> items, string title)
+    {
+        if (!ValidHash(newHash)) return false;
+        var list = (items ?? Enumerable.Empty<JObject>()).ToList();
+        bool referenced = IsDonorRef(list, newHash);
+        if (!referenced && await QbitCategory(c, newHash) != DonorCategory) return false;
+
+        await PromoteDonorToMain(c, newHash);
+        int dropped = DropDonorRefs(list, newHash);
+        Console.WriteLine("[QbitDownload] watch: донор " + newHash + " промоутнут в основную «" + title
+            + "» — та же раздача перерегистрирована (снято донорских записей: " + dropped + ")");
+        return true;
     }
     #endregion
 
@@ -162,6 +296,7 @@ public partial class QbitController
         public HashSet<string> blacklistKeys;  // btih/parselink активного blacklist
         public int minSeeds, minQuality, minMb, maxGb;
         public string titleNorm, originalNorm;  // нормализованные названия сериала для строгого гейта имени
+        public string selfTopicKey;             // топик САМОЙ основной раздачи (её перерегистрация — не донор)
     }
 
     sealed class EpFile { public int index; public int ep; public int season; public string epkey; public long size; public string name; }
@@ -231,6 +366,34 @@ public partial class QbitController
         return false;
     }
 
+    // Ключ «того же топика трекера» для сравнения ссылок. Наши parselink-и — loopback-ссылки вида
+    // http://127.0.0.1:9118/rutracker/parsemagnet?id=6878482&apikey=… : один и тот же топик может
+    // приехать с другим apikey/хостом, поэтому сравниваем путь + значимые параметры запроса.
+    static readonly HashSet<string> _topicKeyIgnore = new(StringComparer.OrdinalIgnoreCase) { "apikey", "account_email", "host", "life" };
+    static string TopicKey(string link)
+    {
+        if (string.IsNullOrWhiteSpace(link)) return null;
+        if (link.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
+        {
+            string bh = MagnetHash(link);
+            return string.IsNullOrEmpty(bh) ? null : "btih:" + bh;
+        }
+        try
+        {
+            if (!Uri.TryCreate(link, UriKind.Absolute, out var u)) return null;
+            var q = HttpUtility.ParseQueryString(u.Query);
+            var parts = new List<string>();
+            foreach (string k in q.AllKeys)
+            {
+                if (k == null || _topicKeyIgnore.Contains(k)) continue;
+                parts.Add(k.ToLowerInvariant() + "=" + (q[k] ?? ""));
+            }
+            parts.Sort(StringComparer.Ordinal);
+            return u.AbsolutePath.ToLowerInvariant() + "?" + string.Join("&", parts);
+        }
+        catch { return null; }
+    }
+
     // Жёсткие гейты кандидата-донора: имя (строго!)/сиды/качество/сезон/вес серии/не-свои/не-blacklist.
     static List<JObject> FilterDonorCandidates(JArray scored, HuntCtx h)
     {
@@ -249,6 +412,13 @@ public partial class QbitController
             if (!string.IsNullOrEmpty(btih) && (h.knownHashes.Contains(btih) || h.blacklistKeys.Contains(btih))) continue;
             if (!string.IsNullOrWhiteSpace(parselink) && h.blacklistKeys.Contains(parselink)) continue;
             if (string.IsNullOrEmpty(btih) && string.IsNullOrWhiteSpace(parselink)) continue;
+
+            // ТОТ ЖЕ топик, что у основной раздачи, только перевыложенный (новые серии → новый infohash).
+            // Это не «другая раздача-донор», это обновление НАШЕЙ же — её заберёт re-grab в CheckWatches.
+            // Взяв её донором, охота получает торрент, который вот-вот станет основной, и контур
+            // замещения сносит его с файлами (инцидент 2026-07-25, «Укрытие»). knownHashes тут не спасают:
+            // у перерегистрации ДРУГОЙ infohash. Сверяем именно топик.
+            if (h.selfTopicKey != null && TopicKey(parselink) == h.selfTopicKey) continue;
 
             var seasons = TorrentScoring.ParseSeasons(title);
             if (h.season > 0 && seasons.Count > 0 && !seasons.Contains(h.season)) continue;
@@ -537,7 +707,8 @@ public partial class QbitController
             minMb = conf.epSizeMinMb,
             maxGb = conf.epSizeMaxGb,
             titleNorm = Shared.Services.Utilities.SearchNameTo.Convert(ctitle),
-            originalNorm = Shared.Services.Utilities.SearchNameTo.Convert(ctx?.Value<string>("title_original"))
+            originalNorm = Shared.Services.Utilities.SearchNameTo.Convert(ctx?.Value<string>("title_original")),
+            selfTopicKey = TopicKey(m.Value<string>("link"))
         };
         if (donors != null)
             foreach (var d in donors.OfType<JObject>())
@@ -588,7 +759,7 @@ public partial class QbitController
             { BlacklistAdd(m, btih, parselink, "foreign", conf.donorBlacklistTtlDays); continue; }
 
             // двухфазный захват: add со стопом после метаданных → подтверждение по файлам
-            if (!await QbitAddMagnetEx(c, magnet, DonorCategory, "qdl-donor", stopAfterMeta: true))
+            if (!await QbitAddMagnetEx(c, magnet, DonorCategory, DonorTag, stopAfterMeta: true))
             { BlacklistAdd(m, btih, parselink, "add-failed", 1); continue; }
 
             var dfiles = await QbitWaitFiles(c, btih, conf.donorMetadataTimeoutSec);
@@ -668,9 +839,19 @@ public partial class QbitController
             if (e != null && e.any && e.kind == null && e.ep >= 0) mainDone.Add((e.season, e.ep));
         }
 
+        string mainHash = item.Value<string>("hash") ?? "";
+
         foreach (var d in donors.OfType<JObject>())
         {
             string dh = d.Value<string>("hash") ?? "";
+
+            // Донор == основная раздача: топик перерегистрировали, CheckWatches пере-резолвил основную
+            // в тот же infohash, а донорская запись осталась. Дальше пошло бы сравнение торрента с самим
+            // собой → ложное «серия замещена основной» → delete-donor снёс бы весь сериал С ФАЙЛАМИ
+            // (инцидент 2026-07-25, «Укрытие»). Ничего не удаляем — просто забываем запись донора.
+            if (dh.Length > 0 && dh.Equals(mainHash, StringComparison.OrdinalIgnoreCase))
+            { res.Add(new ReplaceAction { kind = "forget-donor", donorHash = dh, donor = d }); continue; }
+
             bool known = donorFiles != null && donorFiles.ContainsKey(dh);
             JArray dfiles = known ? donorFiles[dh] : null;
 
@@ -713,7 +894,10 @@ public partial class QbitController
         return res;
     }
 
-    static async Task DeleteDonorFile(HttpClient c, string donorHash, int fileIndex, JArray dfiles)
+    // mainPaths — полные пути файлов основной раздачи: если донор указывает на ТОТ ЖЕ файл на диске
+    // (общая папка, тот же рип), «замещение» удалило бы файл самой основной. Тогда файл не трогаем —
+    // достаточно снять приоритет.
+    static async Task DeleteDonorFile(HttpClient c, string donorHash, int fileIndex, JArray dfiles, HashSet<string> mainPaths = null)
     {
         try
         {
@@ -725,7 +909,13 @@ public partial class QbitController
             if (info == null || info.Value<string>("category") != DonorCategory) return;   // не наш донор — файл не трогаем
             string savePath = info.Value<string>("save_path") ?? ModInit.conf.downloadsPath;
             string full = ConfinedCombine(savePath, rel) ?? ConfinedCombine(ModInit.conf.downloadsPath, rel);
-            if (full != null && System.IO.File.Exists(full)) System.IO.File.Delete(full);
+            if (full == null) return;
+            if (mainPaths != null && mainPaths.Contains(NormPath(full)))
+            {
+                Console.WriteLine("[QbitDownload] hunt: файл донора " + rel + " НЕ удаляю — это файл самой основной раздачи");
+                return;
+            }
+            if (System.IO.File.Exists(full)) System.IO.File.Delete(full);
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] donor file delete: " + ex.Message); }
     }
@@ -749,6 +939,16 @@ public partial class QbitController
                 if (!string.IsNullOrEmpty(dh)) donorFiles[dh] = await QbitFiles(c, dh);
             }
 
+            // пути файлов основной — чтобы «замещение» не удалило её собственный файл (общая папка)
+            var mainInfo = await QbitTorrentInfo(c, mainHash);
+            string mainSave = mainInfo?.Value<string>("save_path") ?? ModInit.conf.downloadsPath;
+            var mainPaths = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var f in mainFiles)
+            {
+                string p = NormPath(ConfinedCombine(mainSave, f.Value<string>("name")));
+                if (p != null) mainPaths.Add(p);
+            }
+
             var actions = PlanReplacements(mainFiles, m, donorFiles, DateTime.UtcNow, ModInit.conf.donorStaleDays);
             foreach (var a in actions.OrderBy(x => x.kind == "drop-file" ? 0 : 1))   // сперва файлы, потом снятие доноров
             {
@@ -757,7 +957,7 @@ public partial class QbitController
                     if (a.kind == "drop-file")
                     {
                         if (a.fileIndex >= 0) await QbitFilePrio(c, a.donorHash, new[] { a.fileIndex }, 0);
-                        await DeleteDonorFile(c, a.donorHash, a.fileIndex, donorFiles.GetValueOrDefault(a.donorHash));
+                        await DeleteDonorFile(c, a.donorHash, a.fileIndex, donorFiles.GetValueOrDefault(a.donorHash), mainPaths);
                         a.ep["status"] = "replaced";
                         a.ep["replacedAt"] = DateTime.UtcNow.ToString("o");
                         changed = true;
@@ -765,7 +965,7 @@ public partial class QbitController
                     }
                     else if (a.kind == "delete-donor" || a.kind == "dead-donor")
                     {
-                        await QbitDeleteDonorSafe(c, a.donorHash);   // удаляем с файлами ТОЛЬКО если категория донорская
+                        await QbitDeleteDonorSafe(c, a.donorHash, mainHash);   // с файлами ТОЛЬКО если категория донорская и папка не общая с основной
                         if (a.kind == "dead-donor")
                             BlacklistAdd(m, a.donorHash, a.donor.Value<string>("link"), "dead", ModInit.conf.donorBlacklistTtlDays);
                         donors.Remove(a.donor);
@@ -796,14 +996,27 @@ public partial class QbitController
                     { var dh = d.Value<string>("hash"); if (!string.IsNullOrEmpty(dh)) referenced.Add(dh); }
 
             using var c = await Qbit();
+
+            // папки пользовательских загрузок: осиротевший донор, пишущий в ту же папку (перерегистрация
+            // той же раздачи / тот же рип), удаляется БЕЗ файлов — это файлы основной загрузки
+            var mainPaths = new List<string>();
+            try
+            {
+                var mainCat = JArray.Parse(await c.GetStringAsync($"/api/v2/torrents/info?category={HttpUtility.UrlEncode(ModInit.conf.category)}"));
+                foreach (var it in mainCat) { var cp = it.Value<string>("content_path"); if (!string.IsNullOrWhiteSpace(cp)) mainPaths.Add(cp); }
+            }
+            catch { }
+
             var inQbit = JArray.Parse(await c.GetStringAsync($"/api/v2/torrents/info?category={HttpUtility.UrlEncode(DonorCategory)}"));
             foreach (var t in inQbit)
             {
                 string h = t.Value<string>("hash");
                 if (!string.IsNullOrEmpty(h) && !referenced.Contains(h))
                 {
-                    await QbitDelete(c, h, true);
-                    Console.WriteLine("[QbitDownload] hunt: осиротевший донор " + h + " удалён при старте");
+                    bool shared = mainPaths.Any(p => PathsOverlap(t.Value<string>("content_path"), p));
+                    await QbitDelete(c, h, !shared);
+                    Console.WriteLine("[QbitDownload] hunt: осиротевший донор " + h + " удалён при старте"
+                        + (shared ? " (БЕЗ файлов — общая папка с загрузкой)" : ""));
                 }
             }
         }
@@ -819,7 +1032,7 @@ public partial class QbitController
             var m = list.OfType<JObject>().FirstOrDefault(x => mainHash.Equals(x.Value<string>("hash"), StringComparison.OrdinalIgnoreCase));
             if (m?["donors"] is not JArray donors) return;
             foreach (var d in donors.OfType<JObject>())
-                await QbitDeleteDonorSafe(c, d.Value<string>("hash"));   // с файлами ТОЛЬКО если категория донорская
+                await QbitDeleteDonorSafe(c, d.Value<string>("hash"), mainHash);   // с файлами ТОЛЬКО если категория донорская и папка не общая с основной
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] delete donors: " + ex.Message); }
     }
@@ -1127,6 +1340,8 @@ public partial class QbitController
 
         using var c = await Qbit();
         if (!await QbitAddMagnetEx(c, magnet, ModInit.conf.category)) return (false, null, "qbit add failed");
+        // кандидат мог уже сидеть донором охоты — на дубликате add категорию не меняет (см. PromoteIfDonor)
+        await PromoteIfDonor(c, newHash, new[] { m }, m.Value<string>("title"));
         await QbitDelete(c, curHash, ModInit.conf.switchDeleteOldFiles);
         MigrateCache(curHash, newHash);
         m["hash"] = newHash;

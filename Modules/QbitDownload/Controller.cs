@@ -2501,7 +2501,7 @@ public partial class QbitController : BaseController
                 {
                     using var c = await Qbit();
                     foreach (var d in donors.OfType<JObject>())
-                        await QbitDeleteDonorSafe(c, d.Value<string>("hash"));   // удаляет с файлами ТОЛЬКО если категория донорская
+                        await QbitDeleteDonorSafe(c, d.Value<string>("hash"), hash);   // с файлами ТОЛЬКО если категория донорская и папка не общая с основной
                 }
                 catch (Exception ex) { Console.WriteLine("[QbitDownload] watch remove donors: " + ex.Message); }
             }
@@ -2559,7 +2559,16 @@ public partial class QbitController : BaseController
                 }
 
                 using var c = await Qbit();
-                if (!await QbitAddMagnet(c, magnet)) continue;     // qBit перепроверит и дотянет новые серии
+                var add = await QbitAddMagnetStatus(c, magnet, ModInit.conf.category);   // qBit перепроверит и дотянет новые серии
+                if (add == QbitAddStatus.Failed) continue;
+
+                // Перевыложенную раздачу могла уже качать охота за сериями (донор с тем же infohash):
+                // тогда add — дубликат, категорию существующего торрента qBit НЕ меняет, и он остаётся
+                // «донором», хотя стал основной. Промоутим и стираем донорские записи, иначе контур
+                // замещения снимет «донора» С ФАЙЛАМИ — весь сериал (инцидент 2026-07-25, «Укрытие»).
+                if (add == QbitAddStatus.Duplicate)
+                    Console.WriteLine("[QbitDownload] watch: re-grab " + m.Value<string>("title") + " — " + newHash + " уже в qBit (дубликат)");
+                await PromoteIfDonor(c, newHash, list.OfType<JObject>(), m.Value<string>("title"));
 
                 try   // убрать старую раздачу (файлы оставить)
                 {

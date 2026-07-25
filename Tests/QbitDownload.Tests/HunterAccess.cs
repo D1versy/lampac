@@ -48,9 +48,10 @@ public static class HunterAccess
 
     public static object MakeHuntCtx(string mainHash, int season, IEnumerable<string> known, IEnumerable<string> blacklist,
                                      int minSeeds, int minQuality, int minMb, int maxGb,
-                                     string titleNorm = null, string originalNorm = null)
+                                     string titleNorm = null, string originalNorm = null, string selfLink = null)
     {
         var h = Activator.CreateInstance(HuntCtxT);
+        HuntCtxT.GetField("selfTopicKey").SetValue(h, selfLink == null ? null : TopicKey(selfLink));
         HuntCtxT.GetField("mainHash").SetValue(h, mainHash);
         HuntCtxT.GetField("season").SetValue(h, season);
         HuntCtxT.GetField("knownHashes").SetValue(h, new HashSet<string>(known ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase));
@@ -66,6 +67,11 @@ public static class HunterAccess
 
     public static bool NameMatchesSeries(string title, string titleNorm, string originalNorm)
         => (bool)Access.Call("NameMatchesSeries", title, titleNorm, originalNorm);
+
+    public static string TopicKey(string link) => (string)Access.Call("TopicKey", link);
+    public static bool PathsOverlap(string a, string b) => (bool)Access.Call("PathsOverlap", a, b);
+    public static int DropDonorRefs(IEnumerable<JObject> items, string hash) => (int)Access.Call("DropDonorRefs", items, hash);
+    public static bool IsDonorRef(IEnumerable<JObject> items, string hash) => (bool)Access.Call("IsDonorRef", items, hash);
 
     public static List<JObject> FilterDonorCandidates(JArray scored, object huntCtx)
         => (List<JObject>)Access.Call("FilterDonorCandidates", scored, huntCtx);
@@ -108,6 +114,11 @@ public static class HunterAccess
     // ── qBit-хелперы (инъецируемый HttpClient) ────────────────────────────
     public static Task<bool> QbitAddMagnetEx(HttpClient c, string magnet, string category, string tags = null, bool stopAfterMeta = false)
         => (Task<bool>)Access.Call("QbitAddMagnetEx", c, magnet, category, tags, stopAfterMeta);
+    public static Task<QbitAddStatus> QbitAddMagnetStatus(HttpClient c, string magnet, string category, string tags = null, bool stopAfterMeta = false)
+        => (Task<QbitAddStatus>)Access.Call("QbitAddMagnetStatus", c, magnet, category, tags, stopAfterMeta);
+    public static Task<bool> PromoteDonorToMain(HttpClient c, string hash) => (Task<bool>)Access.Call("PromoteDonorToMain", c, hash);
+    public static Task<bool> PromoteIfDonor(HttpClient c, string newHash, IEnumerable<JObject> items, string title)
+        => (Task<bool>)Access.Call("PromoteIfDonor", c, newHash, items, title);
     public static Task<JArray> QbitFiles(HttpClient c, string hash) => (Task<JArray>)Access.Call("QbitFiles", c, hash);
     public static Task<JObject> QbitTorrentInfo(HttpClient c, string hash) => (Task<JObject>)Access.Call("QbitTorrentInfo", c, hash);
     public static Task<JArray> QbitWaitFiles(HttpClient c, string hash, int timeoutSec) => (Task<JArray>)Access.Call("QbitWaitFiles", c, hash, timeoutSec);
@@ -115,7 +126,8 @@ public static class HunterAccess
         => (Task<bool>)Access.Call("QbitFilePrio", c, hash, ids, prio);
     public static Task QbitStartTorrent(HttpClient c, string hash) => (Task)Access.Call("QbitStartTorrent", c, hash);
     public static Task QbitDelete(HttpClient c, string hash, bool deleteFiles) => (Task)Access.Call("QbitDelete", c, hash, deleteFiles);
-    public static Task QbitDeleteDonorSafe(HttpClient c, string hash) => (Task)Access.Call("QbitDeleteDonorSafe", c, hash);
+    public static Task QbitDeleteDonorSafe(HttpClient c, string hash, string mainHash = null)
+        => (Task)Access.Call("QbitDeleteDonorSafe", c, hash, mainHash);
     public static Task<string> QbitCategory(HttpClient c, string hash) => (Task<string>)Access.Call("QbitCategory", c, hash);
 
     // ── реконсиляция watch.json ───────────────────────────────────────────
