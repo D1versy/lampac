@@ -438,6 +438,21 @@ public partial class QbitController : BaseController
                 if (hm.Success) hash = hm.Groups[1].Value.ToLower();
             }
 
+            // Пользователь мог нажать «Скачать» на раздаче, которую охота уже качает ДОНОРОМ (она же
+            // топ-1 выдачи, то есть самый вероятный клик). qBit отвечает дубликатом и категорию не меняет:
+            // загрузка осталась бы невидимой в гриде, качала одну серию и была бы снята с файлами уборкой
+            // доноров. Промоутим её в основную и стираем донорские записи (инцидент 2026-07-25, «Укрытие»).
+            if (ok && !string.IsNullOrEmpty(hash))
+            {
+                try
+                {
+                    JArray wl; lock (_watchLock) { wl = LoadWatch(); }
+                    if (await PromoteIfDonor(c, hash, wl.OfType<JObject>(), query ?? hash))
+                        lock (_watchLock) { SaveWatch(wl); }
+                }
+                catch (Exception ex) { Console.WriteLine("[QbitDownload] add: promote donor: " + ex.Message); }
+            }
+
             // сохраняем исходный указатель на раздачу — нужен для слежения за сериалом (пере-резолв),
             // плюс TMDB-контекст поиска (ctx) — фундамент охоты за сериями и переключения раздачи
             if (ok && !string.IsNullOrEmpty(hash) && !string.IsNullOrWhiteSpace(origLink))
@@ -758,6 +773,9 @@ public partial class QbitController : BaseController
             }
 
             using var c = await Qbit();
+            // папку основной запоминаем ДО её удаления: каскад по донорам идёт после, а без этого пути
+            // донор, сидящий в той же папке, снёс бы файлы вместе с собой (проверять было бы не с чем)
+            string mainContentPath = (await QbitTorrentInfo(c, hash))?.Value<string>("content_path");
             var form = new FormUrlEncodedContent(new[]
             {
                 new KeyValuePair<string, string>("hashes", hash),
@@ -767,7 +785,7 @@ public partial class QbitController : BaseController
             if (r.IsSuccessStatusCode)
             {
                 if (loc != null && deleteFiles) DeleteLocalFiles(loc);   // оверлей: mp4-копии удаляем вместе с торрентом
-                await DeleteDonorsOf(c, hash);   // каскад: раздачи-доноры этой загрузки (охота) — с файлами
+                await DeleteDonorsOf(c, hash, mainContentPath);   // каскад: раздачи-доноры этой загрузки (охота) — с файлами
                 DropHlsCache(hash);
                 PurgeCache(hash);
             }
@@ -2267,6 +2285,10 @@ public partial class QbitController : BaseController
                 try
                 {
                     using var c = await Qbit();
+                    // доноров снимаем ПЕРВЫМИ, пока основная ещё в qBit: иначе они осиротеют (watch-запись
+                    // ниже удаляется целиком) и уборка при следующем старте снесёт их файлы вслепую
+                    string mainContentPath = (await QbitTorrentInfo(c, it.hash))?.Value<string>("content_path");
+                    await DeleteDonorsOf(c, it.hash, mainContentPath);
                     var form = new FormUrlEncodedContent(new[]
                     {
                         new KeyValuePair<string, string>("hashes", it.hash),
@@ -2553,6 +2575,14 @@ public partial class QbitController : BaseController
                     // топик не обновился → счётчик застоя; на пороге — поискать более полную раздачу
                     m["stale"] = (m.Value<int?>("stale") ?? 0) + 1;
                     changed = true;
+                    // самолечение: если основная застряла в донорской категории (промоушен не довёлся
+                    // из-за сбоя qBit) — доводим здесь, иначе она невидима в «Загрузках»
+                    try
+                    {
+                        using var cc = await Qbit();
+                        await PromoteIfDonor(cc, curHash, list.OfType<JObject>(), m.Value<string>("title"));
+                    }
+                    catch (Exception ex) { Console.WriteLine("[QbitDownload] watch promote retry: " + ex.Message); }
                     try { await ConsiderSwitch((JObject)m); }
                     catch (Exception ex) { Console.WriteLine("[QbitDownload] switch consider: " + ex); }
                     continue;

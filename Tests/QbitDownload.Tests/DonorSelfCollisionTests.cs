@@ -167,7 +167,8 @@ public class DonorSelfCollisionTests
         var fake = new FakeQbit()
             .Route("/torrents/delete", req => { delBody = req.Content.ReadAsStringAsync().Result; return FakeHttpMessageHandler.Text(""); })
             .Json("info?hashes=" + DonorHash, "[{\"hash\":\"" + DonorHash + "\",\"category\":\"lampa-donor\",\"content_path\":\"/downloads/Silo.S03E04.WEB\"}]")
-            .Json("info?hashes=" + MainHash, "[{\"hash\":\"" + MainHash + "\",\"category\":\"lampa\",\"content_path\":\"/downloads/Silo (Season 3) WEB-DL 1080p\"}]");
+            .Json("info?hashes=" + MainHash, "[{\"hash\":\"" + MainHash + "\",\"category\":\"lampa\",\"content_path\":\"/downloads/Silo (Season 3) WEB-DL 1080p\"}]")
+            .Json("info?category=lampa", "[{\"content_path\":\"/downloads/Silo (Season 3) WEB-DL 1080p\"}]");
         var c = fake.Build();
 
         await HunterAccess.QbitDeleteDonorSafe(c, DonorHash, MainHash);
@@ -256,6 +257,138 @@ public class DonorSelfCollisionTests
         Assert.Equal(1, HunterAccess.DropDonorRefs(items, DonorHash));
         Assert.Single((JArray)items[0]["donors"]);
         Assert.False(HunterAccess.IsDonorRef(items, DonorHash));
+    }
+
+    // ── 5б. Второй раунд ревью: fail-safe и честный промоушен ────────────
+    [Fact]
+    public async Task QbitDeleteDonorSafe_FolderOfAnotherDownload_KeepsFiles()
+    {
+        // донор сел в папку СОСЕДНЕЙ загрузки (не своей основной) — файлы всё равно не наши
+        string delBody = null;
+        var fake = new FakeQbit()
+            .Route("/torrents/delete", req => { delBody = req.Content.ReadAsStringAsync().Result; return FakeHttpMessageHandler.Text(""); })
+            .Json("info?hashes=" + DonorHash, "[{\"hash\":\"" + DonorHash + "\",\"category\":\"lampa-donor\",\"content_path\":\"/downloads/Lucky S01/e1.mkv\"}]")
+            .Json("info?hashes=" + MainHash, "[{\"hash\":\"" + MainHash + "\",\"category\":\"lampa\",\"content_path\":\"/downloads/Silo (Season 3)\"}]")
+            .Json("info?category=lampa", "[{\"content_path\":\"/downloads/Silo (Season 3)\"},{\"content_path\":\"/downloads/Lucky S01\"}]");
+        var c = fake.Build();
+
+        await HunterAccess.QbitDeleteDonorSafe(c, DonorHash, MainHash);
+
+        Assert.Contains("deleteFiles=false", delBody);
+    }
+
+    [Fact]
+    public async Task QbitDeleteDonorSafe_QbitUnreachable_FailsSafe()
+    {
+        // список загрузок не отдался — сверить папки нечем, файлы не трогаем
+        string delBody = null;
+        var fake = new FakeQbit()
+            .Route("/torrents/delete", req => { delBody = req.Content.ReadAsStringAsync().Result; return FakeHttpMessageHandler.Text(""); })
+            .Json("info?hashes=" + DonorHash, "[{\"hash\":\"" + DonorHash + "\",\"category\":\"lampa-donor\",\"content_path\":\"/downloads/Silo.S03E04.WEB\"}]")
+            .Text("info?category=lampa", "boom", HttpStatusCode.InternalServerError);
+        var c = fake.Build();
+
+        await HunterAccess.QbitDeleteDonorSafe(c, DonorHash, null);
+
+        Assert.Contains("deleteFiles=false", delBody);
+    }
+
+    [Fact]
+    public async Task QbitDeleteDonorSafe_MainAlreadyGone_UsesPassedContentPath()
+    {
+        // /qdl/delete снял основную первой: сверяем по переданному пути, а не по отсутствующему торренту
+        string delBody = null;
+        var fake = new FakeQbit()
+            .Route("/torrents/delete", req => { delBody = req.Content.ReadAsStringAsync().Result; return FakeHttpMessageHandler.Text(""); })
+            .Json("info?hashes=" + DonorHash, "[{\"hash\":\"" + DonorHash + "\",\"category\":\"lampa-donor\",\"content_path\":\"/downloads/Silo (Season 3)\"}]")
+            .Json("info?hashes=" + MainHash, "[]")
+            .Json("info?category=lampa", "[]");
+        var c = fake.Build();
+
+        await HunterAccess.QbitDeleteDonorSafe(c, DonorHash, MainHash, "/downloads/Silo (Season 3)");
+
+        Assert.Contains("deleteFiles=false", delBody);
+    }
+
+    [Fact]
+    public async Task PromoteDonorToMain_SetCategoryFailed_ReportsFailure()
+    {
+        var fake = new FakeQbit()
+            .Text("/torrents/setCategory", "Category does not exist", HttpStatusCode.Conflict)
+            .Json("/torrents/files", "[{\"index\":0,\"name\":\"e1.mkv\"}]")
+            .Text("/torrents/filePrio", "").Text("/torrents/start", "");
+        var c = fake.Build();
+
+        Assert.False(await HunterAccess.PromoteDonorToMain(c, DonorHash));
+    }
+
+    [Fact]
+    public async Task PromoteDonorToMain_FilesUnavailable_ReportsFailure()
+    {
+        // категория сменилась, но приоритеты не вернуть → «основная» качала бы одну серию
+        var fake = new FakeQbit()
+            .Text("/torrents/setCategory", "").Text("/torrents/removeTags", "")
+            .Text("/torrents/files", "boom", HttpStatusCode.InternalServerError)
+            .Text("/torrents/start", "");
+        var c = fake.Build();
+
+        Assert.False(await HunterAccess.PromoteDonorToMain(c, DonorHash));
+    }
+
+    [Fact]
+    public async Task PromoteIfDonor_PromotionFailed_KeepsDonorRefs()
+    {
+        // если стереть записи при неудавшемся промоушене, торрент станет «донором-сиротой»
+        // в донорской категории — и уборка при старте снесёт сериал с файлами
+        var items = new List<JObject>
+        {
+            new JObject { ["hash"] = MainHash, ["title"] = "Укрытие", ["donors"] = new JArray(new JObject { ["hash"] = DonorHash }) }
+        };
+        var fake = new FakeQbit().Text("/torrents/setCategory", "nope", HttpStatusCode.Conflict);
+        var c = fake.Build();
+
+        Assert.False(await HunterAccess.PromoteIfDonor(c, DonorHash, items, "Укрытие"));
+        Assert.Single((JArray)items[0]["donors"]);
+    }
+
+    [Fact]
+    public void PlanReplacements_DonorStateUnknown_NoActions()
+    {
+        // qBit не ответил про донора: словарь без ключа = «неизвестно» → в этом проходе не трогаем
+        var item = new JObject
+        {
+            ["hash"] = MainHash,
+            ["donors"] = new JArray(new JObject
+            {
+                ["hash"] = DonorHash,
+                ["addedAt"] = Now.AddDays(-30).ToString("o"),
+                ["eps"] = new JArray(new JObject { ["epkey"] = "s3e4", ["season"] = 3, ["ep"] = 4, ["fileIndex"] = 0, ["status"] = "hunted" })
+            })
+        };
+        var mainFiles = new JArray(File(3, "Silo.S03E04.1080p.mkv", progress: 1));
+
+        Assert.Empty(HunterAccess.PlanReplacements(mainFiles, item, new Dictionary<string, JArray>(), Now, 7));
+    }
+
+    [Fact]
+    public void PlanReplacements_HashCaseInsensitive()
+    {
+        // qBit отдаёт хэши в нижнем регистре, magnet — в верхнем: шлюз обязан работать в обоих
+        var item = new JObject
+        {
+            ["hash"] = MainHash.ToUpperInvariant(),
+            ["donors"] = new JArray(new JObject
+            {
+                ["hash"] = MainHash,
+                ["addedAt"] = Now.ToString("o"),
+                ["eps"] = new JArray(new JObject { ["epkey"] = "s3e4", ["season"] = 3, ["ep"] = 4, ["fileIndex"] = 0, ["status"] = "hunted" })
+            })
+        };
+        var files = new JArray(File(0, "Silo.S03E04.mkv", progress: 1));
+        var actions = HunterAccess.PlanReplacements(files, item, new Dictionary<string, JArray> { [MainHash] = files }, Now, 7);
+
+        Assert.Single(actions);
+        Assert.Equal("forget-donor", actions[0].kind);
     }
 
     // ── 6. Статус add: дубликат отличим от нового торрента ───────────────

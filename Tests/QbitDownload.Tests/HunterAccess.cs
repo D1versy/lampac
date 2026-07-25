@@ -126,8 +126,8 @@ public static class HunterAccess
         => (Task<bool>)Access.Call("QbitFilePrio", c, hash, ids, prio);
     public static Task QbitStartTorrent(HttpClient c, string hash) => (Task)Access.Call("QbitStartTorrent", c, hash);
     public static Task QbitDelete(HttpClient c, string hash, bool deleteFiles) => (Task)Access.Call("QbitDelete", c, hash, deleteFiles);
-    public static Task QbitDeleteDonorSafe(HttpClient c, string hash, string mainHash = null)
-        => (Task)Access.Call("QbitDeleteDonorSafe", c, hash, mainHash);
+    public static Task QbitDeleteDonorSafe(HttpClient c, string hash, string mainHash = null, string mainContentPath = null)
+        => (Task)Access.Call("QbitDeleteDonorSafe", c, hash, mainHash, mainContentPath);
     public static Task<string> QbitCategory(HttpClient c, string hash) => (Task<string>)Access.Call("QbitCategory", c, hash);
 
     // ── реконсиляция watch.json ───────────────────────────────────────────
