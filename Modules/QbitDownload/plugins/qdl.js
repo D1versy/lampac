@@ -1514,7 +1514,71 @@
         try { return Lampa.Timeline.view(Lampa.Utils.hash('qdllive:' + rec.id)); } catch (e) { return null; }
     }
 
-    // Плейлист = все записи камеры за день: доиграв кусок, плеер сам переходит к следующему.
+    // ── «Весь день одной записью» ──
+    // Сервер склеивает куски суток в ОДИН HLS-поток (склейка регистратора: сегменты + DISCONTINUITY),
+    // поэтому у дня один таймлайн и нет «следующего файла». Пока задние куски ремуксятся, плейлист
+    // растёт сам — смотреть можно с первого готового. Ждём именно первый кусок, а не весь день.
+    // Токен отменяет и «ушёл с экрана», и повторное нажатие: без него оставшийся жить setTimeout
+    // через минуту открывал бы плеер поверх того, чем зритель уже занят.
+    var liveDayToken = 0;
+    function liveDayCancel() { liveDayToken++; }
+
+    function livePlayDay(cam, date, label) {
+        var my = ++liveDayToken;
+        var tries = 0;
+        var fired = false;
+
+        // Первый ответ обычно приходит быстро; сообщение показываем, только если готовка затянулась.
+        setTimeout(function () {
+            if (my === liveDayToken && !fired) Lampa.Noty.show('Готовлю запись за день…');
+        }, 700);
+
+        function fire(info) {
+            fired = true;
+            var item = {
+                title: (cam.name || 'Камера') + (label ? '   ·   ' + label : ''),
+                url: API + info.path
+            };
+            try {
+                var tl = Lampa.Timeline.view(Lampa.Utils.hash('qdlliveday:' + cam.id + ':' + info.date));
+                if (tl) {
+                    // За текущий день запись РАСТЁТ (доезжают новые куски), а процент Lampa посчитала
+                    // от прежней длины: досмотренный «конец дня» становился 98–100% и потом блокировал
+                    // продолжение (Lampa не предлагает докрутку при percent ≥ 90). Позиция в секундах
+                    // остаётся верной — пересчитываем процент от новой длины.
+                    if (info.seconds && tl.time > 0) {
+                        tl.duration = info.seconds;
+                        tl.percent = Math.min(100, Math.round(tl.time / info.seconds * 100));
+                    }
+                    item.timeline = tl;
+                }
+            } catch (e) {}
+            Lampa.Player.play(item);
+            Lampa.Player.playlist([item]);
+        }
+
+        function poll() {
+            if (my !== liveDayToken) return;
+            req(API + '/qdl/live/day?camera=' + encodeURIComponent(cam.id) + (date ? '&date=' + encodeURIComponent(date) : ''),
+                function (info) {
+                    if (my !== liveDayToken) return;
+                    if (!info || info.error) { Lampa.Noty.show((info && info.error) || 'Не вышло собрать запись'); return; }
+                    if (info.empty) { Lampa.Noty.show('За этот день записей нет'); return; }
+                    if (info.ready > 0) { fire(info); return; }
+                    // всё готово, но играть нечего — все куски битые
+                    if (info.complete) { Lampa.Noty.show('Записи за этот день не читаются'); return; }
+
+                    if (++tries > 45) { Lampa.Noty.show('Регистратор слишком долго готовит запись'); return; }
+                    if (tries % 10 === 0) Lampa.Noty.show('Ещё готовлю: ' + info.ready + ' из ' + info.total);
+                    setTimeout(poll, 2000);
+                },
+                function () { if (my === liveDayToken) Lampa.Noty.show('Видеорегистратор не отвечает'); });
+        }
+
+        poll();
+    }
+
+    // Плейлист = все записи камеры за день по отдельности (запасной путь: «Фрагменты»).
     function livePlay(cam, items, index) {
         if (!items || !items.length) { Lampa.Noty.show('Записей нет'); return; }
         var playlist = items.map(function (r) {
@@ -1538,6 +1602,7 @@
         var last;
         var date = object.qdl_date || '';   // пусто — сервер сам возьмёт сегодняшний день
         var today = '';
+        var currentLabel = '';              // «Сегодня» / «23 июля, чт» — в заголовок записи дня
         var keepDayFocus = false;           // после смены дня фокус возвращаем на кнопку дня
         var reqId = 0;                      // быстро щёлкают днями → рисуем только последний ответ
 
@@ -1561,6 +1626,7 @@
             if (comp.destroyed) return;
             if (r.today) today = r.today;
             if (r.date) date = r.date;
+            if (r.label) currentLabel = r.label;
 
             body.empty();
             last = null;
@@ -1635,7 +1701,7 @@
                   '<img style="width:12em;height:6.8em;object-fit:cover;border-radius:.5em;background:#111;flex:none">' +
                   '<div style="flex:1;min-width:0">' +
                     '<div style="font-size:1.7em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(c.name) + '</div>' +
-                    '<div style="opacity:.75;font-size:1.25em;margin-top:.35em">' + esc(c.first + ' – ' + c.last) + '   ·   ' + c.count + ' ' + livePlural(c.count, 'запись', 'записи', 'записей') + '   ·   ' + liveDur(c.seconds) + '</div>' +
+                    '<div style="opacity:.75;font-size:1.25em;margin-top:.35em">' + esc(c.first + ' – ' + c.last) + '   ·   ' + liveDur(c.seconds) + '</div>' +
                   '</div>' +
                   '<div style="opacity:.45;font-size:1.8em;padding-right:.4em">▶</div>' +
                 '</div>'
@@ -1644,8 +1710,23 @@
             img.attr('src', API + '/qdl/live/thumb?id=' + c.thumb);
             img.on('error', function () { this.src = './img/img_broken.svg'; });
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
-            el.on('hover:enter', function () {
-                Lampa.Activity.push({ url: '', title: c.name, component: 'qdl_live_camera', qdl_camera: c, qdl_date: date, page: 1 });
+            // Обычный вход = весь день одной записью. Разбивка на куски осталась запасным путём
+            // (долгое нажатие) — на случай, если склейка почему-то не собралась.
+            el.on('hover:enter', function () { livePlayDay(c, date, currentLabel); });
+            el.on('hover:long', function () {
+                Lampa.Select.show({
+                    title: c.name || 'Камера',
+                    items: [
+                        { title: '▶ Смотреть весь день', day: true },
+                        { title: 'Фрагменты по отдельности (' + c.count + ')' }
+                    ],
+                    onSelect: function (a) {
+                        Lampa.Controller.toggle('content');
+                        if (a.day) livePlayDay(c, date, currentLabel);
+                        else Lampa.Activity.push({ url: '', title: c.name, component: 'qdl_live_camera', qdl_camera: c, qdl_date: date, page: 1 });
+                    },
+                    onBack: function () { Lampa.Controller.toggle('content'); }
+                });
             });
             return el;
         }
@@ -1667,7 +1748,7 @@
         };
         this.pause = function () {};
         this.stop = function () {};
-        this.destroy = function () { comp.destroyed = true; network.clear(); scroll.destroy(); html.remove(); };
+        this.destroy = function () { comp.destroyed = true; liveDayCancel(); network.clear(); scroll.destroy(); html.remove(); };
     }
 
     // Экран 2: записи одной камеры за выбранный день
@@ -1704,7 +1785,7 @@
             else if (!items.length)
                 body.append(liveMsg('За этот день записей с этой камеры нет.'));
             else {
-                body.append(playAll(items));
+                body.append(playAll(items, r.label));
                 items.forEach(function (rec, i) { body.append(recRow(rec, items, i)); });
             }
 
@@ -1712,13 +1793,22 @@
             this.activity.toggle();
         };
 
-        function playAll(items) {
+        function playAll(items, label) {
             var total = 0;
             items.forEach(function (r) { total += r.seconds || 0; });
-            var el = $('<div class="selector" style="margin:.6em 1.4em;padding:1em 1.2em;background:rgba(20,160,40,.85);border-radius:.8em;font-size:1.5em;font-weight:600">▶ Смотреть всё подряд   ·   ' + liveDur(total) + '</div>');
-            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
-            el.on('hover:enter', function () { livePlay(cam, items, 0); });
-            return el;
+            var box = $('<div></div>');
+
+            // Основной путь — та же склеенная запись дня, что и по обычному входу в камеру.
+            var day = $('<div class="selector" style="margin:.6em 1.4em;padding:1em 1.2em;background:rgba(20,160,40,.85);border-radius:.8em;font-size:1.5em;font-weight:600">▶ Весь день одной записью   ·   ' + liveDur(total) + '</div>');
+            day.on('hover:focus', function () { last = day[0]; scroll.update(day, true); });
+            day.on('hover:enter', function () { livePlayDay(cam, date, label); });
+
+            // Запасной: куски по очереди (каждый со своим таймлайном) — если склейка не собралась.
+            var seq = $('<div class="selector" style="margin:.4em 1.4em;padding:.8em 1.2em;background:rgba(255,255,255,.1);border-radius:.8em;font-size:1.3em">Фрагменты подряд, по одному</div>');
+            seq.on('hover:focus', function () { last = seq[0]; scroll.update(seq, true); });
+            seq.on('hover:enter', function () { livePlay(cam, items, 0); });
+
+            return box.append(day).append(seq);
         }
 
         function recRow(rec, items, i) {
@@ -1762,7 +1852,7 @@
         };
         this.pause = function () {};
         this.stop = function () {};
-        this.destroy = function () { network.clear(); scroll.destroy(); html.remove(); };
+        this.destroy = function () { liveDayCancel(); network.clear(); scroll.destroy(); html.remove(); };
     }
 
     function buildLiveMenuItem() {

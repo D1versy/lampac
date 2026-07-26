@@ -1,11 +1,15 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
+using Shared;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -143,17 +147,48 @@ public partial class QbitController
 
     #region запросы к регистратору
 
+    // Веер запросов к регистратору шире, чем позволяет его nginx (`limit_req zone=api rate=30r/s`):
+    // одна отрисовка списка камер — это 1 + 2×N запросов, а быстрое листание днями их складывает.
+    // Проверено ревью: 13-way параллелизм ловит 429. Держим ширину узкой — регистратор пишет видео,
+    // ему не до нашего веера.
+    static readonly SemaphoreSlim _liveGate = new SemaphoreSlim(4);
+
+    /// <summary>
+    /// GET к регистратору. null — ЧЕСТНО пусто (404: «нет записей за эту дату»).
+    /// Любой другой не-2xx — исключение: «не смог спросить» не должно выглядеть как «записей нет»,
+    /// иначе камера молча пропадает из списка, а день отдаётся укороченным (и, что хуже, VOD-полным).
+    /// </summary>
     async Task<JToken> LiveApiJson(string path, CancellationToken ct)
     {
-        using var resp = await _liveApi.GetAsync(LiveBase() + path, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
-        if (!resp.IsSuccessStatusCode)
-            return null;
+        string url = LiveBase() + path;
 
-        string body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(body))
-            return null;
+        await _liveGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                using var resp = await _liveApi.GetAsync(url, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
 
-        return JToken.Parse(body);
+                if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    return null;
+
+                if (!resp.IsSuccessStatusCode)
+                {
+                    // 429 (упёрлись в его лимит) и 5xx — разово переспрашиваем, дальше честно падаем.
+                    bool retryable = resp.StatusCode == System.Net.HttpStatusCode.TooManyRequests || (int)resp.StatusCode >= 500;
+                    if (retryable && attempt == 0)
+                    {
+                        await Task.Delay(400, ct).ConfigureAwait(false);
+                        continue;
+                    }
+                    throw new HttpRequestException($"live api {(int)resp.StatusCode} {path}");
+                }
+
+                string body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                return string.IsNullOrWhiteSpace(body) ? null : JToken.Parse(body);
+            }
+        }
+        finally { _liveGate.Release(); }
     }
 
     /// <summary>Одна запись регистратора в нашем (уже нормализованном) виде.</summary>
@@ -436,6 +471,347 @@ public partial class QbitController
         }
 
         return LiveJsonOut(new JObject { ["today"] = todayKey, ["days"] = days });
+    }
+
+    #endregion
+
+    #region /qdl/live/day — ВЕСЬ ДЕНЬ ОДНОЙ ЗАПИСЬЮ (склейка в один HLS, один таймлайн)
+
+    // Регистратор умеет склейку сам (`/api/recordings/camera/{id}/stitched.m3u8`): каждая запись
+    // один раз ремуксится (stream copy, ~9 с на 17 мин видео) в TS-сегменты, а плейлист сшивает их
+    // через EXT-X-DISCONTINUITY — плеер идёт по суткам без «следующего файла», с одним таймлайном.
+    //
+    // Но его плейлист группирует по ЕГО (UTC) суткам, а у нас день локальный: наше окно задевает
+    // две его даты, и у клиента «сегодня» разъехалось бы с показанными временами. Поэтому берём
+    // готовые посегментные индексы (`/hls/_vod/{rec}/index.m3u8`, их пишет тот же ремукс) и
+    // собираем плейлист САМИ — ровно по нашему окну, в нашем порядке.
+    //
+    // Ремукс запускается ТОЛЬКО его stitched.m3u8 (там внутри kick_series), поэтому дёргаем его на
+    // каждую задетую UTC-дату. Это же обновляет TTL-метку кэша (`.done` трогается при чтении), так
+    // что уборщик регистратора (24 ч) не снесёт сегменты под играющим зрителем.
+    //
+    // Пока задние куски ещё ремуксятся, плейлист EVENT (без ENDLIST) — плеер его перечитывает и
+    // лента растёт; когда готовы все, отдаём VOD + ENDLIST. Смотреть можно с первого готового куска.
+
+    sealed class LiveSeg { public double dur; public string name; public int rec; }
+
+    sealed class LiveDayBuild
+    {
+        // Плейлист хранится с плейсхолдером {d1v} в сегментных строках: ключ периметра у каждого
+        // зрителя свой (и в LAN его нет), а кэш общий — подставляем на отдаче, не в кэше.
+        public string playlist;
+        public double seconds;      // длительность готовой части
+        public int ready;           // сколько кусков уже вошло
+        public int total;           // сколько всего кусков за день
+        public bool complete;       // все куски готовы (или битые) → VOD
+    }
+
+    // Готовый плейлист живёт секунды: EVENT-режим клиент перечитывает часто, а собирается он
+    // из 6-10 запросов к регистратору. Ключ — камера+день.
+    static readonly ConcurrentDictionary<string, (DateTime exp, LiveDayBuild build)> _liveDayCache = new();
+
+    static string LiveSegName(string line)
+    {
+        int i = line.LastIndexOf('/');
+        return i >= 0 ? line.Substring(i + 1) : line;
+    }
+
+    /// <summary>Сегменты одной записи из её индекса (пишет ffmpeg при ремуксе). null — индекса нет.</summary>
+    async Task<List<LiveSeg>> LiveRecSegments(int recId, CancellationToken ct)
+    {
+        string body;
+        try
+        {
+            using var resp = await _liveApi.GetAsync(LiveBase() + "/hls/_vod/" + recId + "/index.m3u8", ct).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return null;
+            body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return null; }
+
+        var segs = new List<LiveSeg>();
+        double pending = -1;
+
+        foreach (string raw in body.Split('\n'))
+        {
+            string line = raw.Trim();
+            if (line.Length == 0)
+                continue;
+
+            if (line.StartsWith("#EXTINF:", StringComparison.Ordinal))
+            {
+                string v = line.Substring(8).Trim().TrimEnd(',');
+                int c = v.IndexOf(',');
+                if (c >= 0)
+                    v = v.Substring(0, c);
+                pending = double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out double d) ? d : -1;
+            }
+            else if (line[0] != '#' && pending >= 0)
+            {
+                segs.Add(new LiveSeg { dur = pending, name = LiveSegName(line), rec = recId });
+                pending = -1;
+            }
+        }
+
+        return segs;
+    }
+
+    /// <summary>Статус ремукса у регистратора: id записи → (готова, битая).</summary>
+    // ⚠️ Пинок ОБЯЗАН нести `from`. Без него регистратор берёт ВСЕ записи своей UTC-даты и ремуксит
+    // их по порядку с 00:00Z — а у локального дня первая задетая UTC-дата начинается в 21:00Z, то
+    // есть почти все её записи принадлежат ПРЕДЫДУЩЕМУ локальному дню. У камеры, пишущей непрерывно,
+    // зритель ждал бы, пока перемелется чужой день (и тот занял бы диск), прежде чем появится его
+    // первый кусок. С `from` очередь начинается ровно с нашей первой записи.
+    async Task<Dictionary<int, (bool ready, bool failed)>> LiveVodStatus(int camera, List<LiveRec> recs, DateTime from, DateTime to, CancellationToken ct)
+    {
+        var map = new Dictionary<int, (bool, bool)>();
+
+        for (var d = from.Date; d <= to.AddTicks(-1).Date; d = d.AddDays(1))
+        {
+            // первая НАША запись, начавшаяся в эту UTC-дату; нет таких — дату вообще не трогаем
+            LiveRec head = null;
+            foreach (var r in recs)
+            {
+                if (r.startUtc.Date == d) { head = r; break; }
+            }
+            if (head == null)
+                continue;
+
+            string q = $"date={LiveDayKey(d)}&from={head.id}";
+
+            // Пинок ремуксу (он же — «этот кэш ещё нужен» для TTL-уборщика регистратора).
+            // Тело не нужно: свой плейлист мы собираем ниже. Провал не фатален — статус ниже покажет.
+            try
+            {
+                await _liveGate.WaitAsync(ct).ConfigureAwait(false);
+                try { using var kick = await _liveApi.GetAsync(LiveBase() + $"/api/recordings/camera/{camera}/stitched.m3u8?{q}", ct).ConfigureAwait(false); }
+                finally { _liveGate.Release(); }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { }
+
+            if (await LiveApiJson($"/api/recordings/camera/{camera}/stitched.json?{q}", ct).ConfigureAwait(false) is JObject j
+                && j["items"] is JArray items)
+            {
+                foreach (var it in items)
+                {
+                    int id = (int?)it["recording_id"] ?? 0;
+                    if (id > 0)
+                        map[id] = ((bool?)it["ready"] ?? false, (bool?)it["failed"] ?? false);
+                }
+            }
+        }
+
+        return map;
+    }
+
+    /// <summary>Собрать плейлист «весь день одним файлом» по нашим локальным суткам.</summary>
+    async Task<LiveDayBuild> LiveBuildDay(int camera, DateTime day, TimeZoneInfo tz, CancellationToken ct)
+    {
+        string key = camera + ":" + LiveDayKey(day);
+        if (_liveDayCache.TryGetValue(key, out var hit) && hit.exp > DateTime.UtcNow)
+            return hit.build;
+
+        var (from, to) = LiveDayWindow(day, tz);
+        var recs = await LiveDayRecs(camera, from, to, ct).ConfigureAwait(false);
+        if (recs.Count == 0)
+            return null;
+
+        var status = await LiveVodStatus(camera, recs, from, to, ct).ConfigureAwait(false);
+
+        var parts = new List<List<LiveSeg>>();
+        bool complete = true;
+
+        foreach (var r in recs)
+        {
+            status.TryGetValue(r.id, out var st);
+            if (st.failed)
+                continue;   // битый кусок пропускаем — честная дырка, следующий пойдёт с DISCONTINUITY
+
+            if (!st.ready)
+            {
+                // Дальше плейлист не продолжаем: порядок сегментов обязан быть стабильным между
+                // перечитываниями EVENT-плейлиста, иначе плеер поедет.
+                complete = false;
+                break;
+            }
+
+            var segs = await LiveRecSegments(r.id, ct).ConfigureAwait(false);
+            if (segs == null || segs.Count == 0)
+            {
+                complete = false;
+                break;
+            }
+            parts.Add(segs);
+        }
+
+        double maxSeg = 0, total = 0;
+        foreach (var p in parts)
+        {
+            foreach (var s in p)
+            {
+                if (s.dur > maxSeg) maxSeg = s.dur;
+                total += s.dur;
+            }
+        }
+
+        var sb = new StringBuilder();
+        sb.Append("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-INDEPENDENT-SEGMENTS\n");
+        sb.Append("#EXT-X-TARGETDURATION:").Append(Math.Max(12, (int)Math.Ceiling(maxSeg))).Append('\n');
+        sb.Append("#EXT-X-MEDIA-SEQUENCE:0\n");
+        sb.Append("#EXT-X-PLAYLIST-TYPE:").Append(complete ? "VOD" : "EVENT").Append('\n');
+
+        // {d1v} — место под ключ периметра, подставляется на КАЖДОЙ отдаче (см. LiveSignDay).
+        // Нативные плееры (VLC) резолвят относительные URI без query базового URL (RFC 3986),
+        // поэтому снаружи ключ обязан стоять в самой сегментной строке — как в /qdl/hls.
+        for (int i = 0; i < parts.Count; i++)
+        {
+            if (i > 0)
+                sb.Append("#EXT-X-DISCONTINUITY\n");
+
+            foreach (var s in parts[i])
+            {
+                sb.Append("#EXTINF:").Append(s.dur.ToString("0.#####", CultureInfo.InvariantCulture)).Append(",\n");
+                sb.Append("/qdl/live/seg/").Append(s.rec).Append('/').Append(s.name).Append("{d1v}\n");
+            }
+        }
+
+        if (complete)
+            sb.Append("#EXT-X-ENDLIST\n");
+
+        var build = new LiveDayBuild
+        {
+            playlist = sb.ToString(),
+            seconds = total,
+            ready = parts.Count,
+            total = recs.Count,
+            complete = complete
+        };
+
+        // Готовый день кэшируем дольше: он уже не изменится, а перечитывать плейлист плеер может.
+        _liveDayCache[key] = (DateTime.UtcNow.AddSeconds(complete ? 60 : 4), build);
+        return build;
+    }
+
+    /// <summary>Подставить ключ периметра предъявителя в сегментные строки (в LAN — просто убрать плейсхолдер).</summary>
+    string LiveSignDay(string playlist)
+    {
+        string d1v = LiveD1vKey();
+        return playlist.Replace("{d1v}", string.IsNullOrEmpty(d1v) ? "" : "?d1v=" + Uri.EscapeDataString(d1v));
+    }
+
+    string LiveD1vKey()
+    {
+        if (Request.Query.TryGetValue("d1v", out var q) && q.Count > 0 && !string.IsNullOrEmpty(q[0]))
+            return q[0];
+
+        string cn = CoreInit.conf?.d1v?.cookieName;
+        if (!string.IsNullOrEmpty(cn) && Request.Cookies.TryGetValue(cn, out string cv))
+            return cv;
+
+        return null;
+    }
+
+    // Статус склейки: клиент опрашивает его, пока не появится первый готовый кусок, и показывает
+    // «готовлю запись». Он же запускает ремукс — поэтому первый вызов и есть «пинок».
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/live/day")]
+    async public Task<ActionResult> LiveDay(int camera, string date = null)
+    {
+        if (camera <= 0)
+            return LiveErr("Не указана камера");
+
+        var tz = LiveTz();
+        if (!TryLiveDay(date, tz, out var day))
+            return LiveErr("Неверная дата");
+
+        var ct = HttpContext.RequestAborted;
+        var today = LiveToday(tz);
+
+        LiveDayBuild build;
+        string name = null;
+        try
+        {
+            foreach (var c in await LiveCameraList(ct).ConfigureAwait(false))
+            {
+                if (c.Key == camera) { name = c.Value; break; }
+            }
+            build = await LiveBuildDay(camera, day, tz, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { return new EmptyResult(); }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning("[qdl/live] day: {Error}", ex.Message);
+            return LiveErr("Видеорегистратор недоступен");
+        }
+
+        if (build == null)
+            return LiveJsonOut(new JObject { ["date"] = LiveDayKey(day), ["total"] = 0, ["ready"] = 0, ["empty"] = true });
+
+        return LiveJsonOut(new JObject
+        {
+            ["date"] = LiveDayKey(day),
+            ["label"] = LiveDayLabel(day, today),
+            ["camera"] = new JObject { ["id"] = camera, ["name"] = name ?? ("Камера " + camera) },
+            ["path"] = $"/qdl/live/day/{camera}/{LiveDayKey(day)}/stream.m3u8",
+            ["ready"] = build.ready,
+            ["total"] = build.total,
+            ["complete"] = build.complete,
+            ["seconds"] = (int)Math.Round(build.seconds)
+        });
+    }
+
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/live/day/{camera:int}/{date}/stream.m3u8")]
+    async public Task<ActionResult> LiveDayPlaylist(int camera, string date)
+    {
+        var tz = LiveTz();
+        if (camera <= 0 || string.IsNullOrEmpty(date) || !TryLiveDay(date, tz, out var day))
+            return BadRequest();
+
+        var ct = HttpContext.RequestAborted;
+
+        LiveDayBuild build;
+        try
+        {
+            build = await LiveBuildDay(camera, day, tz, ct).ConfigureAwait(false);
+
+            // Первый кусок ещё ремуксится: ждём его тут, а не отдаём пустой плейлист (плеер на
+            // пустом плейлисте сразу вываливается с ошибкой). Ремукс идёт много быстрее реального
+            // времени, так что это секунды.
+            // build == null — записей за день нет вовсе: ждать нечего, сразу 404 (иначе 30 холостых
+            // секунд и полсотни лишних запросов к регистратору).
+            for (int i = 0; i < 30 && build != null && build.ready == 0 && !build.complete && !ct.IsCancellationRequested; i++)
+            {
+                await Task.Delay(1000, ct).ConfigureAwait(false);
+                build = await LiveBuildDay(camera, day, tz, ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) { return new EmptyResult(); }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning("[qdl/live] day playlist: {Error}", ex.Message);
+            return StatusCode(502);
+        }
+
+        if (build == null || build.ready == 0)
+            return NotFound();
+
+        SetHeadersNoCache();
+        return ContentTo(LiveSignDay(build.playlist), "application/vnd.apple.mpegurl");
+    }
+
+    static readonly Regex _liveSegRx = new Regex(@"^seg_\d{1,6}\.ts$", RegexOptions.Compiled);
+
+    [HttpGet, HttpHead, AllowAnonymous]
+    [Route("qdl/live/seg/{rec:int}/{file}")]
+    async public Task<ActionResult> LiveSegment(int rec, string file)
+    {
+        if (rec <= 0 || file == null || !_liveSegRx.IsMatch(file))
+            return BadRequest();
+
+        return await LiveProxy($"/hls/_vod/{rec}/{file}", passRange: true, timeout: TimeSpan.FromSeconds(60)).ConfigureAwait(false);
     }
 
     #endregion
