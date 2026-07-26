@@ -8,6 +8,7 @@
     "FfWorker.cs",
     "TorrentScoring.cs",
     "EpisodeHunter.cs",
+    "Live.cs",
     "Controller.cs"
   ]
 }

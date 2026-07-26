@@ -100,6 +100,13 @@ public class ModuleConf : ModuleBaseConf
     public int donorBlacklistTtlDays { get; set; } = 30;   // пустышки (нет серии); meta-timeout — всегда 1 день
     public string donorCategory { get; set; } = "";        // пусто → category + "-donor"
 
+    // ── D1VERSY LIVE: записи домашнего видеорегистратора (проект IPCamLive) ──
+    // Регистратор доступен только из LAN, клиенты ходят к нему через наш прокси /qdl/live/*
+    // (см. Live.cs). Адрес наружу не отдаётся.
+    public string liveUrl { get; set; } = "http://192.168.87.24";
+    public string liveTimezone { get; set; } = "";   // IANA-зона для показа времени; пусто = TZ контейнера
+    public int liveDaysBack { get; set; } = 14;      // как далеко назад предлагать дни в выборе даты
+
     // ── Заброшенная основная раздача: предложение переключиться на более полную ──
     public string watchAutoSwitch { get; set; } = "notify"; // off | notify (уведомление+подтверждение) | auto
     public int watchStaleChecks { get; set; } = 8;          // проверок без смены infohash (~2 суток при 6ч)

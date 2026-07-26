@@ -4,6 +4,7 @@
     var API = '{localhost}';
     var ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 19h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     var BELL = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 8a6 6 0 1112 0c0 7 3 9 3 9H3s3-2 3-9z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.3 21a1.94 1.94 0 003.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    var CAM = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.8 7.4l14.4-3.3 1.3 5.6L4.1 13 2.8 7.4z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M6.5 12.2V15a3 3 0 003 3h1.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="18.5" cy="18" r="2.6" stroke="currentColor" stroke-width="2"/><path d="M18 9.9l3.2 1.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
     function req(url, cb, err) {
         try {
@@ -1469,6 +1470,309 @@
         } catch (err) { console.log('qdl: addButton', err); }
     }
 
+    // ───────── D1VERSY LIVE: записи домашнего видеорегистратора ─────────
+    // Сервер (Live.cs модуля) проксирует регистратор из LAN: каталог дня + сами mp4
+    // (клиенту LAN-адрес не виден, снаружи всё идёт через наш origin).
+    // Экран рассчитан на пульт: сверху день (по умолчанию сегодня), ниже — ТОЛЬКО те камеры,
+    // у которых за этот день реально есть записи.
+
+    function livePlural(n, one, few, many) {
+        var a = Math.abs(n) % 100, b = a % 10;
+        if (a > 10 && a < 20) return many;
+        if (b === 1) return one;
+        if (b > 1 && b < 5) return few;
+        return many;
+    }
+
+    function liveDur(sec) {
+        sec = Math.max(0, Math.round(sec || 0));
+        var h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+        if (h) return h + ' ч ' + ('0' + m).slice(-2) + ' мин';
+        if (m) return m + ' мин';
+        return sec + ' сек';
+    }
+
+    function liveSize(b) {
+        if (!b) return '';
+        var gb = b / 1073741824;
+        return gb >= 1 ? (Math.round(gb * 10) / 10) + ' ГБ' : Math.round(b / 1048576) + ' МБ';
+    }
+
+    // YYYY-MM-DD ± дни (через локальный Date — без UTC-сдвигов на парсинге строки)
+    function liveShift(ds, delta) {
+        var p = String(ds || '').split('-');
+        var d = p.length === 3 ? new Date(+p[0], +p[1] - 1, +p[2]) : new Date();
+        d.setDate(d.getDate() + delta);
+        return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+    }
+
+    function liveMsg(text) {
+        return $('<div style="padding:2em 1.6em;font-size:1.4em;opacity:.7;line-height:1.5">' + esc(text) + '</div>');
+    }
+
+    function liveTimeline(rec) {
+        try { return Lampa.Timeline.view(Lampa.Utils.hash('qdllive:' + rec.id)); } catch (e) { return null; }
+    }
+
+    // Плейлист = все записи камеры за день: доиграв кусок, плеер сам переходит к следующему.
+    function livePlay(cam, items, index) {
+        if (!items || !items.length) { Lampa.Noty.show('Записей нет'); return; }
+        var playlist = items.map(function (r) {
+            var item = { title: r.start + ' – ' + r.end + '   ·   ' + (cam.name || 'Камера'), url: API + '/qdl/live/stream?id=' + r.id };
+            var tl = liveTimeline(r);
+            if (tl) item.timeline = tl;
+            return item;
+        });
+        index = Math.max(0, Math.min(index || 0, playlist.length - 1));
+        Lampa.Player.play(playlist[index]);
+        Lampa.Player.playlist(playlist);
+    }
+
+    // Экран 1: день + камеры, писавшие в этот день
+    function ComponentLive(object) {
+        var comp = this;
+        var network = new Lampa.Reguest();
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+        var html = $('<div></div>');
+        var body = $('<div></div>');
+        var last;
+        var date = object.qdl_date || '';   // пусто — сервер сам возьмёт сегодняшний день
+        var today = '';
+        var keepDayFocus = false;           // после смены дня фокус возвращаем на кнопку дня
+        var reqId = 0;                      // быстро щёлкают днями → рисуем только последний ответ
+
+        this.create = function () {
+            scroll.minus();
+            html.append(scroll.render());
+            scroll.body().append(body);
+            load();
+            return this.render();
+        };
+
+        function load() {
+            var my = ++reqId;
+            comp.activity.loader(true);
+            network.silent(API + '/qdl/live/cameras' + (date ? '?date=' + encodeURIComponent(date) : ''),
+                function (r) { if (my === reqId) draw(r || {}); },
+                function () { if (my === reqId) draw({ error: 'Видеорегистратор не отвечает' }); });
+        }
+
+        function draw(r) {
+            if (comp.destroyed) return;
+            if (r.today) today = r.today;
+            if (r.date) date = r.date;
+
+            body.empty();
+            last = null;
+
+            var bar = dayBar(r);
+            body.append(bar);
+
+            if (r.error)
+                body.append(liveMsg('⚠️ ' + r.error));
+            else if (!r.cameras || !r.cameras.length)
+                body.append(liveMsg('За этот день записей нет' + (r.total ? ' (камер всего: ' + r.total + ')' : '') + '. Выбери другой день кнопкой сверху.'));
+            else {
+                if (r.total && r.cameras.length < r.total)
+                    body.append($('<div style="padding:.2em 1.6em 0;font-size:1.15em;opacity:.5">Писали ' + r.cameras.length + ' из ' + r.total + ' камер</div>'));
+                r.cameras.forEach(function (c) { body.append(camRow(c)); });
+            }
+
+            if (keepDayFocus) { last = bar.find('.qdl-live-day')[0]; keepDayFocus = false; }
+
+            comp.activity.loader(false);
+            comp.activity.toggle();   // пере-собрать коллекцию фокуса после перерисовки
+        }
+
+        function reload() { keepDayFocus = true; body.empty(); load(); }
+
+        function dayBar(r) {
+            var canNext = !!(date && today && date < today);
+            var bar = $('<div style="display:flex;align-items:center;gap:.7em;padding:1.2em 1.4em .5em"></div>');
+            var prev = $('<div class="selector" style="padding:.65em 1.1em;background:rgba(255,255,255,.08);border-radius:.6em;font-size:1.4em">◀</div>');
+            var day = $('<div class="selector qdl-live-day" style="flex:1;text-align:center;padding:.65em 1.2em;background:rgba(255,255,255,.13);border-radius:.6em;font-size:1.5em;font-weight:600">📅 ' + esc(r.label || 'Выбрать день') + '</div>');
+            var next = $('<div class="selector" style="padding:.65em 1.1em;background:rgba(255,255,255,' + (canNext ? '.08' : '.03') + ');border-radius:.6em;font-size:1.4em;opacity:' + (canNext ? '1' : '.35') + '">▶</div>');
+
+            prev.on('hover:enter', function () { date = liveShift(date || today, -1); reload(); });
+            next.on('hover:enter', function () {
+                if (!canNext) { Lampa.Noty.show('Это самый свежий день'); return; }
+                date = liveShift(date, 1);
+                reload();
+            });
+            day.on('hover:enter', pickDay);
+
+            [prev, day, next].forEach(function (el) {
+                el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            });
+
+            return bar.append(prev).append(day).append(next);
+        }
+
+        function pickDay() {
+            network.silent(API + '/qdl/live/days', function (r) {
+                var days = (r && r.days) || [];
+                if (!days.length) { Lampa.Noty.show('Список дней пуст'); return; }
+                Lampa.Select.show({
+                    title: 'Какой день показать?',
+                    items: days.map(function (d) {
+                        return {
+                            title: d.label + (d.count
+                                ? '   ·   ' + d.count + ' ' + livePlural(d.count, 'запись', 'записи', 'записей') + ' с ' + d.cameras + ' ' + livePlural(d.cameras, 'камеры', 'камер', 'камер')
+                                : '   ·   записей нет'),
+                            date: d.date,
+                            selected: d.date === date
+                        };
+                    }),
+                    onSelect: function (a) { Lampa.Controller.toggle('content'); date = a.date; reload(); },
+                    onBack: function () { Lampa.Controller.toggle('content'); }
+                });
+            }, function () { Lampa.Noty.show('Видеорегистратор не отвечает'); });
+        }
+
+        function camRow(c) {
+            var el = $(
+                '<div class="selector" style="display:flex;align-items:center;gap:1.2em;padding:.9em;margin:.45em 1.4em;background:rgba(255,255,255,.06);border-radius:.8em">' +
+                  '<img style="width:12em;height:6.8em;object-fit:cover;border-radius:.5em;background:#111;flex:none">' +
+                  '<div style="flex:1;min-width:0">' +
+                    '<div style="font-size:1.7em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(c.name) + '</div>' +
+                    '<div style="opacity:.75;font-size:1.25em;margin-top:.35em">' + esc(c.first + ' – ' + c.last) + '   ·   ' + c.count + ' ' + livePlural(c.count, 'запись', 'записи', 'записей') + '   ·   ' + liveDur(c.seconds) + '</div>' +
+                  '</div>' +
+                  '<div style="opacity:.45;font-size:1.8em;padding-right:.4em">▶</div>' +
+                '</div>'
+            );
+            var img = el.find('img');
+            img.attr('src', API + '/qdl/live/thumb?id=' + c.thumb);
+            img.on('error', function () { this.src = './img/img_broken.svg'; });
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:enter', function () {
+                Lampa.Activity.push({ url: '', title: c.name, component: 'qdl_live_camera', qdl_camera: c, qdl_date: date, page: 1 });
+            });
+            return el;
+        }
+
+        this.render = function () { return html; };
+        this.start = function () {
+            Lampa.Controller.add('content', {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                right: function () { Navigator.move('right'); },
+                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
+                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
+                back: function () { Lampa.Activity.backward(); }
+            });
+            Lampa.Controller.toggle('content');
+        };
+        this.pause = function () {};
+        this.stop = function () {};
+        this.destroy = function () { comp.destroyed = true; network.clear(); scroll.destroy(); html.remove(); };
+    }
+
+    // Экран 2: записи одной камеры за выбранный день
+    function ComponentLiveCamera(object) {
+        var comp = this;
+        var network = new Lampa.Reguest();
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+        var html = $('<div></div>');
+        var body = $('<div></div>');
+        var last;
+        var cam = object.qdl_camera || {};
+        var date = object.qdl_date || '';
+
+        this.create = function () {
+            this.activity.loader(true);
+            scroll.minus();
+            html.append(scroll.render());
+            scroll.body().append(body);
+            network.silent(API + '/qdl/live/recordings?camera=' + encodeURIComponent(cam.id) + (date ? '&date=' + encodeURIComponent(date) : ''),
+                function (r) { comp.build(r || {}); },
+                function () { comp.build({ error: 'Видеорегистратор не отвечает' }); });
+            return this.render();
+        };
+
+        this.build = function (r) {
+            var items = r.items || [];
+            var name = (r.camera && r.camera.name) || cam.name || 'Камера';
+
+            body.append($('<div style="padding:1.2em 1.6em .4em"><div style="font-size:2em;font-weight:700">' + esc(name) + '</div>' +
+                '<div style="opacity:.6;font-size:1.25em;margin-top:.25em">' + esc(r.label || '') + (items.length ? '   ·   ' + items.length + ' ' + livePlural(items.length, 'запись', 'записи', 'записей') : '') + '</div></div>'));
+
+            if (r.error)
+                body.append(liveMsg('⚠️ ' + r.error));
+            else if (!items.length)
+                body.append(liveMsg('За этот день записей с этой камеры нет.'));
+            else {
+                body.append(playAll(items));
+                items.forEach(function (rec, i) { body.append(recRow(rec, items, i)); });
+            }
+
+            this.activity.loader(false);
+            this.activity.toggle();
+        };
+
+        function playAll(items) {
+            var total = 0;
+            items.forEach(function (r) { total += r.seconds || 0; });
+            var el = $('<div class="selector" style="margin:.6em 1.4em;padding:1em 1.2em;background:rgba(20,160,40,.85);border-radius:.8em;font-size:1.5em;font-weight:600">▶ Смотреть всё подряд   ·   ' + liveDur(total) + '</div>');
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:enter', function () { livePlay(cam, items, 0); });
+            return el;
+        }
+
+        function recRow(rec, items, i) {
+            var tl = liveTimeline(rec);
+            var pct = (tl && tl.percent) || 0;
+            var mark = pct >= 90 ? '✓ ' : (pct >= 5 ? '► ' + Math.round(pct) + '%   ·   ' : '');
+            var meta = [liveDur(rec.seconds), liveSize(rec.size), rec.trigger === 'motion' ? 'движение' : (rec.trigger === 'human' ? 'человек' : '')].filter(Boolean).join('   ·   ');
+
+            var el = $(
+                '<div class="selector" style="display:flex;align-items:center;gap:1.2em;padding:.8em;margin:.4em 1.4em;background:rgba(255,255,255,.06);border-radius:.8em">' +
+                  '<img style="width:10em;height:5.65em;object-fit:cover;border-radius:.5em;background:#111;flex:none">' +
+                  '<div style="flex:1;min-width:0">' +
+                    '<div style="font-size:1.6em;font-weight:600">' + esc(mark + rec.start + ' – ' + rec.end) + '</div>' +
+                    '<div style="opacity:.7;font-size:1.2em;margin-top:.3em">' + esc(meta) + '</div>' +
+                  '</div>' +
+                  '<div style="opacity:.45;font-size:1.6em;padding-right:.4em">▶</div>' +
+                '</div>'
+            );
+            var img = el.find('img');
+            img.attr('src', API + '/qdl/live/thumb?id=' + rec.id);
+            img.on('error', function () { this.src = './img/img_broken.svg'; });
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:enter', function () { livePlay(cam, items, i); });
+            return el;
+        }
+
+        this.render = function () { return html; };
+        this.start = function () {
+            Lampa.Controller.add('content', {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                right: function () { Navigator.move('right'); },
+                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
+                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
+                back: function () { Lampa.Activity.backward(); }
+            });
+            Lampa.Controller.toggle('content');
+        };
+        this.pause = function () {};
+        this.stop = function () {};
+        this.destroy = function () { network.clear(); scroll.destroy(); html.remove(); };
+    }
+
+    function buildLiveMenuItem() {
+        var item = $('<li class="menu__item selector qdl-live-menu"><div class="menu__ico">' + CAM + '</div><div class="menu__text">D1VERSY LIVE</div></li>');
+        item.on('hover:enter', function () {
+            Lampa.Activity.push({ url: '', title: 'D1VERSY LIVE', component: 'qdl_live', page: 1 });
+        });
+        return item;
+    }
+
     // ───────── Пункт меню «Загрузки» строго под «Персоны» (data-action="myperson") ─────────
     function buildMenuItem() {
         var item = $('<li class="menu__item selector qdl-menu"><div class="menu__ico">' + ICON + '</div><div class="menu__text">Загрузки</div></li>');
@@ -1496,6 +1800,14 @@
             if (dl.length) {
                 if (!noti.length) { dl.after(buildNotiMenuItem()); setTimeout(pollNotifications, 200); }   // подтянуть бейдж сразу после появления пункта
                 else if (noti.prev('.menu__item')[0] !== dl[0]) { noti.detach(); dl.after(noti); }
+            }
+
+            // «D1VERSY LIVE» (записи видеорегистратора) — строго сразу после «Уведомления»
+            var nt = $('.menu .qdl-noti-menu');
+            var live = $('.menu .qdl-live-menu');
+            if (nt.length) {
+                if (!live.length) nt.after(buildLiveMenuItem());
+                else if (live.prev('.menu__item')[0] !== nt[0]) { live.detach(); nt.after(live); }
             }
         } catch (e) {}
     }
@@ -1596,6 +1908,8 @@
         Lampa.Component.add('qdl_downloads', ComponentDownloads);
         Lampa.Component.add('qdl_card', ComponentCard);
         Lampa.Component.add('qdl_notifications', ComponentNotifications);
+        Lampa.Component.add('qdl_live', ComponentLive);
+        Lampa.Component.add('qdl_live_camera', ComponentLiveCamera);
         Lampa.Listener.follow('full', addButton);
         startMenuWatcher();
         startHeaderNotiWatcher();
