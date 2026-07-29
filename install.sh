@@ -33,6 +33,8 @@ UPDATE=0
 DRY_RUN=0
 PRE_RELEASE=0
 VERBOSE=0
+FORCE=0
+TARGET_VERSION=""
 ARCH=""
 PUBLISH_URL=""
 CLEANUP_PATHS=()
@@ -188,7 +190,9 @@ usage() {
   printf '\n'
 
   printf '%sOptions:%s\n' "$C_BOLD" "$C_RESET"
-  printf '  %s--update%s       Replace app files from latest release, restart service\n' "$C_GREEN" "$C_RESET"
+  printf '  %s--update%s       Replace app files from latest (or --tag) release, restart service\n' "$C_GREEN" "$C_RESET"
+  printf '  %s--tag%s %sVER%s     Install or update a specific release tag (e.g. v1.2.3)\n' "$C_GREEN" "$C_RESET" "$C_CYAN" "$C_RESET"
+  printf '  %s--force%s        Reinstall even if the desired version is already installed\n' "$C_YELLOW" "$C_RESET"
   printf '  %s--dry-run%s      Show what would be updated/deleted without applying changes\n' "$C_YELLOW" "$C_RESET"
   printf '  %s--pre-release%s  Use latest GitHub pre-release asset (%s)\n' "$C_YELLOW" "$C_RESET" "$RELEASE_ZIP_NAME"
   printf '  %s--remove%s       Remove systemd unit, user, and install directory\n' "$C_RED" "$C_RESET"
@@ -200,8 +204,11 @@ usage() {
   printf '%sExamples:%s\n' "$C_BOLD" "$C_RESET"
   printf '  %scurl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | bash%s\n' \
     "$C_DIM" "$GITHUB_REPO" "$C_RESET"
-  printf '  %s%s%s\n'           "$C_DIM" "$SCRIPT_NAME" "$C_RESET"
-  printf '  %s%s --update%s\n'  "$C_DIM" "$SCRIPT_NAME" "$C_RESET"
+  printf '  %s%s%s\n'                    "$C_DIM" "$SCRIPT_NAME" "$C_RESET"
+  printf '  %s%s --update%s\n'           "$C_DIM" "$SCRIPT_NAME" "$C_RESET"
+  printf '  %s%s --tag v1.2.3%s\n'       "$C_DIM" "$SCRIPT_NAME" "$C_RESET"
+  printf '  %s%s --update --tag v1.2.3%s\n' "$C_DIM" "$SCRIPT_NAME" "$C_RESET"
+  printf '  %s%s --update --force%s\n'   "$C_DIM" "$SCRIPT_NAME" "$C_RESET"
   printf '\n'
 }
 
@@ -276,6 +283,19 @@ parse_args() {
         UPDATE=1
         shift
         ;;
+      --tag)
+        if [[ $# -lt 2 || -z "${2:-}" || "$2" == -* ]]; then
+          log_err "--tag requires a version argument (e.g. --tag v1.2.3)."
+          usage >&2
+          exit 1
+        fi
+        TARGET_VERSION="$2"
+        shift 2
+        ;;
+      --force)
+        FORCE=1
+        shift
+        ;;
       -v|--verbose)
         VERBOSE=1
         shift
@@ -291,6 +311,11 @@ parse_args() {
         ;;
     esac
   done
+
+  if [[ -n "$TARGET_VERSION" && "$PRE_RELEASE" -eq 1 ]]; then
+    log_err "--tag and --pre-release are mutually exclusive."
+    exit 1
+  fi
 }
 
 require_root() {
@@ -312,6 +337,62 @@ pick_libicu_package() {
 }
 
 # ─── Version ───────────────────────────────────────────────────────────
+
+# Убрать ведущий "v" для сравнения и записи в version.txt
+normalize_version() {
+  local v="$1"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  echo "${v#v}"
+}
+
+# Проверить, что asset релиза доступен по URL (без скачивания всего zip)
+release_asset_exists() {
+  local url="$1"
+  local code
+  code=$(curl -fsSIL -o /dev/null -w '%{http_code}' "$url" 2>/dev/null) || return 1
+  [[ "$code" == "200" ]]
+}
+
+# Разрешить PUBLISH_URL для конкретного тега (с fallback v / без v)
+resolve_tag_publish_url() {
+  local input="$1"
+  local -a candidates=()
+  local tag url
+
+  candidates+=("$input")
+  if [[ "$input" == v* ]]; then
+    candidates+=("${input#v}")
+  else
+    candidates+=("v${input}")
+  fi
+
+  for tag in "${candidates[@]}"; do
+    url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${RELEASE_ZIP_NAME}"
+    if release_asset_exists "$url"; then
+      PUBLISH_URL="$url"
+      return 0
+    fi
+  done
+
+  log_err "Release tag not found for ${GITHUB_REPO}: ${input} (asset ${RELEASE_ZIP_NAME})."
+  exit 1
+}
+
+# Выбрать PUBLISH_URL: --tag, --pre-release или latest
+resolve_publish_url() {
+  if [[ -n "$TARGET_VERSION" ]]; then
+    spinner_start "Resolving release tag ${TARGET_VERSION}..."
+    resolve_tag_publish_url "$TARGET_VERSION"
+    spinner_ok "Release URL resolved"
+  elif [[ "$PRE_RELEASE" -eq 1 ]]; then
+    spinner_start "Resolving latest pre-release asset..."
+    get_prerelease_zip_url
+    spinner_ok "Pre-release URL resolved"
+  else
+    PUBLISH_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${RELEASE_ZIP_NAME}"
+  fi
+}
 
 # Получить номер последнего [пре-]релиза Лампака с гитхаба
 get_release_version() {
@@ -335,7 +416,8 @@ get_release_version() {
   fi
 
   version=$(curl -sSL -H 'Accept: application/vnd.github+json' "$api_url" \
-    | jq -r --argjson prerelease "$pr_arg" '.[] | select(.prerelease == $prerelease) | .tag_name' | head -n1 | sed 's/^v//') || true
+    | jq -r --argjson prerelease "$pr_arg" '.[] | select(.prerelease == $prerelease) | .tag_name' | head -n1) || true
+  version="$(normalize_version "${version:-}")"
   if [[ -z "${version:-}" ]]; then
     log_err "Could not determine release version from ${api_url}."
     exit 1
@@ -347,7 +429,7 @@ get_release_version() {
 get_installed_version() {
   local version_file="${INSTALL_ROOT}/${VERSION_FILE_NAME}"
   if [[ -f "$version_file" ]]; then
-    cat "$version_file"
+    normalize_version "$(cat "$version_file")"
   else
     echo "N/A"
   fi
@@ -366,9 +448,56 @@ show_version() {
 
 # Сохранить версию в файлик, чтобы было что потом показывать
 save_installed_version() {
-  local version="$1"
+  local version
+  version="$(normalize_version "$1")"
   local version_file="${INSTALL_ROOT}/${VERSION_FILE_NAME}"
   echo "$version" > "$version_file"
+}
+
+# Не продолжать, если желаемая версия уже установлена (если нет --force)
+confirm_same_version_or_exit() {
+  local desired
+  desired="$(normalize_version "$1")"
+  local installed
+  installed="$(get_installed_version)"
+
+  if [[ "$installed" == "N/A" || "$installed" != "$desired" ]]; then
+    return 0
+  fi
+
+  if [[ "$FORCE" -eq 1 ]]; then
+    log_warn "Version ${desired} is already installed — continuing due to --force."
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_ok "Version ${desired} is already installed — nothing to do (dry-run)."
+    printf '  Use %s--force%s to preview a reinstall of the same version.\n\n' "$C_YELLOW" "$C_RESET"
+    exit 0
+  fi
+
+  printf '\n  %sVersion %s is already installed.%s\n' "$C_YELLOW" "$desired" "$C_RESET"
+  printf '  Continue anyway? [y/N]: '
+
+  if [[ ! -r /dev/tty ]]; then
+    printf '\n'
+    log_err "Cannot prompt for confirmation (no TTY). Use --force to reinstall the same version."
+    exit 1
+  fi
+
+  local answer
+  read -r answer </dev/tty || true
+  case "${answer:-}" in
+    y|Y|yes|YES)
+      log_warn "Reinstalling version ${desired}."
+      return 0
+      ;;
+    *)
+      log_ok "Skipped — already at version ${desired}."
+      printf '\n'
+      exit 0
+      ;;
+  esac
 }
 
 
@@ -875,13 +1004,7 @@ main() {
 
   print_banner
 
-  if [[ "$PRE_RELEASE" -eq 1 ]]; then
-    spinner_start "Resolving latest pre-release asset..."
-    get_prerelease_zip_url
-    spinner_ok "Pre-release URL resolved"
-  else
-    PUBLISH_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${RELEASE_ZIP_NAME}"
-  fi
+  resolve_publish_url
 
   local mode_label="Install"
   [[ "$UPDATE" -eq 1 ]] && mode_label="Update"
@@ -894,11 +1017,17 @@ main() {
 
   # Узнаём и показываем версии под баннером
   local release_version
-  release_version="$(get_release_version)"
-  if [[ "$UPDATE" -eq 1 ]]; then
+  if [[ -n "$TARGET_VERSION" ]]; then
+    release_version="$(normalize_version "$TARGET_VERSION")"
+  else
+    release_version="$(get_release_version)"
+  fi
+  if [[ "$UPDATE" -eq 1 ]] || [[ -d "$INSTALL_ROOT" && -f "${INSTALL_ROOT}/Core.dll" ]]; then
     printf '  %sInstalled Version:%s   %s\n' "$C_BOLD" "$C_RESET" "$(get_installed_version)"
   fi
   printf '  %sRelease Version:%s     %s\n' "$C_GREEN" "$C_RESET" "$release_version"
+
+  confirm_same_version_or_exit "$release_version"
 
   local total_steps=4
   [[ "$UPDATE" -eq 1 ]] && total_steps=3

@@ -165,8 +165,17 @@ docker compose -f docker-compose.dev.yaml up -d
 # Установка
 curl -fsSL https://raw.githubusercontent.com/lampac-nextgen/lampac/main/install.sh | sudo bash
 
+# Установка конкретной версии
+curl -fsSL https://raw.githubusercontent.com/lampac-nextgen/lampac/main/install.sh | sudo bash -s -- --tag v1.2.3
+
 # Обновление
 curl -fsSL https://raw.githubusercontent.com/lampac-nextgen/lampac/main/install.sh | sudo bash -s -- --update
+
+# Обновление / даунгрейд на конкретный тег
+curl -fsSL https://raw.githubusercontent.com/lampac-nextgen/lampac/main/install.sh | sudo bash -s -- --update --tag v1.2.3
+
+# Повторная установка той же версии (без интерактивного подтверждения)
+curl -fsSL https://raw.githubusercontent.com/lampac-nextgen/lampac/main/install.sh | sudo bash -s -- --update --force
 
 # Проверка обновления без изменений
 curl -fsSL https://raw.githubusercontent.com/lampac-nextgen/lampac/main/install.sh | sudo bash -s -- --update --dry-run
