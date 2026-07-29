@@ -175,42 +175,44 @@ usage() {
   printf 'Install, update, or remove Lampac NextGen on Debian/Ubuntu (x86_64 or arm64).\n\n'
 
   printf '%sEnvironment (optional):%s\n' "$C_BOLD" "$C_RESET"
-  printf '  %sLAMPAC_GITHUB_REPO%s   GitHub owner/repo for releases  %s(default: %s)%s\n' \
-    "$C_CYAN" "$C_RESET" "$C_DIM" "$GITHUB_REPO" "$C_RESET"
-  printf '  %sLAMPAC_INSTALL_ROOT%s  Install directory               %s(default: %s)%s\n' \
-    "$C_CYAN" "$C_RESET" "$C_DIM" "$INSTALL_ROOT" "$C_RESET"
-  printf '  %sLAMPAC_USER%s          Service account name            %s(default: %s)%s\n' \
-    "$C_CYAN" "$C_RESET" "$C_DIM" "$LAMPAC_USER" "$C_RESET"
-  printf '  %sLAMPAC_UID%s           Preferred UID                   %s(default: 1000)%s\n' \
-    "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET"
-  printf '  %sLAMPAC_GID%s           Preferred GID                   %s(default: 1000)%s\n' \
-    "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET"
-  printf '  %sLAMPAC_PORT%s          HTTP port hint                  %s(default: %s)%s\n' \
-    "$C_CYAN" "$C_RESET" "$C_DIM" "$LISTEN_PORT" "$C_RESET"
-  printf '  %sLAMPAC_CONFIRM_REMOVE%s  Set to 1 to skip the %s--remove%s confirmation prompt %s(non-interactive)%s\n' \
-    "$C_CYAN" "$C_RESET" "$C_GREEN" "$C_RESET" "$C_DIM" "$C_RESET"
+  printf '  %s%-24s%s %-34s %s(default: %s)%s\n' \
+    "$C_CYAN" "LAMPAC_GITHUB_REPO" "$C_RESET" "GitHub owner/repo for releases" "$C_DIM" "$GITHUB_REPO" "$C_RESET"
+  printf '  %s%-24s%s %-34s %s(default: %s)%s\n' \
+    "$C_CYAN" "LAMPAC_INSTALL_ROOT" "$C_RESET" "Install directory" "$C_DIM" "$INSTALL_ROOT" "$C_RESET"
+  printf '  %s%-24s%s %-34s %s(default: %s)%s\n' \
+    "$C_CYAN" "LAMPAC_USER" "$C_RESET" "Service account name" "$C_DIM" "$LAMPAC_USER" "$C_RESET"
+  printf '  %s%-24s%s %-34s %s(default: %s)%s\n' \
+    "$C_CYAN" "LAMPAC_UID" "$C_RESET" "Preferred UID" "$C_DIM" "1000" "$C_RESET"
+  printf '  %s%-24s%s %-34s %s(default: %s)%s\n' \
+    "$C_CYAN" "LAMPAC_GID" "$C_RESET" "Preferred GID" "$C_DIM" "1000" "$C_RESET"
+  printf '  %s%-24s%s %-34s %s(default: %s)%s\n' \
+    "$C_CYAN" "LAMPAC_PORT" "$C_RESET" "HTTP port hint" "$C_DIM" "$LISTEN_PORT" "$C_RESET"
+  printf '  %s%-24s%s Skip %s--remove%s confirmation when set to 1\n' \
+    "$C_CYAN" "LAMPAC_CONFIRM_REMOVE" "$C_RESET" "$C_RED" "$C_RESET"
   printf '\n'
 
   printf '%sOptions:%s\n' "$C_BOLD" "$C_RESET"
-  printf '  %s--update%s       Replace app files from latest (or --tag) release, restart service\n' "$C_GREEN" "$C_RESET"
-  printf '  %s--tag%s %sVER%s     Install or update a specific release tag (e.g. v1.2.3)\n' "$C_GREEN" "$C_RESET" "$C_CYAN" "$C_RESET"
-  printf '  %s--force%s        Reinstall even if the desired version is already installed\n' "$C_YELLOW" "$C_RESET"
-  printf '  %s--dry-run%s      Show what would be updated/deleted without applying changes\n' "$C_YELLOW" "$C_RESET"
-  printf '  %s--pre-release%s  Use latest GitHub pre-release asset (%s)\n' "$C_YELLOW" "$C_RESET" "$RELEASE_ZIP_NAME"
-  printf '  %s--remove%s       Remove systemd unit, user, and install directory\n' "$C_RED" "$C_RESET"
-  printf '  %s-v, --verbose%s  Show full output of all commands (for debugging)\n' "$C_BLUE" "$C_RESET"
-  printf '  %s-h, --help%s     Show this help and exit\n' "$C_BLUE" "$C_RESET"
-  printf '  %s--version%s      Show installed version\n' "$C_BLUE" "$C_RESET"
+  printf '  %s%-16s%s %s\n' "$C_GREEN"  "--update"      "$C_RESET" "Replace app files from latest (or --tag) release"
+  printf '  %s%-16s%s %s\n' "$C_GREEN"  "--tag VER"     "$C_RESET" "Install or update a specific release tag"
+  printf '  %s%-16s%s %s\n' "$C_YELLOW" "--force"       "$C_RESET" "Reinstall even if the desired version is already installed"
+  printf '  %s%-16s%s %s\n' "$C_YELLOW" "--dry-run"     "$C_RESET" "Show what would change without applying updates"
+  printf '  %s%-16s%s %s\n' "$C_YELLOW" "--pre-release" "$C_RESET" "Use latest GitHub pre-release (${RELEASE_ZIP_NAME})"
+  printf '  %s%-16s%s %s\n' "$C_RED"    "--remove"      "$C_RESET" "Remove systemd unit, user, and install directory"
+  printf '  %s%-16s%s %s\n' "$C_BLUE"   "-v, --verbose" "$C_RESET" "Show full output of all commands (for debugging)"
+  printf '  %s%-16s%s %s\n' "$C_BLUE"   "-h, --help"    "$C_RESET" "Show this help and exit"
+  printf '  %s%-16s%s %s\n' "$C_BLUE"   "--version"     "$C_RESET" "Show installed version"
   printf '\n'
 
   printf '%sExamples:%s\n' "$C_BOLD" "$C_RESET"
-  printf '  %scurl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | bash%s\n' \
-    "$C_DIM" "$GITHUB_REPO" "$C_RESET"
-  printf '  %s%s%s\n'                    "$C_DIM" "$SCRIPT_NAME" "$C_RESET"
-  printf '  %s%s --update%s\n'           "$C_DIM" "$SCRIPT_NAME" "$C_RESET"
-  printf '  %s%s --tag v1.2.3%s\n'       "$C_DIM" "$SCRIPT_NAME" "$C_RESET"
-  printf '  %s%s --update --tag v1.2.3%s\n' "$C_DIM" "$SCRIPT_NAME" "$C_RESET"
-  printf '  %s%s --update --force%s\n'   "$C_DIM" "$SCRIPT_NAME" "$C_RESET"
+  printf '  %s# install (latest)%s\n' "$C_DIM" "$C_RESET"
+  printf '  curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | bash\n' "$GITHUB_REPO"
+  printf '  %s# install / pin a tag%s\n' "$C_DIM" "$C_RESET"
+  printf '  %s --tag v1.2.3\n' "$SCRIPT_NAME"
+  printf '  %s# update / downgrade%s\n' "$C_DIM" "$C_RESET"
+  printf '  %s --update\n' "$SCRIPT_NAME"
+  printf '  %s --update --tag v1.2.3\n' "$SCRIPT_NAME"
+  printf '  %s# force reinstall same version%s\n' "$C_DIM" "$C_RESET"
+  printf '  %s --update --force\n' "$SCRIPT_NAME"
   printf '\n'
 }
 
