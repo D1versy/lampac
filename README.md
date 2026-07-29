@@ -182,6 +182,9 @@ curl -fsSL https://raw.githubusercontent.com/lampac-nextgen/lampac/main/install.
 
 # Подробный лог при обновлении (для диагностики ошибок)
 curl -fsSL https://raw.githubusercontent.com/lampac-nextgen/lampac/main/install.sh | sudo bash -s -- --update --verbose
+
+# Текущая версия (до обновления может показать N/A)
+curl -fsSL https://raw.githubusercontent.com/lampac-nextgen/lampac/main/install.sh | sudo bash -s -- --version
 ```
 
 ```bash
@@ -228,6 +231,7 @@ journalctl -u lampac -f
 | `plugins/override/` | Переопределения плагинов |
 | `notifications_date.txt` | Состояние уведомлений |
 | `excludes.conf` | Файл дополнительных исключений |
+| `version.txt` | Файл хранения установленной версии |
 
 Чтобы защитить свои файлы, создайте `excludes.conf` рядом с `Core.dll`:
 
