@@ -38,6 +38,8 @@ TARGET_VERSION=""
 ARCH=""
 PUBLISH_URL=""
 CLEANUP_PATHS=()
+# Set while service is stopped during --update; EXIT trap may restart it.
+_UPDATE_SERVICE_STOPPED=0
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 
@@ -243,10 +245,7 @@ get_prerelease_zip_url() {
     log_err "curl is required for --pre-release."
     exit 1
   fi
-  if ! command -v jq >/dev/null 2>&1; then
-    log_err "jq is required for --pre-release."
-    exit 1
-  fi
+  ensure_jq
   local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases"
   local url
   url=$(curl -sSL -H 'Accept: application/vnd.github+json' "$api_url" \
@@ -318,10 +317,35 @@ parse_args() {
   fi
 }
 
+# Re-exec under sudo. Materializes the script when run via curl|bash (/dev/fd/…).
 require_root() {
-  if [[ ${EUID} -ne 0 ]]; then
-    exec sudo -E "$0" "$@"
+  if [[ ${EUID} -eq 0 ]]; then
+    return 0
   fi
+
+  if ! command -v sudo >/dev/null 2>&1; then
+    log_err "This script must run as root (sudo not found)."
+    exit 1
+  fi
+
+  local src="${BASH_SOURCE[0]:-$0}"
+  local tmp=""
+
+  # Regular on-disk script — sudo it directly.
+  if [[ -f "$src" && -r "$src" && "$src" != /dev/fd/* && "$src" != /proc/self/fd/* ]]; then
+    exec sudo -E bash "$src" "$@"
+  fi
+
+  # Piped / process-substitution: copy to a temp file first (fd is process-local).
+  if [[ -r "$src" ]]; then
+    tmp="$(mktemp /tmp/lampac-install.XXXXXX.sh)"
+    cat "$src" > "$tmp"
+    chmod 700 "$tmp"
+    exec sudo -E bash "$tmp" "$@"
+  fi
+
+  log_err "Cannot re-exec as root (script source unreadable). Download install.sh and run: sudo bash install.sh …"
+  exit 1
 }
 
 pick_libicu_package() {
@@ -334,6 +358,33 @@ pick_libicu_package() {
   done
   log_err "Could not find a suitable libicu package in apt caches."
   exit 1
+}
+
+# Install jq early when needed for --pre-release (before full package step).
+ensure_jq() {
+  if command -v jq >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ ${EUID} -ne 0 ]]; then
+    log_err "jq is required but not installed."
+    exit 1
+  fi
+  log_info "Installing jq..."
+  if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+    || ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq -qq; then
+    log_err "Failed to install jq (required for --pre-release)."
+    exit 1
+  fi
+  log_ok "jq installed"
+}
+
+# Extract "tag_name" from a GitHub release JSON blob without jq.
+json_extract_tag_name() {
+  local json="$1"
+  printf '%s' "$json" \
+    | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | head -n1 \
+    | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
 }
 
 # ─── Version ───────────────────────────────────────────────────────────
@@ -400,23 +451,21 @@ get_release_version() {
     log_err "curl is required to get release version."
     exit 1
   fi
-  if ! command -v jq >/dev/null 2>&1; then
-    log_err "jq is required to get release version."
-    exit 1
-  fi
-  local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases"
-  local version
 
-  # Проверяем флаг пререлиза
-  local pr_arg
+  local version json api_url
+
   if [[ "$PRE_RELEASE" -eq 1 ]]; then
-    pr_arg="true"
+    ensure_jq
+    api_url="https://api.github.com/repos/${GITHUB_REPO}/releases"
+    version=$(curl -sSL -H 'Accept: application/vnd.github+json' "$api_url" \
+      | jq -r '.[] | select(.prerelease == true) | .tag_name' | head -n1) || true
   else
-    pr_arg="false"
+    # Same source of truth as PUBLISH_URL (.../releases/latest/download/...)
+    api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+    json=$(curl -sSL -H 'Accept: application/vnd.github+json' "$api_url") || true
+    version="$(json_extract_tag_name "${json:-}")"
   fi
 
-  version=$(curl -sSL -H 'Accept: application/vnd.github+json' "$api_url" \
-    | jq -r --argjson prerelease "$pr_arg" '.[] | select(.prerelease == $prerelease) | .tag_name' | head -n1) || true
   version="$(normalize_version "${version:-}")"
   if [[ -z "${version:-}" ]]; then
     log_err "Could not determine release version from ${api_url}."
@@ -537,9 +586,9 @@ install_os_packages() {
   local icu_pkg
   icu_pkg="$(pick_libicu_package)"
 
-  run_quiet "Installing system packages (curl, fonts, GStreamer, ICU, ImageMagick, unzip)" \
+  run_quiet "Installing system packages (curl, jq, fonts, GStreamer, ICU, ImageMagick, unzip)" \
     env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates curl fontconfig \
+      ca-certificates curl jq fontconfig \
       gstreamer1.0-libav gstreamer1.0-plugins-bad gstreamer1.0-plugins-base \
       gstreamer1.0-plugins-base-apps gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly \
       gstreamer1.0-tools \
@@ -601,12 +650,16 @@ ensure_service_user() {
     local holder
     holder="$(getent passwd "$prefer_uid" | cut -d: -f1)"
     log_warn "UID ${prefer_uid} taken by \"${holder}\" — using system-assigned UID"
-    useradd -r -g "$LAMPAC_USER" -d "$INSTALL_ROOT" -s /usr/sbin/nologin "$LAMPAC_USER" 2>/dev/null || true
-    return 0
+    useradd -r -g "$LAMPAC_USER" -d "$INSTALL_ROOT" -s /usr/sbin/nologin "$LAMPAC_USER"
+  else
+    useradd -r -u "$prefer_uid" -g "$LAMPAC_USER" -d "$INSTALL_ROOT" -s /usr/sbin/nologin "$LAMPAC_USER"
   fi
 
-  useradd -r -u "$prefer_uid" -g "$LAMPAC_USER" -d "$INSTALL_ROOT" -s /usr/sbin/nologin "$LAMPAC_USER" 2>/dev/null || true
-  log_ok "User ${LAMPAC_USER} created (uid ${prefer_uid}, home ${INSTALL_ROOT})"
+  if ! getent passwd "$LAMPAC_USER" &>/dev/null; then
+    log_err "Failed to create user ${LAMPAC_USER}."
+    exit 1
+  fi
+  log_ok "User ${LAMPAC_USER} created (home ${INSTALL_ROOT})"
 }
 
 set_install_ownership() {
@@ -661,11 +714,8 @@ build_rsync_excludes() {
     "current.conf"
     "database/"
 
-    # Пользовательские .js в корне wwwroot/ (темы, кнопки и т.д.)
+    # Пользовательские файлы и кеш в wwwroot/ (темы, кнопки, lampa-main и т.д.)
     "wwwroot/"
-
-    # Старая папка lampa-main (не входит в новый релиз, но может быть нужна)
-    "wwwroot/lampa-main/"
 
     # Пользовательские плагины и состояние
     "plugins/override/"
@@ -732,36 +782,42 @@ download_and_extract_to_staging() {
 }
 
 install_app() {
-  # Добавил параметр в функцию для сохранения в файлик после установки.
   local release_version="$1"
 
-  local tmp_zip
-  tmp_zip="$(mktemp /tmp/lampac-nextgen.XXXXXX.zip)"
-  CLEANUP_PATHS+=("$tmp_zip")
+  local staging_dir
+  staging_dir="$(mktemp -d /tmp/lampac-install-stage.XXXXXX)"
+  CLEANUP_PATHS+=("$staging_dir")
 
-  run_quiet "Downloading release archive" \
-    curl -fSL --retry 3 -o "$tmp_zip" "$PUBLISH_URL"
+  if ! download_and_extract_to_staging "$staging_dir"; then
+    log_err "Install aborted — download or extraction failed."
+    exit 1
+  fi
 
   mkdir -p "$INSTALL_ROOT"
 
-  run_quiet "Extracting to ${INSTALL_ROOT}" \
-    bash -c "unzip -oq '$tmp_zip' -d '$INSTALL_ROOT' </dev/null"
-  rm -f "$tmp_zip"
+  run_quiet "Installing application files to ${INSTALL_ROOT}" \
+    bash -c "shopt -s dotglob nullglob; cp -a '${staging_dir}'/* '${INSTALL_ROOT}'/"
 
   if [[ ! -f "${INSTALL_ROOT}/Core.dll" ]]; then
     log_err "Expected Core.dll not found in ${INSTALL_ROOT} — check release layout"
     exit 1
   fi
 
-  # Сохраняем версию
   save_installed_version "$release_version"
 }
 
 # ─── Update ──────────────────────────────────────────────────────────────────
 
-do_update() {
+# Best-effort restart if --update stopped the service and then failed.
+_update_restart_service_if_needed() {
+  if [[ "${_UPDATE_SERVICE_STOPPED}" -eq 1 ]]; then
+    log_warn "Update interrupted — attempting to restart ${SERVICE_NAME}..."
+    systemctl start "$SERVICE_NAME" 2>/dev/null || true
+    _UPDATE_SERVICE_STOPPED=0
+  fi
+}
 
-  # Добавил параметр в функцию для сохранения в файлик после обновления.
+do_update() {
   local new_version="$1"
 
   if [[ ! -d "$INSTALL_ROOT" ]] || [[ ! -f "${INSTALL_ROOT}/Core.dll" ]]; then
@@ -837,24 +893,33 @@ do_update() {
   fi
 
   # Реальное обновление
+  trap '_update_restart_service_if_needed; cleanup' EXIT
+
   spinner_start "Stopping ${SERVICE_NAME}..."
   systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  _UPDATE_SERVICE_STOPPED=1
   spinner_ok "Service stopped"
 
-  run_quiet "Syncing release files (rsync --delete)" \
-    rsync -a --delete \
+  if ! rsync -a --delete \
       "${rsync_exclude_args[@]}" \
       "${staging_dir}/" \
-      "${INSTALL_ROOT}/"
+      "${INSTALL_ROOT}/"; then
+    log_err "Syncing release files (rsync --delete) — failed"
+    exit 1
+  fi
+  log_ok "Syncing release files (rsync --delete)"
 
   set_install_ownership
 
-  # Сохраняем новую версию
   save_installed_version "$new_version"
 
   spinner_start "Starting ${SERVICE_NAME}..."
   systemctl start "$SERVICE_NAME"
+  _UPDATE_SERVICE_STOPPED=0
   spinner_ok "Service started"
+
+  # Restore the global cleanup-only trap from main.
+  trap cleanup EXIT
 }
 
 # ─── Systemd ─────────────────────────────────────────────────────────────────
@@ -986,8 +1051,9 @@ print_post_update() {
 
 main() {
   trap cleanup EXIT
-  require_root "$@"
+  # Help/version must work without sudo (and before pipe re-exec).
   parse_args "$@"
+  require_root "$@"
 
   if [[ "$(uname -s)" != "Linux" ]]; then
     log_err "This script supports Linux only."
@@ -1028,6 +1094,12 @@ main() {
   printf '  %sRelease Version:%s     %s\n' "$C_GREEN" "$C_RESET" "$release_version"
 
   confirm_same_version_or_exit "$release_version"
+
+  # Dry-run update: preview rsync only — skip apt / runtime install.
+  if [[ "$DRY_RUN" -eq 1 && "$UPDATE" -eq 1 ]]; then
+    do_update "$release_version"
+    exit 0
+  fi
 
   local total_steps=4
   [[ "$UPDATE" -eq 1 ]] && total_steps=3

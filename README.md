@@ -235,8 +235,7 @@ journalctl -u lampac -f
 | `TorrServer`, `torrserver/`, `data/ts/` | TorrServer и его данные |
 | `.local/`, `.aspnet/`, `.claude/`, `.config/`, `.playwright/` | Домашние директории пользователя |
 | `users.json`, `passwd`, `current.conf`, `database/` | Пользовательские данные |
-| `wwwroot/*.js` | Пользовательские JS (темы, кнопки) |
-| `wwwroot/lampa-main/` | Кеш Lampa UI |
+| `wwwroot/` | Пользовательская статика и кеш Lampa UI |
 | `plugins/override/` | Переопределения плагинов |
 | `notifications_date.txt` | Состояние уведомлений |
 | `excludes.conf` | Файл дополнительных исключений |
