@@ -804,7 +804,7 @@ public partial class QbitController
 
     static readonly Regex _liveSegRx = new Regex(@"^seg_\d{1,6}\.ts$", RegexOptions.Compiled);
 
-    [HttpGet, HttpHead, AllowAnonymous]
+    [HttpGet, AllowAnonymous]
     [Route("qdl/live/seg/{rec:int}/{file}")]
     async public Task<ActionResult> LiveSegment(int rec, string file)
     {
@@ -816,12 +816,243 @@ public partial class QbitController
 
     #endregion
 
+    #region /qdl/live/watch — D1versy Live: ЭФИР (живая сетка камер)
+
+    // Живой просмотр у регистратора уже есть: POST /api/streams/{id}/start поднимает (или находит
+    // общий) ffmpeg → rolling-HLS /hls/{id}/index.m3u8 (RTSP-камеры: seg_N.ts, таргет 2 с;
+    // mac-рекордеры: fMP4 c EXT-X-MAP init.mp4 + seg_N.m4s — их эфир жив, только пока приложение
+    // на маке пушит). Поток ОБЩИЙ на всех зрителей и не глушится по бездействию, stop мы не зовём
+    // никогда (закрытие плеера у одного не должно ронять эфир другим). Здесь — тонкий прокси:
+    // статус/старт + переписывание живого плейлиста на наши сегментные URL (c ключом периметра).
+
+    /// <summary>Сетка: все камеры + кто сейчас в эфире.</summary>
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/live/watch")]
+    async public Task<ActionResult> LiveWatch()
+    {
+        var ct = HttpContext.RequestAborted;
+
+        List<KeyValuePair<int, string>> cams;
+        JObject[] statuses;
+        try
+        {
+            cams = await LiveCameraList(ct).ConfigureAwait(false);
+            if (cams.Count == 0)
+                return LiveErr("Регистратор не отдал список камер");
+
+            statuses = await Task.WhenAll(cams.Select(async c =>
+            {
+                try { return await LiveApiJson($"/api/streams/{c.Key}/status", ct).ConfigureAwait(false) as JObject; }
+                catch (OperationCanceledException) { throw; }
+                catch { return null; }   // статус одной камеры упал → она «не в эфире», сетка живёт
+            })).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { return new EmptyResult(); }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning("[qdl/live] watch: {Error}", ex.Message);
+            return LiveErr("Регистратор недоступен");
+        }
+
+        var items = new JArray();
+        for (int i = 0; i < cams.Count; i++)
+        {
+            var st = statuses[i];
+            bool ready = st != null && ((bool?)st["ready"] ?? false);
+            items.Add(new JObject
+            {
+                ["id"] = cams[i].Key,
+                ["name"] = cams[i].Value,
+                ["live"] = ready,
+                ["running"] = st != null && ((bool?)st["is_running"] ?? false)
+            });
+        }
+
+        // эфирные — первыми
+        var sorted = new JArray(items.OrderByDescending(x => (bool)x["live"]).ThenBy(x => (int)x["id"]));
+        return LiveJsonOut(new JObject { ["cameras"] = sorted });
+    }
+
+    /// <summary>Старт эфира камеры (идемпотентно) + статус. Клиент опрашивает до ready.</summary>
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/live/watch/start")]
+    async public Task<ActionResult> LiveWatchStart(int camera)
+    {
+        if (camera <= 0)
+            return LiveErr("Не указана камера");
+
+        var ct = HttpContext.RequestAborted;
+        try
+        {
+            JObject st;
+            await _liveGate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                using var resp = await _liveApi.PostAsync(LiveBase() + $"/api/streams/{camera}/start", null, ct).ConfigureAwait(false);
+                string body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode)
+                    return LiveErr(resp.StatusCode == System.Net.HttpStatusCode.NotFound ? "Камера не найдена" : "Регистратор не смог запустить эфир");
+                st = JObject.Parse(body);
+            }
+            finally { _liveGate.Release(); }
+
+            bool ready = (bool?)st["ready"] ?? false;
+            bool running = (bool?)st["is_running"] ?? false;
+
+            // Сырой error регистратора — текст Python-исключения (пути, errno): клиенту его не
+            // показываем (Noty рендерит как есть), в лог — целиком.
+            string rawErr = (string)st["error"];
+            if (!string.IsNullOrEmpty(rawErr))
+                Serilog.Log.Warning("[qdl/live] camera {Camera} stream error: {Err}", camera, rawErr);
+
+            return LiveJsonOut(new JObject
+            {
+                ["camera"] = camera,
+                ["running"] = running,
+                ["ready"] = ready,
+                ["path"] = ready ? $"/qdl/live/watch/hls/{camera}/index.m3u8" : null,
+                // у mac-рекордера running=false означает «приложение сейчас не пушит» — это не ошибка
+                ["error"] = string.IsNullOrEmpty(rawErr) ? null : "Камера не отвечает"
+            });
+        }
+        catch (OperationCanceledException) { return new EmptyResult(); }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning("[qdl/live] watch start: {Error}", ex.Message);
+            return LiveErr("Регистратор недоступен");
+        }
+    }
+
+    /// <summary>Живой плейлист камеры: сегментные URI → наши, с ключом периметра. Не кэшируется (rolling).</summary>
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/live/watch/hls/{camera:int}/index.m3u8")]
+    async public Task<ActionResult> LiveWatchPlaylist(int camera)
+    {
+        if (camera <= 0)
+            return BadRequest();
+
+        var ct = HttpContext.RequestAborted;
+        string body = null;
+        try
+        {
+            // Watchdog регистратора при подвисшем ffmpeg рестартует его, СНАЧАЛА удалив плейлист —
+            // окно «плейлиста нет» ~4-8 с. Немедленный 404 уронил бы зрителя, поэтому коротко
+            // переспрашиваем: для плеера это просто медленный ответ, эфир не рвётся.
+            for (int i = 0; ; i++)
+            {
+                await _liveGate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    using var resp = await _liveApi.GetAsync(LiveBase() + $"/hls/{camera}/index.m3u8", ct).ConfigureAwait(false);
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                        break;
+                    }
+                }
+                finally { _liveGate.Release(); }
+
+                if (i >= 16)
+                    return NotFound();
+                await Task.Delay(500, ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) { return new EmptyResult(); }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning("[qdl/live] watch playlist: {Error}", ex.Message);
+            return StatusCode(502);
+        }
+
+        string d1v = LiveD1vKey();
+        string sign = string.IsNullOrEmpty(d1v) ? "" : "?d1v=" + Uri.EscapeDataString(d1v);
+        string prefix = $"/qdl/live/watch/seg/{camera}/";
+
+        var sb = new StringBuilder(body.Length + 512);
+        foreach (string raw in body.Split('\n'))
+        {
+            string line = raw.TrimEnd('\r');
+            if (line.Length == 0) { sb.Append('\n'); continue; }
+
+            if (line[0] == '#')
+            {
+                // fMP4: init-сегмент едет отдельной строкой-тегом — переписываем и его
+                var m = Regex.Match(line, "^(#EXT-X-MAP:URI=\")([^\"]+)(\".*)$");
+                sb.Append(m.Success ? m.Groups[1].Value + prefix + LiveSegName(m.Groups[2].Value) + sign + m.Groups[3].Value : line);
+            }
+            else
+                sb.Append(prefix).Append(LiveSegName(line)).Append(sign);
+
+            sb.Append('\n');
+        }
+
+        SetHeadersNoCache();
+        return ContentTo(sb.ToString(), "application/vnd.apple.mpegurl");
+    }
+
+    static readonly Regex _liveWatchSegRx = new Regex(@"^(seg_\d{1,10}\.(ts|m4s)|init\.mp4)$", RegexOptions.Compiled);
+
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/live/watch/seg/{camera:int}/{file}")]
+    async public Task<ActionResult> LiveWatchSegment(int camera, string file)
+    {
+        if (camera <= 0 || file == null || !_liveWatchSegRx.IsMatch(file))
+            return BadRequest();
+
+        return await LiveProxy($"/hls/{camera}/{file}", passRange: true, timeout: TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+    }
+
+    /// <summary>Превью тайла: кадр эфира (thumb.jpg), фолбек — постер последней записи камеры.</summary>
+    // Выбор цели решаем ДО проксирования (дешёвый HEAD-пробник): LiveProxy пишет прямо в Response,
+    // и после него переключиться на фолбек уже нельзя (тело начато).
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/live/watch/thumb")]
+    async public Task<ActionResult> LiveWatchThumb(int camera)
+    {
+        if (camera <= 0)
+            return BadRequest();
+
+        var ct = HttpContext.RequestAborted;
+        try
+        {
+            bool hasLiveThumb;
+            await _liveGate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                using var probe = new HttpRequestMessage(HttpMethod.Head, LiveBase() + $"/thumb/{camera}/thumb.jpg");
+                using var resp = await _liveApi.SendAsync(probe, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+                hasLiveThumb = resp.IsSuccessStatusCode;
+            }
+            finally { _liveGate.Release(); }
+
+            if (hasLiveThumb)
+                return await LiveProxy($"/thumb/{camera}/thumb.jpg", passRange: false, timeout: TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+
+            // mac-рекордеры кадра эфира не имеют → постер самой свежей записи камеры
+            if (await LiveApiJson($"/api/recordings/?camera_id={camera}&limit=1", ct).ConfigureAwait(false) is JArray arr && arr.Count > 0)
+            {
+                int rec = (int?)arr[0]["id"] ?? 0;
+                if (rec > 0)
+                    return await LiveProxy($"/api/recordings/{rec}/thumbnail", passRange: false, timeout: TimeSpan.FromSeconds(60)).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) { return new EmptyResult(); }
+        catch (Exception ex)
+        {
+            Serilog.Log.Debug("[qdl/live] watch thumb: {Error}", ex.Message);
+        }
+
+        return NotFound();
+    }
+
+    #endregion
+
     #region /qdl/live/stream, /qdl/live/thumb — байтовый прокси регистратора
 
     // Записи регистратора — готовые mp4 с moov в начале (ingest_service ремуксит с +faststart
     // и только ПОСЛЕ этого заводит строку в БД), поэтому играем их напрямую: Range работает,
     // перемотка мгновенная, HLS-обвязка не нужна ни одному клиенту.
-    [HttpGet, HttpHead, AllowAnonymous]
+    [HttpGet, AllowAnonymous]
     [Route("qdl/live/stream")]
     async public Task<ActionResult> LiveStream(int id)
     {
@@ -832,7 +1063,7 @@ public partial class QbitController
     }
 
     // Кадр-превью. Первый запрос может подождать ffmpeg на стороне регистратора (дальше кэш).
-    [HttpGet, HttpHead, AllowAnonymous]
+    [HttpGet, AllowAnonymous]
     [Route("qdl/live/thumb")]
     async public Task<ActionResult> LiveThumb(int id)
     {

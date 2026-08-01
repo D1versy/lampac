@@ -5,6 +5,7 @@
     var ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 19h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     var BELL = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 8a6 6 0 1112 0c0 7 3 9 3 9H3s3-2 3-9z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.3 21a1.94 1.94 0 003.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     var CAM = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.8 7.4l14.4-3.3 1.3 5.6L4.1 13 2.8 7.4z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M6.5 12.2V15a3 3 0 003 3h1.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="18.5" cy="18" r="2.6" stroke="currentColor" stroke-width="2"/><path d="M18 9.9l3.2 1.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+    var REC = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/></svg>';
 
     function req(url, cb, err) {
         try {
@@ -59,6 +60,9 @@
             '.qdl-fs svg{width:1.8em;height:1.8em}' +
             // карточка коллекции в «Загрузках»: эффект стопки постеров (дёшево, без доп. DOM)
             '.qdl-col-card .card__view{box-shadow:.3em -.3em 0 -.08em rgba(255,255,255,.28),.6em -.6em 0 -.16em rgba(255,255,255,.14);border-radius:.3em}' +
+            // тайл сетки эфира: без своего focus-правила он никак не подсвечивается пультом
+            '.qdl-watch-tile{transition:transform .1s}' +
+            '.qdl-watch-tile.focus{box-shadow:0 0 0 .22em #fff;transform:scale(1.04);z-index:1}' +
             // бейдж непрочитанных на нашей иконке уведомлений в хедере (красный кружок с числом)
             '.qdl-noti-head{position:relative}' +
             '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}';
@@ -1470,7 +1474,7 @@
         } catch (err) { console.log('qdl: addButton', err); }
     }
 
-    // ───────── D1VERSY LIVE: записи домашнего видеорегистратора ─────────
+    // ───────── D1versy Records: записи домашнего видеорегистратора ─────────
     // Сервер (Live.cs модуля) проксирует регистратор из LAN: каталог дня + сами mp4
     // (клиенту LAN-адрес не виден, снаружи всё идёт через наш origin).
     // Экран рассчитан на пульт: сверху день (по умолчанию сегодня), ниже — ТОЛЬКО те камеры,
@@ -1526,15 +1530,21 @@
     function livePlayDay(cam, date, label) {
         var my = ++liveDayToken;
         var tries = 0;
-        var fired = false;
 
         // Первый ответ обычно приходит быстро; сообщение показываем, только если готовка затянулась.
         setTimeout(function () {
-            if (my === liveDayToken && !fired) Lampa.Noty.show('Готовлю запись за день…');
+            if (my === liveDayToken) Lampa.Noty.show('Готовлю запись за день…');
         }, 700);
 
+        // Каждый терминальный выход ЗАКРЫВАЕТ токен: иначе отложенный тост «Готовлю…» перетирал
+        // бы финальное сообщение (на LAN ответ приходит быстрее 700 мс) и врал, что что-то идёт.
+        function stop(msg) {
+            if (my === liveDayToken) liveDayToken++;
+            if (msg) Lampa.Noty.show(msg);
+        }
+
         function fire(info) {
-            fired = true;
+            if (my === liveDayToken) liveDayToken++;
             var item = {
                 title: (cam.name || 'Камера') + (label ? '   ·   ' + label : ''),
                 url: API + info.path
@@ -1562,17 +1572,22 @@
             req(API + '/qdl/live/day?camera=' + encodeURIComponent(cam.id) + (date ? '&date=' + encodeURIComponent(date) : ''),
                 function (info) {
                     if (my !== liveDayToken) return;
-                    if (!info || info.error) { Lampa.Noty.show((info && info.error) || 'Не вышло собрать запись'); return; }
-                    if (info.empty) { Lampa.Noty.show('За этот день записей нет'); return; }
+                    if (!info || info.error) { stop((info && info.error) || 'Не вышло собрать запись'); return; }
+                    if (info.empty) { stop('За этот день записей нет'); return; }
                     if (info.ready > 0) { fire(info); return; }
                     // всё готово, но играть нечего — все куски битые
-                    if (info.complete) { Lampa.Noty.show('Записи за этот день не читаются'); return; }
+                    if (info.complete) { stop('Записи за этот день не читаются'); return; }
 
-                    if (++tries > 45) { Lampa.Noty.show('Регистратор слишком долго готовит запись'); return; }
+                    if (++tries > 45) { stop('Регистратор слишком долго готовит запись'); return; }
                     if (tries % 10 === 0) Lampa.Noty.show('Ещё готовлю: ' + info.ready + ' из ' + info.total);
                     setTimeout(poll, 2000);
                 },
-                function () { if (my === liveDayToken) Lampa.Noty.show('Видеорегистратор не отвечает'); });
+                function () {
+                    // разовый сетевой сбой — не приговор: считаем попыткой и продолжаем
+                    if (my !== liveDayToken) return;
+                    if (++tries > 45) { stop('Видеорегистратор не отвечает'); return; }
+                    setTimeout(poll, 2000);
+                });
         }
 
         poll();
@@ -1592,7 +1607,169 @@
         Lampa.Player.playlist(playlist);
     }
 
-    // Экран 1: день + камеры, писавшие в этот день
+    // ── D1versy Live: ЭФИР — сетка подключённых камер ──
+    // Тайл = живой кадр (обновляется сам) + имя + статус. Enter — эфир камеры фуллскрином
+    // в плеере (rolling-HLS через наш прокси /qdl/live/watch/*). Поток на регистраторе общий
+    // на всех зрителей, stop не зовём никогда.
+    function liveWatchPlay(cam) {
+        var my = ++liveDayToken;   // общий токен отмены с готовкой дня: уход с экрана/повторное нажатие глушит опрос
+        var tries = 0;
+
+        setTimeout(function () {
+            if (my === liveDayToken) Lampa.Noty.show('Включаю эфир…');
+        }, 700);
+
+        // Терминальный выход закрывает токен — иначе отложенный тост «Включаю эфир…» перетирает
+        // финальное сообщение (оффлайн mac-камера отвечает за десятки мс, куда быстрее 700 мс тоста).
+        function stop(msg) {
+            if (my === liveDayToken) liveDayToken++;
+            if (msg) Lampa.Noty.show(msg);
+        }
+
+        function poll() {
+            if (my !== liveDayToken) return;
+            req(API + '/qdl/live/watch/start?camera=' + encodeURIComponent(cam.id),
+                function (st) {
+                    if (my !== liveDayToken) return;
+                    if (!st || st.error) { stop((st && st.error) || 'Не вышло включить эфир'); return; }
+                    if (st.ready && st.path) {
+                        liveDayToken++;   // опрос завершён — токен закрываем сами
+                        var item = { title: (cam.name || 'Камера') + '   ·   Эфир', url: API + st.path };
+                        Lampa.Player.play(item);
+                        Lampa.Player.playlist([item]);
+                        return;
+                    }
+                    // mac-рекордер без активной сессии: ждать нечего, приложение на маке не пушит
+                    if (!st.running) { stop('Камера сейчас не в эфире'); return; }
+                    if (++tries > 20) { stop('Эфир не поднялся — камера не отвечает'); return; }
+                    setTimeout(poll, 1500);
+                },
+                function () {
+                    // разовый сетевой сбой — считаем попыткой, не обрываем прогрев
+                    if (my !== liveDayToken) return;
+                    if (++tries > 20) { stop('Видеорегистратор не отвечает'); return; }
+                    setTimeout(poll, 1500);
+                });
+        }
+
+        poll();
+    }
+
+    function ComponentLiveWatch(object) {
+        var comp = this;
+        var network = new Lampa.Reguest();
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+        var html = $('<div></div>');
+        var body = $('<div style="display:flex;flex-wrap:wrap;gap:1em;padding:1.2em 1.4em"></div>');
+        var last;
+        var timer = null;
+        var haveTiles = false;
+
+        // Таймер живёт только пока экран активен: Lampa на forward-навигации НЕ зовёт destroy
+        // (компонент висит в стеке до pages_save_total), и без stop в pause() каждая копия сетки
+        // продолжала бы дёргать регистратор каждые 12 с из фона.
+        function startTimer() { if (!timer && haveTiles) timer = setInterval(refresh, 12000); }
+        function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
+
+        this.create = function () {
+            injectCss();
+            this.activity.loader(true);
+            scroll.minus();
+            html.append(scroll.render());
+            scroll.body().append(body);
+            network.silent(API + '/qdl/live/watch',
+                function (r) { comp.build(r || {}); },
+                function () { comp.build({ error: 'Видеорегистратор не отвечает' }); });
+            return this.render();
+        };
+
+        this.build = function (r) {
+            if (comp.destroyed) return;
+            var cams = r.cameras || [];
+
+            if (r.error)
+                body.append(liveMsg('⚠️ ' + r.error));
+            else if (!cams.length)
+                body.append(liveMsg('Камер не найдено.'));
+            else
+                cams.forEach(function (c) { body.append(tile(c)); });
+
+            // статусы и кадры дышат сами; DOM не перестраиваем — фокус пульта не теряется
+            haveTiles = cams.length > 0;
+            startTimer();
+
+            this.activity.loader(false);
+            this.activity.toggle();
+        };
+
+        function badgeHtml(c) {
+            return c.live
+                ? '<span style="background:rgba(200,30,30,.92);color:#fff;padding:.12em .55em;border-radius:.35em;font-size:.85em;font-weight:700">● LIVE</span>'
+                : '<span style="background:rgba(255,255,255,.16);color:#ddd;padding:.12em .55em;border-radius:.35em;font-size:.85em">не в эфире</span>';
+        }
+
+        function tile(c) {
+            var el = $(
+                '<div class="selector qdl-watch-tile" data-cam="' + c.id + '" style="position:relative;width:24em;border-radius:.8em;overflow:hidden;background:#111">' +
+                  '<img style="display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#0a0a0a">' +
+                  '<div style="position:absolute;left:0;right:0;bottom:0;padding:.6em .8em;background:linear-gradient(0deg,rgba(0,0,0,.85),rgba(0,0,0,0));display:flex;align-items:center;gap:.6em">' +
+                    '<div class="qdl-watch-name" style="flex:1;min-width:0;font-size:1.25em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(c.name) + '</div>' +
+                    '<div class="qdl-watch-badge">' + badgeHtml(c) + '</div>' +
+                  '</div>' +
+                '</div>'
+            );
+            var img = el.find('img');
+            img.attr('src', API + '/qdl/live/watch/thumb?camera=' + c.id + '&t=' + Date.now());
+            img.on('error', function () { this.src = './img/img_broken.svg'; });
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:enter', function () { liveWatchPlay(c); });
+            return el;
+        }
+
+        function refresh() {
+            // плеер открыт оверлеем (activity остаётся «активной») — сетку под ним не обновляем
+            try { if (Lampa.Player.opened && Lampa.Player.opened()) return; } catch (e) {}
+            network.silent(API + '/qdl/live/watch', function (r) {
+                if (comp.destroyed || !r || !r.cameras) return;
+                r.cameras.forEach(function (c) {
+                    var el = body.find('.qdl-watch-tile[data-cam="' + c.id + '"]');
+                    if (!el.length) return;
+                    el.find('.qdl-watch-badge').html(badgeHtml(c));
+                    // живой кадр дышит только у эфирных — остальным нечего обновлять
+                    if (c.live) el.find('img').attr('src', API + '/qdl/live/watch/thumb?camera=' + c.id + '&t=' + Date.now());
+                });
+            }, function () {});
+        }
+
+        this.render = function () { return html; };
+        this.start = function () {
+            startTimer();   // вернулись на экран (в т.ч. Back с другого) — сетка снова дышит
+            Lampa.Controller.add('content', {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                right: function () { Navigator.move('right'); },
+                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
+                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
+                back: function () { Lampa.Activity.backward(); }
+            });
+            Lampa.Controller.toggle('content');
+        };
+        // pause = ушли ВПЕРЁД на другой экран: глушим таймер и висящий прогрев эфира —
+        // иначе доживший опрос открыл бы плеер поверх того, чем зритель уже занят
+        this.pause = function () { stopTimer(); liveDayCancel(); };
+        this.stop = function () { stopTimer(); liveDayCancel(); };
+        this.destroy = function () {
+            comp.destroyed = true;
+            liveDayCancel();
+            stopTimer();
+            network.clear(); scroll.destroy(); html.remove();
+        };
+    }
+
+    // Экран 1 (D1versy Records): день + камеры, писавшие в этот день
     function ComponentLive(object) {
         var comp = this;
         var network = new Lampa.Reguest();
@@ -1746,8 +1923,9 @@
             });
             Lampa.Controller.toggle('content');
         };
-        this.pause = function () {};
-        this.stop = function () {};
+        // уход с экрана (вперёд или назад) глушит висящую готовку дня — см. коммент у liveDayToken
+        this.pause = function () { liveDayCancel(); };
+        this.stop = function () { liveDayCancel(); };
         this.destroy = function () { comp.destroyed = true; liveDayCancel(); network.clear(); scroll.destroy(); html.remove(); };
     }
 
@@ -1850,15 +2028,25 @@
             });
             Lampa.Controller.toggle('content');
         };
-        this.pause = function () {};
-        this.stop = function () {};
+        this.pause = function () { liveDayCancel(); };
+        this.stop = function () { liveDayCancel(); };
         this.destroy = function () { liveDayCancel(); network.clear(); scroll.destroy(); html.remove(); };
     }
 
-    function buildLiveMenuItem() {
-        var item = $('<li class="menu__item selector qdl-live-menu"><div class="menu__ico">' + CAM + '</div><div class="menu__text">D1VERSY LIVE</div></li>');
+    // Эфир (сетка камер) — D1versy Live
+    function buildWatchMenuItem() {
+        var item = $('<li class="menu__item selector qdl-watch-menu"><div class="menu__ico">' + CAM + '</div><div class="menu__text">D1versy Live</div></li>');
         item.on('hover:enter', function () {
-            Lampa.Activity.push({ url: '', title: 'D1VERSY LIVE', component: 'qdl_live', page: 1 });
+            Lampa.Activity.push({ url: '', title: 'D1versy Live', component: 'qdl_live_watch', page: 1 });
+        });
+        return item;
+    }
+
+    // Записи (день одной записью) — D1versy Records
+    function buildLiveMenuItem() {
+        var item = $('<li class="menu__item selector qdl-live-menu"><div class="menu__ico">' + REC + '</div><div class="menu__text">D1versy Records</div></li>');
+        item.on('hover:enter', function () {
+            Lampa.Activity.push({ url: '', title: 'D1versy Records', component: 'qdl_live', page: 1 });
         });
         return item;
     }
@@ -1892,12 +2080,20 @@
                 else if (noti.prev('.menu__item')[0] !== dl[0]) { noti.detach(); dl.after(noti); }
             }
 
-            // «D1VERSY LIVE» (записи видеорегистратора) — строго сразу после «Уведомления»
+            // «D1versy Live» (эфир) — строго сразу после «Уведомления»
             var nt = $('.menu .qdl-noti-menu');
-            var live = $('.menu .qdl-live-menu');
+            var watch = $('.menu .qdl-watch-menu');
             if (nt.length) {
-                if (!live.length) nt.after(buildLiveMenuItem());
-                else if (live.prev('.menu__item')[0] !== nt[0]) { live.detach(); nt.after(live); }
+                if (!watch.length) nt.after(buildWatchMenuItem());
+                else if (watch.prev('.menu__item')[0] !== nt[0]) { watch.detach(); nt.after(watch); }
+            }
+
+            // «D1versy Records» (записи) — строго сразу после «D1versy Live»
+            var w = $('.menu .qdl-watch-menu');
+            var live = $('.menu .qdl-live-menu');
+            if (w.length) {
+                if (!live.length) w.after(buildLiveMenuItem());
+                else if (live.prev('.menu__item')[0] !== w[0]) { live.detach(); w.after(live); }
             }
         } catch (e) {}
     }
@@ -2000,6 +2196,7 @@
         Lampa.Component.add('qdl_notifications', ComponentNotifications);
         Lampa.Component.add('qdl_live', ComponentLive);
         Lampa.Component.add('qdl_live_camera', ComponentLiveCamera);
+        Lampa.Component.add('qdl_live_watch', ComponentLiveWatch);
         Lampa.Listener.follow('full', addButton);
         startMenuWatcher();
         startHeaderNotiWatcher();
