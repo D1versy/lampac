@@ -1474,7 +1474,7 @@
         } catch (err) { console.log('qdl: addButton', err); }
     }
 
-    // ───────── D1versy Records: записи домашнего видеорегистратора ─────────
+    // ───────── D1versy Rec: записи домашнего видеорегистратора ─────────
     // Сервер (Live.cs модуля) проксирует регистратор из LAN: каталог дня + сами mp4
     // (клиенту LAN-адрес не виден, снаружи всё идёт через наш origin).
     // Экран рассчитан на пульт: сверху день (по умолчанию сегодня), ниже — ТОЛЬКО те камеры,
@@ -1769,7 +1769,7 @@
         };
     }
 
-    // Экран 1 (D1versy Records): день + камеры, писавшие в этот день
+    // Экран 1 (D1versy Rec): день + камеры, писавшие в этот день
     function ComponentLive(object) {
         var comp = this;
         var network = new Lampa.Reguest();
@@ -2042,11 +2042,11 @@
         return item;
     }
 
-    // Записи (день одной записью) — D1versy Records
+    // Записи (день одной записью) — D1versy Rec
     function buildLiveMenuItem() {
-        var item = $('<li class="menu__item selector qdl-live-menu"><div class="menu__ico">' + REC + '</div><div class="menu__text">D1versy Records</div></li>');
+        var item = $('<li class="menu__item selector qdl-live-menu"><div class="menu__ico">' + REC + '</div><div class="menu__text">D1versy Rec</div></li>');
         item.on('hover:enter', function () {
-            Lampa.Activity.push({ url: '', title: 'D1versy Records', component: 'qdl_live', page: 1 });
+            Lampa.Activity.push({ url: '', title: 'D1versy Rec', component: 'qdl_live', page: 1 });
         });
         return item;
     }
@@ -2088,7 +2088,7 @@
                 else if (watch.prev('.menu__item')[0] !== nt[0]) { watch.detach(); nt.after(watch); }
             }
 
-            // «D1versy Records» (записи) — строго сразу после «D1versy Live»
+            // «D1versy Rec» (записи) — строго сразу после «D1versy Live»
             var w = $('.menu .qdl-watch-menu');
             var live = $('.menu .qdl-live-menu');
             if (w.length) {

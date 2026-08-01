@@ -32,10 +32,10 @@
 | `GET /qdl/live/stream?id=` | mp4 одного фрагмента (прокси с Range/seek) — запасной путь |
 | `GET /qdl/live/thumb?id=` | кадр-превью записи (прокси) |
 
-## D1versy Live / D1versy Records — видеорегистратор (`Live.cs`)
+## D1versy Live / D1versy Rec — видеорегистратор (`Live.cs`)
 
 **Два раздела в меню**: «D1versy Live» — эфир (живая сетка камер: тайлы с дышащими кадрами,
-Enter → эфир фуллскрином), «D1versy Records» — записи (день одной записью, ниже).
+Enter → эфир фуллскрином), «D1versy Rec» — записи (день одной записью, ниже).
 
 Эфир у регистратора уже есть: `POST /api/streams/{id}/start` поднимает (или находит общий) ffmpeg →
 rolling-HLS `/hls/{id}/index.m3u8` (RTSP-камеры — `seg_N.ts`, таргет 2 с; mac-рекордеры — fMP4 с
