@@ -1913,6 +1913,8 @@
         var currentLabel = '';              // «Сегодня» / «23 июля, чт» — в заголовок записи дня
         var keepDayFocus = false;           // после смены дня фокус возвращаем на кнопку дня
         var reqId = 0;                      // быстро щёлкают днями → рисуем только последний ответ
+        var autoJumped = false;             // авто-прыжок на последний день с записями — один раз
+        var userTouched = false;            // зритель сам менял день → в его выбор не вмешиваемся
 
         this.create = function () {
             injectCss();   // фокус-стили dayBar/camRow
@@ -1945,9 +1947,26 @@
 
             if (r.error)
                 body.append(liveMsg('⚠️ ' + r.error));
-            else if (!r.cameras || !r.cameras.length)
-                body.append(liveMsg('За этот день записей нет' + (r.total ? ' (камер всего: ' + r.total + ')' : '') + '. Выбери другой день кнопкой сверху.'));
+            else if (!r.cameras || !r.cameras.length) {
+                // Сегодня пусто, а зритель день не выбирал → сами прыгаем на последний день
+                // с записями. Иначе на ТВ экран выглядит мёртвым: три кнопки сверху, стрелке
+                // «вниз» некуда идти — читается как «навигация не работает».
+                if (!autoJumped && !userTouched && !object.qdl_date) {
+                    autoJumped = true;
+                    body.append(liveMsg('За сегодня записей нет — ищу последний день с записями…'));
+                    network.silent(API + '/qdl/live/days', function (dr) {
+                        if (comp.destroyed) return;
+                        var target = null;
+                        ((dr && dr.days) || []).forEach(function (d) { if (!target && d.count > 0) target = d; });
+                        if (target && target.date !== date) { date = target.date; reload(); }
+                        else { body.empty(); body.append(dayBar(r)); body.append(emptyMsg(r)); comp.activity.toggle(); }
+                    }, function () {});
+                }
+                else body.append(emptyMsg(r));
+            }
             else {
+                if (autoJumped && r.today && date !== r.today)
+                    body.append($('<div style="padding:.2em 1.6em 0;font-size:1.15em;opacity:.55">За сегодня записей пока нет — показан последний день с записями</div>'));
                 if (r.total && r.cameras.length < r.total)
                     body.append($('<div style="padding:.2em 1.6em 0;font-size:1.15em;opacity:.5">Писали ' + r.cameras.length + ' из ' + r.total + ' камер</div>'));
                 r.cameras.forEach(function (c) { body.append(camRow(c)); });
@@ -1959,6 +1978,10 @@
             comp.activity.toggle();   // пере-собрать коллекцию фокуса после перерисовки
         }
 
+        function emptyMsg(r) {
+            return liveMsg('За этот день записей нет' + (r.total ? ' (камер всего: ' + r.total + ')' : '') + '. Выбери другой день кнопкой сверху.');
+        }
+
         function reload() { keepDayFocus = true; body.empty(); load(); }
 
         function dayBar(r) {
@@ -1968,13 +1991,14 @@
             var day = $('<div class="selector qdl-btn-focus qdl-live-day" style="flex:1;text-align:center;padding:.65em 1.2em;background:rgba(255,255,255,.13);border-radius:.6em;font-size:1.5em;font-weight:600">📅 ' + esc(r.label || 'Выбрать день') + '</div>');
             var next = $('<div class="selector qdl-btn-focus" style="padding:.65em 1.1em;background:rgba(255,255,255,' + (canNext ? '.08' : '.03') + ');border-radius:.6em;font-size:1.4em;opacity:' + (canNext ? '1' : '.35') + '">▶</div>');
 
-            prev.on('hover:enter', function () { date = liveShift(date || today, -1); reload(); });
+            prev.on('hover:enter', function () { userTouched = true; date = liveShift(date || today, -1); reload(); });
             next.on('hover:enter', function () {
                 if (!canNext) { Lampa.Noty.show('Это самый свежий день'); return; }
+                userTouched = true;
                 date = liveShift(date, 1);
                 reload();
             });
-            day.on('hover:enter', pickDay);
+            day.on('hover:enter', function () { userTouched = true; pickDay(); });
 
             [prev, day, next].forEach(function (el) {
                 el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
