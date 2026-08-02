@@ -60,9 +60,20 @@
             '.qdl-fs svg{width:1.8em;height:1.8em}' +
             // карточка коллекции в «Загрузках»: эффект стопки постеров (дёшево, без доп. DOM)
             '.qdl-col-card .card__view{box-shadow:.3em -.3em 0 -.08em rgba(255,255,255,.28),.6em -.6em 0 -.16em rgba(255,255,255,.14);border-radius:.3em}' +
+            // сетка эфира: по центру и во всю ширину (рут-em клампится на 10.6px → телефон ~36em:
+            // фикс-ширина давала одну колонку слева с мёртвым полем справа). flex-grow растягивает
+            // колонки, кап 38em не даёт одинокой плитке распухнуть на весь ТВ.
+            '.qdl-watch-grid{display:flex;flex-wrap:wrap;gap:1em;padding:1.2em 1.4em;justify-content:center}' +
+            '.qdl-watch-grid>div:not(.qdl-watch-tile){flex:1 1 100%}' +
+            '.qdl-watch-tile{flex:1 1 20em;max-width:38em;min-width:0;transition:transform .1s}' +
             // тайл сетки эфира: без своего focus-правила он никак не подсвечивается пультом
-            '.qdl-watch-tile{transition:transform .1s}' +
             '.qdl-watch-tile.focus{box-shadow:0 0 0 .22em #fff;transform:scale(1.04);z-index:1}' +
+            // фокус пульта в наших списках/кнопках: Lampa вешает класс .focus только на ТВ/десктопе,
+            // а генерического .selector.focus в её CSS нет — без этих правил фокус невидим
+            '.qdl-row-focus{transition:box-shadow .1s}' +
+            '.qdl-row-focus.focus{box-shadow:0 0 0 .2em #fff}' +
+            '.qdl-btn-focus.focus{background:#fff !important;color:#000 !important;opacity:1 !important}' +
+            '.qdl-btn-green.focus{background:#19b531 !important;box-shadow:0 0 0 .15em #fff}' +
             // бейдж непрочитанных на нашей иконке уведомлений в хедере (красный кружок с числом)
             '.qdl-noti-head{position:relative}' +
             '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}';
@@ -922,6 +933,7 @@
         var last;
 
         this.create = function () {
+            injectCss();   // фокус-стили строк: не полагаемся на то, что другой экран уже инъецировал
             this.activity.loader(true);
             scroll.minus();
             html.append(scroll.render());
@@ -946,7 +958,7 @@
         this.append = function (n) {
             var poster = n.hash ? (API + '/qdl/poster?hash=' + n.hash) : './img/img_broken.svg';
             var el = $(
-                '<div class="qdl-noti-row selector" style="display:flex;align-items:center;gap:1em;padding:1em;margin:.35em .6em;background:rgba(255,255,255,.05);border-radius:.7em">' +
+                '<div class="qdl-noti-row selector qdl-row-focus" style="display:flex;align-items:center;gap:1em;padding:1em;margin:.35em .6em;background:rgba(255,255,255,.05);border-radius:.7em">' +
                   '<img src="' + poster + '" style="width:3.6em;height:5.4em;object-fit:cover;border-radius:.4em;background:#222;flex:none">' +
                   '<div style="flex:1;min-width:0">' +
                     '<div style="font-size:1.3em;font-weight:600">' + esc(n.title || 'Сериал') + '</div>' +
@@ -1611,6 +1623,81 @@
     // Тайл = живой кадр (обновляется сам) + имя + статус. Enter — эфир камеры фуллскрином
     // в плеере (rolling-HLS через наш прокси /qdl/live/watch/*). Поток на регистраторе общий
     // на всех зрителей, stop не зовём никогда.
+    // ── iPhone: эфир в НАТИВНОМ iOS-плеере (без VLC и без обновления приложения) ──
+    // Приложение не перехватывает HTML5-видео (в VLC ведёт только мост Lampa.Player.play →
+    // AndroidJS.openPlayer), а WKWebView собран с allowsInlineMediaPlayback. Поэтому свой <video>
+    // БЕЗ playsinline при удачном play() сам открывает штатный фуллскрин-плеер iOS (нормальные
+    // контролы, AirPlay, PiP — и тап по экрану больше не мгновенная пауза).
+    // ⚠️ play() обязан жить в НАСТОЯЩЕМ жесте: hover:enter у Lampa диспатчится из setTimeout(20мс),
+    // жест там мёртв → зовём это ТОЛЬКО из прямого addEventListener('click') (паттерн qdl-fs).
+    // qdl_ios_live: 'auto' (дефолт) | 'off' — аварийный откат на старый VLC-путь через Storage.
+    function iosLiveNative() {
+        var mode = 'auto';
+        try { mode = Lampa.Storage.get('qdl_ios_live', 'auto') || 'auto'; } catch (e) {}
+        if (mode === 'off') return false;
+        return window.d1vision_platform === 'ios';
+    }
+
+    var iosLiveVideo = null;
+
+    function iosLiveStop() {
+        var v = iosLiveVideo;
+        iosLiveVideo = null;
+        if (!v) return;
+        try { v.pause(); } catch (e) {}
+        try { v.removeAttribute('src'); v.load(); } catch (e) {}   // канонический release потока в WebKit
+        try { if (v.parentNode) v.parentNode.removeChild(v); } catch (e) {}
+    }
+
+    // Вызывать ТОЛЬКО синхронно из прямого click. true = взялись (hover:enter этого тапа подавить).
+    function liveWatchPlayIOS(cam) {
+        if (!iosLiveNative()) return false;
+        iosLiveStop();                          // повторный тап убивает предыдущую сессию
+        var my = ++liveDayToken;                // pause/stop экрана (liveDayCancel) глушит фолбек и тост
+        var started = false, settled = false;
+
+        var v = document.createElement('video');
+        v.controls = true;
+        // НЕ display:none (WebKit троттлит невидимое медиа) — микро-элемент в углу
+        v.style.cssText = 'position:fixed;left:0;bottom:0;width:2px;height:2px;opacity:.01;pointer-events:none';
+        v.src = API + '/qdl/live/watch/hls/' + encodeURIComponent(cam.id) + '/index.m3u8';
+        document.body.appendChild(v);
+        iosLiveVideo = v;
+
+        var toast = setTimeout(function () { if (!settled && my === liveDayToken) Lampa.Noty.show('Включаю эфир…'); }, 700);
+        var watchdog = setTimeout(fail, 12000);   // сервер сам ждёт поток до ~8с → 12с потолок
+
+        function close() { settled = true; clearTimeout(toast); clearTimeout(watchdog); if (my === liveDayToken) liveDayToken++; }
+        function fail() {
+            if (settled) return;
+            var alive = (my === liveDayToken);
+            close(); iosLiveStop();
+            if (alive) liveWatchPlay(cam);      // фолбек: старый прогрев /start → VLC-мост (жест не нужен)
+        }
+
+        v.addEventListener('playing', function () { started = true; v.__qdlStarted = true; if (!settled) close(); });
+        v.addEventListener('error', function () {
+            if (!started) { fail(); return; }
+            iosLiveStop(); Lampa.Noty.show('Эфир прервался');
+        });
+        v.addEventListener('webkitendfullscreen', function () {
+            // кнопка PiP тоже закрывает фуллскрин — элемент не убивать, пока он в PiP
+            setTimeout(function () {
+                try { if (v.webkitPresentationMode === 'picture-in-picture') return; } catch (e) {}
+                if (v === iosLiveVideo) iosLiveStop();
+            }, 0);
+        });
+        v.addEventListener('webkitpresentationmodechanged', function () {
+            try { if (started && v.webkitPresentationMode === 'inline' && v === iosLiveVideo) iosLiveStop(); } catch (e) {}
+        });
+
+        try {
+            var p = v.play();                   // ← здесь живёт user-gesture
+            if (p && p.catch) p.catch(function () { fail(); });
+        } catch (e) { fail(); }
+        return true;
+    }
+
     function liveWatchPlay(cam) {
         var my = ++liveDayToken;   // общий токен отмены с готовкой дня: уход с экрана/повторное нажатие глушит опрос
         var tries = 0;
@@ -1660,7 +1747,7 @@
         var network = new Lampa.Reguest();
         var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
         var html = $('<div></div>');
-        var body = $('<div style="display:flex;flex-wrap:wrap;gap:1em;padding:1.2em 1.4em"></div>');
+        var body = $('<div class="qdl-watch-grid"></div>');   // раскладка — в injectCss (центр + растягивание)
         var last;
         var timer = null;
         var haveTiles = false;
@@ -1710,7 +1797,7 @@
 
         function tile(c) {
             var el = $(
-                '<div class="selector qdl-watch-tile" data-cam="' + c.id + '" style="position:relative;width:24em;border-radius:.8em;overflow:hidden;background:#111">' +
+                '<div class="selector qdl-watch-tile" data-cam="' + c.id + '" style="position:relative;border-radius:.8em;overflow:hidden;background:#111">' +
                   '<img style="display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#0a0a0a">' +
                   '<div style="position:absolute;left:0;right:0;bottom:0;padding:.6em .8em;background:linear-gradient(0deg,rgba(0,0,0,.85),rgba(0,0,0,0));display:flex;align-items:center;gap:.6em">' +
                     '<div class="qdl-watch-name" style="flex:1;min-width:0;font-size:1.25em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(c.name) + '</div>' +
@@ -1722,7 +1809,20 @@
             img.attr('src', API + '/qdl/live/watch/thumb?camera=' + c.id + '&t=' + Date.now());
             img.on('error', function () { this.src = './img/img_broken.svg'; });
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
-            el.on('hover:enter', function () { liveWatchPlay(c); });
+
+            // iPhone: нативный плеер требует ЖИВОГО жеста → прямой click (hover:enter Lampa
+            // диспатчит через setTimeout — жест мёртв). На один тап прилетают ОБА события
+            // (click, затем hover:enter через ~20мс) — метка времени гасит второй.
+            // data-live держит refresh() — замыкание c устаревает после build.
+            el.attr('data-live', c.live ? '1' : '0');
+            var iosTapAt = 0;
+            el[0].addEventListener('click', function () {
+                if (el.attr('data-live') === '1' && liveWatchPlayIOS(c)) iosTapAt = Date.now();
+            });
+            el.on('hover:enter', function () {
+                if (Date.now() - iosTapAt < 1000) return;   // этот тап уже забрал нативный путь
+                liveWatchPlay(c);
+            });
             return el;
         }
 
@@ -1734,6 +1834,7 @@
                 r.cameras.forEach(function (c) {
                     var el = body.find('.qdl-watch-tile[data-cam="' + c.id + '"]');
                     if (!el.length) return;
+                    el.attr('data-live', c.live ? '1' : '0');   // свежий статус для iOS-пути (замыкание тайла — снимок)
                     el.find('.qdl-watch-badge').html(badgeHtml(c));
                     // живой кадр дышит только у эфирных — остальным нечего обновлять
                     if (c.live) el.find('img').attr('src', API + '/qdl/live/watch/thumb?camera=' + c.id + '&t=' + Date.now());
@@ -1757,14 +1858,17 @@
             });
             Lampa.Controller.toggle('content');
         };
-        // pause = ушли ВПЕРЁД на другой экран: глушим таймер и висящий прогрев эфира —
-        // иначе доживший опрос открыл бы плеер поверх того, чем зритель уже занят
-        this.pause = function () { stopTimer(); liveDayCancel(); };
-        this.stop = function () { stopTimer(); liveDayCancel(); };
+        // pause = ушли ВПЕРЁД на другой экран: глушим таймер, висящий прогрев эфира и
+        // ещё НЕ заигравший скрытый iOS-<video> (иначе он заиграл бы и открыл фуллскрин поверх
+        // нового экрана). Уже играющий/PiP — не трогаем: зритель им пользуется.
+        function killPendingIosVideo() { if (iosLiveVideo && !iosLiveVideo.__qdlStarted) iosLiveStop(); }
+        this.pause = function () { stopTimer(); liveDayCancel(); killPendingIosVideo(); };
+        this.stop = function () { stopTimer(); liveDayCancel(); killPendingIosVideo(); };
         this.destroy = function () {
             comp.destroyed = true;
             liveDayCancel();
             stopTimer();
+            killPendingIosVideo();   // играющий/PiP живёт на body и переживает экран — закроется сам по Done/выходу из PiP
             network.clear(); scroll.destroy(); html.remove();
         };
     }
@@ -1784,6 +1888,7 @@
         var reqId = 0;                      // быстро щёлкают днями → рисуем только последний ответ
 
         this.create = function () {
+            injectCss();   // фокус-стили dayBar/camRow
             scroll.minus();
             html.append(scroll.render());
             scroll.body().append(body);
@@ -1832,9 +1937,9 @@
         function dayBar(r) {
             var canNext = !!(date && today && date < today);
             var bar = $('<div style="display:flex;align-items:center;gap:.7em;padding:1.2em 1.4em .5em"></div>');
-            var prev = $('<div class="selector" style="padding:.65em 1.1em;background:rgba(255,255,255,.08);border-radius:.6em;font-size:1.4em">◀</div>');
-            var day = $('<div class="selector qdl-live-day" style="flex:1;text-align:center;padding:.65em 1.2em;background:rgba(255,255,255,.13);border-radius:.6em;font-size:1.5em;font-weight:600">📅 ' + esc(r.label || 'Выбрать день') + '</div>');
-            var next = $('<div class="selector" style="padding:.65em 1.1em;background:rgba(255,255,255,' + (canNext ? '.08' : '.03') + ');border-radius:.6em;font-size:1.4em;opacity:' + (canNext ? '1' : '.35') + '">▶</div>');
+            var prev = $('<div class="selector qdl-btn-focus" style="padding:.65em 1.1em;background:rgba(255,255,255,.08);border-radius:.6em;font-size:1.4em">◀</div>');
+            var day = $('<div class="selector qdl-btn-focus qdl-live-day" style="flex:1;text-align:center;padding:.65em 1.2em;background:rgba(255,255,255,.13);border-radius:.6em;font-size:1.5em;font-weight:600">📅 ' + esc(r.label || 'Выбрать день') + '</div>');
+            var next = $('<div class="selector qdl-btn-focus" style="padding:.65em 1.1em;background:rgba(255,255,255,' + (canNext ? '.08' : '.03') + ');border-radius:.6em;font-size:1.4em;opacity:' + (canNext ? '1' : '.35') + '">▶</div>');
 
             prev.on('hover:enter', function () { date = liveShift(date || today, -1); reload(); });
             next.on('hover:enter', function () {
@@ -1874,7 +1979,7 @@
 
         function camRow(c) {
             var el = $(
-                '<div class="selector" style="display:flex;align-items:center;gap:1.2em;padding:.9em;margin:.45em 1.4em;background:rgba(255,255,255,.06);border-radius:.8em">' +
+                '<div class="selector qdl-row-focus" style="display:flex;align-items:center;gap:1.2em;padding:.9em;margin:.45em 1.4em;background:rgba(255,255,255,.06);border-radius:.8em">' +
                   '<img style="width:12em;height:6.8em;object-fit:cover;border-radius:.5em;background:#111;flex:none">' +
                   '<div style="flex:1;min-width:0">' +
                     '<div style="font-size:1.7em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(c.name) + '</div>' +
@@ -1941,6 +2046,7 @@
         var date = object.qdl_date || '';
 
         this.create = function () {
+            injectCss();   // фокус-стили кнопок/строк записей
             this.activity.loader(true);
             scroll.minus();
             html.append(scroll.render());
@@ -1977,12 +2083,12 @@
             var box = $('<div></div>');
 
             // Основной путь — та же склеенная запись дня, что и по обычному входу в камеру.
-            var day = $('<div class="selector" style="margin:.6em 1.4em;padding:1em 1.2em;background:rgba(20,160,40,.85);border-radius:.8em;font-size:1.5em;font-weight:600">▶ Весь день одной записью   ·   ' + liveDur(total) + '</div>');
+            var day = $('<div class="selector qdl-btn-green" style="margin:.6em 1.4em;padding:1em 1.2em;background:rgba(20,160,40,.85);border-radius:.8em;font-size:1.5em;font-weight:600">▶ Весь день одной записью   ·   ' + liveDur(total) + '</div>');
             day.on('hover:focus', function () { last = day[0]; scroll.update(day, true); });
             day.on('hover:enter', function () { livePlayDay(cam, date, label); });
 
             // Запасной: куски по очереди (каждый со своим таймлайном) — если склейка не собралась.
-            var seq = $('<div class="selector" style="margin:.4em 1.4em;padding:.8em 1.2em;background:rgba(255,255,255,.1);border-radius:.8em;font-size:1.3em">Фрагменты подряд, по одному</div>');
+            var seq = $('<div class="selector qdl-btn-focus" style="margin:.4em 1.4em;padding:.8em 1.2em;background:rgba(255,255,255,.1);border-radius:.8em;font-size:1.3em">Фрагменты подряд, по одному</div>');
             seq.on('hover:focus', function () { last = seq[0]; scroll.update(seq, true); });
             seq.on('hover:enter', function () { livePlay(cam, items, 0); });
 
@@ -1996,7 +2102,7 @@
             var meta = [liveDur(rec.seconds), liveSize(rec.size), rec.trigger === 'motion' ? 'движение' : (rec.trigger === 'human' ? 'человек' : '')].filter(Boolean).join('   ·   ');
 
             var el = $(
-                '<div class="selector" style="display:flex;align-items:center;gap:1.2em;padding:.8em;margin:.4em 1.4em;background:rgba(255,255,255,.06);border-radius:.8em">' +
+                '<div class="selector qdl-row-focus" style="display:flex;align-items:center;gap:1.2em;padding:.8em;margin:.4em 1.4em;background:rgba(255,255,255,.06);border-radius:.8em">' +
                   '<img style="width:10em;height:5.65em;object-fit:cover;border-radius:.5em;background:#111;flex:none">' +
                   '<div style="flex:1;min-width:0">' +
                     '<div style="font-size:1.6em;font-weight:600">' + esc(mark + rec.start + ' – ' + rec.end) + '</div>' +
