@@ -464,6 +464,185 @@
         });
     }
 
+    // ───────── Зеркало прогресса устройства: file_view ↔ нативное KV AndroidJS (см. claude/06 §AM) ─────────
+    // localStorage привязан к origin, а нативные клиенты гоняются между хостами (LAN ↔ tv.d1versy.com) —
+    // у каждого origin был СВОЙ file_view («прогресс то есть, то нет»). Мост AndroidJS даёт per-app KV,
+    // общее для всех origin (Apple: BridgeStorage/storage.json, Android: SharedPreferences "storage");
+    // сама Lampa AndroidJS.set/get не использует — ключ qdl_file_view целиком наш.
+    // Зеркало: {hash: {…road, t: epoch-ms записи}}. Арбитр конфликтов — qdl_tl_meta (per-origin,
+    // Lampa.Storage): {hash: t последнего принятия/отправки ЭТИМ origin}.
+    // В браузере/Tizen (нет AndroidJS) фича молчит. Выключатель: Lampa.Storage 'qdl_tl_mirror'='off'.
+
+    function hasOwn(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+
+    // строка из KV → объект-зеркало; null/''/битый JSON/не-объект → {}
+    function mirrorParse(raw) {
+        try {
+            var o = JSON.parse(raw);
+            return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
+        } catch (e) { return {}; }
+    }
+
+    // валидный road: percent/time/duration — конечные числа ≥ 0 (легаси-число «просто percent» не зеркалим)
+    function mirrorValidRoad(r) {
+        return !!(r && typeof r === 'object' &&
+            typeof r.percent === 'number' && isFinite(r.percent) && r.percent >= 0 &&
+            typeof r.time === 'number' && isFinite(r.time) && r.time >= 0 &&
+            typeof r.duration === 'number' && isFinite(r.duration) && r.duration >= 0);
+    }
+
+    // копия road без служебной метки t; addT — проставить новую метку
+    function mirrorRoad(src, addT) {
+        var o = {}, k;
+        for (k in src) if (hasOwn(src, k) && k !== 't') o[k] = src[k];
+        if (addT !== undefined) o.t = addT;
+        return o;
+    }
+
+    var MIRROR_CAP = 1000;            // кап зеркала И бюджет посева (иначе local>капа → вечный re-seed-churn)
+    var MIRROR_SEED_T = 1;            // сентинел-метка посева: «древнее всего» — старый local не выдаёт себя
+                                      // за свежий и НИКОГДА не перебивает чужой прогресс (ревью §AM: клоббер на выкате)
+    var MIRROR_CLOCK_SLACK = 300000;  // кламп меток из будущего (увод часов вперёд + NTP-починка): max now+5мин
+
+    // Слияние (чистая функция, входы не мутирует). Инварианты по каждому hash (m=зеркало, known=мета):
+    //   метка из будущего → кламп + переписать в зеркале (де-пойзон);
+    //   нет локально: known==0 или m.t>known → принять; иначе (мы это знали, локально стёрто) →
+    //     УДАЛИТЬ из зеркала — уважаем очистку истории этим origin;
+    //   есть локально: реальный апдейт (m.t>SEED_T) новее меты → принять; мета новее зеркала → ремонт
+    //     (перезалить local с t=меты — лечит упавший set() и вайп «Мигрировать»); m.t==known → no-op;
+    //     меты нет и в зеркале сид → NO-OP: до-фичевый рассинхрон origin'ов не разрушаем, ждём просмотра;
+    //   нет в зеркале → посеять с t=SEED_T, пока зеркало под капом; мусор — пропустить.
+    // Мета на выходе содержит только живые ключи (гигиена).
+    function mirrorMerge(local, mirror, meta, now, cap) {
+        var outLocal = {}, outMirror = {}, outMeta = {}, changedLocal = false, changedMirror = false;
+        var h, m, mt, known, room = 0, cutoff = now + MIRROR_CLOCK_SLACK;
+        cap = cap || MIRROR_CAP;
+        local = local || {}; mirror = mirror || {}; meta = meta || {};
+        for (h in local) if (hasOwn(local, h)) outLocal[h] = local[h];
+        for (h in mirror) if (hasOwn(mirror, h)) outMirror[h] = mirror[h];
+
+        for (h in mirror) {
+            if (!hasOwn(mirror, h)) continue;
+            m = mirror[h];
+            if (!mirrorValidRoad(m) || typeof m.t !== 'number' || !isFinite(m.t)) continue;
+            mt = m.t;
+            if (mt > cutoff) {                                   // де-пойзон будущих меток
+                mt = cutoff;
+                outMirror[h] = mirrorRoad(m, mt);
+                changedMirror = true;
+            }
+            known = (typeof meta[h] === 'number' && isFinite(meta[h])) ? Math.min(meta[h], cutoff) : 0;
+            if (!hasOwn(outLocal, h)) {
+                if (known === 0 || mt > known) {                 // новое для origin / свежее принятого
+                    outLocal[h] = mirrorRoad(m);
+                    outMeta[h] = mt;
+                    changedLocal = true;
+                } else {                                          // знали (mt<=known), локально стёрто → удаление
+                    delete outMirror[h];
+                    changedMirror = true;
+                }
+            } else if (mt > known && mt > MIRROR_SEED_T) {       // реальный апдейт новее меты → принять
+                outLocal[h] = mirrorRoad(m);
+                outMeta[h] = mt;
+                changedLocal = true;
+            } else if (known > mt && mirrorValidRoad(outLocal[h])) {   // зеркало отстало → ремонт из local
+                outMirror[h] = mirrorRoad(outLocal[h], known);
+                outMeta[h] = known;
+                changedMirror = true;
+            } else if (known > 0) {
+                outMeta[h] = known;                              // steady state (mt === known)
+            }
+            // known==0 && mt<=SEED_T && локально есть → no-op (см. инварианты выше)
+        }
+        for (h in outMirror) if (hasOwn(outMirror, h)) room++;
+        for (h in local) {
+            if (!hasOwn(local, h)) continue;
+            if (!hasOwn(outMirror, h) && mirrorValidRoad(local[h]) && room < cap) {
+                outMirror[h] = mirrorRoad(local[h], MIRROR_SEED_T);
+                outMeta[h] = MIRROR_SEED_T;
+                changedMirror = true;
+                room++;
+            }
+        }
+        return { local: outLocal, mirror: outMirror, meta: outMeta, changedLocal: changedLocal, changedMirror: changedMirror };
+    }
+
+    // кап зеркала: cap самых свежих по t (запись без метки считается самой старой; сиды t=1 вылетают первыми)
+    function mirrorPrune(mirror, cap) {
+        cap = cap || MIRROR_CAP;
+        var keys = [], out = {}, h, i;
+        for (h in mirror) if (hasOwn(mirror, h)) keys.push(h);
+        if (keys.length <= cap) return mirror;
+        keys.sort(function (a, b) {
+            return (Number(mirror[b] && mirror[b].t) || 0) - (Number(mirror[a] && mirror[a].t) || 0);
+        });
+        for (i = 0; i < cap; i++) out[keys[i]] = mirror[keys[i]];
+        return out;
+    }
+
+    function mirrorReady() {
+        try { if (Lampa.Storage.get('qdl_tl_mirror', 'on') === 'off') return false; } catch (e) {}
+        var a = window.AndroidJS;
+        return !!(a && typeof a.get === 'function' && typeof a.set === 'function');
+    }
+
+    function mirrorRead() {
+        try { return mirrorParse(window.AndroidJS.get('qdl_file_view')); }   // Android → null, Apple → '' — parse покрывает оба
+        catch (e) { return {}; }
+    }
+
+    // false = записать не удалось (Android set() бросает после одноразового dump() потока «Мигрировать») —
+    // мета к этому моменту уже впереди зеркала, на следующем старте ветка «ремонт» в mirrorMerge дольёт
+    function mirrorWrite(m) {
+        try { window.AndroidJS.set('qdl_file_view', JSON.stringify(mirrorPrune(m, MIRROR_CAP))); return true; }
+        catch (e) { return false; }
+    }
+
+    var mirrorCache = null, mirrorTimer = null;
+
+    // Timeline.listener 'update' — прилетает и от нативного VLC (натив зовёт Lampa.Timeline.update
+    // при закрытии/конце плеера). Дебаунс коалесцирует пачки (авто-next, отметки серий).
+    function onTimelineUpdate(e) {
+        try {
+            var d = e && e.data;
+            if (!mirrorCache || !d || !d.hash || !mirrorValidRoad(d.road)) return;
+            var now = Date.now();
+            mirrorCache[d.hash] = mirrorRoad(d.road, now);
+            var meta = Lampa.Storage.get('qdl_tl_meta', {}) || {};   // мету — СРАЗУ, до записи зеркала:
+            meta[d.hash] = now;                                      // упавший set() починится ремонтом на старте
+            Lampa.Storage.set('qdl_tl_meta', meta);
+            if (mirrorTimer) clearTimeout(mirrorTimer);
+            mirrorTimer = setTimeout(function () { mirrorTimer = null; mirrorWrite(mirrorCache); }, 400);
+        } catch (e2) {}
+    }
+
+    function initTimelineMirror() {
+        if (window.__qdl_mirror_started) return;   // повторный 'app ready' → одна подписка
+        window.__qdl_mirror_started = true;
+        if (!mirrorReady()) return;
+
+        var local = Lampa.Storage.get('file_view', {}) || {};
+        var meta = Lampa.Storage.get('qdl_tl_meta', {}) || {};
+        var r = mirrorMerge(local, mirrorRead(), meta, Date.now());
+
+        // Применять слияние локально ТОЛЬКО вместе с Timeline.read() в том же тике: иначе in-memory
+        // кэш Timeline при следующем update() перезапишет file_view своим старым снимком (клоббер).
+        // Без read (upstream убрал API) — деградация: мету не двигаем, принятие отложится до его появления.
+        var canApply = !!(Lampa.Timeline && typeof Lampa.Timeline.read === 'function');
+        if (r.changedLocal && canApply) {
+            Lampa.Storage.set('file_view', r.local);
+            Lampa.Timeline.read();
+        }
+        Lampa.Storage.set('qdl_tl_meta', canApply ? r.meta : meta);
+        mirrorCache = r.mirror;
+        if (r.changedMirror) mirrorWrite(mirrorCache);
+
+        try {
+            if (Lampa.Timeline && Lampa.Timeline.listener && typeof Lampa.Timeline.listener.follow === 'function')
+                Lampa.Timeline.listener.follow('update', onTimelineUpdate);
+        } catch (e) {}
+    }
+
     // ТВ (нативный плеер) тянет оригинал (EAC3 ок), всё остальное (десктоп/мобайл-браузер) — HLS (звук→AAC).
     // ВАЖНО: Platform.is('browser') слишком узок (на Linux-десктопе platform='' → false). Берём инверсию tv().
     function isBrowser() {
@@ -515,16 +694,19 @@
         }, function () { cb(null); });
     }
 
-    function rawPlay(hash, index, title, audio, fileName) {
+    // f (объект файла с сервера) опционален: с ним ключ таймлайна — стабильный tl (переживает re-grab
+    // и замену донор→основная), без него — прежний легаси-ключ hash:имя (pickTimeline для {name}
+    // даёт бинарно тот же ключ, что старый epTimelineHash)
+    function rawPlay(hash, index, title, audio, fileName, f) {
         var item = { title: title || 'Загрузка', url: streamUrl(hash, index, audio) };
-        try { item.timeline = Lampa.Timeline.view(epTimelineHash(hash, fileName || title)); } catch (e) {}
+        try { item.timeline = pickTimeline(hash, f || { name: fileName || title }); } catch (e) {}
         Lampa.Player.play(item);
         Lampa.Player.playlist([item]);
     }
 
     // ───────── Воспроизведение локального файла (оффлайн) ─────────
-    function playLocal(hash, index, title, fileName) {
-        ensureAudio(hash, index, function (audio) { rawPlay(hash, index, title, audio, fileName); });
+    function playLocal(hash, index, title, fileName, f) {
+        ensureAudio(hash, index, function (audio) { rawPlay(hash, index, title, audio, fileName, f); });
     }
 
     // сыграть конкретную серию с полным плейлистом (элемент плейлиста — тот же инстанс timeline)
@@ -541,7 +723,7 @@
         fetchEpisodes(hash, function (files) {
             var vids = mergedVideoFiles(files);
             if (!vids.length) { Lampa.Noty.show('Видеофайлы не найдены'); return; }
-            if (vids.length === 1) { playLocal(srcHash(vids[0], hash), vids[0].index, baseName(vids[0].name), vids[0].name); return; }
+            if (vids.length === 1) { playLocal(srcHash(vids[0], hash), vids[0].index, baseName(vids[0].name), vids[0].name, vids[0]); return; }
 
             ensureAudio(srcHash(vids[0], hash), vids[0].index, function (audio) {   // озвучку выбираем один раз на сериал
                 var playlist = buildPlaylist(hash, vids, audio, srcHash(vids[0], hash));
@@ -570,7 +752,7 @@
         fetchEpisodes(hash, function (files) {
             var vids = mergedVideoFiles(files);
             if (vids.length > 1) chooseEpisode(hash, name);
-            else playLocal(vids.length ? srcHash(vids[0], hash) : hash, vids.length ? vids[0].index : -1, name, vids.length ? vids[0].name : null);
+            else playLocal(vids.length ? srcHash(vids[0], hash) : hash, vids.length ? vids[0].index : -1, name, vids.length ? vids[0].name : null, vids.length ? vids[0] : null);
         }, function () { playLocal(hash, -1, name); });
     }
 
@@ -2359,6 +2541,7 @@
         startHeaderNotiWatcher();
         startPlayerFsWatcher();
         pollNotifications();
+        try { initTimelineMirror(); } catch (e) {}       // зеркало прогресса устройства (только нативные клиенты)
         try { whenDmca(function () {}); } catch (e) {}   // прогрев DMCA-списка до первого открытия карточки
         try { setInterval(pollNotifications, 90000); } catch (e) {}
     }
