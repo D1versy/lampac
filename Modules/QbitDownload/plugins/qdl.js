@@ -1639,29 +1639,52 @@
     }
 
     var iosLiveVideo = null;
+    var iosLiveTapAt = 0;
 
-    function iosLiveStop() {
-        var v = iosLiveVideo;
-        iosLiveVideo = null;
+    // Снести КОНКРЕТНУЮ попытку (её <video> + оверлей). Чужой текущий элемент не трогаем:
+    // хвост убитой попытки (reject её play(), поздний watchdog) раньше сносил видео преемника —
+    // отсюда и был баг «двойной тап открывает VLC».
+    function iosLiveDrop(v) {
         if (!v) return;
+        if (iosLiveVideo === v) iosLiveVideo = null;
         try { v.pause(); } catch (e) {}
         try { v.removeAttribute('src'); v.load(); } catch (e) {}   // канонический release потока в WebKit
-        try { if (v.parentNode) v.parentNode.removeChild(v); } catch (e) {}
+        var w = v.__qdlWrap || v;
+        try { if (w.parentNode) w.parentNode.removeChild(w); } catch (e) {}
     }
+
+    function iosLiveStop() { iosLiveDrop(iosLiveVideo); }
 
     // Вызывать ТОЛЬКО синхронно из прямого click. true = взялись (hover:enter этого тапа подавить).
     function liveWatchPlayIOS(cam) {
         if (!iosLiveNative()) return false;
-        iosLiveStop();                          // повторный тап убивает предыдущую сессию
+        if (Date.now() - iosLiveTapAt < 800) return true;   // двойной тап = ОДНА попытка (второй клик молча гасим)
+        iosLiveTapAt = Date.now();
+        iosLiveStop();
         var my = ++liveDayToken;                // pause/stop экрана (liveDayCancel) глушит фолбек и тост
         var started = false, settled = false;
 
+        // ВИДИМЫЙ оверлей на весь экран: WebKit авто-фуллскринит только «заметное» видео —
+        // невидимый микро-элемент срабатывал через раз (первый тап ок, после Done — уже нет).
+        // Заодно мгновенная обратная связь: экран сразу чёрный, не «ничего не происходит».
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;background:#000;z-index:9999';
+
         var v = document.createElement('video');
-        v.controls = true;
-        // НЕ display:none (WebKit троттлит невидимое медиа) — микро-элемент в углу
-        v.style.cssText = 'position:fixed;left:0;bottom:0;width:2px;height:2px;opacity:.01;pointer-events:none';
+        v.controls = true;                      // БЕЗ playsinline → play() уводит в нативный фуллскрин iOS
+        v.style.cssText = 'width:100%;height:100%;object-fit:contain';
+        v.__qdlWrap = wrap;
         v.src = API + '/qdl/live/watch/hls/' + encodeURIComponent(cam.id) + '/index.m3u8';
-        document.body.appendChild(v);
+        wrap.appendChild(v);
+
+        // ✕ — на случай, если фуллскрин так и не поднялся, а эфир играет инлайн в оверлее
+        var x = document.createElement('div');
+        x.textContent = '✕';
+        x.style.cssText = 'position:absolute;right:.6em;top:.6em;z-index:2;width:2.2em;height:2.2em;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);color:#fff;border-radius:50%;font-size:1.6em';
+        x.addEventListener('click', function (e) { e.stopPropagation(); close(); iosLiveDrop(v); });
+        wrap.appendChild(x);
+
+        document.body.appendChild(wrap);
         iosLiveVideo = v;
 
         var toast = setTimeout(function () { if (!settled && my === liveDayToken) Lampa.Noty.show('Включаю эфир…'); }, 700);
@@ -1671,24 +1694,28 @@
         function fail() {
             if (settled) return;
             var alive = (my === liveDayToken);
-            close(); iosLiveStop();
+            close(); iosLiveDrop(v);            // только СВОЙ элемент — см. коммент у iosLiveDrop
             if (alive) liveWatchPlay(cam);      // фолбек: старый прогрев /start → VLC-мост (жест не нужен)
         }
 
         v.addEventListener('playing', function () { started = true; v.__qdlStarted = true; if (!settled) close(); });
+        // страховка: авто-презентация не случилась → просим нативный фуллскрин явно
+        v.addEventListener('loadedmetadata', function () {
+            try { if (!v.webkitDisplayingFullscreen && v.webkitEnterFullscreen) v.webkitEnterFullscreen(); } catch (e) {}
+        });
         v.addEventListener('error', function () {
             if (!started) { fail(); return; }
-            iosLiveStop(); Lampa.Noty.show('Эфир прервался');
+            iosLiveDrop(v); Lampa.Noty.show('Эфир прервался');
         });
         v.addEventListener('webkitendfullscreen', function () {
             // кнопка PiP тоже закрывает фуллскрин — элемент не убивать, пока он в PiP
             setTimeout(function () {
                 try { if (v.webkitPresentationMode === 'picture-in-picture') return; } catch (e) {}
-                if (v === iosLiveVideo) iosLiveStop();
+                iosLiveDrop(v);
             }, 0);
         });
         v.addEventListener('webkitpresentationmodechanged', function () {
-            try { if (started && v.webkitPresentationMode === 'inline' && v === iosLiveVideo) iosLiveStop(); } catch (e) {}
+            try { if (started && v.webkitPresentationMode === 'inline' && v === iosLiveVideo) iosLiveDrop(v); } catch (e) {}
         });
 
         try {
