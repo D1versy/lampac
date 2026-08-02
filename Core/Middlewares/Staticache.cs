@@ -265,10 +265,16 @@ public class Staticache
             };
 
             if (_r.contentLength > 0)
-            {
                 httpContext.Response.ContentLength = _r.contentLength;
+
+            // immutable-эндпоинты (versioned-URL ?v=) кэшируются у клиента навсегда независимо от
+            // contentLength: js/html пишутся chunked (без длины), и общий "contentLength > 0"-путь
+            // их не покрывает — из-за этого app.min.js исторически ходил вообще без Cache-Control.
+            // Гейт по наличию ?v: прямой запрос БЕЗ версии вечно кэшировать нельзя.
+            if (staticache.immutable && _r.statusCode == 200 && httpContext.Request.Query.ContainsKey("v"))
+                httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=31536000,immutable";
+            else if (_r.contentLength > 0)
                 httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=86400,immutable";
-            }
             else if (ext is "json" or "html")
                 WriteNoCache(httpContext);
 

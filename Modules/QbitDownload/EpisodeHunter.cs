@@ -1015,6 +1015,7 @@ public partial class QbitController
                     {
                         if (a.fileIndex >= 0) await QbitFilePrio(c, a.donorHash, new[] { a.fileIndex }, 0);
                         await DeleteDonorFile(c, a.donorHash, a.fileIndex, donorFiles.GetValueOrDefault(a.donorHash), mainPaths);
+                        DropResolveCache(a.donorHash);   // файл донора удалён с диска — путь из кеша резолва больше не валиден
                         a.ep["status"] = "replaced";
                         a.ep["replacedAt"] = DateTime.UtcNow.ToString("o");
                         changed = true;
@@ -1023,6 +1024,7 @@ public partial class QbitController
                     else if (a.kind == "delete-donor" || a.kind == "dead-donor")
                     {
                         await QbitDeleteDonorSafe(c, a.donorHash, mainHash);   // с файлами ТОЛЬКО если категория донорская и папка не общая с основной
+                        DropResolveCache(a.donorHash);
                         if (a.kind == "dead-donor")
                             BlacklistAdd(m, a.donorHash, a.donor.Value<string>("link"), "dead", ModInit.conf.donorBlacklistTtlDays);
                         donors.Remove(a.donor);
@@ -1051,6 +1053,15 @@ public partial class QbitController
     {
         try
         {
+            // FAIL-SAFE миграции хранилища: watch.json ФИЗИЧЕСКИ отсутствует (пустой/несмигрированный
+            // том /qdl-data), а в qBit живут доноры → это НЕ сироты, это потерянное состояние.
+            // Уборка удалила бы всех доноров С ФАЙЛАМИ (ср. инцидент «Укрытие», claude/06 §AK).
+            if (!System.IO.File.Exists(WatchFile))
+            {
+                Console.WriteLine("[QbitDownload] hunt: watch.json отсутствует (пустой /qdl-data? миграция тома?) — стартовая уборка доноров ПРОПУЩЕНА");
+                return;
+            }
+
             JArray list; lock (_watchLock) { list = LoadWatch(); }
             var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var mainHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1113,7 +1124,10 @@ public partial class QbitController
             var m = list.OfType<JObject>().FirstOrDefault(x => mainHash.Equals(x.Value<string>("hash"), StringComparison.OrdinalIgnoreCase));
             if (m?["donors"] is not JArray donors) return;
             foreach (var d in donors.OfType<JObject>())
+            {
                 await QbitDeleteDonorSafe(c, d.Value<string>("hash"), mainHash, mainContentPath);   // с файлами ТОЛЬКО если категория донорская и папка не общая
+                DropResolveCache(d.Value<string>("hash"));
+            }
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] delete donors: " + ex.Message); }
     }

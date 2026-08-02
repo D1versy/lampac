@@ -72,6 +72,15 @@ public class ModuleConf : ModuleBaseConf
     // Возврат зрителя = штатный VOD-рестарт с -ss (~3-5 с). 0 = не глушить (старое поведение).
     public int hlsIdleKillSec { get; set; } = 180;
 
+    // ── Прогрев кеша (/qdl/warmup): при открытии карточки скачанного клиент просит сервер заранее
+    //    прочитать голову+хвост файла — байты оседают в page cache WSL-VM (9p cache=loose), и старт
+    //    плейбека идёт из RAM, а не с холодного HDD через 9p. Заодно греется ffprobe-кеш дорожек. ──
+    public bool warmupEnabled { get; set; } = true;
+    public int warmupHeadMb { get; set; } = 64;    // голова файла (первые секунды видео + заголовки контейнера)
+    public int warmupTailMb { get; set; } = 8;     // хвост (moov у mp4, Cues у mkv — плеер читает их до старта)
+    public int warmupTtlMin { get; set; } = 15;    // дедуп «уже прогрет» по пути файла
+    public int warmupPaceMs { get; set; } = 0;     // пауза между 1-МБ чанками (мс); >0 — щадить HDD при конкуренции
+
     // Слежение за сериалами: как часто проверять обновление раздач (часы).
     public int watchIntervalHours { get; set; } = 6;
 

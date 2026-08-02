@@ -25,21 +25,79 @@ public partial class QbitController : BaseController
     static readonly Regex _hashRx = new Regex("^([0-9a-fA-F]{40}|[0-9A-Za-z]{32})$", RegexOptions.Compiled);
     static bool ValidHash(string h) => !string.IsNullOrEmpty(h) && _hashRx.IsMatch(h);
 
-    #region qBittorrent client (cookie auth, проверяем логин)
+    #region qBittorrent client (cookie auth, разделяемая SID-сессия)
+    // Раньше каждый вызов Qbit() создавал свой HttpClient и делал полный POST /auth/login — на КАЖДЫЙ
+    // qdl-запрос, включая каждый Range-seek плеера. Теперь handler-стек (пул TCP-соединений + кука QBT_SID)
+    // общий и живёт между запросами; Qbit() отдаёт лёгкую обёртку, которую вызывающие по-прежнему
+    // диспозят через using (диспозится только обёртка: disposeHandler=false).
+    static HttpClientHandler _qbitPool;                 // общий CookieContainer (QBT_SID) + пул соединений
+    static QbitAuthHandler _qbitAuth;                   // 401/403 → re-login → повтор запроса (ровно 1 раз)
+    static string _qbitGen;                             // host|user|pass — пересоздание стека при смене init.conf
+    static DateTime _qbitSidAt = DateTime.MinValue;     // когда логинились; session timeout qBit по умолчанию 60 мин
+    static readonly SemaphoreSlim _qbitGate = new SemaphoreSlim(1, 1);
+    static readonly TimeSpan QbitSidTtl = TimeSpan.FromMinutes(30);
+
     static async Task<HttpClient> Qbit()
     {
-        var handler = new HttpClientHandler
+        string gen = ModInit.conf.qbitHost + "|" + ModInit.conf.qbitUser + "|" + ModInit.conf.qbitPass;
+        if (_qbitAuth == null || _qbitGen != gen || DateTime.UtcNow - _qbitSidAt > QbitSidTtl)
         {
-            CookieContainer = new CookieContainer(),
-            UseCookies = true,
-            AllowAutoRedirect = false
-        };
-        var c = new HttpClient(handler)
+            await _qbitGate.WaitAsync();
+            try
+            {
+                if (_qbitAuth == null || _qbitGen != gen)
+                {
+                    // старый стек не диспозим: у параллельного запроса он может быть в полёте; отдаём GC (смена конфига редка)
+                    _qbitPool = new HttpClientHandler { CookieContainer = new CookieContainer(), UseCookies = true, AllowAutoRedirect = false };
+                    _qbitAuth = new QbitAuthHandler(_qbitPool);
+                    _qbitGen = gen;
+                    _qbitSidAt = DateTime.MinValue;
+                }
+                if (DateTime.UtcNow - _qbitSidAt > QbitSidTtl)
+                    await QbitLogin(_qbitPool);
+            }
+            finally { _qbitGate.Release(); }
+        }
+
+        var c = new HttpClient(_qbitAuth, disposeHandler: false)
         {
             BaseAddress = new Uri(ModInit.conf.qbitHost),
             Timeout = TimeSpan.FromSeconds(ModInit.conf.timeoutSeconds)
         };
         // qBittorrent CSRF: Referer должен совпадать с хостом WebUI
+        c.DefaultRequestHeaders.Referrer = new Uri(ModInit.conf.qbitHost);
+        return c;
+    }
+
+    // Полный логин; зовётся только под _qbitGate. Кука пишется в общий CookieContainer стека.
+    // Бэкофф: qBit лежит → логины из очереди на гейт падали бы ПОСЛЕДОВАТЕЛЬНО по timeoutSeconds
+    // каждый (каскад вместо параллельного fail-fast, как было раньше). После неудачи ~8 с
+    // отвечаем отказом сразу.
+    static DateTime _qbitLoginFailAt = DateTime.MinValue;
+    static readonly TimeSpan QbitLoginBackoff = TimeSpan.FromSeconds(8);
+
+    static async Task QbitLogin(HttpClientHandler pool)
+    {
+        if (DateTime.UtcNow - _qbitLoginFailAt < QbitLoginBackoff)
+            throw new Exception("qbit auth failed (backoff)");
+        try
+        {
+            await QbitLoginCore(pool);
+        }
+        catch
+        {
+            _qbitLoginFailAt = DateTime.UtcNow;
+            throw;
+        }
+    }
+
+    static async Task QbitLoginCore(HttpClientHandler pool)
+    {
+        using var c = new HttpClient(pool, disposeHandler: false)
+        {
+            BaseAddress = new Uri(ModInit.conf.qbitHost),
+            Timeout = TimeSpan.FromSeconds(ModInit.conf.timeoutSeconds)
+        };
         c.DefaultRequestHeaders.Referrer = new Uri(ModInit.conf.qbitHost);
 
         var form = new FormUrlEncodedContent(new[]
@@ -53,15 +111,48 @@ public partial class QbitController : BaseController
         // Успех = 2xx + выставлена сессионная кука. qBit v5 отдаёт 204 + QBT_SID (тело пустое),
         // старые версии — 200 + "Ok.". Неверные креды: 403 (v5) или 200 + "Fails." без куки.
         bool hasSid = false;
-        foreach (Cookie ck in handler.CookieContainer.GetCookies(new Uri(ModInit.conf.qbitHost)))
+        foreach (Cookie ck in pool.CookieContainer.GetCookies(new Uri(ModInit.conf.qbitHost)))
             if (ck.Name.StartsWith("QBT_SID", StringComparison.OrdinalIgnoreCase)) { hasSid = true; break; }
 
         if (!resp.IsSuccessStatusCode || (!hasSid && login != "Ok."))
-        {
-            c.Dispose();
             throw new Exception("qbit auth failed");
+
+        _qbitSidAt = DateTime.UtcNow;
+    }
+
+    // Прозрачный re-login: SID протух (рестарт qBit, смена session timeout) → 401/403 → логин → повтор 1 раз.
+    sealed class QbitAuthHandler : DelegatingHandler
+    {
+        public QbitAuthHandler(HttpMessageHandler inner) : base(inner) { }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage req, CancellationToken ct)
+        {
+            if (req.Content != null)
+                await req.Content.LoadIntoBufferAsync();   // иначе повтор не сможет переслать POST-форму
+
+            var resp = await base.SendAsync(req, ct);
+            if (resp.StatusCode != HttpStatusCode.Unauthorized && resp.StatusCode != HttpStatusCode.Forbidden)
+                return resp;
+            if ((req.RequestUri?.AbsolutePath ?? "").EndsWith("/auth/login"))
+                return resp;   // сам логин не ретраим (иначе рекурсия)
+            resp.Dispose();
+
+            await _qbitGate.WaitAsync(ct);
+            try
+            {
+                // параллельный запрос мог уже перелогиниться, пока мы ждали гейт — не логинимся дважды
+                if (DateTime.UtcNow - _qbitSidAt > TimeSpan.FromSeconds(5))
+                {
+                    _qbitSidAt = DateTime.MinValue;
+                    await QbitLogin(_qbitPool);
+                }
+            }
+            finally { _qbitGate.Release(); }
+
+            var retry = new HttpRequestMessage(req.Method, req.RequestUri) { Content = req.Content };
+            foreach (var h in req.Headers) retry.Headers.TryAddWithoutValidation(h.Key, h.Value);
+            return await base.SendAsync(retry, ct);
         }
-        return c;
     }
     #endregion
 
@@ -73,9 +164,13 @@ public partial class QbitController : BaseController
         string js = FileCache.ReadAllText($"{ModInit.modpath}/plugins/qdl.js", "qdl.js")
             .Replace("{localhost}", host);
 
-        // qdl.js is loaded via a versioned URL (/qdl.js?v=...); tell compliant clients to revalidate
-        // so a redeployed plugin is picked up without a manual cache clear.
-        SetHeadersNoCache();
+        // /qdl.js?v={cacheVersion}: ?v меняется каждым рестартом, а задеплоить новый qdl.js без
+        // рестарта нельзя (код в образе) → versioned-URL кэшируем навсегда, 163 КБ не перекачиваются
+        // при каждом запуске. Легаси-запрос без ?v — прежний no-cache.
+        if (HttpContext.Request.Query.ContainsKey("v"))
+            HttpContext.Response.Headers["Cache-Control"] = "public,max-age=31536000,immutable";
+        else
+            SetHeadersNoCache();
         return ContentTo(js, "application/javascript; charset=utf-8");
     }
     #endregion
@@ -641,8 +736,7 @@ public partial class QbitController : BaseController
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            using var c = await Qbit();
-            string full = await ResolveFile(c, hash, index);
+            string full = await ResolveFileCached(hash, index);   // на хите — ноль обращений к qBit (важно: плеер шлёт Range-seek'и очередями)
             if (full == null) return NotFound();
             return PhysicalFile(full, MimeType(full), enableRangeProcessing: true);
         }
@@ -650,6 +744,43 @@ public partial class QbitController : BaseController
         {
             Console.WriteLine("[QbitDownload] stream: " + ex);
             return Json(new { error = "internal error" });
+        }
+    }
+
+    // ── Кеш резолва hash+index → путь на диске ──
+    // Каждый холодный резолв = 2 GET к qBit API; без кеша это платил каждый /qdl/stream (включая
+    // каждый Range-seek), /qdl/audio и каждый HLS-рестарт. TTL короткий + File.Exists-гард на хите;
+    // негативные результаты не кешируем (файл мог ещё докачиваться и вот-вот появится).
+    static readonly ConcurrentDictionary<string, (string path, DateTime at)> _resolveCache = new();
+    static readonly TimeSpan ResolveTtl = TimeSpan.FromMinutes(5);
+
+    static async Task<string> ResolveFileCached(string hash, int index, HttpClient c = null)
+    {
+        string key = hash.ToLowerInvariant() + ":" + index;
+        if (_resolveCache.TryGetValue(key, out var e))
+        {
+            if (DateTime.UtcNow - e.at < ResolveTtl && System.IO.File.Exists(e.path)) return e.path;
+            _resolveCache.TryRemove(key, out _);
+        }
+
+        string p;
+        if (c != null) p = await ResolveFile(c, hash, index);
+        else { using var qc = await Qbit(); p = await ResolveFile(qc, hash, index); }
+
+        if (p != null) _resolveCache[key] = (p, DateTime.UtcNow);
+        return p;
+    }
+
+    // Маппинг hash+index→путь изменился (удаление, оверлей-mp4, re-grab/SWITCH, замещение донора) —
+    // снять все записи хеша; кеш ffprobe-дорожек по снятым путям тоже.
+    static void DropResolveCache(string hash)
+    {
+        string pre = (hash ?? "").ToLowerInvariant() + ":";
+        foreach (var kv in _resolveCache)
+        {
+            if (!kv.Key.StartsWith(pre, StringComparison.Ordinal)) continue;
+            if (_resolveCache.TryRemove(kv.Key, out var e) && e.path != null)
+                _probeCache.TryRemove(e.path, out _);
         }
     }
 
@@ -768,6 +899,7 @@ public partial class QbitController : BaseController
                 if (deleteFiles) DeleteLocalFiles(loc);
                 try { using var c2 = await Qbit(); await DeleteDonorsOf(c2, hash); } catch { }   // хвосты охоты, если были
                 DropHlsCache(hash);
+                DropResolveCache(hash);
                 PurgeCache(hash);   // маркер local/<hash>.json удалит тоже
                 return Json(new { success = true });
             }
@@ -787,6 +919,7 @@ public partial class QbitController : BaseController
                 if (loc != null && deleteFiles) DeleteLocalFiles(loc);   // оверлей: mp4-копии удаляем вместе с торрентом
                 await DeleteDonorsOf(c, hash, mainContentPath);   // каскад: раздачи-доноры этой загрузки (охота) — с файлами
                 DropHlsCache(hash);
+                DropResolveCache(hash);
                 PurgeCache(hash);
             }
             return Json(new { success = r.IsSuccessStatusCode });
@@ -861,6 +994,9 @@ public partial class QbitController : BaseController
         if (!ValidHash(hash)) return BadRequest();
         string p = PosterPath(hash);
         if (!System.IO.File.Exists(p)) return NotFound();
+        // сутки клиентского кэша: грид на N карточек не делает N ревалидаций при каждом входе;
+        // смена постера видна инициатору сразу (qdl.js добавляет &t= после heal/save)
+        HttpContext.Response.Headers["Cache-Control"] = "public,max-age=86400";
         return PhysicalFile(p, "image/jpeg");
     }
     #endregion
@@ -1082,7 +1218,7 @@ public partial class QbitController : BaseController
                 var lopts = new JArray();
                 var lfA = PickLocal(LocalFiles(locA), index);
                 if (lfA != null)
-                    foreach (var a in ProbeAudio(lfA.path)) lopts.Add(a);
+                    foreach (var a in ProbeAudioCached(lfA.path)) lopts.Add(a);
                 return ContentTo(lopts.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
             }
 
@@ -1111,9 +1247,9 @@ public partial class QbitController : BaseController
 
             var opts = new JArray();
 
-            // встроенные аудиодорожки (ffprobe видео)
-            string vpath = await ResolveFile(c, hash, vindex);
-            foreach (var a in ProbeAudio(vpath)) opts.Add(a);
+            // встроенные аудиодорожки (ffprobe видео; и резолв, и ffprobe — из кешей)
+            string vpath = await ResolveFileCached(hash, vindex, c);
+            foreach (var a in ProbeAudioCached(vpath)) opts.Add(a);
 
             // внешние озвучки — устойчивый матчер (студия + серия, много фолбэков; claude/06 §T)
             foreach (var d in DubsForVideo(files, vf))
@@ -1122,6 +1258,27 @@ public partial class QbitController : BaseController
             return ContentTo(opts.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] audio: " + ex); return ContentTo("[]", "application/json; charset=utf-8"); }
+    }
+
+    // ── Кеш ffprobe-дорожек по пути файла ──
+    // ProbeAudio = запуск процесса ffprobe (до 15 с) на критическом пути КАЖДОГО старта плейбека.
+    // Файл по данному пути иммутабелен, пока существует → длинный TTL + File.Exists-гард.
+    // Храним строкой и парсим на выдаче: JToken одно-родительский, отдавать один и тот же
+    // JObject в разные JArray-ответы нельзя. Пустой результат не кешируем (ffprobe мог
+    // споткнуться о докачивающийся файл — следующий запрос перепроверит).
+    static readonly ConcurrentDictionary<string, (string json, DateTime at)> _probeCache = new();
+    static readonly TimeSpan ProbeTtl = TimeSpan.FromHours(12);
+
+    static List<JObject> ProbeAudioCached(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return new List<JObject>();
+        if (_probeCache.TryGetValue(path, out var e) && DateTime.UtcNow - e.at < ProbeTtl && System.IO.File.Exists(path))
+            return JArray.Parse(e.json).OfType<JObject>().ToList();
+
+        var res = ProbeAudio(path);
+        if (res.Count > 0)
+            _probeCache[path] = (new JArray(res).ToString(Newtonsoft.Json.Formatting.None), DateTime.UtcNow);
+        return res;
     }
 
     static List<JObject> ProbeAudio(string path)
@@ -1413,22 +1570,21 @@ public partial class QbitController : BaseController
     // Резолв входов ffmpeg: видеофайл + внешняя озвучка + маппинг аудио (общий для плейлиста и seek-рестарта)
     static async Task<(string src, string extAudio, string audioMap)> ResolveHlsInputs(string hash, int index, string audio)
     {
-        string src, extAudio = null, audioMap = "0:a:0?";
-        using (var c = await Qbit())
+        string extAudio = null, audioMap = "0:a:0?";
+        string src = await ResolveFileCached(hash, index);   // обычный HLS-рестарт/seek — без обращений к qBit
+        if (src == null) return (null, null, null);
+
+        if (audio.StartsWith("e")) audioMap = "0:a:" + audio.Substring(1);       // встроенная дорожка N
+        else if (audio.StartsWith("d"))                                            // внешняя озвучка по СТУДИИ — файл для ЭТОЙ серии
         {
-            src = await ResolveFile(c, hash, index);
-            if (src == null) return (null, null, null);
-            if (audio.StartsWith("e")) audioMap = "0:a:" + audio.Substring(1);       // встроенная дорожка N
-            else if (audio.StartsWith("d"))                                            // внешняя озвучка по СТУДИИ — файл для ЭТОЙ серии
-            {
-                extAudio = await ResolveDubFile(c, hash, index, audio);
-                if (!string.IsNullOrEmpty(extAudio)) audioMap = "1:a:0";
-            }
-            else if (audio.StartsWith("f"))                                            // back-compat: внешний файл по индексу
-            {
-                extAudio = await ResolveFile(c, hash, int.Parse(audio.Substring(1)));
-                if (!string.IsNullOrEmpty(extAudio)) audioMap = "1:a:0";
-            }
+            using var c = await Qbit();
+            extAudio = await ResolveDubFile(c, hash, index, audio);
+            if (!string.IsNullOrEmpty(extAudio)) audioMap = "1:a:0";
+        }
+        else if (audio.StartsWith("f"))                                            // back-compat: внешний файл по индексу
+        {
+            extAudio = await ResolveFileCached(hash, int.Parse(audio.Substring(1)));
+            if (!string.IsNullOrEmpty(extAudio)) audioMap = "1:a:0";
         }
         return (src, extAudio, audioMap);
     }
@@ -2311,8 +2467,10 @@ public partial class QbitController : BaseController
                 catch { }
             }
 
-            // HLS-кэш нарезан из СТАРЫХ (HEVC) файлов — сбросить, иначе браузер продолжит получать их сегменты
+            // HLS-кэш нарезан из СТАРЫХ (HEVC) файлов — сбросить, иначе браузер продолжит получать их сегменты.
+            // Кеш резолва тоже: local-маркер записан, пути подменяются на mp4-копии.
             DropHlsCache(it.hash);
+            DropResolveCache(it.hash);
 
             job.progress = 1.0;
             job.state = "done";
@@ -2630,6 +2788,8 @@ public partial class QbitController : BaseController
 
     static void MigrateCache(string oldH, string newH)
     {
+        DropResolveCache(oldH);   // re-grab/SWITCH: старый hash больше не резолвится, новый начнёт с чистого листа
+        DropResolveCache(newH);
         void mv(string a, string b) { try { if (System.IO.File.Exists(a)) { Directory.CreateDirectory(Path.GetDirectoryName(b)); System.IO.File.Copy(a, b, true); System.IO.File.Delete(a); } } catch { } }
         mv(MetaPath(oldH), MetaPath(newH));
         mv(PosterPath(oldH), PosterPath(newH));

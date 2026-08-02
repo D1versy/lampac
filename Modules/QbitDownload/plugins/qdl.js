@@ -380,12 +380,62 @@
     // серия может лежать в раздаче-доноре (охота) — стрим/аудио строим от её hash
     function srcHash(f, hash) { return (f && f.hash) || hash; }
 
-    // объединённый плейлист сериала; фолбэк на /qdl/files (старый сервер / ошибка)
+    // объединённый плейлист сериала; фолбэк на /qdl/files (старый сервер / ошибка).
+    // Мемоизация: путь «карточка → Смотреть» дёргал /qdl/episodes до 3 раз подряд
+    // (addContinueButton → watchByHash → chooseEpisode). TTL короткий: докачка/охота меняют
+    // список. Параллельные запросы одного hash коалесцируются в один сетевой вызов.
+    var _epCache = {};    // hash -> {t, files}
+    var _epPending = {};  // hash -> [{cb, err}]
+    var EP_TTL = 45000;
+    function dropEpCache(hash) { if (hash) delete _epCache[hash]; else _epCache = {}; }
+
     function fetchEpisodes(hash, cb, err) {
-        req(API + '/qdl/episodes?hash=' + hash, function (files) {
-            if (files && files.length !== undefined) cb(files);
-            else req(API + '/qdl/files?hash=' + hash, cb, err);
-        }, function () { req(API + '/qdl/files?hash=' + hash, cb, err); });
+        var c = _epCache[hash];
+        if (c && Date.now() - c.t < EP_TTL) { try { cb(c.files); } catch (e) {} return; }   // cb в try: на хите он зовётся синхронно
+        if (_epPending[hash]) { _epPending[hash].push({ cb: cb, err: err }); return; }
+        _epPending[hash] = [{ cb: cb, err: err }];
+        var done = function (ok, files) {
+            var subs = _epPending[hash] || []; delete _epPending[hash];
+            if (ok) _epCache[hash] = { t: Date.now(), files: files };
+            for (var i = 0; i < subs.length; i++)
+                try { if (ok) subs[i].cb(files); else if (subs[i].err) subs[i].err(); } catch (e) {}
+        };
+        try {
+            req(API + '/qdl/episodes?hash=' + hash, function (files) {
+                if (files && files.length !== undefined) done(true, files);
+                else req(API + '/qdl/files?hash=' + hash, function (f) { done(true, f); }, function () { done(false); });
+            }, function () {
+                req(API + '/qdl/files?hash=' + hash, function (f) { done(true, f); }, function () { done(false); });
+            });
+        } catch (e) { done(false); }   // синхронный throw из req не должен заклинить _epPending навсегда
+    }
+
+    // ───────── Прогрев кеша сервера (голова+хвост файла в page cache + ffprobe-кеш) ─────────
+    // fire-and-forget: голый fetch, не req (ответ не важен, Reguest и 45-с таймаут — лишние)
+    function warmup(hash, index) {
+        try { fetch(API + '/qdl/warmup?hash=' + hash + '&index=' + (index >= 0 ? index : -1)).catch(function () {}); } catch (e) {}
+    }
+
+    // прогрев при открытии карточки: серия «Продолжить» (или единственный файл / первая серия)
+    // греется, ПОКА полная карточка ждёт свои TMDB/CUB-запросы; попутно наполняет кеш fetchEpisodes,
+    // так что последующий addContinueButton сетевого вызова не делает
+    function prewarmForCard(hash) {
+        fetchEpisodes(hash, function (files) {
+            var vids = mergedVideoFiles(files);
+            if (!vids.length) return;
+            var target = vids.length === 1 ? vids[0] : (chooseContinue(vids, function (f) { return pickTimeline(hash, f); }) || vids[0]);
+            warmup(srcHash(target, hash), target.index);
+        });
+    }
+
+    // при старте серии греем следующую по плейлисту — авто-переход N→N+1 стартует из RAM.
+    // (N+2 при автопереходе не греется — хук на Lampa.Player.listener('start') оставлен как задел)
+    function warmupNext(hash, vids, current) {
+        for (var i = 0; i < vids.length; i++)
+            if (vids[i] === current || (vids[i].index === current.index && srcHash(vids[i], hash) === srcHash(current, hash))) {
+                if (vids[i + 1]) warmup(srcHash(vids[i + 1], hash), vids[i + 1].index);
+                return;
+            }
     }
     function baseName(p) { return String(p || '').split('/').pop().split('\\').pop(); }
 
@@ -716,6 +766,7 @@
             for (var i = 0; i < vids.length; i++)
                 if (vids[i] === target || (vids[i].index === target.index && srcHash(vids[i], hash) === srcHash(target, hash))) { Lampa.Player.play(playlist[i]); break; }
             Lampa.Player.playlist(playlist);
+            warmupNext(hash, vids, target);   // следующая серия — в page cache, пока смотрят эту
         });
     }
 
@@ -741,6 +792,7 @@
                     onSelect: function (a) {
                         Lampa.Player.play(playlist[a.i]);   // сам элемент плейлиста: его timeline пишет прогресс
                         Lampa.Player.playlist(playlist);
+                        warmupNext(hash, vids, vids[a.i]);   // следующая серия — в page cache, пока смотрят эту
                     },
                     onBack: function () { Lampa.Controller.toggle('content'); }
                 });
@@ -776,6 +828,7 @@
 
     // ───────── Открытие загрузки: НАСТОЯЩАЯ полная карточка (вся инфа), но в режиме «одна кнопка» ─────────
     function openDownload(item) {
+        prewarmForCard(item.hash);   // прогрев стартует сразу, не дожидаясь TMDB/CUB-запросов полной карточки
         var m = item.meta || {};
         if (m.id) {
             Lampa.Activity.push({
@@ -1089,7 +1142,10 @@
                 onSelect: function (a) {
                     Lampa.Controller.toggle('content');
                     req(API + '/qdl/watch/switch?hash=' + n.hash + '&accept=' + (a.ok ? 1 : 0), function (r) {
-                        if (a.ok) Lampa.Noty.show(r && r.success ? '✓ Переключено — сезон перекачивается' : 'Не вышло: ' + ((r && r.error) || 'ошибка'));
+                        if (a.ok) {
+                            dropEpCache();   // раздача заменяется целиком (новый hash) — сбросить весь кеш серий
+                            Lampa.Noty.show(r && r.success ? '✓ Переключено — сезон перекачивается' : 'Не вышло: ' + ((r && r.error) || 'ошибка'));
+                        }
                         else Lampa.Noty.show('Оставили текущую раздачу');
                     }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
                 },
@@ -1379,6 +1435,7 @@
         var run = function (mode) {
             req(API + '/qdl/transcode?hash=' + t.hash + (mode ? '&mode=' + mode : ''), function (r) {
                 if (!r || !r.success) { Lampa.Noty.show('Транскодирование: ' + ((r && r.error) || 'ошибка')); return; }
+                dropEpCache(t.hash);   // имена файлов сменятся (mkv→mp4) — кеш списка серий устареет
                 if (r.queued > 1) Lampa.Noty.show('🎬 В очереди (' + r.queued + ') — сообщу о прогрессе');
                 else if (r.files > 1) Lampa.Noty.show('🎬 Транскодирование запущено (' + r.files + ' серий) — сообщу о прогрессе');
                 else Lampa.Noty.show('🎬 Транскодирование запущено — это займёт заметное время, сообщу о прогрессе');
@@ -1459,6 +1516,7 @@
                             if (!a.ok) { Lampa.Controller.toggle('content'); return; }
                             req(API + '/qdl/delete?hash=' + t.hash + '&deleteFiles=true', function () {
                                 dropAudioPref(t.hash);   // подчистить запомненную озвучку (localStorage)
+                                dropEpCache(t.hash);     // и кеш списка серий
                                 Lampa.Noty.show('Удалено');
                                 Lampa.Activity.replace();
                             });
@@ -1574,8 +1632,14 @@
     function addContinueButton(render, cont, hash, name, gateItem) {
         fetchEpisodes(hash, function (files) {
             var vids = mergedVideoFiles(files);
-            if (vids.length < 2) return;
+            if (!vids.length) return;
+            // прогрев и здесь: покрывает восстановленную активность и «Смотреть (загружено)»
+            // на обычной карточке — пути, где openDownload/prewarmForCard не звались.
+            // Дубль с prewarmForCard безвреден: сервер дедупит и очередь, и «уже прогрет».
+            if (vids.length === 1) { warmup(srcHash(vids[0], hash), vids[0].index); return; }   // фильм/один файл
             var target = chooseContinue(vids, function (f) { return pickTimeline(hash, f); });
+            var warm = target || vids[0];
+            warmup(srcHash(warm, hash), warm.index);
             if (!target || $('.qdl-continue-btn', render).length) return;
             var label = 'Продолжить · ' + epShort(target.name);
             var b = $('<div class="full-start__button selector qdl-continue-btn">' + ICON + '<span>' + esc(label) + '</span></div>');

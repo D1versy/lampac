@@ -17,6 +17,10 @@ public class StaticacheAttribute : Attribute
     /// <param name="always">
     /// Кеширует на уровне системы даже если в init отключён
     /// </param>
+    /// <param name="immutable">
+    /// Ответ отдаётся с Cache-Control: public,max-age=31536000,immutable (и на HIT, и на MISS).
+    /// ТОЛЬКО для эндпоинтов с versioned-URL (?v=...): клиент кэширует навсегда, обновление — сменой ?v.
+    /// </param>
     public StaticacheAttribute(
         int cacheMinutes = 1,
         bool manually = false,
@@ -24,7 +28,8 @@ public class StaticacheAttribute : Attribute
         bool setHeadersNoCache = false,
         bool skipUids = false,
         string[] queryKeys = null,
-        string[] ignoreQueryKeys = null)
+        string[] ignoreQueryKeys = null,
+        bool immutable = false)
     {
         if (0 >= cacheMinutes)
             cacheMinutes = 1;
@@ -36,6 +41,7 @@ public class StaticacheAttribute : Attribute
         this.skipUids = skipUids;
         this.queryKeys = queryKeys;
         this.ignoreQueryKeys = ignoreQueryKeys;
+        this.immutable = immutable;
     }
 
     public int cacheMinutes { get; }
@@ -51,4 +57,6 @@ public class StaticacheAttribute : Attribute
     public string[] queryKeys { get; set; }
 
     public string[] ignoreQueryKeys { get; set; }
+
+    public bool immutable { get; }
 }

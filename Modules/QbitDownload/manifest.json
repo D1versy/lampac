@@ -9,6 +9,7 @@
     "TorrentScoring.cs",
     "EpisodeHunter.cs",
     "Live.cs",
+    "Warmup.cs",
     "Controller.cs"
   ]
 }

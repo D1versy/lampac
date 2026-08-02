@@ -57,6 +57,12 @@ public class ApiController : BaseController
             html = html.Replace("<head>", $"<head><base href=\"/{Regex.Match(ModInit.conf.index, "^([^/]+)/").Groups[1].Value}/\" />");
             html = html.Replace("src=\"/lampainit.js\"", $"src=\"/lampainit.js?v={cacheVersion}\"");
 
+            // ?v= у app.min.js/app.css: вместо апстримового 15-минутного тика — стабильная версия
+            // (см. AppCacheVersion); в паре с immutable-заголовками LampaApp/LampaAppCss клиент
+            // держит 2-МБ бандл в кэше до деплоя. Апстрим изменил сниппет → замена просто не
+            // сработает и останется прежнее 15-минутное поведение (деградация к статус-кво).
+            html = Regex.Replace(html, @"Math\.floor\(\(new Date\(\)\)\.getTime\(\)\s*/\s*9e5\)", "'" + AppCacheVersion() + "'");
+
             return ContentTo(html, "text/html; charset=utf-8");
         }
 
@@ -136,7 +142,10 @@ public class ApiController : BaseController
 
     #region app.min.js
     [HttpGet, AllowAnonymous]
-    [Staticache(20, always: true)]
+    // immutable: URL versioned (?v= из Index) → вечный клиентский кэш.
+    // queryKeys "v" ОБЯЗАТЕЛЕН: без него старый и новый ?v делят одну запись серверного кеша,
+    // и после автообновления фронта LampaCron'ом клиент навечно закешировал бы СТАРОЕ тело под НОВЫМ ?v.
+    [Staticache(20, always: true, immutable: true, queryKeys: new[] { "v" })]
     [Route("/app.min.js")]
     [Route("{type}/app.min.js")]
     public ActionResult LampaApp(string type)
@@ -225,7 +234,7 @@ public class ApiController : BaseController
 
     #region app.css
     [HttpGet, AllowAnonymous]
-    [Staticache(20, always: true)]
+    [Staticache(20, always: true, immutable: true, queryKeys: new[] { "v" })]   // см. комментарий у LampaApp
     [Route("/css/app.css")]
     [Route("{type}/css/app.css")]
     public ActionResult LampaAppCss(string type)
@@ -625,6 +634,31 @@ public class ApiController : BaseController
     // Cache-buster for our client plugin URLs: recomputed on each process (re)start, so redeployed JS is
     // re-fetched even by clients that ignore no-cache headers (Tizen/webOS). Injected via the {version} token.
     static readonly string cacheVersion = System.DateTime.UtcNow.Ticks.ToString("x");
+
+    // cache_version для index.html (?v= у app.min.js / css/app.css): апстримовый index генерит
+    // Math.floor(Date/9e5) — новый ?v каждые 15 минут, т.е. браузер перекачивал 2-МБ app.min.js
+    // при каждом запуске позже 15 мин. Заменяем на стабильную серверную версию: меняется при
+    // рестарте (деплое) И при автообновлении фронта LampaCron'ом (поэтому в версии mtime файла).
+    static string _appVer;
+    static long _appVerMtime = -1;
+    static string AppCacheVersion()
+    {
+        try
+        {
+            string type = ModInit.conf.path ?? (ModInit.conf.index ?? "lampa-main/index.html").Split('/')[0];
+            var fi = new IO.FileInfo($"wwwroot/{type}/app.min.js");
+            long mt = fi.Exists ? fi.LastWriteTimeUtc.Ticks : 0;
+            // Свежий mtime (<60 с) = LampaCron может ещё писать файл (распаковка не атомарна):
+            // не выпускаем новый ?v, пока файл не «отлежался» — иначе клиент рискует навечно
+            // (immutable) закешировать обрезанный бандл. До тех пор старый ?v → старая
+            // серверная кеш-запись → консистентная старая пара версия+тело.
+            if (_appVer != null && mt != _appVerMtime && DateTime.UtcNow.Ticks - mt < TimeSpan.TicksPerMinute)
+                return _appVer;
+            if (_appVer == null || mt != _appVerMtime) { _appVerMtime = mt; _appVer = $"{cacheVersion}-{mt:x}"; }
+            return _appVer;
+        }
+        catch { return cacheVersion; }
+    }
 
     [HttpGet, AllowAnonymous]
     [Staticache(20, always: true, setHeadersNoCache: true)]

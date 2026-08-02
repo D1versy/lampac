@@ -99,7 +99,13 @@ public class StaticacheWriter
                     httpContext.Response.ContentLength = contentLength;
                 }
 
-                if (contentLength > 0)
+                // immutable-эндпоинты (versioned-URL ?v=) — вечный клиентский кэш и на MISS-пути тоже;
+                // js/html идут chunked (contentLength=0), общий путь ниже их не покрывает.
+                // Гейт по наличию ?v: прямой запрос БЕЗ версии вечно кэшировать нельзя.
+                var stAttr = httpContext.GetEndpoint()?.Metadata?.GetMetadata<StaticacheAttribute>();
+                if (stAttr?.immutable == true && httpContext.Response.StatusCode == 200 && httpContext.Request.Query.ContainsKey("v"))
+                    httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=31536000,immutable";
+                else if (contentLength > 0)
                     httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=86400,immutable";
                 #endregion
 

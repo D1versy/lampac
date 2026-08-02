@@ -43,6 +43,7 @@
     <Compile Include="..\..\Modules\QbitDownload\FfWorker.cs" Link="Module\FfWorker.cs" />
     <Compile Include="..\..\Modules\QbitDownload\TorrentScoring.cs" Link="Module\TorrentScoring.cs" />
     <Compile Include="..\..\Modules\QbitDownload\EpisodeHunter.cs" Link="Module\EpisodeHunter.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\Warmup.cs" Link="Module\Warmup.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Controller.cs" Link="Module\Controller.cs" />
   </ItemGroup>
 
