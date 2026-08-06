@@ -525,6 +525,21 @@
         return b.length > 24 ? b.slice(0, 24) + '…' : b;
     }
 
+    // номер серии для бейджа на экране серий: epkey сервера (s1e4) → 4, иначе парс имени
+    // (та же цепочка, что epShort), иначе null (вызывающий подставит порядковый)
+    function epNumber(f) {
+        var m = /e(\d+)$/i.exec(String((f && f.epkey) || ''));
+        if (m) return parseInt(m[1], 10);
+        var b = stripExt(baseName((f && f.name) || ''));
+        m = /S(\d+)[\s._-]*E(\d+)/i.exec(b);
+        if (m) return parseInt(m[2], 10);
+        m = /(?:серия|episode|ep)[\s._#-]*(\d{1,4})/i.exec(b);
+        if (m) return parseInt(m[1], 10);
+        m = /(?:^|[\s._[(-])(\d{1,3})(?:[\s._\])-]|$)/.exec(b);
+        if (m) return parseInt(m[1], 10);
+        return null;
+    }
+
     // Что продолжать: (1) ПОСЛЕДНЯЯ серия на паузе (5–90%) — досмотреть её;
     // (2) иначе серия после последней досмотренной (≥90%), которая ещё не досмотрена;
     // (3) прогресса нет / всё досмотрено → null (кнопка не показывается)
@@ -952,8 +967,10 @@
 
         function rowEl(f, i) {
             var meta = epMeta(f);
+            var num = epNumber(f);   // номер серии крупно слева: длинные имена файлов обрезаются (репорт с iPhone)
             var el = $(
                 '<div class="selector qdl-row-focus" style="display:flex;align-items:center;gap:1.2em;padding:.9em 1.2em;margin:.35em 1.4em;background:rgba(255,255,255,.06);border-radius:.8em">' +
+                  '<div class="qdl-ep-num" style="flex:none;min-width:1.7em;text-align:center;font-size:1.8em;font-weight:700;opacity:.9">' + (num !== null ? num : i + 1) + '</div>' +
                   '<div style="flex:1;min-width:0">' +
                     '<div style="font-size:1.5em;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="qdl-ep-mark"></span><span class="qdl-ep-name"></span></div>' +
                     (meta ? '<div style="opacity:.65;font-size:1.15em;margin-top:.25em">' + esc(meta) + '</div>' : '') +

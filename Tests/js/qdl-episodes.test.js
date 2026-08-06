@@ -90,6 +90,30 @@ test('рендер: заголовок, счётчик, строки с отме
   assert.ok(m.r.$(rows[0]).text().indexOf('1 ГБ') !== -1, 'размер файла в мете');
   assert.ok(m.r.$(rows[2]).find('.qdl-ep-name').text().indexOf('· врем.') !== -1, 'донор помечен в имени');
   assert.ok(m.r.$(rows[2]).text().indexOf('временная — заменится основной') !== -1, 'донор расшифрован в мете');
+
+  const nums = Array.from(rows.find('.qdl-ep-num').map((_, e) => m.r.$(e).text()).get());
+  assert.deepStrictEqual(nums, ['1', '2', '3'], 'номер серии бейджем в начале строки (длинные имена обрезаются)');
+});
+
+test('epNumber: epkey сервера → номер, иначе парс имени (цепочка epShort), иначе null', () => {
+  const m = mount();   // любой инстанс — нужен только доступ к qdl
+  const n = m.r.qdl.epNumber;
+  assert.strictEqual(n({ epkey: 's2e7', name: 'whatever.mkv' }), 7, 'epkey приоритетнее имени');
+  assert.strictEqual(n({ name: 'Show.S01E03.1080p.mkv' }), 3, 'SxxExx');
+  assert.strictEqual(n({ name: 'Gnosia - 07 [1080p AVC].mkv' }), 7, 'голый номер');
+  assert.strictEqual(n({ name: '01 серия_След Чикатило.mkv' }), 1, 'номер в начале');
+  assert.strictEqual(n({ name: 'NoNumberAtAll.mkv' }), null, 'нет номера → null (бейдж возьмёт порядковый)');
+});
+
+test('бейдж номера: без номера в имени — порядковый (i+1)', () => {
+  const m = mount({
+    files: [
+      { index: 0, name: 'Alpha.mkv', size: 1 },
+      { index: 1, name: 'Beta.mkv', size: 1 },
+    ],
+  });
+  const nums = Array.from(rowsOf(m).find('.qdl-ep-num').map((_, e) => m.r.$(e).text()).get());
+  assert.deepStrictEqual(nums, ['1', '2'], 'фолбэк на порядок в плейлисте');
 });
 
 test('hover:enter на строке играет соответствующий элемент плейлиста (донор — со своего hash)', () => {
