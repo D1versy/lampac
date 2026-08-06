@@ -8,7 +8,7 @@
 Наш код изолирован — почти всё в одном модуле:
 - **`Modules/QbitDownload/`** — наш модуль: фича «Скачать» → qBittorrent → раздел «Загрузки» (оффлайн-просмотр).
   - `Controller.cs` — эндпоинты (`/qdl/search|add|list|files|stream|hls|watch`, уведомления, аудиодорожки) + `GET /d1vision/hosts.json` (OTA-список хостов и бренд для клиентов, см. ниже)
-  - `plugins/qdl.js` — клиентский плагин Lampa (кнопка «Скачать», грид «Загрузки»)
+  - `plugins/qdl.js` — клиентский плагин Lampa (кнопка «Скачать», грид «Загрузки», экран серий `qdl_episodes`, Rec/эфир, фикс селектбокса — устройство: `E:\Media-server\claude\03`, грабли: `claude/06` §AO)
   - `ModInit.cs` · `ModuleConf.cs` · `SqlContext.cs` (SQLite `qdl.db`) · `manifest.json`
 - **`Modules/LampaWeb/widgets/samsung/`** — наш кастомный Tizen-виджет D1Vision (задел под Samsung TV): бренд + мульти-хост `loader.js`, сервер собирает `.wgt` по `GET /samsung.wgt`.
 - **`Tests/QbitDownload.Tests/`** (C#/xUnit) + **`Tests/js/`** (JS) — наши тесты.
