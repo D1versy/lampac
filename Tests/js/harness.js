@@ -91,13 +91,23 @@ function makeLampa(over) {
     Reguest: function () { this.timeout = () => {}; this.silent = () => {}; this.clear = () => {}; },
     Listener: { follow() {} },
     Component: { add() {} },
-    Select: { show() {} },
+    Select: {
+      show() {},
+      render: () => null,
+      // как в новом бандле Lampa: Select.listener с fullshow — на него подписан initSelectFix
+      listener: {
+        _subs: {},
+        follow(t, fn) { (this._subs[t] = this._subs[t] || []).push(fn); },
+        send(t, e) { (this._subs[t] || []).slice().forEach((fn) => fn(e)); },
+      },
+    },
+    Layer: { _calls: [], update(w) { this._calls.push(w); } },
     Player: { play() {}, playlist() {} },
     Noty: { show() {} },
     Activity: { push() {}, replace() {}, active: () => ({}), backward() {}, own: () => true },
     Controller: { add() {}, toggle() {}, collectionSet() {}, collectionFocus() {} },
     Template: { get: () => makeEl() },
-    Scroll: function () { this.render = () => makeEl(); this.body = () => makeEl(); this.append = () => {}; this.minus = () => {}; this.update = () => {}; this.destroy = () => {}; },
+    Scroll: function () { this.render = () => makeEl(); this.body = () => make$(); this.append = () => {}; this.minus = () => {}; this.update = () => {}; this.destroy = () => {}; },   // body() — jQuery-заглушка: компоненты зовут scroll.body().append(...)
     Lang: { add() {} },
     Utils: { putScriptAsync() {}, hash: (s) => 'h' + String(s) },
     // Timeline-стаб: view() выдаёт стабильный объект на hash (как настоящий Lampa.Timeline)
@@ -196,7 +206,7 @@ function loadLampaInit(opts) {
 
 // ── shared qdl.js source transform (strip auto-start, export internal helpers) ──
 const QDL_TAIL = "if (window.appready) start();\n    else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') start(); });";
-const QDL_EXPORT = "window.__qdl = { esc: esc, names: names, slimCard: slimCard, cleanName: cleanName, videoFiles: videoFiles, baseName: baseName, isBrowser: isBrowser, isMobile: isMobile, mobileHls: mobileHls, streamUrl: streamUrl, posterUrl: posterUrl, relTime: relTime, badge: badge, chip: chip, getAudioPref: getAudioPref, setAudioPref: setAudioPref, updateNotiBadge: updateNotiBadge, ensureHeaderNoti: ensureHeaderNoti, buildHeaderNoti: buildHeaderNoti, normTitle: normTitle, isSerialName: isSerialName, isSeasonTail: isSeasonTail, findDownload: findDownload, addButton: addButton, canTranscode: canTranscode, quickMenu: quickMenu, confirmPartial: confirmPartial, watch: watch, openDownload: openDownload, chooseAndDownload: chooseAndDownload, pollTranscode: pollTranscode, dropAudioPref: dropAudioPref, rewriteCubUrl: rewriteCubUrl, isDmca: isDmca, whenDmca: whenDmca, setDmcaList: setDmcaList, noteCubDomain: noteCubDomain, groupDownloads: groupDownloads, gridOrder: gridOrder, commonPrefixTitle: commonPrefixTitle, buildCollectionPicker: buildCollectionPicker, itemTitle: itemTitle, addToCollection: addToCollection, collectionMenu: collectionMenu, renameCollection: renameCollection, chooseCover: chooseCover, healPoster: healPoster, ComponentDownloads: ComponentDownloads, touchCollections: touchCollections, stripExt: stripExt, epTimelineHash: epTimelineHash, epView: epView, epShort: epShort, chooseContinue: chooseContinue, buildPlaylist: buildPlaylist, chooseEpisode: chooseEpisode, watchByHash: watchByHash, playEpisode: playEpisode, startTranscode: startTranscode, addContinueButton: addContinueButton, mergedVideoFiles: mergedVideoFiles, srcHash: srcHash, fetchEpisodes: fetchEpisodes, epTimelineKey: epTimelineKey, pickTimeline: pickTimeline, shortDate: shortDate, torrentSubtitle: torrentSubtitle, openNotification: openNotification, pollNotifications: pollNotifications, mirrorParse: mirrorParse, mirrorValidRoad: mirrorValidRoad, mirrorRoad: mirrorRoad, mirrorMerge: mirrorMerge, mirrorPrune: mirrorPrune, mirrorReady: mirrorReady, mirrorRead: mirrorRead, mirrorWrite: mirrorWrite, initTimelineMirror: initTimelineMirror, onTimelineUpdate: onTimelineUpdate, rawPlay: rawPlay, warmup: warmup, prewarmForCard: prewarmForCard, warmupNext: warmupNext, dropEpCache: dropEpCache };";
+const QDL_EXPORT = "window.__qdl = { esc: esc, names: names, slimCard: slimCard, cleanName: cleanName, videoFiles: videoFiles, baseName: baseName, isBrowser: isBrowser, isMobile: isMobile, mobileHls: mobileHls, streamUrl: streamUrl, posterUrl: posterUrl, relTime: relTime, badge: badge, chip: chip, getAudioPref: getAudioPref, setAudioPref: setAudioPref, updateNotiBadge: updateNotiBadge, ensureHeaderNoti: ensureHeaderNoti, buildHeaderNoti: buildHeaderNoti, normTitle: normTitle, isSerialName: isSerialName, isSeasonTail: isSeasonTail, findDownload: findDownload, addButton: addButton, canTranscode: canTranscode, quickMenu: quickMenu, confirmPartial: confirmPartial, watch: watch, openDownload: openDownload, chooseAndDownload: chooseAndDownload, pollTranscode: pollTranscode, dropAudioPref: dropAudioPref, rewriteCubUrl: rewriteCubUrl, isDmca: isDmca, whenDmca: whenDmca, setDmcaList: setDmcaList, noteCubDomain: noteCubDomain, groupDownloads: groupDownloads, gridOrder: gridOrder, commonPrefixTitle: commonPrefixTitle, buildCollectionPicker: buildCollectionPicker, itemTitle: itemTitle, addToCollection: addToCollection, collectionMenu: collectionMenu, renameCollection: renameCollection, chooseCover: chooseCover, healPoster: healPoster, ComponentDownloads: ComponentDownloads, touchCollections: touchCollections, stripExt: stripExt, epTimelineHash: epTimelineHash, epView: epView, epShort: epShort, chooseContinue: chooseContinue, buildPlaylist: buildPlaylist, chooseEpisode: chooseEpisode, watchByHash: watchByHash, ComponentEpisodes: ComponentEpisodes, epMark: epMark, epMeta: epMeta, fixSelectHeight: fixSelectHeight, initSelectFix: initSelectFix, liveSize: liveSize, ComponentCard: ComponentCard, ComponentNotifications: ComponentNotifications, ComponentLive: ComponentLive, ComponentLiveWatch: ComponentLiveWatch, ComponentLiveCamera: ComponentLiveCamera, startTranscode: startTranscode, addContinueButton: addContinueButton, mergedVideoFiles: mergedVideoFiles, srcHash: srcHash, fetchEpisodes: fetchEpisodes, epTimelineKey: epTimelineKey, pickTimeline: pickTimeline, shortDate: shortDate, torrentSubtitle: torrentSubtitle, openNotification: openNotification, pollNotifications: pollNotifications, mirrorParse: mirrorParse, mirrorValidRoad: mirrorValidRoad, mirrorRoad: mirrorRoad, mirrorMerge: mirrorMerge, mirrorPrune: mirrorPrune, mirrorReady: mirrorReady, mirrorRead: mirrorRead, mirrorWrite: mirrorWrite, initTimelineMirror: initTimelineMirror, onTimelineUpdate: onTimelineUpdate, rawPlay: rawPlay, warmup: warmup, prewarmForCard: prewarmForCard, warmupNext: warmupNext, dropEpCache: dropEpCache };";
 function qdlSource() {
   // CRLF→LF: после git checkout с autocrlf файл на диске может оказаться в CRLF — якорь с \n обязан находиться
   const src = fs.readFileSync(QDL, 'utf8').replace(/\r\n/g, '\n');

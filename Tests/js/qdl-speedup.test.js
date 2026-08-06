@@ -187,7 +187,7 @@ test('warmupNext: греет следующую серию; на последн�
   assert.strictEqual(fetch.urls.length, 1, 'после последней серии прогрева нет');
 });
 
-test('playEpisode: после старта греется следующая серия плейлиста', () => {
+test('экран серий: после старта серии греется следующая по плейлисту', () => {
   const net = countingReq(FILES);
   const fetch = capturingFetch();
   const lampa = H.makeLampa(Object.assign(net.lampaOver, {
@@ -196,7 +196,10 @@ test('playEpisode: после старта греется следующая с�
   }));
   const { qdl: q } = H.loadQdl({ lampa, fetch });
   const h = 'b'.repeat(40);
-  q.playEpisode(h, FILES, FILES[1]);
+  const inst = new q.ComponentEpisodes({ qdl_hash: h, qdl_name: 'Сериал' });
+  inst.activity = { loader() {}, toggle() {} };
+  inst.create();
+  inst.play(1);
   const wu = fetch.urls.filter((u) => u.indexOf('/qdl/warmup') !== -1);
   assert.strictEqual(wu.length, 1, 'один warmup при старте: ' + JSON.stringify(fetch.urls));
   assert.ok(wu[0].indexOf('&index=2') !== -1, 'греется серия после текущей: ' + wu[0]);

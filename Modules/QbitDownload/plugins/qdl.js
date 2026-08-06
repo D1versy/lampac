@@ -72,12 +72,57 @@
             // а генерического .selector.focus в её CSS нет — без этих правил фокус невидим
             '.qdl-row-focus{transition:box-shadow .1s}' +
             '.qdl-row-focus.focus{box-shadow:0 0 0 .2em #fff}' +
+            // экран серий: текущая (продолжаемая) серия подсвечена синим
+            '.qdl-ep--cur{background:rgba(25,100,210,.22) !important}' +
             '.qdl-btn-focus.focus{background:#fff !important;color:#000 !important;opacity:1 !important}' +
             '.qdl-btn-green.focus{background:#19b531 !important;box-shadow:0 0 0 .15em #fff}' +
             // бейдж непрочитанных на нашей иконке уведомлений в хедере (красный кружок с числом)
             '.qdl-noti-head{position:relative}' +
             '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}';
         document.head.appendChild(st);
+    }
+
+    // ───────── Фикс высоты селектбокса (upstream-баг Lampa) ─────────
+    // Select.show() кладёт шапку в jQuery .data('mheight'), а Layer.frameUpdate читает
+    // СЫРОЕ DOM-свойство elem.mheight (так пишет Scroll.minus) → высота шапки селектбокса
+    // никогда не вычитается: инлайн-height у .selectbox__body больше доступного места,
+    // низ длинных списков (серии, 60 раздач, озвучки) уезжает за экран и не докручивается.
+    // Чиним свойством (канон Scroll.minus) + немедленный Layer.update; страховкой — явный
+    // px max-height (формула frameUpdate) на десктопе/ТВ: переживает standards mode и старый
+    // flex. Мобилу ≤480 не трогаем — там родной кап 60vh (iPhone-шит).
+    function fixSelectHeight(e) {
+        try {
+            var root = (e && e.html) || (Lampa.Select && Lampa.Select.render && Lampa.Select.render());
+            if (!root || !root.find) return;
+            var body = root.find('.selectbox__body');
+            var head = root.find('.selectbox__head');
+            if (!body.length || !head.length) return;
+            body[0].mheight = head[0];                        // то, что реально читает Layer.frameUpdate
+            try { Lampa.Layer.update(body); } catch (e1) {}   // пересчитать height сейчас, не ждать resize
+            if (window.innerWidth > 480) {
+                var hd = document.querySelector('.head');
+                var nv = document.querySelector('.navigation-bar');
+                var landscape = window.innerWidth > window.innerHeight && window.innerHeight < 768;
+                var h = window.innerHeight
+                    - (hd ? hd.getBoundingClientRect().height : 0)
+                    - (nv && !landscape ? nv.getBoundingClientRect().height : 0)
+                    - head[0].getBoundingClientRect().height;
+                if (h > 0) body.css('max-height', h);         // следующий show() сбросит в 'unset' → пересчитаем заново
+            }
+        } catch (e2) {}
+    }
+
+    function initSelectFix() {
+        if (window.__qdl_selectfix) return;   // повторная загрузка qdl.js → одна подписка
+        if (Lampa.Select && Lampa.Select.listener && typeof Lampa.Select.listener.follow === 'function') {
+            window.__qdl_selectfix = true;
+            Lampa.Select.listener.follow('fullshow', fixSelectHeight);
+        } else if (Lampa.Select && typeof Lampa.Select.show === 'function') {
+            // бандл без listener: оборачиваем show (fullshow в show синхронный — паритет)
+            window.__qdl_selectfix = true;
+            var orig = Lampa.Select.show;
+            Lampa.Select.show = function () { var r = orig.apply(this, arguments); fixSelectHeight(null); return r; };
+        }
     }
 
     // ───────── DMCA-фолбек (см. claude/06 в Media-server) ─────────
@@ -759,45 +804,14 @@
         ensureAudio(hash, index, function (audio) { rawPlay(hash, index, title, audio, fileName, f); });
     }
 
-    // сыграть конкретную серию с полным плейлистом (элемент плейлиста — тот же инстанс timeline)
-    function playEpisode(hash, vids, target) {
-        ensureAudio(srcHash(target, hash), target.index, function (audio) {
-            var playlist = buildPlaylist(hash, vids, audio, srcHash(target, hash));
-            for (var i = 0; i < vids.length; i++)
-                if (vids[i] === target || (vids[i].index === target.index && srcHash(vids[i], hash) === srcHash(target, hash))) { Lampa.Player.play(playlist[i]); break; }
-            Lampa.Player.playlist(playlist);
-            warmupNext(hash, vids, target);   // следующая серия — в page cache, пока смотрят эту
+    // Список серий — своя активность (qdl_episodes), а не Select: см. ComponentEpisodes.
+    // autoplay=true — сразу играть продолжаемую серию («Продолжить» с карточки): «назад»
+    // из плеера при этом возвращает на экран серий, а не на карточку.
+    function chooseEpisode(hash, name, autoplay) {
+        Lampa.Activity.push({
+            url: '', component: 'qdl_episodes', title: 'Серии — ' + (name || ''),
+            qdl_hash: hash, qdl_name: name || '', qdl_autoplay: !!autoplay
         });
-    }
-
-    function chooseEpisode(hash, name) {
-        fetchEpisodes(hash, function (files) {
-            var vids = mergedVideoFiles(files);
-            if (!vids.length) { Lampa.Noty.show('Видеофайлы не найдены'); return; }
-            if (vids.length === 1) { playLocal(srcHash(vids[0], hash), vids[0].index, baseName(vids[0].name), vids[0].name, vids[0]); return; }
-
-            ensureAudio(srcHash(vids[0], hash), vids[0].index, function (audio) {   // озвучку выбираем один раз на сериал
-                var playlist = buildPlaylist(hash, vids, audio, srcHash(vids[0], hash));
-                var view = function (f) { return pickTimeline(hash, f); };
-                var cur = chooseContinue(vids, view);
-                Lampa.Select.show({
-                    title: 'Серии — ' + (name || ''),
-                    items: vids.map(function (f, i) {
-                        var p = (view(f) || {}).percent || 0, pre = '';
-                        if (p >= 90) pre = '✓ ';                                   // досмотрена
-                        else if (p >= 5) pre = '► ' + Math.round(p) + '% · ';      // на паузе
-                        var suf = f.source === 'donor' ? ' · врем.' : '';          // серия с раздачи-донора (охота)
-                        return { title: pre + baseName(f.name) + suf, i: i, selected: cur ? vids[i] === cur : i === 0 };
-                    }),
-                    onSelect: function (a) {
-                        Lampa.Player.play(playlist[a.i]);   // сам элемент плейлиста: его timeline пишет прогресс
-                        Lampa.Player.playlist(playlist);
-                        warmupNext(hash, vids, vids[a.i]);   // следующая серия — в page cache, пока смотрят эту
-                    },
-                    onBack: function () { Lampa.Controller.toggle('content'); }
-                });
-            });
-        }, function () { Lampa.Noty.show('Ошибка чтения файлов'); });
     }
 
     function watchByHash(hash, name) {
@@ -850,12 +864,186 @@
         return '<span style="display:inline-block;background:rgba(255,255,255,.1);padding:.3em .65em;border-radius:.45em;margin:0 .5em .5em 0;font-size:1em">' + esc(txt) + '</span>';
     }
 
+    // ───────── Экран серий (замена селектбокса) ─────────
+    // Почему активность, а не Lampa.Select: (1) длинные списки скроллятся по канону
+    // (Scroll + minus + update на фокусе) и не зависят от upstream-бага высоты селектбокса;
+    // (2) «назад» из плеера возвращает СЮДА, а не на карточку сериала; (3) озвучка видна
+    // кнопкой и не переспрашивается перед каждым входом (преф qdl_audio2 применяется молча).
+    function epMark(pct) { return pct >= 90 ? '✓ ' : (pct >= 5 ? '► ' + Math.round(pct) + '% · ' : ''); }
+    function epMeta(f) {
+        return [liveSize(f && f.size), (f && f.source === 'donor') ? 'временная — заменится основной' : '']
+            .filter(Boolean).join('   ·   ');
+    }
+
+    function ComponentEpisodes(object) {
+        var comp = this;
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+        var html = $('<div></div>');
+        var body = $('<div></div>');
+        var last;
+        var rows = [];        // [{el, f}] — отметки обновляются на месте, DOM не перестраивается (фокус жив)
+        var audioBtn = null;
+        var hash = object.qdl_hash;
+        var name = object.qdl_name || '';
+
+        this.vids = [];
+        this.audioOpts = [];
+        this.audio = null;
+        this.audioReady = false;
+
+        this.create = function () {
+            injectCss();
+            this.activity.loader(true);
+            scroll.minus();
+            html.append(scroll.render());
+            scroll.body().append(body);
+            fetchEpisodes(hash, function (files) {
+                comp.vids = mergedVideoFiles(files);
+                if (!comp.vids.length) { comp.build(); return; }
+                req(API + '/qdl/audio?hash=' + srcHash(comp.vids[0], hash) + '&index=' + comp.vids[0].index,
+                    function (opts) { comp.audioOpts = opts || []; comp.build(); },
+                    function () { comp.build(); });
+            }, function () { comp.build(); });
+            return this.render();
+        };
+
+        // озвучка без вопросов: единственная дорожка или валидный преф; иначе спросим при первом плее
+        function resolveAudioSilent() {
+            var opts = comp.audioOpts;
+            if (opts.length <= 1) { comp.audio = opts[0] && opts[0].id; comp.audioReady = true; return; }
+            var pref = getAudioPref(srcHash(comp.vids[0], hash));
+            if (pref && opts.some(function (o) { return o.id === pref; })) { comp.audio = pref; comp.audioReady = true; }
+        }
+
+        function audioLabel() {
+            var hit = comp.audioOpts.filter(function (o) { return o.id === comp.audio; })[0];
+            return comp.audioReady ? ((hit && hit.label) || 'по умолчанию') : 'выбрать';
+        }
+
+        function askAudio(cb) {
+            var ahash = srcHash(comp.vids[0], hash);
+            var pref = getAudioPref(ahash);
+            var ordered = comp.audioOpts.slice().sort(function (a, b) { return (b.id === pref ? 1 : 0) - (a.id === pref ? 1 : 0); });
+            Lampa.Select.show({
+                title: 'Озвучка',
+                items: ordered.map(function (o) { return { title: (o.id === pref ? '✓ ' : '') + o.label, id: o.id }; }),
+                onSelect: function (s) {
+                    setAudioPref(ahash, s.id);
+                    comp.audio = s.id; comp.audioReady = true;
+                    if (audioBtn) audioBtn.text('Озвучка: ' + audioLabel());
+                    if (cb) cb(s.id); else Lampa.Controller.toggle('content');
+                },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }
+
+        this.play = function (i) {
+            var vids = comp.vids, f = vids[i];
+            if (!f) return;
+            var go = function (audio) {
+                // озвучка выбрана для основной раздачи (vids[0]) — донорским файлам buildPlaylist даст дефолт
+                var playlist = buildPlaylist(hash, vids, audio, srcHash(vids[0], hash));
+                Lampa.Player.play(playlist[i]);      // сам элемент плейлиста: его timeline пишет прогресс
+                Lampa.Player.playlist(playlist);
+                warmupNext(hash, vids, f);           // следующая серия — в page cache, пока смотрят эту
+            };
+            if (comp.audioReady) go(comp.audio); else askAudio(go);
+        };
+
+        function rowEl(f, i) {
+            var meta = epMeta(f);
+            var el = $(
+                '<div class="selector qdl-row-focus" style="display:flex;align-items:center;gap:1.2em;padding:.9em 1.2em;margin:.35em 1.4em;background:rgba(255,255,255,.06);border-radius:.8em">' +
+                  '<div style="flex:1;min-width:0">' +
+                    '<div style="font-size:1.5em;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="qdl-ep-mark"></span><span class="qdl-ep-name"></span></div>' +
+                    (meta ? '<div style="opacity:.65;font-size:1.15em;margin-top:.25em">' + esc(meta) + '</div>' : '') +
+                  '</div>' +
+                  '<div style="opacity:.45;font-size:1.5em;padding-right:.3em">▶</div>' +
+                '</div>'
+            );
+            el.find('.qdl-ep-name').text(baseName(f.name) + (f.source === 'donor' ? ' · врем.' : ''));
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:enter', function () { comp.play(i); });
+            rows.push({ el: el, f: f });
+            return el;
+        }
+
+        this.build = function () {
+            var vids = comp.vids;
+            rows = [];
+            resolveAudioSilent();
+
+            body.append($('<div style="padding:1.2em 1.6em .4em"><div class="qdl-ep-title" style="font-size:2em;font-weight:700"></div>' +
+                (vids.length ? '<div style="opacity:.6;font-size:1.25em;margin-top:.25em">' + vids.length + ' ' + livePlural(vids.length, 'серия', 'серии', 'серий') + '</div>' : '') +
+                '</div>'));
+            body.find('.qdl-ep-title').text(name || 'Серии');
+
+            if (!vids.length) body.append(liveMsg('Видеофайлы не найдены'));
+            else {
+                if (comp.audioOpts.length > 1) {
+                    audioBtn = $('<div class="selector qdl-btn-focus" style="display:inline-block;margin:.2em 1.4em .6em;padding:.7em 1.2em;background:rgba(255,255,255,.1);border-radius:.8em;font-size:1.3em"></div>');
+                    audioBtn.text('Озвучка: ' + audioLabel());
+                    audioBtn.on('hover:focus', function () { last = audioBtn[0]; scroll.update(audioBtn, true); });
+                    audioBtn.on('hover:enter', function () { askAudio(null); });
+                    body.append($('<div></div>').append(audioBtn));
+                }
+                vids.forEach(function (f, i) { body.append(rowEl(f, i)); });
+                comp.refreshMarks();   // отметки + подсветка текущей + стартовый фокус на ней
+            }
+
+            this.activity.loader(false);
+            this.activity.toggle();
+
+            if (object.qdl_autoplay && vids.length) {
+                object.qdl_autoplay = false;   // одноразово: возврат из плеера не перезапускает плей
+                var cur = chooseContinue(vids, function (f) { return pickTimeline(hash, f); });
+                comp.play(cur ? vids.indexOf(cur) : 0);
+            }
+        };
+
+        // свежие ✓/►N% и подсветка «текущей» — зовётся из start() при каждом возврате (в т.ч. из плеера)
+        this.refreshMarks = function () {
+            if (!rows.length) return;
+            var view = function (f) { return pickTimeline(hash, f); };
+            var cur = chooseContinue(comp.vids, view);
+            rows.forEach(function (r) {
+                r.el.find('.qdl-ep-mark').text(epMark((view(r.f) || {}).percent || 0));
+                r.el.toggleClass('qdl-ep--cur', !!cur && r.f === cur);
+            });
+            if (cur && !last) {   // стартовый фокус — на продолжаемой серии; выбор пользователя не перебиваем
+                var hit = rows.filter(function (r) { return r.f === cur; })[0];
+                if (hit) last = hit.el[0];
+            }
+        };
+
+        this.render = function () { return html; };
+        this.start = function () {
+            comp.refreshMarks();
+            Lampa.Controller.add('content', {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                right: function () { Navigator.move('right'); },
+                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
+                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
+                back: function () { Lampa.Activity.backward(); }
+            });
+            Lampa.Controller.toggle('content');
+        };
+        this.pause = function () {};
+        this.stop = function () {};
+        this.destroy = function () { scroll.destroy(); html.remove(); };
+    }
+
     function ComponentCard(object) {
         var item = object.qdl || {};
         var scroll = new Lampa.Scroll({ mask: true, over: true });
         var html = $('<div></div>');
 
         this.create = function () {
+            scroll.minus();   // без этого на ТВ у .scroll нет высоты — контент не скроллится
             var m = item.meta || {};
             var pct = Math.round((item.progress || 0) * 100);
             var kind = m.media_type === 'tv' ? 'Сериал' : 'Фильм';
@@ -896,6 +1084,7 @@
             );
             body.find('.qdl-poster').on('error', function () { this.src = './img/img_broken.svg'; });
             body.find('.qdl-watch').on('hover:enter', function () { watch(item); });
+            body.find('.qdl-watch').on('hover:focus', function (e) { scroll.update($(e.target), true); });
 
             scroll.append(body);
             html.append(scroll.render());
@@ -1644,7 +1833,8 @@
             var label = 'Продолжить · ' + epShort(target.name);
             var b = $('<div class="full-start__button selector qdl-continue-btn">' + ICON + '<span>' + esc(label) + '</span></div>');
             b.on('hover:enter', function () {
-                confirmPartial(gateItem, function () { playEpisode(hash, vids, target); });
+                // через экран серий с автоплеем: «назад» из плеера вернёт в список серий
+                confirmPartial(gateItem, function () { chooseEpisode(hash, name, true); });
             });
             cont.prepend(b);
         });
@@ -2595,6 +2785,7 @@
 
     function start() {
         Lampa.Component.add('qdl_downloads', ComponentDownloads);
+        Lampa.Component.add('qdl_episodes', ComponentEpisodes);
         Lampa.Component.add('qdl_card', ComponentCard);
         Lampa.Component.add('qdl_notifications', ComponentNotifications);
         Lampa.Component.add('qdl_live', ComponentLive);
@@ -2605,6 +2796,7 @@
         startHeaderNotiWatcher();
         startPlayerFsWatcher();
         pollNotifications();
+        try { initSelectFix(); } catch (e) {}            // фикс скролла селектбоксов (upstream mheight-баг)
         try { initTimelineMirror(); } catch (e) {}       // зеркало прогресса устройства (только нативные клиенты)
         try { whenDmca(function () {}); } catch (e) {}   // прогрев DMCA-списка до первого открытия карточки
         try { setInterval(pollNotifications, 90000); } catch (e) {}

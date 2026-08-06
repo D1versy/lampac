@@ -161,7 +161,7 @@ test('pickTimeline: legacy-фолбэк при старом прогрессе; 
 
 // ─────────────────────────────── chooseEpisode: серии доноров в общем списке ───────────────────────────────
 
-test('chooseEpisode: объединённый список с донором — суффикс «врем.», плей уходит с донорского hash', () => {
+test('chooseEpisode: объединённый список с донором — пометка «временная», плей уходит с донорского hash', () => {
   const episodes = [
     { index: 0, name: 'Show S02E01.mkv', source: 'main', epkey: 's2e1', tl: 't1:s2e1', progress: 1 },
     { index: 4, name: 'Other S02E02.mkv', source: 'donor', hash: 'dddd', epkey: 's2e2', tl: 't1:s2e2', progress: 1 },
@@ -175,13 +175,17 @@ test('chooseEpisode: объединённый список с донором —
   });
   r.lampa.Platform.tv = () => true;
   r.qdl.chooseEpisode('mmmm', 'Сериал');
-  const menu = last(r.calls.selects);
-  assert.ok(menu, 'меню серий показано');
-  assert.strictEqual(menu.items.length, 2);
-  assert.ok(menu.items[1].title.indexOf('врем.') !== -1);
-  assert.strictEqual(menu.items[0].title.indexOf('врем.'), -1);
+  const pushed = last(r.calls.pushes);
+  assert.ok(pushed && pushed.component === 'qdl_episodes', 'экран серий открыт');
 
-  menu.onSelect(menu.items[1]);
+  const inst = new r.qdl.ComponentEpisodes(pushed);
+  inst.activity = { loader() {}, toggle() {} };
+  inst.create();
+  assert.strictEqual(inst.vids.length, 2);
+  assert.strictEqual(r.qdl.epMeta(inst.vids[0]).indexOf('временная'), -1, 'основная не помечена');
+  assert.ok(r.qdl.epMeta(inst.vids[1]).indexOf('временная') !== -1, 'донор помечен «временная»');
+
+  inst.play(1);
   assert.strictEqual(r.calls.plays.length, 1);
   assert.ok(r.calls.plays[0].url.indexOf('hash=dddd') !== -1, 'серия донора — с его hash');
 });

@@ -96,15 +96,15 @@ function fakeReqFiles(files) {
   };
 }
 
-test('chooseEpisode: отметки ✓/►, автофокус на текущей, плеер получает элемент плейлиста с timeline', () => {
+test('chooseEpisode: пушит экран серий (qdl_episodes), плеер получает элемент плейлиста с timeline', () => {
   const files = [
     { index: 0, name: 'Ep01.mkv', size: 1 },
     { index: 1, name: 'Ep02.mkv', size: 1 },
     { index: 2, name: 'Ep03.mkv', size: 1 },
   ];
-  let select = null, played = null, playlist = null;
+  let pushed = null, played = null, playlist = null;
   const lampa = H.makeLampa(Object.assign(fakeReqFiles(files), {
-    Select: { show: (o) => { select = o; } },
+    Activity: { push: (o) => { pushed = o; } },
     Player: { play: (x) => { played = x; }, playlist: (p) => { playlist = p; } },
     Platform: { tv: () => false },   // браузер → HLS
   }));
@@ -115,17 +115,31 @@ test('chooseEpisode: отметки ✓/►, автофокус на текущ�
   lampa.Timeline.view(lampa.Utils.hash(h + ':Ep02')).percent = 40;
 
   q.chooseEpisode(h, 'Сериал');
-  assert.ok(select, 'пикер серий показан');
-  assert.ok(select.items[0].title.indexOf('✓') === 0, '1-я помечена досмотренной: ' + select.items[0].title);
-  assert.ok(/^► 40% · /.test(select.items[1].title), '2-я на паузе с процентом: ' + select.items[1].title);
-  assert.strictEqual(select.items[1].selected, true, 'автофокус на текущей (2-й)');
-  assert.ok(!select.items[0].selected && !select.items[2].selected);
+  assert.ok(pushed, 'экран серий открыт');
+  assert.strictEqual(pushed.component, 'qdl_episodes');
+  assert.strictEqual(pushed.qdl_hash, h);
+  assert.strictEqual(pushed.qdl_autoplay, false, 'без autoplay по умолчанию');
 
-  select.onSelect(select.items[2]);
+  const inst = new q.ComponentEpisodes(pushed);
+  inst.activity = { loader() {}, toggle() {} };
+  inst.create();
+  assert.strictEqual(inst.vids.length, 3, 'серии загружены');
+
+  inst.play(2);
   assert.ok(played && playlist, 'играем и плейлист передан');
   assert.strictEqual(played, playlist[2], 'играется САМ элемент плейлиста (общий инстанс timeline)');
   assert.ok(played.timeline, 'у элемента есть timeline');
   assert.strictEqual(played.timeline, lampa.Timeline.view(lampa.Utils.hash(h + ':Ep03')), 'timeline привязан к серии');
+});
+
+test('экран серий: отметки epMark и мета-строка epMeta', () => {
+  const { qdl: q } = H.loadQdl();
+  assert.strictEqual(q.epMark(100), '✓ ', 'досмотрена');
+  assert.strictEqual(q.epMark(40), '► 40% · ', 'на паузе с процентом');
+  assert.strictEqual(q.epMark(3), '', '<5% — случайный тык, без отметки');
+  assert.strictEqual(q.epMeta({ size: 1073741824 }), '1 ГБ');
+  assert.ok(q.epMeta({ source: 'donor' }).indexOf('временная') === 0, 'донор помечен');
+  assert.strictEqual(q.epMeta({}), '', 'без данных — пусто');
 });
 
 test('watchByHash: одиночный файл играет с timeline по имени файла', () => {
