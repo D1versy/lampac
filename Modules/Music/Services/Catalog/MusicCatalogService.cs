@@ -440,22 +440,34 @@ public static class MusicCatalogService
         if (artists.Count > 0)
             sections.Add(new MusicBrowseSection
             {
-                id = SpotifySupport.ArtistsSectionId, title = "Исполнители", type = "artists",
-                source_provider = SpotifySupport.ProviderId, has_more = false, artists = artists
+                id = SpotifySupport.ArtistsSectionId,
+                title = "Исполнители",
+                type = "artists",
+                source_provider = SpotifySupport.ProviderId,
+                has_more = false,
+                artists = artists
             });
 
         if (albums.Count > 0)
             sections.Add(new MusicBrowseSection
             {
-                id = SpotifySupport.AlbumsSectionId, title = "Альбомы", type = "albums",
-                source_provider = SpotifySupport.ProviderId, has_more = false, albums = albums
+                id = SpotifySupport.AlbumsSectionId,
+                title = "Альбомы",
+                type = "albums",
+                source_provider = SpotifySupport.ProviderId,
+                has_more = false,
+                albums = albums
             });
 
         if (tracks.Count > 0)
             sections.Add(new MusicBrowseSection
             {
-                id = SpotifySupport.TracksSectionId, title = "Треки", type = "tracks",
-                source_provider = SpotifySupport.ProviderId, has_more = false, tracks = tracks
+                id = SpotifySupport.TracksSectionId,
+                title = "Треки",
+                type = "tracks",
+                source_provider = SpotifySupport.ProviderId,
+                has_more = false,
+                tracks = tracks
             });
 
         return sections;
