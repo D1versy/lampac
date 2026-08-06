@@ -188,17 +188,19 @@ test('lampainit: appload torrserver_url следует за origin (извне �
   assert.strictEqual(lampa.Storage.get('torrserver_url'), 'https://tv.d1versy.com:9443/ts');
 });
 
-test('lampainit: appload calls Lampa.Utils.putScriptAsync for qdl.js', () => {
+test('lampainit: appload calls Lampa.Utils.putScriptAsync for qdl.js and music.js', () => {
   const scripts = [];
   const lampa = H.makeLampa({ Utils: { putScriptAsync: (a) => scripts.push(a) } });
   const { mod } = H.loadLampaInit({ lampa });
   mod.appload();
-  assert.strictEqual(scripts.length, 1);
+  // 2.13: два вызова — наш qdl.js и music.js (модуль Music upstream, включён флипом манифеста)
+  assert.strictEqual(scripts.length, 2);
   // NB: array is created inside the vm sandbox (different realm's Array),
   // so deepStrictEqual on the array object rejects it — compare contents instead.
   assert.strictEqual(scripts[0].length, 1);
   // URL carries the {version} cache-buster token (the server replaces it with a per-start stamp).
   assert.strictEqual(scripts[0][0], '{localhost}/qdl.js?v={version}');
+  assert.strictEqual(scripts[1][0], '{localhost}/music.js?v={version}');
 });
 
 test('lampainit: appload calls Lampa.Lang.add with the neutral strings', () => {
