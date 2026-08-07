@@ -1,6 +1,11 @@
 (function () {
     'use strict';
 
+    // Синглтон: при двойном подключении qdl.js (нативная оболочка + инжект, горячая переподгрузка)
+    // второй экземпляр дублировал observers/interval/Listener — дубли пунктов меню и красного бейджа
+    if (window.qdl_plugin_loaded) return;
+    window.qdl_plugin_loaded = 1;
+
     var API = '{localhost}';
     var ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 19h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     var BELL = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 8a6 6 0 1112 0c0 7 3 9 3 9H3s3-2 3-9z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.3 21a1.94 1.94 0 003.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -1308,9 +1313,15 @@
         } catch (e) {}
     }
 
-    // опрос ленты: бейдж непрочитанных + тост для появившихся с прошлого опроса
+    // опрос ленты: бейдж непрочитанных + тост для появившихся с прошлого опроса.
+    // In-flight флаг обязателен: вызывается из 4 точек (старт, вставка иконки/меню, interval) —
+    // без него два параллельных ответа читали один qdl_noti_lastid и дублировали тосты/бейдж
+    var notiPollBusy = false;
     function pollNotifications() {
+        if (notiPollBusy) return;
+        notiPollBusy = true;
         req(API + '/qdl/notifications', function (r) {
+            notiPollBusy = false;
             if (!r) return;
             var items = r.items || [];
             updateNotiBadge(r.unread || 0);
@@ -1325,14 +1336,16 @@
 
             // на самом первом опросе (lastId===0) не спамим историей — только запоминаем точку отсчёта
             if (lastId > 0) {
-                // SWITCH (предложение сменить раздачу) / INFO — это НЕ «скачанная серия»: свой тост без «скачана»
+                // SWITCH (предложение сменить раздачу) / INFO — это НЕ «скачанная серия»: свой тост без «скачана»;
+                // при пачке событий — один агрегированный тост (детали в центре «Уведомления»), как у скачанных серий
                 var special = fresh.filter(function (x) { return x.kind === 'SWITCH' || x.kind === 'INFO'; });
                 var dl = fresh.filter(function (x) { return x.kind !== 'SWITCH' && x.kind !== 'INFO'; });
-                special.forEach(function (x) { Lampa.Noty.show((x.kind === 'SWITCH' ? '🔀 ' : '📺 ') + esc(x.title) + ' — ' + esc(x.label)); });
+                if (special.length === 1) Lampa.Noty.show((special[0].kind === 'SWITCH' ? '🔀 ' : '📺 ') + esc(special[0].title) + ' — ' + esc(special[0].label));
+                else if (special.length > 1) Lampa.Noty.show('🔔 Новых уведомлений: ' + special.length);
                 if (dl.length === 1) Lampa.Noty.show('📺 ' + esc(dl[0].title) + ' — ' + esc(dl[0].label) + ' скачана');
                 else if (dl.length > 1) Lampa.Noty.show('📺 Скачано новых серий: ' + dl.length);
             }
-        });
+        }, function () { notiPollBusy = false; });
     }
 
     // открыть карточку загрузки из уведомления (по hash);
@@ -2670,11 +2683,20 @@
         return item;
     }
 
+    // Одна нода на селектор: jQuery-НАБОР из >1 элемента ломает вставки (.after/.append на наборе
+    // КЛОНИРУЕТ узел в каждый элемент) — так плодились дубли пунктов меню и красного бейджа.
+    // Лишние экземпляры (наследие прошлых версий/двойных вставок) сносим — self-heal.
+    function dedupe(sel) {
+        var n = $(sel);
+        if (n.length > 1) n.slice(1).remove();
+        return n.first();
+    }
+
     function ensureMenu() {
         try {
             var anchor = $('.menu .menu__item[data-action="myperson"]').first();
             if (!anchor.length) return;                 // «Персоны» ещё не отрисованы — ждём
-            var existing = $('.menu .qdl-menu');
+            var existing = dedupe('.menu .qdl-menu');
             if (!existing.length) { anchor.after(buildMenuItem()); }
             // уже есть — держим строго сразу после «Персоны» (меню могло пере-рендериться)
             else if (existing.prev('.menu__item')[0] !== anchor[0]) {
@@ -2683,24 +2705,24 @@
             }
 
             // «Уведомления» — строго сразу после «Загрузки»
-            var dl = $('.menu .qdl-menu');
-            var noti = $('.menu .qdl-noti-menu');
+            var dl = dedupe('.menu .qdl-menu');
+            var noti = dedupe('.menu .qdl-noti-menu');
             if (dl.length) {
                 if (!noti.length) { dl.after(buildNotiMenuItem()); setTimeout(pollNotifications, 200); }   // подтянуть бейдж сразу после появления пункта
                 else if (noti.prev('.menu__item')[0] !== dl[0]) { noti.detach(); dl.after(noti); }
             }
 
             // «D1versy Live» (эфир) — строго сразу после «Уведомления»
-            var nt = $('.menu .qdl-noti-menu');
-            var watch = $('.menu .qdl-watch-menu');
+            var nt = dedupe('.menu .qdl-noti-menu');
+            var watch = dedupe('.menu .qdl-watch-menu');
             if (nt.length) {
                 if (!watch.length) nt.after(buildWatchMenuItem());
                 else if (watch.prev('.menu__item')[0] !== nt[0]) { watch.detach(); nt.after(watch); }
             }
 
             // «D1versy Rec» (записи) — строго сразу после «D1versy Live»
-            var w = $('.menu .qdl-watch-menu');
-            var live = $('.menu .qdl-live-menu');
+            var w = dedupe('.menu .qdl-watch-menu');
+            var live = dedupe('.menu .qdl-live-menu');
             if (w.length) {
                 if (!live.length) w.after(buildLiveMenuItem());
                 else if (live.prev('.menu__item')[0] !== w[0]) { live.detach(); w.after(live); }
@@ -2732,14 +2754,14 @@
 
     function ensureHeaderNoti() {
         try {
-            var actions = $('.head .head__actions');
-            if (!actions.length) return;                    // хедер ещё не отрисован / иная сборка
-            if ($('.head .qdl-noti-head').length) return;   // уже стоит
+            // гард в том же scope, что updateNotiBadge ($('.qdl-noti-head') по всему документу):
+            // раньше гард смотрел только внутрь .head, а копию вне него не видел — и вставлял ещё одну
+            if (dedupe('.qdl-noti-head').length) return;
+            var actions = $('.head .head__actions').first();   // .first(): вставка в НАБОР клонирует узел
+            if (!actions.length) return;                       // хедер ещё не отрисован / иная сборка
             injectCss();
-            var bell = actions.find('.open--notice').first();
-            if (bell.length) bell.before(buildHeaderNoti());   // перед штатным «звонком»
-            else actions.append(buildHeaderNoti());
-            pollNotifications();                            // сразу подтянуть текущий бейдж
+            actions.append(buildHeaderNoti());                 // штатный колокольчик вырезан AppPatch'ем — наш единственный
+            pollNotifications();                               // сразу подтянуть текущий бейдж
         } catch (e) {}
     }
 
