@@ -709,8 +709,11 @@ public class Startup
                 OnPrepareResponse = ctx =>
                 {
                     string p = ctx.Context.Request.Path.Value ?? string.Empty;
-                    if (p.StartsWith("/ext/", StringComparison.OrdinalIgnoreCase))
+                    if (p.StartsWith("/ext/", StringComparison.OrdinalIgnoreCase)
+                        || p.StartsWith("/cubext/plugin/", StringComparison.OrdinalIgnoreCase))
                         ctx.Context.Response.Headers["Cache-Control"] = "public,max-age=86400";
+                    else if (p.StartsWith("/cubext/", StringComparison.OrdinalIgnoreCase))
+                        ctx.Context.Response.Headers["Cache-Control"] = "public,max-age=31536000,immutable";
                     else if (p.StartsWith("/lampa-main/", StringComparison.OrdinalIgnoreCase)
                         && (p.Contains("/vender/") || p.Contains("/fonts/") || p.Contains("/icons/")
                          || p.Contains("/img/") || p.Contains("/lang/") || p.Contains("/webos/")))

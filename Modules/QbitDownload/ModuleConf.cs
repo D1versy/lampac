@@ -18,6 +18,11 @@ public class ModuleConf : ModuleBaseConf
     public string brand { get; set; } = "D1Vision";
     public List<string> clientHosts { get; set; }
 
+    // Витрина расширений CUB локально (qdl 2.17, CubExtensions.cs): смонтированный том с копией
+    // тем (CSS), скринсейверов (MP4), превью и JS плагинов + локальный list.json с premium=0.
+    // Наполняется scripts/vendor-cub-extensions.ps1; пусто/нет файла → редирект на upstream-cub.
+    public string cubExtPath { get; set; } = "/lampac/wwwroot/cubext";
+
     // Каталог с бинарными билдами клиентов для самообновления (OTA app updates): смонтированный
     // том, лежат manifest.json/appcast.xml + сами APK/DMG. Отдаётся через GET /d1vision/apps/<platform>/<file>.
     // Билды кладёт publish-скрипт (Android) / make-dmg.sh (Mac). См. E:\Media-server\claude\08-clients.md.
