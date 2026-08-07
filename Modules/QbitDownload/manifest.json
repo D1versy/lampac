@@ -10,6 +10,7 @@
     "EpisodeHunter.cs",
     "Live.cs",
     "Warmup.cs",
+    "AppReplace.cs",
     "Controller.cs"
   ]
 }

@@ -20,6 +20,7 @@ public class ModInit : IModuleLoaded
 
         updateConf();
         EventListener.UpdateInitFile += updateConf;
+        AppPatch.Attach();   // вырезание upstream-колокольчика/меню из app.min.js при отдаче (см. AppReplace.cs)
 
         // SQLite-хранилище уведомлений: создаём схему (без миграций) + WAL для параллельных read/write
         try
@@ -76,6 +77,7 @@ public class ModInit : IModuleLoaded
     public void Dispose()
     {
         EventListener.UpdateInitFile -= updateConf;
+        AppPatch.Detach();
         _watchTimer?.Dispose();
         _watchTimer = null;
         _notifyTimer?.Dispose();
