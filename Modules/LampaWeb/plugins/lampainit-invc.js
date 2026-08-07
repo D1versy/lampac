@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.20';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
+window.qdl_fork_version = '2.21';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
 // Лампа готова для использования
@@ -178,20 +178,20 @@ lampainit_invc.first_initiale = function firstinitiale() {
 
 
 // ── ДО загрузки Lampa: платформенные сущности D1Vision ──
-// Нативные оболочки добавляют в UA токен "d1vision_<platform>/<версия>" (mac|ios|android|tizen);
+// Нативные оболочки добавляют в UA токен "d1vision_<platform>/<версия>" (mac|ios|android|tizen|windows);
 // Tizen-виджет вместо UA сеет localStorage['d1vision_platform']='tizen' в loader.js.
 // По токену сервер выставляет платформенные ключи, которые раньше форсил КАЖДЫЙ клиент у себя
 // (BridgeConfig в LampaKit, и т.п.) — теперь единая точка правды здесь: поведение платформ
 // меняется по воздуху, без пересборки бинарей. Канон: E:\Media-server\claude\08-clients.md.
 // «4 замка» маршрутизации плеера (claude/07-mac-app.md): оболочки с мостом window.AndroidJS
-// живут на андроидной ветке запуска плеера, поэтому mac/ios/android получают одинаковые
+// живут на андроидной ветке запуска плеера, поэтому mac/ios/android/windows получают одинаковые
 // андроидные ключи; ЧЕСТНАЯ идентичность платформы — d1vision_platform (window + localStorage).
 // Старые бинари без токена, но с lampa_client в UA → 'android': их собственный форс-скрипт
 // пишет ровно те же значения, операция идемпотентна — обратная совместимость при миграции.
 window.d1vision_brand = window.d1vision_brand || 'D1Vision';   // дефолт; актуальное значение приезжает из /d1vision/hosts.json (init.conf → QbitDownload.brand)
 try {
   var d1ua = navigator.userAgent || '';
-  var d1tok = /d1vision_(mac|ios|android|tizen)\/(\S+)/i.exec(d1ua);
+  var d1tok = /d1vision_(mac|ios|android|tizen|windows)\/(\S+)/i.exec(d1ua);
   // Из localStorage доверяем ТОЛЬКО 'tizen' (его легитимно сеет loader.js виджета — у Tizen
   // нет UA-токена). mac/ios/android определяем ИСКЛЮЧИТЕЛЬНО по UA-токену: иначе залипшее в
   // одном браузере значение (импорт настроек, общий профиль) навсегда форсило бы андроидные
@@ -206,7 +206,7 @@ try {
 
   // Оболочки с нативным мостом AndroidJS → андроидный маршрут плеера (замки 2 и 3).
   // tizen и web НЕ трогаем: там платформу определяет сама Lampa, нативного моста нет.
-  if (d1plat === 'mac' || d1plat === 'ios' || d1plat === 'android') {
+  if (d1plat === 'mac' || d1plat === 'ios' || d1plat === 'android' || d1plat === 'windows') {
     localStorage.setItem('platform', 'android');
     localStorage.setItem('player', 'android');
     localStorage.setItem('player_torrent', 'android');

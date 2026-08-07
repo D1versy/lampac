@@ -894,6 +894,9 @@ public partial class QbitController : BaseController
             case ".apk": return "application/vnd.android.package-archive";
             case ".dmg": return "application/x-apple-diskimage";
             case ".wgt":
+            case ".exe":
+            case ".msi":
+            case ".nupkg":
             case ".zip": return "application/octet-stream";
             case ".xml": return "application/xml; charset=utf-8";
             case ".json": return "application/json; charset=utf-8";

@@ -1,7 +1,7 @@
 'use strict';
 // Платформенный блок D1Vision в lampainit-invc.js (ранний, до загрузки Lampa):
 // детект UA-токена d1vision_<platform>/<ver> → d1vision_platform + форс андроидных
-// ключей плеера для оболочек с нативным мостом (mac/ios/android). См. claude/08-clients.md.
+// ключей плеера для оболочек с нативным мостом (mac/ios/android/windows). См. claude/08-clients.md.
 const test = require('node:test');
 const assert = require('node:assert');
 const H = require('./harness');
@@ -41,6 +41,13 @@ test('platform: токен d1vision_ios → platform ios + форс-ключи',
 test('platform: токен d1vision_android → platform android + форс-ключи', () => {
   const { sandbox, localStorage } = load(`${UA_BASE} lampa_client d1vision_android/1.4.2-522`);
   assert.strictEqual(sandbox.window.d1vision_platform, 'android');
+  assertForced(localStorage);
+});
+
+test('platform: токен d1vision_windows → platform windows + форс-ключи', () => {
+  const { sandbox, localStorage } = load(`${UA_BASE} lampa_client d1vision_windows/1.0.0-500`);
+  assert.strictEqual(sandbox.window.d1vision_platform, 'windows');
+  assert.strictEqual(localStorage.getItem('d1vision_platform'), 'windows');
   assertForced(localStorage);
 });
 
