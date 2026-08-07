@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.14';   // 2.0: умная выдача раздач (⭐ скоринг, серии/дата/🔔) + охота за сериями по всем раздачам (/qdl/episodes, серии-доноры «врем.», tl-таймлайн) + SWITCH-переключение; 2.1: фиксы ревью — аудио доноров по своему hash, SWITCH-тост без «скачана»; 2.2: пункт меню «D1VERSY LIVE» — записи видеорегистратора (день → камеры с записями → плеер, прокси /qdl/live/*); 2.3: весь день ОДНОЙ записью с одним таймлайном (склеенный HLS /qdl/live/day), фрагменты — запасной путь; 2.4: раздел «D1versy Live» — эфир (живая сетка камер, rolling-HLS /qdl/live/watch/*), прежний раздел записей переименован в «D1versy Records»; 2.5: «D1versy Records» → «D1versy Rec»; 2.6: iPhone — эфир в НАТИВНОМ плеере iOS (прямой click-жест, <video> без playsinline, фолбек в VLC, qdl_ios_live auto/off); сетка эфира по центру и во всю ширину; видимый фокус пульта в Rec/камере/Уведомлениях; 2.7: фикс iOS-эфира — видимый оверлей вместо скрытого <video> (авто-фуллскрин WebKit флакал со второго раза), явный webkitEnterFullscreen, попытки чистят только свой элемент (двойной тап больше не роняет в VLC); 2.8: Rec на пустом «сегодня» сам прыгает на последний день с записями (пустой день на ТВ выглядел как «нет навигации» — вниз некуда идти); 2.9: зеркало прогресса устройства (file_view ↔ нативное KV AndroidJS, ключ qdl_file_view) — resume переживает смену хоста LAN↔внешний на iPhone/Mac/Android, браузер не затронут; выкл. зеркала: qdl_tl_mirror='off', фолбэк «всегда с начала» — player_timecode='again'; rawPlay унифицирован на pickTimeline (tl-ключ при известном файле); инварианты слияния после адверсариального ревью: сид-метка t=1 (старьё не клоббрит свежее), кламп меток из будущего, уважение очистки истории, бюджет посева=кап (без re-seed-churn); 2.10: скорость — прогрев кеша сервера при открытии карточки скачанного (/qdl/warmup: голова+хвост файла в page cache + ffprobe-кеш; addContinueButton/openDownload) и прогрев следующей серии при старте плейбека (warmupNext); мемоизация fetchEpisodes (1 запрос /qdl/episodes вместо 3 на пути «Смотреть», TTL 45 с, инвалидация на del/SWITCH/транскод); сервер: кеш резолва hash+index→путь, кеш ffprobe-дорожек, переиспользование SID-сессии qBittorrent, immutable-кэширование app.min.js/qdl.js/постеров; 2.11: свой ЭКРАН СЕРИЙ (qdl_episodes) вместо селектбокса — длинные списки скроллятся на ТВ, «назад» из плеера возвращает в список серий (и «Продолжить» идёт через него, autoplay), озвучка помнится и меняется кнопкой без переспроса, отметки ✓/►N% + размер/«временная» у доноров обновляются на месте; общий фикс селектбоксов (upstream-баг: Select пишет mheight в jQuery data, Layer читает сырое свойство → низ длинных списков «за экраном»; fixSelectHeight по fullshow: свойство + Layer.update + px max-height >480) — чинит выбор раздачи (60 пунктов), озвучки и все селекты; qdl_card: scroll.minus() + фокус-скролл; 2.12: номер серии бейджем в начале строки экрана серий (epNumber: epkey сервера → парс имени → порядковый) — на iPhone длинные имена файлов обрезались и серии было не отличить; 2.13: синк с upstream 1.45 + включён модуль Music (флип manifest enable:true, клиентам подключён /music.js) + свежие yaml-источники NextHUB; 2.14: только НАШИ уведомления — упразднён upstream-колокольчик (AppPatch в QbitDownload/AppReplace.cs режет иконку Notice + NoticeCub из app.min.js при отдаче) и пункты меню Релизы/Расписание/Подписки + фоновый TimeTable-парсер (TMDB каждые 30 сек) + ряды «Скоро выйдут»/«Недавно вышли»; фикс дублей qdl-колокольчика/бейджа (dedupe+first, in-flight poll, синглтон-гард qdl_plugin_loaded, агрегация SWITCH/INFO-тостов); тут: CSS-фолбэк на случай смены tree + disable_features.subscribe=true
+window.qdl_fork_version = '2.15';   // 2.0: умная выдача раздач (⭐ скоринг, серии/дата/🔔) + охота за сериями по всем раздачам (/qdl/episodes, серии-доноры «врем.», tl-таймлайн) + SWITCH-переключение; 2.1: фиксы ревью — аудио доноров по своему hash, SWITCH-тост без «скачана»; 2.2: пункт меню «D1VERSY LIVE» — записи видеорегистратора (день → камеры с записями → плеер, прокси /qdl/live/*); 2.3: весь день ОДНОЙ записью с одним таймлайном (склеенный HLS /qdl/live/day), фрагменты — запасной путь; 2.4: раздел «D1versy Live» — эфир (живая сетка камер, rolling-HLS /qdl/live/watch/*), прежний раздел записей переименован в «D1versy Records»; 2.5: «D1versy Records» → «D1versy Rec»; 2.6: iPhone — эфир в НАТИВНОМ плеере iOS (прямой click-жест, <video> без playsinline, фолбек в VLC, qdl_ios_live auto/off); сетка эфира по центру и во всю ширину; видимый фокус пульта в Rec/камере/Уведомлениях; 2.7: фикс iOS-эфира — видимый оверлей вместо скрытого <video> (авто-фуллскрин WebKit флакал со второго раза), явный webkitEnterFullscreen, попытки чистят только свой элемент (двойной тап больше не роняет в VLC); 2.8: Rec на пустом «сегодня» сам прыгает на последний день с записями (пустой день на ТВ выглядел как «нет навигации» — вниз некуда идти); 2.9: зеркало прогресса устройства (file_view ↔ нативное KV AndroidJS, ключ qdl_file_view) — resume переживает смену хоста LAN↔внешний на iPhone/Mac/Android, браузер не затронут; выкл. зеркала: qdl_tl_mirror='off', фолбэк «всегда с начала» — player_timecode='again'; rawPlay унифицирован на pickTimeline (tl-ключ при известном файле); инварианты слияния после адверсариального ревью: сид-метка t=1 (старьё не клоббрит свежее), кламп меток из будущего, уважение очистки истории, бюджет посева=кап (без re-seed-churn); 2.10: скорость — прогрев кеша сервера при открытии карточки скачанного (/qdl/warmup: голова+хвост файла в page cache + ffprobe-кеш; addContinueButton/openDownload) и прогрев следующей серии при старте плейбека (warmupNext); мемоизация fetchEpisodes (1 запрос /qdl/episodes вместо 3 на пути «Смотреть», TTL 45 с, инвалидация на del/SWITCH/транскод); сервер: кеш резолва hash+index→путь, кеш ffprobe-дорожек, переиспользование SID-сессии qBittorrent, immutable-кэширование app.min.js/qdl.js/постеров; 2.11: свой ЭКРАН СЕРИЙ (qdl_episodes) вместо селектбокса — длинные списки скроллятся на ТВ, «назад» из плеера возвращает в список серий (и «Продолжить» идёт через него, autoplay), озвучка помнится и меняется кнопкой без переспроса, отметки ✓/►N% + размер/«временная» у доноров обновляются на месте; общий фикс селектбоксов (upstream-баг: Select пишет mheight в jQuery data, Layer читает сырое свойство → низ длинных списков «за экраном»; fixSelectHeight по fullshow: свойство + Layer.update + px max-height >480) — чинит выбор раздачи (60 пунктов), озвучки и все селекты; qdl_card: scroll.minus() + фокус-скролл; 2.12: номер серии бейджем в начале строки экрана серий (epNumber: epkey сервера → парс имени → порядковый) — на iPhone длинные имена файлов обрезались и серии было не отличить; 2.13: синк с upstream 1.45 + включён модуль Music (флип manifest enable:true, клиентам подключён /music.js) + свежие yaml-источники NextHUB; 2.14: только НАШИ уведомления — упразднён upstream-колокольчик (AppPatch в QbitDownload/AppReplace.cs режет иконку Notice + NoticeCub из app.min.js при отдаче) и пункты меню Релизы/Расписание/Подписки + фоновый TimeTable-парсер (TMDB каждые 30 сек) + ряды «Скоро выйдут»/«Недавно вышли»; фикс дублей qdl-колокольчика/бейджа (dedupe+first, in-flight poll, синглтон-гард qdl_plugin_loaded, агрегация SWITCH/INFO-тостов); тут: CSS-фолбэк на случай смены tree + disable_features.subscribe=true; 2.15: локализация внешних источников — клиент ходит ТОЛЬКО на наш сервер (осознанные исключения: YouTube-трейлеры, стрим балансеров): форс proxy_tmdb=true каждую загрузку (LAN-клиенты по GeoIP получали false и ходили за постерами/TMDB-API напрямую; теперь /tmdb/img кеш 72ч + /tmdb/api кеш 24ч), lampa_settings.mirrors=false (проба зеркал cub.rip/durex.monster/cubnotrip.top на старте), lampa_settings.geo=false (raw-$.ajax на geo.<cub>, страна = 'RU'), watch-пинг $.get('tmdb.<cub>/watch?id=') → локальная заглушка /cub/api/checker (raw jQuery мимо request_before — ловит XHR-патч); сервер: MyLocalIp-хук вместо api.ipify.org, почасовой прогрев каталога CatalogWarmup, вендор плагинов магазина расширений (/ext/*)
 
 
 // Лампа готова для использования 
@@ -227,6 +227,25 @@ try {
 // Дефолт subscribe=false ставит lampainit.js ВЫШЕ по файлу (наш код инлайнится после него, до app.min.js).
 try { window.lampa_settings.disable_features.subscribe = true; } catch (e) {}
 
+// ── ДО загрузки Lampa: локализация внешних источников (qdl 2.15, см. claude/11 Media-server) ──
+// Клиент должен ходить ТОЛЬКО на наш сервер (осознанные исключения: YouTube-трейлеры, стрим балансеров).
+// mirrors=false — гейт пробы зеркал CUB: 6 raw-$.ajax на cub.rip/durex.monster/cubnotrip.top//api/checker
+//   при каждом старте (raw jQuery мимо request_before — cubproxy.js их не видит); гейт в бандле:
+//   `if (!window.lampa_settings.mirrors) return call && call();` — колбэк зовётся, поток старта цел.
+// geo=false — гейт raw-$.ajax на geo.<cub>; без пробы страна = 'RU', что нам и нужно. In-bundle
+//   TMDBProxy.init() при этом не стартует — неважно: наш tmdbproxy.js перекрывает TMDB.api/image сам.
+try {
+  window.lampa_settings.mirrors = false;
+  window.lampa_settings.geo = false;
+} catch (e) {}
+// proxy_tmdb=true КАЖДУЮ загрузку (не в first_initiale): upstream lampainit.js ставит его только при
+// первом запуске (гард lampac_initiale) и по GeoIP — LAN-клиент получал null→false и ходил за
+// постерами/TMDB-API на image.tmdb.org/api.themoviedb.org напрямую, мимо сервера. Форс до старта
+// Lampa уводит на {localhost}/tmdb/img (кеш 72ч, SSD) и /tmdb/api (кеш 24ч) через tmdbproxy.js.
+// Строка 'true' — ровно то, что кладёт Lampa.Storage.set(…, true). Ручной тумблер «Прокси TMDB»
+// в настройках теперь живёт до перезагрузки — это осознанно.
+try { localStorage.setItem('proxy_tmdb', 'true'); } catch (e) {}
+
 // ── ДО загрузки Lampa: XHR-перехват для DMCA-фолбека (пара к qdl.js, см. claude/06 Media-server) ──
 // CUB на заблокированные правообладателем карточки отдаёт {"blocked":true} → Lampa рисует
 // «Контент заблокирован» без единой кнопки. Детали карточек (tmdb.<cub>/3/movie|tv/<id>)
@@ -245,19 +264,28 @@ try {
       if (m[2].indexOf('api_key=') === -1) return null;   // прямому TMDB без ключа нельзя (401)
       return '{localhost}/tmdb/api/' + m[1] + m[2];
     };
+    // пинг «просмотрено» (qdl 2.15): $.get('https://tmdb.<cub>/watch?id=…') — raw jQuery МИМО
+    // Lampa.Reguest, request_before не стреляет, cubproxy.js его не видит; единственный ловец — XHR.
+    // Заворачиваем на локальную заглушку /cub/api/checker (CubProxy отвечает 'ok' без похода наружу);
+    // ответ фронт игнорирует. Форма с /cub/ — на случай, если URL уже кем-то завёрнут.
+    var qdlRewriteWatch = function (u) {
+      return /^https?:\/\/(?:[^\/]+\/cub\/)?tmdb\.[^\/]*\/watch\?/.test(String(u))
+        ? '{localhost}/cub/api/checker' : null;
+    };
     var qdlXhrOpen = window.XMLHttpRequest.prototype.open;
     window.XMLHttpRequest.prototype.open = function (method, url) {
       try {
         if (String(method).toUpperCase() === 'GET') {
           var dm = /^https?:\/\/tmdb\.([^\/]+)\//.exec(String(url));
           if (dm) window.qdl_cub_domain = dm[1];          // домен CUB — qdl.js возьмёт для /blocked
-          var ru = qdlRewriteCub(url);
+          var ru = qdlRewriteCub(url) || qdlRewriteWatch(url);
           if (ru) arguments[1] = ru;
         }
       } catch (e) {}
       return qdlXhrOpen.apply(this, arguments);
     };
     lampainit_invc.rewriteCubUrl = qdlRewriteCub;         // наружу — для тестов
+    lampainit_invc.rewriteWatchUrl = qdlRewriteWatch;     // наружу — для тестов
   }
 } catch (e) {}
 

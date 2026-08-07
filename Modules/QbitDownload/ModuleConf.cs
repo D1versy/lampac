@@ -121,4 +121,18 @@ public class ModuleConf : ModuleBaseConf
     public int watchStaleChecks { get; set; } = 8;          // проверок без смены infohash (~2 суток при 6ч)
     public int watchSwitchCooldownDays { get; set; } = 7;   // не чаще одного переключения в неделю
     public bool switchDeleteOldFiles { get; set; } = false; // другой рип = другие файлы; старые по умолчанию оставляем
+
+    // ── Локализация внешних источников (qdl 2.15, карта — E:\Media-server\claude\11) ──
+    // mylocalip без api.ipify.org: внешний IP = A-запись СОБСТВЕННОГО домена (DNS самолечится при
+    // смене IP; Kodik/Alloha подписывают ссылки на реальный внешний IP — LAN-адрес сюда нельзя).
+    // Пусто = хук выключен, upstream-фолбэк на ipify остаётся.
+    public string myIpHost { get; set; } = "tv.d1versy.com";
+
+    // Прогрев каталога главной (CatalogWarmup.cs): запоминаем /cub/tmdb.* URL-ы клиентов и
+    // периодически дёргаем их локально — протухшую запись Staticache (TTL CubProxy 3 ч) обновляет
+    // наш тик, а не живой клиент. HIT-проверки бесплатны (ответ из кеша, наружу ничего).
+    public bool catalogWarmupEnabled { get; set; } = true;
+    public int catalogWarmupPeriodMin { get; set; } = 15;   // кламп ≥5; наружу всё равно ≈раз в TTL на URL
+    public int catalogWarmupMaxUrls { get; set; } = 64;     // LRU-кап списка
+    public int catalogWarmupPruneDays { get; set; } = 14;   // URL не запрашивался клиентами N дней → забыть
 }

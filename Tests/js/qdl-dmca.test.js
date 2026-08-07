@@ -58,6 +58,30 @@ test('rewriteCubUrl: каталог/поиск/служебные и чужие 
   ]) assert.strictEqual(qdl.rewriteCubUrl(u), null, u);
 });
 
+// ─────────────────────────────── rewriteWatchUrl (qdl 2.15) ───────────────────────────────
+// пинг «просмотрено» — raw $.get мимо request_before/cubproxy.js → заворачиваем на локальную заглушку
+
+test('rewriteWatchUrl: watch-пинг CUB → локальная заглушка /cub/api/checker', () => {
+  const { qdl } = H.loadQdl();
+  assert.strictEqual(qdl.rewriteWatchUrl('https://tmdb.cub.rip/watch?id=1084736&cat=movie'),
+    '{localhost}/cub/api/checker');
+  assert.strictEqual(qdl.rewriteWatchUrl('http://tmdb.mirror.men/watch?id=5'),
+    '{localhost}/cub/api/checker', 'зеркальный домен тоже');
+  assert.strictEqual(qdl.rewriteWatchUrl('http://192.168.87.24:9118/cub/tmdb.cub.rip/watch?id=5'),
+    '{localhost}/cub/api/checker', 'уже завёрнутая форма через /cub/ тоже');
+});
+
+test('rewriteWatchUrl: посторонние URL не трогаем', () => {
+  const { qdl } = H.loadQdl();
+  for (const u of [
+    'https://tmdb.cub.rip/3/movie/1?api_key=k',   // детали — зона rewriteCubUrl
+    'https://tmdb.cub.rip/blocked',               // DMCA-список (идёт через Reguest→cubproxy.js)
+    'https://tmdb.cub.rip/watch',                 // без query такого запроса в бандле нет
+    'https://cub.rip/watch?id=1',                 // не tmdb-сабдомен
+    'https://example.com/watch?id=1',             // чужой хост
+  ]) assert.strictEqual(qdl.rewriteWatchUrl(u), null, u);
+});
+
 // ─────────────────────────────── XHR-патч ───────────────────────────────
 
 // фабрика: у каждого теста СВОЙ класс, иначе патчи из разных sandbox наслаиваются на общий прототип
@@ -82,6 +106,10 @@ test('XHR-патч: GET карточки CUB переписан на прокс�
   const c = new Xhr();
   c.open('GET', 'https://cub.rip/api/notice');
   assert.strictEqual(c._url, 'https://cub.rip/api/notice', 'не-tmdb URL не трогаем');
+
+  const d = new Xhr();
+  d.open('GET', 'https://tmdb.cub.rip/watch?id=1084736&cat=movie');
+  assert.strictEqual(d._url, '{localhost}/cub/api/checker', 'watch-пинг → локальная заглушка (2.15)');
 });
 
 test('XHR-патч: домен CUB запоминается из живых запросов → /blocked идёт на зеркало', () => {
@@ -108,6 +136,12 @@ test('lampainit-invc: ранний XHR-патч (deep-link) — стоит до 
   assert.strictEqual(sandbox.window.qdl_xhr_patch, 1, 'флаг не даст qdl.js навесить второй патч');
   assert.strictEqual(sandbox.window.qdl_cub_domain, 'cub.rip', 'домен CUB запомнен для /blocked');
   assert.strictEqual(mod.rewriteCubUrl('https://tmdb.cub.rip/3/discover/movie?api_key=k'), null);
+
+  // 2.15: watch-пинг тоже ловится ранним патчем (deep-link может дёрнуть его до загрузки qdl.js)
+  const w = new sandbox.window.XMLHttpRequest();
+  w.open('GET', 'https://tmdb.cub.rip/watch?id=7&cat=tv');
+  assert.strictEqual(w._url, '{localhost}/cub/api/checker');
+  assert.strictEqual(mod.rewriteWatchUrl('https://tmdb.cub.rip/blocked'), null);
 });
 
 test('qdl.js: при уже стоящем раннем патче второй не вешается (window.qdl_xhr_patch)', () => {

@@ -344,6 +344,30 @@ test('lampainit: appload is idempotent across two calls (no throw, single style)
   assert.strictEqual(styles.length, 1, 'second appload should not append a duplicate style');
 });
 
+// ─────────────────────────── top-level: локализация внешних источников (qdl 2.15) ───────────────────────────
+
+test('lampainit 2.15: top-level форсит proxy_tmdb=true даже поверх сохранённого false', () => {
+  const ls = H.makeStorage();
+  ls.setItem('proxy_tmdb', 'false'); // старый клиент: lampainit.js по GeoIP(LAN)=null записал false
+  const { localStorage } = H.loadLampaInit({ localStorage: ls });
+  assert.strictEqual(localStorage.getItem('proxy_tmdb'), 'true');
+});
+
+test('lampainit 2.15: top-level гасит lampa_settings.mirrors и .geo (пробы зеркал/гео CUB)', () => {
+  const settings = { disable_features: {} };
+  const { sandbox } = H.loadLampaInit({ windowExtra: { lampa_settings: settings } });
+  assert.strictEqual(sandbox.window.lampa_settings.mirrors, false);
+  assert.strictEqual(sandbox.window.lampa_settings.geo, false);
+  // соседний флаг из более раннего блока тоже на месте — блоки не мешают друг другу
+  assert.strictEqual(sandbox.window.lampa_settings.disable_features.subscribe, true);
+});
+
+test('lampainit 2.15: без window.lampa_settings не падает, а proxy_tmdb всё равно форсится', () => {
+  // отдельные try/catch: падение блока настроек не должно отменить форс proxy_tmdb
+  const { localStorage } = H.loadLampaInit();
+  assert.strictEqual(localStorage.getItem('proxy_tmdb'), 'true');
+});
+
 // ─────────────────────────── first_initiale() ───────────────────────────
 
 test('lampainit: first_initiale exists and does not throw', () => {

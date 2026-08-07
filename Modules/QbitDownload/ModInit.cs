@@ -21,6 +21,8 @@ public class ModInit : IModuleLoaded
         updateConf();
         EventListener.UpdateInitFile += updateConf;
         AppPatch.Attach();   // вырезание upstream-колокольчика/меню из app.min.js при отдаче (см. AppReplace.cs)
+        EventListener.MyLocalIp += MyIp;   // внешний IP без api.ipify.org (qdl 2.15, см. MyIp ниже)
+        CatalogWarmup.Attach();            // почасовой прогрев каталога главной (CatalogWarmup.cs)
 
         // SQLite-хранилище уведомлений: создаём схему (без миграций) + WAL для параллельных read/write
         try
@@ -78,6 +80,8 @@ public class ModInit : IModuleLoaded
     {
         EventListener.UpdateInitFile -= updateConf;
         AppPatch.Detach();
+        EventListener.MyLocalIp -= MyIp;
+        CatalogWarmup.Detach();
         _watchTimer?.Dispose();
         _watchTimer = null;
         _notifyTimer?.Dispose();
@@ -89,5 +93,38 @@ public class ModInit : IModuleLoaded
     void updateConf()
     {
         conf = ModuleInvoke.Init("QbitDownload", new ModuleConf());
+    }
+
+    // ── mylocalip без api.ipify.org (qdl 2.15) ──
+    // Семантика «внешний IP сервера» обязана остаться настоящей: Kodik/Alloha подписывают ссылки
+    // на реальный IP (BaseController фолбэком ходил в ipify). Берём A-запись СОБСТВЕННОГО домена
+    // (myIpHost) — тот же IP, DNS самолечится при его смене. Ошибка резолва → отдаём последний
+    // удачный, а на самом первом сбое null → upstream-фолбэк (ipify) остаётся страховкой.
+    static string _myIp;
+    static System.DateTime _myIpAt;
+    static async System.Threading.Tasks.Task<string> MyIp(Shared.Models.Events.EventMyLocalIp e)
+    {
+        string host = conf?.myIpHost;
+        if (string.IsNullOrEmpty(host))
+            return null;
+
+        if (_myIp != null && (System.DateTime.UtcNow - _myIpAt).TotalHours < 12)
+            return _myIp;
+
+        try
+        {
+            foreach (var ip in await System.Net.Dns.GetHostAddressesAsync(host))
+            {
+                if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                {
+                    _myIp = ip.ToString();
+                    _myIpAt = System.DateTime.UtcNow;
+                    return _myIp;
+                }
+            }
+        }
+        catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] myip dns: " + ex.Message); }
+
+        return _myIp;
     }
 }

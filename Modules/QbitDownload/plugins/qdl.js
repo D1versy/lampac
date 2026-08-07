@@ -157,6 +157,14 @@
         return API + '/tmdb/api/' + m[1] + m[2];
     }
 
+    // Пинг «просмотрено» (qdl 2.15): $.get('https://tmdb.<cub>/watch?id=…') — raw jQuery МИМО
+    // Lampa.Reguest, request_before не стреляет и cubproxy.js его не видит; единственный ловец — XHR.
+    // → локальная заглушка /cub/api/checker (CubProxy отвечает 'ok' без похода наружу), ответ игнорируется.
+    function rewriteWatchUrl(u) {
+        return /^https?:\/\/(?:[^\/]+\/cub\/)?tmdb\.[^\/]*\/watch\?/.test(String(u))
+            ? API + '/cub/api/checker' : null;
+    }
+
     function isDmca(media, id) {
         if (!dmcaList || !id) return false;
         for (var i = 0; i < dmcaList.length; i++) {
@@ -203,7 +211,7 @@
                 try {
                     if (String(method).toUpperCase() === 'GET') {
                         noteCubDomain(url);
-                        var ru = rewriteCubUrl(url);
+                        var ru = rewriteCubUrl(url) || rewriteWatchUrl(url);
                         if (ru) arguments[1] = ru;
                     }
                 } catch (e) {}
