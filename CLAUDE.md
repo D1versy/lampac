@@ -9,6 +9,7 @@
 - **`Modules/QbitDownload/`** — наш модуль: фича «Скачать» → qBittorrent → раздел «Загрузки» (оффлайн-просмотр).
   - `Controller.cs` — эндпоинты (`/qdl/search|add|list|files|stream|hls|watch`, уведомления, аудиодорожки) + `GET /d1vision/hosts.json` (OTA-список хостов и бренд для клиентов, см. ниже)
   - `plugins/qdl.js` — клиентский плагин Lampa (кнопка «Скачать», грид «Загрузки», экран серий `qdl_episodes`, Rec/эфир, фикс селектбокса — устройство: `E:\Media-server\claude\03`, грабли: `claude/06` §AO)
+  - `AppReplace.cs` — **серверный патчер бандла Lampa** (`AppPatch`): подписка на `EventListener.AppReplace` («appjs»), при отдаче `app.min.js` режет по строковым якорям upstream-колокольчик уведомлений (иконка Notice + NoticeCub-опрос), пункты меню Релизы/Расписание/Подписки, фоновый TimeTable-парсер и ряды «Скоро выйдут»/«Недавно вышли». Якорь не найден (сменился tree) → warn в лог + CSS-фолбэк в `lampainit-invc.js`. Наши уведомления qdl это не трогает.
   - `ModInit.cs` · `ModuleConf.cs` · `SqlContext.cs` (SQLite `qdl.db`) · `manifest.json`
 - **`Modules/LampaWeb/widgets/samsung/`** — наш кастомный Tizen-виджет D1Vision (задел под Samsung TV): бренд + мульти-хост `loader.js`, сервер собирает `.wgt` по `GET /samsung.wgt`.
 - **`Tests/QbitDownload.Tests/`** (C#/xUnit) + **`Tests/js/`** (JS) — наши тесты.
@@ -27,7 +28,7 @@
 - Модули в `Modules/<Name>/` = `manifest.json` + `.cs`. **Компилируются в РАНТАЙМЕ через Roslyn** при старте контейнера (в логах: `compilation <Name>` / `loaded module: <Name>`). Пересборка SDK не нужна, но в образ `.cs` копируются (`Core/Core.csproj` глобит `Modules/**`).
 - Быстрая итерация без полного билда: `docker cp Modules/QbitDownload lampac:/lampac/module/QbitDownload && docker restart lampac`.
 - Ошибки компиляции модуля видны в логах: `docker logs lampac | grep -i qbit`.
-- Фронтенд Lampa НЕ в репо — качается в рантайме (`Modules/LampaWeb/Services/LampaCron.cs` тянет `yumata/lampa` в `wwwroot/lampa-main/`). JS-плагины цепляются через `lampainit-invc.js` (`{localhost}` → host).
+- Фронтенд Lampa НЕ в этом репо. В бою (compose медиасервера) он **вендорен**: `E:\Media-server\lampa-vendor\lampa-main` → бинд-том `:ro` в `/lampac/wwwroot/lampa-main` + `LampaWeb.autoupdate: false` в `init.conf` — GitHub не нужен вообще; обновление фронта — осознанный runbook (`E:\Media-server\claude\04-operations.md`). Механизм скачивания (`Modules/LampaWeb/Services/LampaCron.cs`, тянет `yumata/lampa` в `wwwroot/lampa-main/`) остаётся фолбэком для голого запуска. JS-плагины цепляются через `lampainit-invc.js` (`{localhost}` → host).
 
 ## OTA-обновления клиентов и платформы (D1Vision)
 Все клиенты (D1Vision mac/iOS, LAMPA-App Android TV, задел Tizen, браузер) — тонкие WebView-оболочки: грузят живой веб-интерфейс с этого сервера. **Канонический документ — `E:\Media-server\claude\08-clients.md`.**
