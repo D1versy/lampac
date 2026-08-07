@@ -14,7 +14,7 @@
   - `ModInit.cs` (+ хук `MyLocalIp`: внешний IP = DNS своего домена вместо api.ipify.org) · `ModuleConf.cs` · `SqlContext.cs` (SQLite `qdl.db`) · `manifest.json` (⚠️ поле `tree` — ЯВНЫЙ список .cs; новый файл без записи в tree = compilation error и крашлуп контейнера)
 - **`Modules/LampaWeb/widgets/samsung/`** — наш кастомный Tizen-виджет D1Vision (задел под Samsung TV): бренд + мульти-хост `loader.js`, сервер собирает `.wgt` по `GET /samsung.wgt`.
 - **`Tests/QbitDownload.Tests/`** (C#/xUnit) + **`Tests/js/`** (JS) — наши тесты.
-- Правки upstream-файлов (**минимальные**): `Modules/LampaWeb/plugins/lampainit-invc.js` (регистрация `qdl.js` **и `music.js`** + скрытие вкладки CUB + ранний платформенный блок D1Vision, см. ниже), `Modules/LampaWeb/Controllers/ApiController.cs` (5 строк), `Modules/Music/manifest.json` (**флип `enable: true`** — у upstream модуль Music выключен по умолчанию; без флипа `/music.js` отдаёт 404, см. медиасервер `claude/06` §AP).
+- Правки upstream-файлов (**минимальные**): `Modules/LampaWeb/plugins/lampainit-invc.js` (регистрация `qdl.js` **и `music.js`** + скрытие вкладки CUB + ранний платформенный блок D1Vision, см. ниже), `Modules/LampaWeb/Controllers/ApiController.cs` (5 строк), `Modules/Music/manifest.json` (**флип `enable: true`** — у upstream модуль Music выключен по умолчанию; без флипа `/music.js` отдаёт 404, см. медиасервер `claude/06` §AP), `Core/Startup.cs` (~27 строк: подключение `UseD1VPerimeter` в нужной точке пайплайна, `EnableForHttps` для сжатия, `Cache-Control` статике в `OnPrepareResponse`).
 - `README.md`, этот `CLAUDE.md`.
 
 ## Что фиксить здесь, а что — в медиасервере

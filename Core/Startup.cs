@@ -229,10 +229,15 @@ public class Startup
             services.AddResponseCompression(options =>
             {
                 options.MimeTypes = CoreInit.CompressionMimeTypes;
-                // qdl 2.16: сейчас за caddy Request.Scheme=http (ForwardedHeaders для docker-сети не
-                // сконфигурен) и флаг не срабатывает, но без него включение KnownProxies в будущем
-                // молча убило бы динамическое сжатие всем внешним клиентам. Precompressed-путь
-                // Staticache (.br) эту проверку не проходит вовсе — ему флаг не нужен.
+                // qdl 2.16, формулировка исправлена в 2.22 (была ровно наоборот). За caddy
+                // Request.Scheme РЕАЛЬНО https, и флаг РАБОТАЕТ уже сейчас: caddy сидит на
+                // 172.24.0.5 (docker-сеть media), это попадает в дефолтный KnownProxies 172.16/12
+                // (в init.conf не переопределён), а UseForwardedHeaders ниже учитывает
+                // X-Forwarded-Proto. Проверка: `curl -H "X-Forwarded-Proto: https" .../tmdbproxy.js`
+                // → {localhost} подставляется как https://, без заголовка — http://.
+                // Без EnableForHttps динамическое сжатие молча отключилось бы всем внешним
+                // клиентам. Precompressed-путь Staticache (.br) эту проверку не проходит вовсе —
+                // ему флаг не нужен.
                 options.EnableForHttps = true;
             });
         }
