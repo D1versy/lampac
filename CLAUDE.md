@@ -12,7 +12,7 @@
   - `ModInit.cs` · `ModuleConf.cs` · `SqlContext.cs` (SQLite `qdl.db`) · `manifest.json`
 - **`Modules/LampaWeb/widgets/samsung/`** — наш кастомный Tizen-виджет D1Vision (задел под Samsung TV): бренд + мульти-хост `loader.js`, сервер собирает `.wgt` по `GET /samsung.wgt`.
 - **`Tests/QbitDownload.Tests/`** (C#/xUnit) + **`Tests/js/`** (JS) — наши тесты.
-- Правки upstream-файлов (**минимальные**): `Modules/LampaWeb/plugins/lampainit-invc.js` (регистрация `qdl.js` + скрытие вкладки CUB + ранний платформенный блок D1Vision, см. ниже), `Modules/LampaWeb/Controllers/ApiController.cs` (5 строк).
+- Правки upstream-файлов (**минимальные**): `Modules/LampaWeb/plugins/lampainit-invc.js` (регистрация `qdl.js` **и `music.js`** + скрытие вкладки CUB + ранний платформенный блок D1Vision, см. ниже), `Modules/LampaWeb/Controllers/ApiController.cs` (5 строк), `Modules/Music/manifest.json` (**флип `enable: true`** — у upstream модуль Music выключен по умолчанию; без флипа `/music.js` отдаёт 404, см. медиасервер `claude/06` §AP).
 - `README.md`, этот `CLAUDE.md`.
 
 ## Что фиксить здесь, а что — в медиасервере
@@ -43,8 +43,8 @@
 
 ## Сборка / деплой / синк
 - Билд: `docker build -t lampac-custom:latest .` → образ подхватит медиасервер (`docker compose up -d lampac`).
-- Синк с upstream делать **из репо медиасервера**: `E:\Media-server\scripts\sync-lampac-fork.ps1`.
-- При rebase конфликт возможен только в `lampainit-invc.js` (одна строка) — оставить нашу `putScriptAsync(["{localhost}/qdl.js"])`.
+- Синк с upstream делать **из репо медиасервера**: `E:\Media-server\scripts\sync-lampac-fork.ps1`. Страховочный паттерн (бэкап-ветка + бэкап-тег образа + тесты между ребейзом и билдом + headless-проверки) — `claude/06` §AP; после ребейза пушить `--force-with-lease`.
+- При rebase конфликты вероятны только в наших точках правок upstream: `lampainit-invc.js` — оставить наши ДВЕ строки `putScriptAsync` (`{localhost}/qdl.js` и `{localhost}/music.js`); `Modules/Music/manifest.json` — оставить наш `"enable": true`.
 
 ## Полная документация (живёт в репо медиасервера)
 `E:\Media-server\claude\` — вся база знаний по проекту:
