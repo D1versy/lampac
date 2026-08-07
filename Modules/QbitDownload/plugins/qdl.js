@@ -1239,7 +1239,12 @@
         var network = new Lampa.Reguest();
         var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
         var html = $('<div></div>');
-        var body = $('<div class="category-full"></div>');
+        // mapping--grid + cols--6 — ровно то, чем штатный каталог Lampa раскладывает карточки
+        // (ItemsLine добавляет их из params.items.mapping/cols). Без них .card остаётся при своей
+        // фиксированной width:12.75em, ряд не добирает ширину контейнера и справа зияет пустота
+        // (на 1280 — 100 px против 15 px слева). Правила .cols--N > * дают долю 100/N % и несут
+        // свои медиазапросы, поэтому узкие экраны раскладываются как у штатных экранов.
+        var body = $('<div class="category-full mapping--grid cols--6"></div>');
         var last;
         var builtStamp = -1;   // colStamp на момент build: разошёлся — грид устарел
 
@@ -1264,13 +1269,14 @@
                 // под-грид коллекции: только её фильмы, в порядке добавления
                 var cg = g.cols.filter(function (c) { return c.col.id === object.collection_id; })[0];
                 if (!cg)
-                    body.append($('<div style="padding:2em;font-size:1.4em;opacity:.7">Коллекции больше нет.</div>'));
+                    // width:100% — иначе .cols--6 > * сожмёт сообщение до ширины одной карточки
+                    body.append($('<div style="width:100%;padding:2em;font-size:1.4em;opacity:.7">Коллекции больше нет.</div>'));
                 else
                     cg.items.forEach(function (t) { comp.append(t, { collection: cg.col }); });
             } else {
                 // главный грид: коллекции и фильмы вперемешку, по дате загрузки (новое сверху)
                 if (!g.cols.length && !g.singles.length)
-                    body.append($('<div style="padding:2em;font-size:1.4em;opacity:.7">В «Загрузках» пока пусто. Нажми «Скачать» на карточке фильма.</div>'));
+                    body.append($('<div style="width:100%;padding:2em;font-size:1.4em;opacity:.7">В «Загрузках» пока пусто. Нажми «Скачать» на карточке фильма.</div>'));
                 gridOrder(g).forEach(function (e) {
                     if (e.col) comp.appendCollection(e.col);
                     else comp.append(e.item);
