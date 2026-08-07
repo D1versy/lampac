@@ -222,6 +222,8 @@ test('mirrorPrune: остаются cap самых свежих по t; запи
 });
 
 // ─────────────────────────────── initTimelineMirror (интеграция) ───────────────────────────────
+// qdl 2.18: дефолт режима — 'auto' (зеркало уступает серверному таймкод-синку).
+// Интеграционные тесты самого зеркала форсят 'on' — прежнее синхронное поведение.
 
 test('init: принятие из зеркала — Storage.set(file_view) СТРОГО до Timeline.read, подписка на update', () => {
   const kv = mockKV({ qdl_file_view: JSON.stringify({ hm: road(40, 100, 2000, { t: 5000 }) }) });
@@ -233,6 +235,7 @@ test('init: принятие из зеркала — Storage.set(file_view) СТ
       listener: { follow(name, fn) { follows.push([name, typeof fn]); } },
     },
   });
+  lampa._storage.set('qdl_tl_mirror', 'on');
   const { qdl: q } = H.loadQdl({ lampa, windowExtra: { AndroidJS: kv } });
   q.initTimelineMirror();
 
@@ -249,6 +252,7 @@ test('init без Timeline.read: file_view НЕ трогаем, мету не д
   const kv = mockKV();
   const lampa = H.makeLampa();                                // дефолтный Timeline: без read/listener
   lampa._storage.set('file_view', { h1: road(30, 60, 600) });
+  lampa._storage.set('qdl_tl_mirror', 'on');
   const { qdl: q } = H.loadQdl({ lampa, windowExtra: { AndroidJS: kv } });
   q.initTimelineMirror();
 
@@ -264,6 +268,7 @@ test('onTimelineUpdate: дебаунс — три апдейта → ОДНА з
   const kv = mockKV();
   const ft = fakeTimers();
   const lampa = H.makeLampa({ Timeline: { read() {}, listener: { follow() {} } } });
+  lampa._storage.set('qdl_tl_mirror', 'on');
   const { qdl: q } = H.loadQdl({
     lampa, windowExtra: { AndroidJS: kv },
     setTimeout: ft.setTimeout, clearTimeout: ft.clearTimeout,
@@ -289,6 +294,7 @@ test('onTimelineUpdate: дебаунс — три апдейта → ОДНА з
 test('AndroidJS.set бросает (Android после dump()) → не падаем; следующий старт дозаливает зеркало', () => {
   const lampa = H.makeLampa({ Timeline: { read() {}, listener: { follow() {} } } });
   lampa._storage.set('file_view', { h1: road(30, 60, 600) });
+  lampa._storage.set('qdl_tl_mirror', 'on');
   const broken = { get: () => null, set: () => { throw new Error('already dumped'); } };
   const { qdl: q1 } = H.loadQdl({ lampa, windowExtra: { AndroidJS: broken } });
   assert.doesNotThrow(() => q1.initTimelineMirror());
@@ -304,6 +310,7 @@ test('AndroidJS.set бросает (Android после dump()) → не пада
 test('guard: повторный initTimelineMirror → одна подписка follow', () => {
   const follows = [];
   const lampa = H.makeLampa({ Timeline: { read() {}, listener: { follow(n) { follows.push(n); } } } });
+  lampa._storage.set('qdl_tl_mirror', 'on');
   const { qdl: q } = H.loadQdl({ lampa, windowExtra: { AndroidJS: mockKV() } });
   q.initTimelineMirror();
   q.initTimelineMirror();
@@ -324,6 +331,87 @@ test('без AndroidJS (браузер): init тихо выходит, Storage �
   const { qdl: q } = H.loadQdl({ lampa });
   assert.doesNotThrow(() => q.initTimelineMirror());
   assert.strictEqual(lampa.Storage._calls.length, 0);
+});
+
+// ─────────────────────────────── режим 'auto' (qdl 2.18): сервер главный ───────────────────────────────
+
+/** Инъецируемый setInterval: тик дёргается руками. */
+function fakeInterval() {
+  const timers = [];
+  return {
+    timers,
+    setInterval(fn, ms) { timers.push({ fn, ms, cleared: false }); return timers.length; },
+    clearInterval(id) { if (timers[id - 1]) timers[id - 1].cleared = true; },
+    tick(n) { for (let i = 0; i < n; i++) timers.forEach((t) => { if (!t.cleared) t.fn(); }); },
+  };
+}
+
+test("auto: серверный таймкод-плагин появился → зеркало НЕ стартует (KV не тронут, подписки нет)", () => {
+  const kv = mockKV({ qdl_file_view: JSON.stringify({ h1: road(40, 100, 2000, { t: 5000 }) }) });
+  const fi = fakeInterval();
+  const follows = [];
+  const lampa = H.makeLampa({ Timeline: { read() {}, listener: { follow(n) { follows.push(n); } } } });
+  const win = { AndroidJS: kv };
+  const { qdl: q, sandbox } = H.loadQdl({
+    lampa, windowExtra: win,
+    setInterval: fi.setInterval, clearInterval: fi.clearInterval,
+  });
+  q.initTimelineMirror();
+  assert.strictEqual(follows.length, 0, 'до решения зеркало не подписывается');
+  sandbox.window.lampac_timecode_plugin = true;   // sync.js догрузил timecode.js
+  fi.tick(3);
+  assert.strictEqual(follows.length, 0, 'сервер главный — зеркало так и не стартовало');
+  assert.strictEqual(kv._calls.get.length + kv._calls.set.length, 0);
+  assert.ok(fi.timers[0].cleared, 'поллинг остановлен');
+});
+
+test('auto: серверный синк так и не появился → фолбэк в зеркало после таймаута поллинга', () => {
+  const kv = mockKV({ qdl_file_view: JSON.stringify({ h1: road(40, 100, 2000, { t: 5000 }) }) });
+  const fi = fakeInterval();
+  const follows = [];
+  const lampa = H.makeLampa({ Timeline: { read() {}, listener: { follow(n) { follows.push(n); } } } });
+  const { qdl: q } = H.loadQdl({
+    lampa, windowExtra: { AndroidJS: kv },
+    setInterval: fi.setInterval, clearInterval: fi.clearInterval,
+  });
+  q.initTimelineMirror();
+  fi.tick(30);   // 30 × 500 мс = 15 с
+  assert.deepStrictEqual(follows, ['update'], 'после таймаута зеркало стартовало');
+  const fv = lampa.Storage._calls.filter((c) => c[0] === 'file_view');
+  assert.strictEqual(fv.length, 1, 'слияние применено (принятие из KV)');
+  assert.ok(fi.timers[0].cleared, 'поллинг остановлен');
+});
+
+// ─────────────────────────────── бакет серверных таймкодов (qdl 2.18) ───────────────────────────────
+
+test('tlBucket: seriesKey из f.tl (сегмент sNeM отрезан), без tl — infohash; set/clear защищён от чужого', () => {
+  const { qdl: q, sandbox } = H.loadQdl();
+  assert.strictEqual(q.tlBucket([{ tl: 'breaking-bad:s1e4' }], 'HASH1'), 'qdl_breaking-bad');
+  assert.strictEqual(q.tlBucket([{ name: 'extra.mkv' }], 'HASH1'), 'qdl_HASH1');   // файлы без tl
+  assert.strictEqual(q.tlBucket([], 'HASH1'), 'qdl_HASH1');
+  q.setTlBucket('qdl_a');
+  assert.strictEqual(sandbox.window.qdl_timecode_card, 'qdl_a');
+  q.clearTlBucket('qdl_b');   // чужой бакет не снимаем (destroy отложен на 200 мс, экран уже сменился)
+  assert.strictEqual(sandbox.window.qdl_timecode_card, 'qdl_a');
+  q.clearTlBucket('qdl_a');
+  assert.ok(!sandbox.window.qdl_timecode_card);
+});
+
+test('setTlBucket шлёт timecode_pullFromServer; initTimecodeBridge перерисовывает активный экран по timecode_updated', () => {
+  const events = [];
+  const subs = {};
+  const lampa = H.makeLampa({
+    Listener: {
+      follow(name, fn) { (subs[name] = subs[name] || []).push(fn); },
+      send(name, e) { events.push([name, e && e.type]); (subs[name] || []).forEach((fn) => fn(e)); },
+    },
+  });
+  const { qdl: q } = H.loadQdl({ lampa });
+  q.initTimecodeBridge();
+  q.setTlBucket('qdl_x');
+  assert.deepStrictEqual(events, [['lampac', 'timecode_pullFromServer']]);
+  // 'timecode_updated' без активного экрана — не падает
+  assert.doesNotThrow(() => lampa.Listener.send('lampac', { type: 'timecode_updated' }));
 });
 
 // ─────────────────────────────── rawPlay после унификации на pickTimeline ───────────────────────────────

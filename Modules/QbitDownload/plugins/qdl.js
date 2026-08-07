@@ -703,8 +703,7 @@
         return out;
     }
 
-    function mirrorReady() {
-        try { if (Lampa.Storage.get('qdl_tl_mirror', 'on') === 'off') return false; } catch (e) {}
+    function mirrorHasKV() {
         var a = window.AndroidJS;
         return !!(a && typeof a.get === 'function' && typeof a.set === 'function');
     }
@@ -739,11 +738,10 @@
         } catch (e2) {}
     }
 
-    function initTimelineMirror() {
-        if (window.__qdl_mirror_started) return;   // повторный 'app ready' → одна подписка
-        window.__qdl_mirror_started = true;
-        if (!mirrorReady()) return;
-
+    // Собственно запуск зеркала: слияние при старте + подписка на Timeline 'update'.
+    // Вызывается ТОЛЬКО после решения о режиме (initTimelineMirror) — нельзя сначала
+    // смёржить, а потом «передумать»: слияние двигает мету.
+    function mirrorStart() {
         var local = Lampa.Storage.get('file_view', {}) || {};
         var meta = Lampa.Storage.get('qdl_tl_meta', {}) || {};
         var r = mirrorMerge(local, mirrorRead(), meta, Date.now());
@@ -764,6 +762,28 @@
             if (Lampa.Timeline && Lampa.Timeline.listener && typeof Lampa.Timeline.listener.follow === 'function')
                 Lampa.Timeline.listener.follow('update', onTimelineUpdate);
         } catch (e) {}
+    }
+
+    // qdl 2.18: истина о прогрессе переехала на сервер (Modules/Sync/TimeCode, per-device uid —
+    // сеятель в lampainit-invc.js). Зеркало qdl_file_view остаётся аварийным фолбэком.
+    // Режимы qdl_tl_mirror: 'auto' (деф.) — ждём до 15 с появления серверного таймкод-плагина
+    // (window.lampac_timecode_plugin, грузится через sync.js); появился → зеркало НЕ стартует;
+    // таймаут → сервер сломан/выключен → старое зеркало, клиент не деградирует.
+    // 'on' — форс-зеркало (аварийный тумблер), 'off' — совсем выключить.
+    function initTimelineMirror() {
+        if (window.__qdl_mirror_started) return;   // повторный 'app ready' → одна подписка
+        window.__qdl_mirror_started = true;
+        if (!mirrorHasKV()) return;                // браузер/Tizen: ни зеркала, ни нужды в нём
+        var mode = 'auto';
+        try { mode = String(Lampa.Storage.get('qdl_tl_mirror', 'auto')); } catch (e) {}
+        if (mode === 'off') return;
+        if (mode === 'on') { mirrorStart(); return; }
+        var waited = 0;
+        var t = setInterval(function () {
+            if (window.lampac_timecode_plugin) { clearInterval(t); return; }   // сервер главный
+            waited += 500;
+            if (waited >= 15000) { clearInterval(t); try { mirrorStart(); } catch (e) {} }
+        }, 500);
     }
 
     // ТВ (нативный плеер) тянет оригинал (EAC3 ок), всё остальное (десктоп/мобайл-браузер) — HLS (звук→AAC).
@@ -897,6 +917,45 @@
     // (Scroll + minus + update на фокусе) и не зависят от upstream-бага высоты селектбокса;
     // (2) «назад» из плеера возвращает СЮДА, а не на карточку сериала; (3) озвучка видна
     // кнопкой и не переспрашивается перед каждым входом (преф qdl_audio2 применяется молча).
+
+    // qdl 2.18: бакет серверных таймкодов для наших экранов. timecode/plugin.js берёт card_id
+    // из activity (movie/card) — на qdl_episodes карточки нет, всё падало бы в ведро '0_movie',
+    // а ЧТЕНИЕ /timecode/all идёт per card_id. Наш форк-дифф в plugin.js читает
+    // window.qdl_timecode_card. Бакет — по seriesKey из f.tl (стабилен через донор-замещение
+    // и re-grab, как и сам ключ таймлайна qdltl:*), фолбэк — infohash раздачи.
+    var activeEpisodesComp = null;   // текущий экран серий — для перерисовки по 'timecode_updated'
+
+    function tlBucket(vids, hash) {
+        try {
+            var f = (vids || []).filter(function (v) { return v && v.tl; })[0];
+            if (f) return 'qdl_' + String(f.tl).replace(/:s\d+e\d+$/i, '');
+        } catch (e) {}
+        return 'qdl_' + hash;
+    }
+
+    function setTlBucket(bucket) {
+        window.qdl_timecode_card = bucket;
+        // pull таймкодов бакета с сервера (хук нашего диффа в timecode/plugin.js; без синка — no-op)
+        try { Lampa.Listener.send('lampac', { type: 'timecode_pullFromServer' }); } catch (e) {}
+    }
+
+    function clearTlBucket(bucket) {
+        // снимать только СВОЙ бакет: destroy активности зовётся с задержкой 200 мс — новый экран
+        // мог уже выставить свой (Activity.backward → setTimeout(destroy, 200))
+        if (window.qdl_timecode_card === bucket) { try { delete window.qdl_timecode_card; } catch (e) { window.qdl_timecode_card = undefined; } }
+    }
+
+    function initTimecodeBridge() {
+        if (window.__qdl_tc_bridge) return;
+        window.__qdl_tc_bridge = true;
+        try {
+            Lampa.Listener.follow('lampac', function (e) {
+                if (e && e.type === 'timecode_updated' && activeEpisodesComp) {
+                    try { activeEpisodesComp.refreshMarks(); } catch (e2) {}
+                }
+            });
+        } catch (e) {}
+    }
     function epMark(pct) { return pct >= 90 ? '✓ ' : (pct >= 5 ? '► ' + Math.round(pct) + '% · ' : ''); }
     function epMeta(f) {
         return [liveSize(f && f.size), (f && f.source === 'donor') ? 'временная — заменится основной' : '']
@@ -919,6 +978,8 @@
         this.audio = null;
         this.audioReady = false;
 
+        this.tlbucket = null;   // бакет серверных таймкодов этого экрана (qdl 2.18)
+
         this.create = function () {
             injectCss();
             this.activity.loader(true);
@@ -927,6 +988,9 @@
             scroll.body().append(body);
             fetchEpisodes(hash, function (files) {
                 comp.vids = mergedVideoFiles(files);
+                comp.tlbucket = tlBucket(comp.vids, hash);
+                activeEpisodesComp = comp;
+                setTlBucket(comp.tlbucket);   // запись прогресса из плеера и pull с сервера — в этот бакет
                 if (!comp.vids.length) { comp.build(); return; }
                 req(API + '/qdl/audio?hash=' + srcHash(comp.vids[0], hash) + '&index=' + comp.vids[0].index,
                     function (opts) { comp.audioOpts = opts || []; comp.build(); },
@@ -1048,6 +1112,8 @@
 
         this.render = function () { return html; };
         this.start = function () {
+            // возврат на экран (в т.ч. из плеера/другой активности) — восстановить бакет таймкодов
+            if (comp.tlbucket) { activeEpisodesComp = comp; setTlBucket(comp.tlbucket); }
             comp.refreshMarks();
             Lampa.Controller.add('content', {
                 toggle: function () {
@@ -1064,7 +1130,11 @@
         };
         this.pause = function () {};
         this.stop = function () {};
-        this.destroy = function () { scroll.destroy(); html.remove(); };
+        this.destroy = function () {
+            if (activeEpisodesComp === comp) activeEpisodesComp = null;
+            if (comp.tlbucket) clearTlBucket(comp.tlbucket);
+            scroll.destroy(); html.remove();
+        };
     }
 
     function ComponentCard(object) {
@@ -2844,7 +2914,8 @@
         startPlayerFsWatcher();
         pollNotifications();
         try { initSelectFix(); } catch (e) {}            // фикс скролла селектбоксов (upstream mheight-баг)
-        try { initTimelineMirror(); } catch (e) {}       // зеркало прогресса устройства (только нативные клиенты)
+        try { initTimelineMirror(); } catch (e) {}       // аварийный фолбэк зеркала (режим 'auto', см. qdl 2.18)
+        try { initTimecodeBridge(); } catch (e) {}       // перерисовка экрана серий по pull серверных таймкодов
         try { whenDmca(function () {}); } catch (e) {}   // прогрев DMCA-списка до первого открытия карточки
         try { setInterval(pollNotifications, 90000); } catch (e) {}
     }

@@ -60,6 +60,10 @@
           id: 0
         };
         var card_id = (card.id || 0) + '_' + (card.name ? 'tv' : 'movie');
+        // D1V (qdl 2.18): наши экраны (qdl_episodes и пр.) не кладут карточку в activity —
+        // card_id выродился бы в '0_movie', а ЧТЕНИЕ /timecode/all идёт per card_id.
+        // qdl.js выставляет window.qdl_timecode_card на время жизни своего экрана.
+        if (window.qdl_timecode_card) card_id = window.qdl_timecode_card;
         var uid = Lampa.Storage.get('lampac_unic_id', '');
         var token = '{token}';
 		
@@ -109,6 +113,12 @@
             delete viewed[i].hash;
           }
           Lampa.Storage.set(_this2.filename(), viewed, true);
+          // D1V (qdl 2.18): анти-клоббер — внешняя запись file_view обязана сопровождаться
+          // Timeline.read() В ТОМ ЖЕ тике, иначе in-memory кэш Timeline при следующем update()
+          // перезапишет file_view своим старым снимком (та же грабля, что claude/06 §AM).
+          try { if (Lampa.Timeline.read) Lampa.Timeline.read(); } catch (e) {}
+          // Сигнал потребителям (qdl.js перерисует бейджи серий / кнопку «Продолжить»)
+          try { Lampa.Listener.send('lampac', { type: 'timecode_updated' }); } catch (e) {}
         });
       }
     }, {

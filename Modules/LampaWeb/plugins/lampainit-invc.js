@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.17';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
+window.qdl_fork_version = '2.18';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
 // Лампа готова для использования
@@ -212,6 +212,39 @@ try {
     localStorage.setItem('player_torrent', 'android');
     localStorage.setItem('player_iptv', 'android');
     localStorage.setItem('internal_torrclient', 'true');
+  }
+} catch (e) {}
+
+// ── ДО загрузки Lampa: стабильный uid устройства (серверный синк per-device, qdl 2.18) ──
+// Серверные плагины синка (sync.js → bookmark.js + timecode.js, Modules/Sync) идентифицируют
+// устройство query-параметром uid = localStorage['lampac_unic_id']. Но localStorage per-origin:
+// LAN (192.168.87.24:9118) и tv.d1versy.com:9443 дали бы РАЗНЫЕ uid = «два устройства» на
+// сервере, и прогресс снова расщепился бы при переключении хоста — ровно та грабля, ради
+// которой существовало зеркало qdl_file_view (claude/06 §AM в Media-server).
+// AndroidJS — per-app KV нативных оболочек (mac/ios/android), ОБЩИЙ для всех origin: держим
+// канонический uid там (ключ qdl_device_uid) и пересеваем в localStorage каждого origin.
+// Браузер/Tizen без AndroidJS живут на одном хосте — их per-origin uid и так стабилен.
+// ⚠️ Android: AndroidJS.set() бросает после одноразового dump() (поток «Мигрировать») — глотаем;
+// на следующем старте запись повторится. Выполняется ДО Lampa: sync-плагины читают uid на init.
+try {
+  var d1kv = window.AndroidJS;
+  if (d1kv && typeof d1kv.get === 'function' && typeof d1kv.set === 'function') {
+    var d1dev = '';
+    try { d1dev = d1kv.get('qdl_device_uid') || ''; } catch (e) {}
+    var d1ls = '';
+    try { d1ls = localStorage.getItem('lampac_unic_id') || ''; } catch (e) {}
+    if (!d1dev) {
+      // усыновление: если у origin уже был uid — делаем его каноническим, иначе генерим.
+      // Первый символ — буква: Lampa.Storage.get() парсит значения как JSON, чисто цифровая
+      // строка превратилась бы в number.
+      d1dev = d1ls;
+      if (!d1dev) {
+        d1dev = 'd';
+        for (var d1i = 0; d1i < 7; d1i++) d1dev += 'abcdefghijklmnopqrstuvwxyz0123456789'.charAt(Math.floor(Math.random() * 36));
+      }
+      try { d1kv.set('qdl_device_uid', d1dev); } catch (e) {}
+    }
+    if (d1ls !== d1dev) localStorage.setItem('lampac_unic_id', d1dev);
   }
 } catch (e) {}
 
