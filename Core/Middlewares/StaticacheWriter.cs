@@ -101,9 +101,10 @@ public class StaticacheWriter
 
                 // immutable-эндпоинты (versioned-URL ?v=) — вечный клиентский кэш и на MISS-пути тоже;
                 // js/html идут chunked (contentLength=0), общий путь ниже их не покрывает.
-                // Гейт по наличию ?v: прямой запрос БЕЗ версии вечно кэшировать нельзя.
+                // Гейт по наличию ?v: прямой запрос БЕЗ версии вечно кэшировать нельзя. Исключение
+                // (qdl 2.16): attr без queryKeys = content-addressed URL (постеры) — immutable всегда.
                 var stAttr = httpContext.GetEndpoint()?.Metadata?.GetMetadata<StaticacheAttribute>();
-                if (stAttr?.immutable == true && httpContext.Response.StatusCode == 200 && httpContext.Request.Query.ContainsKey("v"))
+                if (stAttr?.immutable == true && httpContext.Response.StatusCode == 200 && (stAttr.queryKeys == null || httpContext.Request.Query.ContainsKey("v")))
                     httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=31536000,immutable";
                 else if (contentLength > 0)
                     httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=86400,immutable";
@@ -182,7 +183,20 @@ public class StaticacheWriter
                         }
                     }
 
-                    Staticache.cacheFiles[cachekey] = new StaticacheCacheModel(exTicks, ext, (short)httpContext.Response.StatusCode, contentLength);
+                    var model = new StaticacheCacheModel(exTicks, ext, (short)httpContext.Response.StatusCode, contentLength);
+                    Staticache.cacheFiles[cachekey] = model;
+
+                    // qdl 2.16: brotli-сайдкар — фоново (финальный flush хвоста идёт после выхода из
+                    // middleware, синхронное сжатие задержало бы его; msm к старту задачи disposed —
+                    // CompressBr читает только что записанный raw-файл). Гейты: 200, сжимаемый ext,
+                    // ≥1 КБ, TTL ≥ 2 мин (отсекает и ветки «не-200/length mismatch → 1 минута»).
+                    long rawLen = msm.Stream.Length;
+                    if (httpContext.Response.StatusCode == 200 && rawLen >= 1024
+                        && ext is "html" or "json" or "js" or "css" or "svg"
+                        && ex >= DateTimeOffset.Now.AddMinutes(2))
+                    {
+                        _ = Task.Run(() => Staticache.CompressBr(cachekey, model, cachefile, rawLen));
+                    }
                 }
                 catch (Exception exception)
                 {

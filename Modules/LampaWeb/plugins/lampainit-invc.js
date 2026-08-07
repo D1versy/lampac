@@ -10,11 +10,15 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.15';   // 2.0: умная выдача раздач (⭐ скоринг, серии/дата/🔔) + охота за сериями по всем раздачам (/qdl/episodes, серии-доноры «врем.», tl-таймлайн) + SWITCH-переключение; 2.1: фиксы ревью — аудио доноров по своему hash, SWITCH-тост без «скачана»; 2.2: пункт меню «D1VERSY LIVE» — записи видеорегистратора (день → камеры с записями → плеер, прокси /qdl/live/*); 2.3: весь день ОДНОЙ записью с одним таймлайном (склеенный HLS /qdl/live/day), фрагменты — запасной путь; 2.4: раздел «D1versy Live» — эфир (живая сетка камер, rolling-HLS /qdl/live/watch/*), прежний раздел записей переименован в «D1versy Records»; 2.5: «D1versy Records» → «D1versy Rec»; 2.6: iPhone — эфир в НАТИВНОМ плеере iOS (прямой click-жест, <video> без playsinline, фолбек в VLC, qdl_ios_live auto/off); сетка эфира по центру и во всю ширину; видимый фокус пульта в Rec/камере/Уведомлениях; 2.7: фикс iOS-эфира — видимый оверлей вместо скрытого <video> (авто-фуллскрин WebKit флакал со второго раза), явный webkitEnterFullscreen, попытки чистят только свой элемент (двойной тап больше не роняет в VLC); 2.8: Rec на пустом «сегодня» сам прыгает на последний день с записями (пустой день на ТВ выглядел как «нет навигации» — вниз некуда идти); 2.9: зеркало прогресса устройства (file_view ↔ нативное KV AndroidJS, ключ qdl_file_view) — resume переживает смену хоста LAN↔внешний на iPhone/Mac/Android, браузер не затронут; выкл. зеркала: qdl_tl_mirror='off', фолбэк «всегда с начала» — player_timecode='again'; rawPlay унифицирован на pickTimeline (tl-ключ при известном файле); инварианты слияния после адверсариального ревью: сид-метка t=1 (старьё не клоббрит свежее), кламп меток из будущего, уважение очистки истории, бюджет посева=кап (без re-seed-churn); 2.10: скорость — прогрев кеша сервера при открытии карточки скачанного (/qdl/warmup: голова+хвост файла в page cache + ffprobe-кеш; addContinueButton/openDownload) и прогрев следующей серии при старте плейбека (warmupNext); мемоизация fetchEpisodes (1 запрос /qdl/episodes вместо 3 на пути «Смотреть», TTL 45 с, инвалидация на del/SWITCH/транскод); сервер: кеш резолва hash+index→путь, кеш ffprobe-дорожек, переиспользование SID-сессии qBittorrent, immutable-кэширование app.min.js/qdl.js/постеров; 2.11: свой ЭКРАН СЕРИЙ (qdl_episodes) вместо селектбокса — длинные списки скроллятся на ТВ, «назад» из плеера возвращает в список серий (и «Продолжить» идёт через него, autoplay), озвучка помнится и меняется кнопкой без переспроса, отметки ✓/►N% + размер/«временная» у доноров обновляются на месте; общий фикс селектбоксов (upstream-баг: Select пишет mheight в jQuery data, Layer читает сырое свойство → низ длинных списков «за экраном»; fixSelectHeight по fullshow: свойство + Layer.update + px max-height >480) — чинит выбор раздачи (60 пунктов), озвучки и все селекты; qdl_card: scroll.minus() + фокус-скролл; 2.12: номер серии бейджем в начале строки экрана серий (epNumber: epkey сервера → парс имени → порядковый) — на iPhone длинные имена файлов обрезались и серии было не отличить; 2.13: синк с upstream 1.45 + включён модуль Music (флип manifest enable:true, клиентам подключён /music.js) + свежие yaml-источники NextHUB; 2.14: только НАШИ уведомления — упразднён upstream-колокольчик (AppPatch в QbitDownload/AppReplace.cs режет иконку Notice + NoticeCub из app.min.js при отдаче) и пункты меню Релизы/Расписание/Подписки + фоновый TimeTable-парсер (TMDB каждые 30 сек) + ряды «Скоро выйдут»/«Недавно вышли»; фикс дублей qdl-колокольчика/бейджа (dedupe+first, in-flight poll, синглтон-гард qdl_plugin_loaded, агрегация SWITCH/INFO-тостов); тут: CSS-фолбэк на случай смены tree + disable_features.subscribe=true; 2.15: локализация внешних источников — клиент ходит ТОЛЬКО на наш сервер (осознанные исключения: YouTube-трейлеры, стрим балансеров): форс proxy_tmdb=true каждую загрузку (LAN-клиенты по GeoIP получали false и ходили за постерами/TMDB-API напрямую; теперь /tmdb/img кеш 72ч + /tmdb/api кеш 24ч), lampa_settings.mirrors=false (проба зеркал cub.rip/durex.monster/cubnotrip.top на старте), lampa_settings.geo=false (raw-$.ajax на geo.<cub>, страна = 'RU'), watch-пинг $.get('tmdb.<cub>/watch?id=') → локальная заглушка /cub/api/checker (raw jQuery мимо request_before — ловит XHR-патч); сервер: MyLocalIp-хук вместо api.ipify.org, почасовой прогрев каталога CatalogWarmup, вендор плагинов магазина расширений (/ext/*)
+window.qdl_fork_version = '2.16';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
-// Лампа готова для использования 
+// Лампа готова для использования
 lampainit_invc.appload = function appload() {
+  // qdl 2.16: appload зовут ДВОЕ — наш быстрый вотчер (25 мс, внизу файла) и upstream-таймер
+  // lampainit.js (200 мс); гард делает вызов идемпотентным (без него — дубли putScriptAsync)
+  if (lampainit_invc._apploaded) return;
+  lampainit_invc._apploaded = true;
   Lampa.Utils.putScriptAsync(["{localhost}/qdl.js?v={version}"]);  // QbitDownload: кнопка «Скачать» + раздел «Загрузки» ({version} = cache-buster, подставляет сервер)
   Lampa.Utils.putScriptAsync(["{localhost}/music.js?v={version}"]);  // Music (upstream 1.45, manifest enable:true — наш флип): раздел «Музыка»; откат = убрать строку + рестарт
   // TorrServer — через прокси lampac (/ts/* → контейнер torrserver, модуль TorrServer external_url).
@@ -286,6 +290,25 @@ try {
     };
     lampainit_invc.rewriteCubUrl = qdlRewriteCub;         // наружу — для тестов
     lampainit_invc.rewriteWatchUrl = qdlRewriteWatch;     // наружу — для тестов
+  }
+} catch (e) {}
+
+// ── Быстрый вотчер появления Lampa (qdl 2.16) ──
+// Upstream-таймер lampainit.js проверяет Lampa раз в 200 мс → старт qdl.js/music.js опаздывал
+// в среднем на ~100 мс. Свой поллер 25 мс зовёт appload сразу; идемпотентность — гард
+// _apploaded в самом appload (upstream-таймер позовёт повторно — no-op). Страховочный стоп
+// через 30 с: если Lampa так и не появилась (сломанный бандл), не крутимся вечно.
+try {
+  // Гейт typeof: в проде Lampa на этом этапе НЕ существует (бандл грузится после invc) → вотчер
+  // взводится; в тестах (vm/jsdom) мок Lampa уже стоит → вотчер не нужен (и его 30-с страховка
+  // держала бы node-процесс тестов), appload зовут руками/upstream-таймером.
+  if (typeof Lampa === 'undefined') {
+    var qdlFastWatch = setInterval(function () {
+      if (typeof Lampa === 'undefined') return;
+      clearInterval(qdlFastWatch);
+      try { lampainit_invc.appload(); } catch (e) {}
+    }, 25);
+    setTimeout(function () { clearInterval(qdlFastWatch); }, 30000);   // Lampa не появилась — не крутимся вечно
   }
 } catch (e) {}
 

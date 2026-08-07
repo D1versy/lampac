@@ -637,8 +637,10 @@ public class ApiController : BaseController
 
     // cache_version для index.html (?v= у app.min.js / css/app.css): апстримовый index генерит
     // Math.floor(Date/9e5) — новый ?v каждые 15 минут, т.е. браузер перекачивал 2-МБ app.min.js
-    // при каждом запуске позже 15 мин. Заменяем на стабильную серверную версию: меняется при
-    // рестарте (деплое) И при автообновлении фронта LampaCron'ом (поэтому в версии mtime файла).
+    // при каждом запуске позже 15 мин. Версия — ТОЛЬКО из mtime+length файла (qdl 2.16: раньше
+    // сюда входил cacheVersion=ticks процесса, и каждый рестарт контейнера заставлял всех клиентов
+    // перекачивать бандл+css ~630 КБ br без единого изменённого байта). Меняется при реальном
+    // обновлении вендора/LampaCron.
     static string _appVer;
     static long _appVerMtime = -1;
     static string AppCacheVersion()
@@ -654,17 +656,26 @@ public class ApiController : BaseController
             // серверная кеш-запись → консистентная старая пара версия+тело.
             if (_appVer != null && mt != _appVerMtime && DateTime.UtcNow.Ticks - mt < TimeSpan.TicksPerMinute)
                 return _appVer;
-            if (_appVer == null || mt != _appVerMtime) { _appVerMtime = mt; _appVer = $"{cacheVersion}-{mt:x}"; }
+            if (_appVer == null || mt != _appVerMtime) { _appVerMtime = mt; _appVer = $"{mt:x}-{(fi.Exists ? fi.Length : 0):x}"; }
             return _appVer;
         }
         catch { return cacheVersion; }
     }
 
     [HttpGet, AllowAnonymous]
-    [Staticache(20, always: true, setHeadersNoCache: true)]
+    [Staticache(20, always: true)]
     [Route("lampainit.js")]
     public ActionResult LamInit()
     {
+        // qdl 2.16: ?v={cacheVersion} есть у всех клиентов (index.html) → versioned-URL кэшируем
+        // навсегда, как qdl.js: −15 КБ br на каждом старте. Тело зависит от {country}/host, но это
+        // КЛИЕНТСКИЙ кеш собственного ответа — безопасно (серверный Staticache для lampainit и так
+        // отключён через StatiCacheDisabled ниже). Легаси-запрос без ?v — прежний no-cache.
+        if (HttpContext.Request.Query.ContainsKey("v"))
+            HttpContext.Response.Headers["Cache-Control"] = "public,max-age=31536000,immutable";
+        else
+            SetHeadersNoCache();
+
         var sb = StringBuilderPool.Rent();
 
         try

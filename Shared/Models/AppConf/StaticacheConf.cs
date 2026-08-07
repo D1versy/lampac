@@ -40,6 +40,8 @@ public class StaticachePreparedRoute
     public Regex PathRegex { get; init; }
 }
 
-public readonly record struct StaticacheCacheModel(long ex, string ext, short statusCode = 200, int contentLength = 0);
+/// brLength > 0 — рядом с raw-файлом лежит готовый "<file>.br" такого размера (сжат один раз при
+/// записи, см. Staticache.CompressBr): HIT отдаёт его мимо ResponseCompression без пережима.
+public readonly record struct StaticacheCacheModel(long ex, string ext, short statusCode = 200, int contentLength = 0, int brLength = 0);
 
 public record StaticacheFeature(int cacheMinutes, string cachekey);

@@ -41,10 +41,20 @@ public class Staticache
         string cacheDir = Path.Combine("cache", "static");
         BucketFolders.Create(cacheDir);
 
+        List<string> brSidecars = null;   // qdl 2.16: ".br"-сайдкары собираем отдельно (см. ниже)
+
         foreach (string inFile in Directory.EnumerateFiles(cacheDir, "*", SearchOption.AllDirectories))
         {
             try
             {
+                // qdl 2.16: сайдкар "<raw>.br" НЕ парсить как самостоятельную запись —
+                // int.Parse("26362.jpg") упал бы в catch и удалил валидный файл
+                if (inFile.EndsWith(".br", StringComparison.OrdinalIgnoreCase))
+                {
+                    (brSidecars ??= new()).Add(inFile);
+                    continue;
+                }
+
                 /// cache\static\62\-DDVxczeTgFWOm32NktG6A-1779890234674_26362.jpg
                 ReadOnlySpan<char> fileName = inFile.AsSpan();
 
@@ -75,16 +85,55 @@ public class Staticache
                 if (now > unixTime || string.IsNullOrEmpty(cachekey) || string.IsNullOrEmpty(ext))
                 {
                     deleteFile(inFile);
+                    deleteFile(inFile + ".br");   // qdl 2.16: сайдкар протухшего — тоже
                     continue;
                 }
 
-                cacheFiles.TryAdd(cachekey, new StaticacheCacheModel(unixTime, ext, 200, contentLength));
+                var model = new StaticacheCacheModel(unixTime, ext, 200, contentLength);
+
+                // qdl 2.16: .br пережил рестарт — подхватываем (порядок Enumerate не важен, смотрим на ФС)
+                string brFile = inFile + ".br";
+                if (File.Exists(brFile))
+                    model = model with { brLength = (int)new FileInfo(brFile).Length };
+
+                cacheFiles.TryAdd(cachekey, model);
             }
             catch
             {
                 deleteFile(inFile);
             }
         }
+
+        // qdl 2.16: сироты — .br, чей raw удалён (протух/битое имя) + догенерация .br для валидных
+        // записей без сайдкара (иначе immutable app.min.js остался бы на пережиме-q1 до протухания).
+        // Один фоновый поток, последовательно — на 24 ядрах незаметно.
+        List<string> orphanBr = null;
+        if (brSidecars != null)
+            foreach (string brFile in brSidecars)
+                if (!File.Exists(brFile[..^3]))
+                    (orphanBr ??= new()).Add(brFile);
+
+        _ = Task.Run(() =>
+        {
+            if (orphanBr != null)
+                foreach (string brFile in orphanBr)
+                    deleteFile(brFile);
+
+            foreach (var c in cacheFiles)
+            {
+                if (c.Value.brLength > 0 || c.Value.statusCode != 200 || c.Value.ext is not ("html" or "json" or "js" or "css" or "svg"))
+                    continue;
+
+                try
+                {
+                    string raw = GetFilePath(c.Key, c.Value.ex, c.Value.contentLength, c.Value.ext);
+                    long rawLen = new FileInfo(raw).Length;
+                    if (rawLen >= 1024)
+                        CompressBr(c.Key, c.Value, raw, rawLen);
+                }
+                catch { }
+            }
+        });
         #endregion
 
         void UpdateRoutes()
@@ -129,6 +178,7 @@ public class Staticache
                 {
                     string cachefile = GetFilePath(_c.Key, _c.Value.ex, _c.Value.contentLength, _c.Value.ext);
                     deleteFile(cachefile);
+                    deleteFile(cachefile + ".br");   // qdl 2.16: File.Delete по несуществующему пути — no-op
                 }
             }
         }
@@ -148,6 +198,59 @@ public class Staticache
         {
             Log.Error(ex, "CatchId={CatchId}", "id_wfl5s3rn");
         }
+    }
+
+    // ── qdl 2.16: precompressed brotli-сайдкар ──
+    // Жмём ОДИН раз (фоново, q9: для 2 МБ ~100-150 мс на ядро, разово) вместо пережима q1 на каждом
+    // HIT (ResponseCompressionBody даже давал размер ХУЖЕ MISS из-за поблочной подачи SendFile).
+    // Атомарность: .tmp → File.Move; флаг в реестре — ТОЛЬКО после move через TryUpdate с comparand:
+    // если запись успела смениться (новый ex/len), наш .br — сирота, его подчистит startup-sweep.
+    public static void CompressBr(string cachekey, StaticacheCacheModel model, string rawFile, long rawLen)
+    {
+        string brFile = rawFile + ".br", tmp = brFile + ".tmp";
+        try
+        {
+            using (var src = File.OpenRead(rawFile))
+            using (var dst = File.Create(tmp))
+            using (var br = new System.IO.Compression.BrotliStream(dst, new System.IO.Compression.BrotliCompressionOptions { Quality = 9 }))
+                src.CopyTo(br);
+
+            long len = new FileInfo(tmp).Length;
+            if (len == 0 || len >= rawLen)
+            {
+                deleteFile(tmp);   // несжимаемое — остаёмся на raw
+                return;
+            }
+
+            File.Move(tmp, brFile, overwrite: true);
+
+            if (!cacheFiles.TryUpdate(cachekey, model with { brLength = (int)len }, model))
+                deleteFile(brFile);
+        }
+        catch (Exception ex)
+        {
+            deleteFile(tmp);
+            Log.Error(ex, "CatchId={CatchId}", "id_stcbr01");
+        }
+    }
+
+    // Быстрый путь без парсера для типичного "gzip, deflate, br"; точный разбор q-values —
+    // только при наличии ';' (чтобы не отдать br клиенту с "br;q=0").
+    static bool AcceptsBr(HttpRequest req)
+    {
+        var ae = req.Headers.AcceptEncoding;
+        if (ae.Count == 0)
+            return false;
+
+        string s = ae.ToString();
+        if (!s.Contains("br", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (!s.Contains(';'))
+            return true;
+
+        return StringWithQualityHeaderValue.TryParseList(ae, out var list)
+            && list.Any(v => v.Value.Equals("br", StringComparison.OrdinalIgnoreCase) && (v.Quality ?? 1) > 0);
     }
     #endregion
 
@@ -270,8 +373,10 @@ public class Staticache
             // immutable-эндпоинты (versioned-URL ?v=) кэшируются у клиента навсегда независимо от
             // contentLength: js/html пишутся chunked (без длины), и общий "contentLength > 0"-путь
             // их не покрывает — из-за этого app.min.js исторически ходил вообще без Cache-Control.
-            // Гейт по наличию ?v: прямой запрос БЕЗ версии вечно кэшировать нельзя.
-            if (staticache.immutable && _r.statusCode == 200 && httpContext.Request.Query.ContainsKey("v"))
+            // Гейт по наличию ?v: прямой запрос БЕЗ версии вечно кэшировать нельзя. Исключение
+            // (qdl 2.16): у attr'а НЕТ queryKeys → URL content-addressed (постеры /tmdb/img/<hash>),
+            // версия не нужна — immutable всегда.
+            if (staticache.immutable && _r.statusCode == 200 && (staticache.queryKeys == null || httpContext.Request.Query.ContainsKey("v")))
                 httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=31536000,immutable";
             else if (_r.contentLength > 0)
                 httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=86400,immutable";
@@ -281,6 +386,18 @@ public class Staticache
             httpContext.Response.ContentType = ext;
 
             string file = GetFilePath(cachekey, _r.ex, _r.contentLength, _r.ext);
+
+            // qdl 2.16: готовый brotli-сайдкар мимо ResponseCompression: Content-Encoding ДО записи
+            // тела → ShouldCompressResponse видит его и уходит в pass-through (нативный SendFile,
+            // Content-Length сохраняется). Vary middleware в pass-through НЕ ставит — ставим сами.
+            if (_r.brLength > 0 && AcceptsBr(httpContext.Request))
+            {
+                httpContext.Response.Headers[HeaderNames.ContentEncoding] = "br";
+                httpContext.Response.Headers[HeaderNames.Vary] = "Accept-Encoding";
+                httpContext.Response.ContentLength = _r.brLength;   // точная длина даже для бывших chunked
+                return httpContext.Response.SendFileAsync(file + ".br");
+            }
+
             return httpContext.Response.SendFileAsync(file);
         }
         else

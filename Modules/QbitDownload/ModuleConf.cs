@@ -128,11 +128,15 @@ public class ModuleConf : ModuleBaseConf
     // Пусто = хук выключен, upstream-фолбэк на ipify остаётся.
     public string myIpHost { get; set; } = "tv.d1versy.com";
 
-    // Прогрев каталога главной (CatalogWarmup.cs): запоминаем /cub/tmdb.* URL-ы клиентов и
-    // периодически дёргаем их локально — протухшую запись Staticache (TTL CubProxy 3 ч) обновляет
-    // наш тик, а не живой клиент. HIT-проверки бесплатны (ответ из кеша, наружу ничего).
+    // Прогрев каталога главной (CatalogWarmup.cs): запоминаем URL РЯДОВ /cub/tmdb.* и периодически
+    // дёргаем их локально — протухшую запись Staticache (TTL CubProxy 3 ч) обновляет наш тик, а не
+    // живой клиент. v2 (qdl 2.16): из ответов рядов достаём карточки и греем ещё постеры (/tmdb/img)
+    // и детали (/cub/tmdb./3/...) — открытие карточки всегда в тёплый кеш. HIT-проверки бесплатны.
     public bool catalogWarmupEnabled { get; set; } = true;
-    public int catalogWarmupPeriodMin { get; set; } = 15;   // кламп ≥5; наружу всё равно ≈раз в TTL на URL
-    public int catalogWarmupMaxUrls { get; set; } = 64;     // LRU-кап списка
-    public int catalogWarmupPruneDays { get; set; } = 14;   // URL не запрашивался клиентами N дней → забыть
+    public int catalogWarmupPeriodMin { get; set; } = 15;    // кламп ≥5; наружу всё равно ≈раз в TTL на URL
+    public int catalogWarmupMaxUrls { get; set; } = 128;     // LRU-кап РЯДОВ (ряды по годам/жанрам легко >64)
+    public int catalogWarmupPruneDays { get; set; } = 14;    // ряд не запрашивался клиентами N дней → забыть
+    public int catalogWarmupCardsPerRow { get; set; } = 12;  // сколько первых карточек ряда греть (видимая часть на ТВ)
+    public int catalogWarmupPosterBudget { get; set; } = 120; // постеров за тик (ротация курсора добирает хвост)
+    public int catalogWarmupDetailBudget { get; set; } = 32;  // деталей за тик (каждый MISS = поход в tmdb.cub.red)
 }

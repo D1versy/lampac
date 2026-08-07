@@ -229,6 +229,11 @@ public class Startup
             services.AddResponseCompression(options =>
             {
                 options.MimeTypes = CoreInit.CompressionMimeTypes;
+                // qdl 2.16: сейчас за caddy Request.Scheme=http (ForwardedHeaders для docker-сети не
+                // сконфигурен) и флаг не срабатывает, но без него включение KnownProxies в будущем
+                // молча убило бы динамическое сжатие всем внешним клиентам. Precompressed-путь
+                // Staticache (.br) эту проверку не проходит вовсе — ему флаг не нужен.
+                options.EnableForHttps = true;
             });
         }
 
@@ -696,7 +701,21 @@ public class Startup
             {
                 ServeUnknownFileTypes = midd.unknownStaticFiles,
                 DefaultContentType = "application/octet-stream",
-                ContentTypeProvider = contentTypeProvider
+                ContentTypeProvider = contentTypeProvider,
+                // D1Vision: у статики не было Cache-Control вообще → браузеры уходили в эвристику
+                // Last-Modified (на ТВ = ревалидация/перекачка каждый старт). Вендор lampa-main
+                // приколочен пином tree (autoupdate:false) — содержимое по этим путям неизменно,
+                // год+immutable безопасен; /ext/* обновляется vendor-скриптом без смены URL — сутки.
+                OnPrepareResponse = ctx =>
+                {
+                    string p = ctx.Context.Request.Path.Value ?? string.Empty;
+                    if (p.StartsWith("/ext/", StringComparison.OrdinalIgnoreCase))
+                        ctx.Context.Response.Headers["Cache-Control"] = "public,max-age=86400";
+                    else if (p.StartsWith("/lampa-main/", StringComparison.OrdinalIgnoreCase)
+                        && (p.Contains("/vender/") || p.Contains("/fonts/") || p.Contains("/icons/")
+                         || p.Contains("/img/") || p.Contains("/lang/") || p.Contains("/webos/")))
+                        ctx.Context.Response.Headers["Cache-Control"] = "public,max-age=31536000,immutable";
+                }
             });
         }
         #endregion

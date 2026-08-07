@@ -147,8 +147,12 @@ public class TmdbProxyController : BaseController
     #endregion
 
     #region IMG
+    // qdl 2.16: URL content-addressed (t/p/<size>/<hash>.jpg — содержимое неизменно) → год+immutable
+    // вместо суточного max-age: сетка постеров не перекачивается клиентом раз в сутки.
+    // 302-фолбэк при ошибке апстрима безопасен: редиректы StaticacheWriter не кэширует и
+    // immutable-ветка требует StatusCode 200.
     [HttpGet]
-    [Staticache(always: true)]
+    [Staticache(always: true, immutable: true)]
     [Route("tmdb/img/{*suffix}")]
     async public Task TmdbIMG()
     {

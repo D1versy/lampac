@@ -1,25 +1,29 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Shared.Attributes;
 
 namespace Music;
 
 public class ApiController : BaseController
 {
+    // D1Vision: 717-КБ плагин отдавался с no-cache на КАЖДЫЙ старт клиента (77% повторного
+    // трафика) и пересобирался 4 Replace на каждый запрос. Клиенты с 2.13 всегда ходят с
+    // ?v={cacheVersion} (lampainit-invc) → versioned-URL кэшируем навсегда, как app.min.js/qdl.js;
+    // Staticache снимает и серверную пересборку (ключ включает Host — {localhost} безопасен).
     [HttpGet]
     [AllowAnonymous]
+    [Staticache(20, always: true, immutable: true, queryKeys = ["v"])]
     [Route("music.js")]
     [Route("music/js/{token}")]
     public ActionResult MusicJS(string token)
     {
-        SetHeadersNoCache();
-
         string plugin = FileCache.ReadAllText($"{ModInit.modpath}/plugin.js", "music.js", false)
             .Replace("{localhost}", host)
             .Replace("{client_debug_enabled}", ModInit.conf?.client_debug_enabled == true ? "true" : "false")
             .Replace("{stats_clear_enabled}", ModInit.conf?.stats_clear_enabled == true ? "true" : "false")
             .Replace("{daily_reset_enabled}", ModInit.conf?.daily_reset_enabled == true ? "true" : "false");
 
-        return Content(plugin, "application/javascript; charset=utf-8");
+        return ContentTo(plugin, "application/javascript; charset=utf-8");
     }
 
     [HttpPost]
