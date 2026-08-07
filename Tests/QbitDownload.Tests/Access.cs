@@ -62,6 +62,7 @@ public static class Access
     public static string SeriesKey(int seriesId, string link) => (string)Call("SeriesKey", seriesId, link);
     public static bool IsPrivateHost(Uri u) => (bool)Call("IsPrivateHost", u);
     public static bool IsLoopbackSelf(Uri u) => (bool)Call("IsLoopbackSelf", u);
+    public static string TmdbPosterPath(string posterUrl, string hash) => (string)Call("TmdbPosterPath", posterUrl, hash);
 
     // ── JToken-based helpers ──────────────────────────────────────────────
     public static string BaseNoExt(JToken f) => (string)Call("BaseNoExt", f);

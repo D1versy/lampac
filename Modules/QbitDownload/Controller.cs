@@ -954,6 +954,135 @@ public partial class QbitController : BaseController
     #endregion
 
     #region /qdl/save — сохранить метаданные TMDB + закэшировать постер локально (SSD)
+    // Один клиент на ВСЕ скачивания постеров: healPoster (qdl.js) дёргается на каждый рендер грида
+    // для каждой битой карточки — «new HttpClient на запрос» жёг бы сокеты. AllowAutoRedirect
+    // оставляем включённым ОСОЗНАННО: наш /tmdb/img при сбое апстрима отвечает 302 на image.tmdb.org
+    // (TmdbProxy/Controller.cs) — фолбэк на прямой TMDB достаётся бесплатно.
+    static readonly HttpClient _posterHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+
+    // Антистампед. Раньше промах стоил 0 мс (см. ниже про молчаливый пропуск), теперь — реальный
+    // round-trip, а heal стреляет по каждой битой карточке на каждый рендер: без гарда холодный кеш
+    // на 60 карточек = 60 параллельных self-запросов в свой же Kestrel по 20 с каждый.
+    static readonly ConcurrentDictionary<string, byte> _posterInFlight = new();
+
+    // Троттл лога, одна строка на хэш в 10 минут. Молчаливый пропуск (if без else + голый catch) —
+    // ровно то, из-за чего поломка постеров в qdl 2.15 прожила сутки незамеченной; но и заливать
+    // stdout строкой на карточку на каждый рендер нельзя.
+    static readonly ConcurrentDictionary<string, DateTime> _posterLoggedAt = new();
+    static readonly TimeSpan PosterLogCooldown = TimeSpan.FromMinutes(10);
+
+    static void LogPosterOnce(string hash, string why)
+    {
+        var now = DateTime.UtcNow;
+        if (_posterLoggedAt.TryGetValue(hash, out var was) && now - was < PosterLogCooldown)
+            return;
+        _posterLoggedAt[hash] = now;
+        Console.WriteLine($"[QbitDownload] poster {hash}: {why}");
+    }
+
+    static readonly Regex _tmdbImgRx = new Regex(@"(?:/tmdb/img/|image\.tmdb\.org/)(t/p/[^?#]+)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Белый список: суффикс уходит в /tmdb/img/{*suffix} дословно, а тот форвардит его апстриму.
+    // Без проверки клиент мог бы гонять наш прокси по произвольному пути TMDB (в т.ч. через «..»).
+    static readonly Regex _tmdbPathOkRx = new Regex(@"^t/p/[A-Za-z0-9][A-Za-z0-9_.\-]*/[A-Za-z0-9_\-]+\.(?:jpg|png|webp)$",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// Относительный путь картинки TMDB («t/p/w500/abc.jpg») из того, что прислал клиент, — или из
+    /// меты на диске. null = это не картинка TMDB (её разберёт ветка внешнего постера).
+    ///
+    /// ЗАЧЕМ ПАРСИТЬ, А НЕ БРАТЬ URL КАК ЕСТЬ: с qdl 2.15 proxy_tmdb форсится в true каждую загрузку
+    /// (lampainit-invc.js) → Lampa.TMDB.image отдаёт НЕ адрес TMDB, а НАШ прокси:
+    /// «{localhost}/tmdb/img/t/p/w500/…?account_email=&amp;uid=», где {localhost} подставляется при отдаче
+    /// плагина (TmdbProxy/Controller.cs). В LAN это http://192.168.87.24:9118 → прежняя проверка
+    /// «https И не приватный хост» резала постер МОЛЧА; снаружи ({localhost} = https://tv.d1versy.com:9443)
+    /// проверку проходило, но упиралось в отсутствие hairpin-NAT из контейнера (а был бы hairpin —
+    /// D1VPerimeter отдал бы пустой 404: у серверного HttpClient нет ключа/куки d1v). Итог: форме URL
+    /// от клиента больше не доверяем — берём из неё только путь картинки и качаем сами.
+    ///
+    /// Ветка «мета с диска» ОБЯЗАТЕЛЬНА для healPoster: он шлёт только hash + poster_url, без card.
+    /// Query отбрасываем: апстриму account_email/uid/token не нужны (они и так в CoreInit.SkipQueryKeys).
+    /// </summary>
+    static string TmdbPosterPath(string posterUrl, string hash)
+    {
+        string path = null;
+
+        if (!string.IsNullOrWhiteSpace(posterUrl))
+        {
+            var m = _tmdbImgRx.Match(posterUrl);
+            if (m.Success)
+                path = m.Groups[1].Value;
+        }
+
+        if (path == null && ValidHash(hash))
+        {
+            try
+            {
+                string mp = MetaPath(hash);
+                if (System.IO.File.Exists(mp))
+                {
+                    string pp = JObject.Parse(System.IO.File.ReadAllText(mp))["poster_path"]?.ToString();
+                    if (!string.IsNullOrWhiteSpace(pp) && pp[0] == '/')
+                        path = "t/p/w500" + pp;   // w500 — тот же размер, что просит saveMeta в qdl.js
+                }
+            }
+            catch { }
+        }
+
+        return (path != null && _tmdbPathOkRx.IsMatch(path)) ? path : null;
+    }
+
+    /// <summary>
+    /// Скачать картинку. Общий низ для всех веток: успех + image/* + кап 6 МБ + непустое тело.
+    /// Любая ошибка — null (вызывающий решает, ретраить ли другим адресом).
+    /// </summary>
+    static async Task<byte[]> PosterBytes(string url, string hostHeader = null, bool forwardHttps = false)
+    {
+        try
+        {
+            using var rq = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrEmpty(hostHeader))
+                rq.Headers.TryAddWithoutValidation("Host", hostHeader);
+            if (forwardHttps)
+                rq.Headers.TryAddWithoutValidation("X-Forwarded-Proto", "https");
+
+            using var rs = await _posterHttp.SendAsync(rq, HttpCompletionOption.ResponseHeadersRead);
+            if (!rs.IsSuccessStatusCode)
+                return null;
+            if (!(rs.Content.Headers.ContentType?.MediaType ?? "").StartsWith("image/"))
+                return null;
+
+            await rs.Content.LoadIntoBufferAsync(6_000_000);
+            byte[] img = await rs.Content.ReadAsByteArrayAsync();
+            return (img != null && img.Length > 200) ? img : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Постер TMDB качаем ЧЕРЕЗ СВОЙ /tmdb/img на loopback: там кеш картинок на SSD (immutable, TTL год)
+    /// и, если настроен, апстрим-прокси. Прецедент ровно такого self-запроса — CatalogWarmup.Fetch;
+    /// локальный запрос D1VPerimeter пропускает.
+    ///
+    /// ⚠️ Host и X-Forwarded-Proto подставляем КЛИЕНТСКИЕ: ключ Staticache = Scheme+Host+Path
+    /// (Staticache.getQueryKeys), и запрос «от себя» с Host: 127.0.0.1 попал бы в ЧУЖОЙ бакет вместо
+    /// того, что уже прогрет гридом и CatalogWarmup.
+    /// </summary>
+    static async Task<byte[]> FetchTmdbPoster(string tmdbPath, string clientAuthority, bool clientHttps)
+    {
+        int port = 9118;
+        try { if (CoreInit.conf.listen.port > 0) port = CoreInit.conf.listen.port; } catch { }
+
+        byte[] img = await PosterBytes($"http://127.0.0.1:{port}/tmdb/img/{tmdbPath}", clientAuthority, clientHttps);
+
+        // сам Kestrel не ответил — до 302-фолбэка ВНУТРИ /tmdb/img дело не дошло, идём на TMDB напрямую
+        if (img == null)
+            img = await PosterBytes("https://image.tmdb.org/" + tmdbPath);
+
+        return img;
+    }
+
     [HttpPost, AllowAnonymous]
     [Route("qdl/save")]
     async public Task<ActionResult> Save(string hash, string card = null, string poster_url = null)
@@ -976,28 +1105,51 @@ public partial class QbitController : BaseController
                 catch { }
             }
 
-            // постер качаем сами (только https + image/* + кап 6МБ; loopback/приват запрещены)
-            if (!string.IsNullOrWhiteSpace(poster_url)
+            // Постер качаем сами. Картинку TMDB — в ЛЮБОЙ форме URL (наш прокси, прямой image.tmdb.org)
+            // или вообще без URL, по мете с диска — тянем через свой /tmdb/img (TmdbPosterPath/FetchTmdbPoster).
+            // Всё остальное («внешний» не-TMDB постер) — по прежним правилам: только https + image/* +
+            // кап 6 МБ, loopback/приват запрещены (анти-SSRF). Порядок веток важен: если клиент прислал
+            // НАШ адрес, он уже разобран первой веткой, и проверка «хост наш» во второй не нужна.
+            string tmdbPath = TmdbPosterPath(poster_url, hash);
+            byte[] img = null;
+            string why = null;
+
+            if (tmdbPath != null)
+            {
+                // параллельный heal по этому же хэшу уже качает — второй раз не ходим
+                if (_posterInFlight.TryAdd(hash, 0))
+                {
+                    try
+                    {
+                        string auth = null; bool https = false;
+                        try { var hu = new Uri(host); auth = hu.Authority; https = hu.Scheme == "https"; } catch { }
+
+                        img = await FetchTmdbPoster(tmdbPath, auth, https);
+                        if (img == null)
+                            why = "tmdb fetch failed: " + tmdbPath;
+                    }
+                    finally { _posterInFlight.TryRemove(hash, out _); }
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(poster_url)
                 && Uri.TryCreate(poster_url, UriKind.Absolute, out var pu)
                 && pu.Scheme == "https" && !IsPrivateHost(pu))
             {
-                try
-                {
-                    using var hc = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-                    using var pr = await hc.GetAsync(pu, HttpCompletionOption.ResponseHeadersRead);
-                    string ct = pr.Content.Headers.ContentType?.MediaType ?? "";
-                    if (pr.IsSuccessStatusCode && ct.StartsWith("image/"))
-                    {
-                        await pr.Content.LoadIntoBufferAsync(6_000_000);
-                        byte[] img = await pr.Content.ReadAsByteArrayAsync();
-                        if (img != null && img.Length > 200)
-                            System.IO.File.WriteAllBytes(PosterPath(hash), img);
-                    }
-                }
-                catch { }
+                img = await PosterBytes(pu.ToString());
+                if (img == null)
+                    why = "external fetch failed";
             }
+            else if (!string.IsNullOrWhiteSpace(poster_url))
+                why = "rejected poster_url (не картинка TMDB и не публичный https)";
 
-            return Json(new { success = true, has_poster = System.IO.File.Exists(PosterPath(hash)) });
+            if (img != null)
+                System.IO.File.WriteAllBytes(PosterPath(hash), img);
+            else if (why != null)
+                LogPosterOnce(hash, why);
+
+            // reason — для следующего разбора: почему постера нет, видно прямо в ответе (qdl.js
+            // неизвестные поля игнорирует)
+            return Json(new { success = true, has_poster = System.IO.File.Exists(PosterPath(hash)), reason = why });
         }
         catch (Exception ex)
         {
