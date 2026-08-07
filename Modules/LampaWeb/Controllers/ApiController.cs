@@ -145,7 +145,12 @@ public class ApiController : BaseController
     // immutable: URL versioned (?v= из Index) → вечный клиентский кэш.
     // queryKeys "v" ОБЯЗАТЕЛЕН: без него старый и новый ?v делят одну запись серверного кеша,
     // и после автообновления фронта LampaCron'ом клиент навечно закешировал бы СТАРОЕ тело под НОВЫМ ?v.
-    [Staticache(20, always: true, immutable: true, queryKeys: new[] { "v" })]
+    // TTL 20 мин → 7 суток: тело адресуется своим ?v, поэтому протухание по времени ничего не чинит,
+    // зато КАЖДОЕ протухание стоило клиентам лишних сотен килобайт — .br-сайдкар (384 КБ) жмётся
+    // фоном после первой записи, и до его готовности ответы шли динамическим сжатием: замер дал
+    // 562 КБ на MISS и 644 КБ на HIT-без-сайдкара против 384 КБ на прогретом (br поверх SendFile
+    // эмитит блок на каждый чанк — HIT выходит ТОЛЩЕ MISS, см. claude/06 §AS).
+    [Staticache(10080, always: true, immutable: true, queryKeys: new[] { "v" })]
     [Route("/app.min.js")]
     [Route("{type}/app.min.js")]
     public ActionResult LampaApp(string type)
@@ -234,7 +239,7 @@ public class ApiController : BaseController
 
     #region app.css
     [HttpGet, AllowAnonymous]
-    [Staticache(20, always: true, immutable: true, queryKeys: new[] { "v" })]   // см. комментарий у LampaApp
+    [Staticache(10080, always: true, immutable: true, queryKeys: new[] { "v" })]   // см. комментарий у LampaApp
     [Route("/css/app.css")]
     [Route("{type}/css/app.css")]
     public ActionResult LampaAppCss(string type)

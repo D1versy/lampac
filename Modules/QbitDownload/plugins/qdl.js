@@ -187,7 +187,14 @@
             setDmcaList(cached.list);
             return;
         }
-        req('https://tmdb.' + (window.qdl_cub_domain || 'cub.rip') + '/blocked', function (list) {
+        // URL строим СРАЗУ локальным (qdl 2.19). Раньше тут был внешний https://tmdb.<cub>/blocked,
+        // а на наш /cub/ его заворачивал cubproxy.js на request_before — но у этого два зазора:
+        //   1) фолбэк req(): если `new Lampa.Reguest()` бросит, ветка catch уходит голым fetch(url)
+        //      МИМО request_before — запрос ушёл бы прямо на cub.rip;
+        //   2) cubproxy.js переписывает, только если домен есть в Lampa.Manifest.cub_mirrors —
+        //      незнакомое зеркало из qdl_cub_domain пролетало бы наружу.
+        // Итоговый адрес тот же, что получался после cubproxy (CubProxy: catch-all cub/{*suffix}).
+        req(API + '/cub/tmdb.' + (window.qdl_cub_domain || 'cub.rip') + '/blocked', function (list) {
             if (Object.prototype.toString.call(list) !== '[object Array]') list = (cached && cached.list) || [];
             else { try { Lampa.Storage.set('qdl_dmca_cache', { ts: Date.now(), list: list }); } catch (e) {} }
             setDmcaList(list);
@@ -1415,16 +1422,35 @@
             // на самом первом опросе (lastId===0) не спамим историей — только запоминаем точку отсчёта
             if (lastId > 0) {
                 // SWITCH (предложение сменить раздачу) / INFO — это НЕ «скачанная серия»: свой тост без «скачана»;
-                // при пачке событий — один агрегированный тост (детали в центре «Уведомления»), как у скачанных серий
+                // при пачке событий — один агрегированный тост (детали в центре «Уведомления»), как у скачанных серий.
+                // START (qdl 2.19) — «началась загрузка серии»: третья корзина со своим текстом и своей агрегацией,
+                // чтобы не слиться со «скачана» (иначе пользователь решит, что серия уже готова к просмотру).
                 var special = fresh.filter(function (x) { return x.kind === 'SWITCH' || x.kind === 'INFO'; });
-                var dl = fresh.filter(function (x) { return x.kind !== 'SWITCH' && x.kind !== 'INFO'; });
+                var started = fresh.filter(function (x) { return x.kind === 'START'; });
+                var dl = fresh.filter(function (x) { return x.kind !== 'SWITCH' && x.kind !== 'INFO' && x.kind !== 'START'; });
                 if (special.length === 1) Lampa.Noty.show((special[0].kind === 'SWITCH' ? '🔀 ' : '📺 ') + esc(special[0].title) + ' — ' + esc(special[0].label));
                 else if (special.length > 1) Lampa.Noty.show('🔔 Новых уведомлений: ' + special.length);
+                if (started.length === 1) Lampa.Noty.show('⏬ ' + esc(started[0].title) + ' — ' + esc(started[0].label) + ' качается');
+                else if (started.length > 1) Lampa.Noty.show('⏬ Начата загрузка серий: ' + started.length);
                 if (dl.length === 1) Lampa.Noty.show('📺 ' + esc(dl[0].title) + ' — ' + esc(dl[0].label) + ' скачана');
                 else if (dl.length > 1) Lampa.Noty.show('📺 Скачано новых серий: ' + dl.length);
             }
         }, function () { notiPollBusy = false; });
     }
+
+    // Мгновенный пуш уведомлений (qdl 2.19). WS-клиент синка (Modules/Sync, sync_v2/invc-ws.js)
+    // ретранслирует серверные события DOM-событием 'lwsEvent' с detail = {uid, name, data};
+    // сервер шлёт name='qdl_noti', и мы просто дёргаем обычный опрос — единый источник правды
+    // (бейдж + тосты + qdl_noti_lastid) остаётся один, дубли невозможны: pollNotifications
+    // защищён in-flight флагом notiPollBusy. 90-секундный setInterval в start() ОСТАВЛЕН фолбэком:
+    // сокет может быть не поднят (Sync-плагин не загружен / старая сборка) или оборваться.
+    // Регистрируем на уровне модуля, а не в start(): подписка ничего не стоит и не зависит от того,
+    // долетело ли событие app 'ready'. Если document без addEventListener (старый WebView) — try/catch.
+    try {
+        document.addEventListener('lwsEvent', function (e) {
+            try { if (e && e.detail && e.detail.name === 'qdl_noti') pollNotifications(); } catch (err) {}
+        });
+    } catch (e) {}
 
     // открыть карточку загрузки из уведомления (по hash);
     // kind=SWITCH — предложение переключить заброшенную раздачу на более полную (подтверждение)
@@ -2917,7 +2943,7 @@
         try { initTimelineMirror(); } catch (e) {}       // аварийный фолбэк зеркала (режим 'auto', см. qdl 2.18)
         try { initTimecodeBridge(); } catch (e) {}       // перерисовка экрана серий по pull серверных таймкодов
         try { whenDmca(function () {}); } catch (e) {}   // прогрев DMCA-списка до первого открытия карточки
-        try { setInterval(pollNotifications, 90000); } catch (e) {}
+        try { setInterval(pollNotifications, 90000); } catch (e) {}   // фолбэк: основной путь — пуш по 'lwsEvent' (qdl 2.19)
     }
 
     if (window.appready) start();

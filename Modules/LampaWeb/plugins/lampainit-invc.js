@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.18';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
+window.qdl_fork_version = '2.19';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
 // Лампа готова для использования
@@ -271,9 +271,46 @@ try { window.lampa_settings.disable_features.subscribe = true; } catch (e) {}
 //   `if (!window.lampa_settings.mirrors) return call && call();` — колбэк зовётся, поток старта цел.
 // geo=false — гейт raw-$.ajax на geo.<cub>; без пробы страна = 'RU', что нам и нужно. In-bundle
 //   TMDBProxy.init() при этом не стартует — неважно: наш tmdbproxy.js перекрывает TMDB.api/image сам.
+// socket_use=false — ЕДИНСТВЕННАЯ постоянно активная утечка: WebSocket на cub.rip (qdl 2.19).
+//   Гейт в бандле: `if (!window.lampa_settings.socket_use) return;` в Socket.connect(), а сам
+//   Socket.init() зовётся в стартовой цепочке БЕЗУСЛОВНО. Подмена cub_domain тут не помогает:
+//   адреса берутся из ОТДЕЛЬНОГО литерального массива soc_mirrors ['cub.rip','kurwa-bober.ninja',
+//   'nackhui.com'] (Object.defineProperty, сеттер-пустышка — перезаписать нельзя). В сообщениях
+//   наружу уходят device_id, имя устройства, account и terminal; при недоступности — ретраи ~10 с.
+// socket_methods=false — второй замок: даже если сокет кто-то поднимет (socket_url извне),
+//   входящие команды (open/devices/terminal — чужой Activity.push!) обрабатываться не будут.
+// services=false — гигиена, не утечка: /plugin/sport, /plugin/tsarea, /plugin/shots приезжают
+//   через НАШ релей /cub/red/plugin/*, но это сторонний НЕстатический JS, исполняемый в нашем
+//   origin, где в cookie лежит ключ периметра D1Vision.
+// ВАЖНО: работает только потому, что бандл наливает дефолты через Arrays.extend(lampa_settings, …)
+//   БЕЗ флага replase — extend пишет лишь в ключи со значением undefined, наши false переживают.
 try {
   window.lampa_settings.mirrors = false;
   window.lampa_settings.geo = false;
+  window.lampa_settings.socket_use = false;
+  window.lampa_settings.socket_methods = false;
+  window.lampa_settings.services = false;
+} catch (e) {}
+// ── ДО загрузки Lampa: выключение скринсейвера (qdl 2.19) ──
+// Скринсейвер включён ПО УМОЛЧАНИЮ (Params.trigger('screensaver', true), задержка 5 мин), и любой
+// его тип ходит наружу: 'aerial' (дефолт!) — raw.githubusercontent.com/OrangeJedi/Aerial/master/
+// videos.json + видео с чужого CDN, причём со схемой http:; 'nature' — picsum.photos каждые 30 с;
+// 'cub' — видео с cub_domain, ДА ЕЩЁ и с ?token= аккаунта в URL; 'chrome' (и любой НЕизвестный тип —
+// класс Chrome стоит фолбэком) — iframe на clients3.google.com.
+// Гейт в бандле: `if (!Storage.field('screensaver') || …) return;` в Screensaver.resetTimer.
+// Форсим ровно как proxy_tmdb ниже — строкой в localStorage: Lampa ещё не загружена, а Lampa.Storage
+// читает те же ключи, и его get() отдельно разбирает 'true'/'false' в булево (JSON-кавычки не нужны).
+// Каждую загрузку, а не в first_initiale: иначе тумблер, включённый руками, пережил бы перезапуск.
+// screensaver_type — пояс и подтяжки на случай, если тумблер включат руками (он живёт до
+// перезагрузки страницы): единственный тип, который НЕ ходит наружу с клиента, — 'cub'. В
+// отдаваемом бандле класс Cub собран уже с нашим адресом: default = 'http://192.168.87.24:9118/
+// cub/red' + '/img/background/default.mp4' (подмена cub_domain на этапе отдачи). Пустой
+// Storage['cub_screensaver'] даёт относительный 'token=…', который резолвится в НАШ origin → 404,
+// то есть наружу всё равно ничего не уходит. 'nature' (picsum.photos каждые 30 с) и 'chrome'
+// (iframe clients3.google.com, он же фолбэк для неизвестного типа) — прямые обращения с клиента.
+try {
+  if (localStorage.getItem('screensaver') !== 'false') localStorage.setItem('screensaver', 'false');
+  if (localStorage.getItem('screensaver_type') !== 'cub') localStorage.setItem('screensaver_type', 'cub');
 } catch (e) {}
 // proxy_tmdb=true КАЖДУЮ загрузку (не в first_initiale): upstream lampainit.js ставит его только при
 // первом запуске (гард lampac_initiale) и по GeoIP — LAN-клиент получал null→false и ходил за

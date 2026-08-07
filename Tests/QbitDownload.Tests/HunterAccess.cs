@@ -136,4 +136,18 @@ public static class HunterAccess
         => Access.Call("SaveWatchReconciled", working, originalHashes);
     public static JArray LoadWatch() => (JArray)Access.Call("LoadWatch");
     public static void SaveWatch(JArray a) => Access.Call("SaveWatch", a);
+
+    // ── надёжность и покрытие охоты (топ-N проб, пустая выдача, догон после рестарта) ──
+    public static List<JObject> ProbeCandidates(List<JObject> eligible, int season, List<int> wanted, int probesPerRun)
+        => (List<JObject>)Access.Call("ProbeCandidates", eligible, season, wanted, probesPerRun);
+
+    public static string DropReason(JObject cand, object huntCtx) => (string)Access.Call("DropReason", cand, huntCtx);
+
+    public static bool ShouldRetryHunt(int searched, int barren, int retries)
+        => (bool)Access.Call("ShouldRetryHunt", searched, barren, retries);
+
+    public static void SetHuntStamp(JObject m, DateTime now, int maxClaim) => Access.Call("SetHuntStamp", m, now, maxClaim);
+    public static void MarkHuntBarren(JObject m, DateTime now) => Access.Call("MarkHuntBarren", m, now);
+
+    public static int HuntRetryMax => (int)C.GetField("HuntRetryMax", SF).GetValue(null);
 }

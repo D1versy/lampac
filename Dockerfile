@@ -138,9 +138,11 @@ RUN groupadd -r -g 1000 lampac \
 # Copy application
 COPY --chown=lampac:lampac --from=builder /out /
 
-# Health check — verify process is running
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD pgrep -x dotnet || exit 1
+# Health check — Kestrel реально отвечает. Раньше был `pgrep -x dotnet`: живой процесс ≠ живой
+# сервер (зависший Kestrel healthcheck считал здоровым). start-period больше: старт включает
+# Roslyn-компиляцию модулей.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1:9118/lampainit.js || exit 1
 
 USER lampac
 

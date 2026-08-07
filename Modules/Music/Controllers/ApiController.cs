@@ -12,7 +12,7 @@ public class ApiController : BaseController
     // Staticache снимает и серверную пересборку (ключ включает Host — {localhost} безопасен).
     [HttpGet]
     [AllowAnonymous]
-    [Staticache(20, always: true, immutable: true, queryKeys = ["v"])]
+    [Staticache(10080, always: true, immutable: true, queryKeys = ["v"])]   // TTL как у app.min.js: см. комментарий там (протухание = лишние сотни КБ до готовности .br)
     [Route("music.js")]
     [Route("music/js/{token}")]
     public ActionResult MusicJS(string token)

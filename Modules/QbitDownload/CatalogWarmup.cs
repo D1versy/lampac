@@ -17,18 +17,24 @@ namespace QbitDownload;
 // Каталог CUB идёт через CubProxy (/cub/tmdb.*) и кешируется Staticache на 3 ч; по истечении TTL
 // первый живой клиент ловил MISS (поход в tmdb.cub.red на его времени). Здесь: запоминаем URL
 // РЯДОВ главной и дёргаем их сами по таймеру; v2 — из ответов рядов достаём карточки и греем
-// ещё ПОСТЕРЫ (/tmdb/img, TTL год) и ДЕТАЛИ (/cub/tmdb./3/..., TTL 3 ч) — открытие карточки
-// у клиента всегда попадает в тёплый кеш (2-3 мс вместо 150-300 мс MISS). Наружу это НЕ добавляет
-// трафика сверх прежнего: HIT отвечает кеш с SSD, MISS — ровно тот запрос, что сделал бы клиент.
+// ещё ПОСТЕРЫ (/tmdb/img/t/p/w300, TTL год), ФОНЫ (/tmdb/img/t/p/w1280 по backdrop_path) и
+// ДЕТАЛИ (/tmdb/api/3/movie|tv/<id>, TTL 24 ч) — открытие карточки у клиента всегда попадает
+// в тёплый кеш (2-3 мс вместо 150-300 мс MISS). Наружу это НЕ добавляет трафика сверх прежнего:
+// HIT отвечает кеш с SSD, MISS — ровно тот запрос, что сделал бы клиент.
 // Тонкости (не видны из кода по отдельности):
 //  • подписка EventListener.Middleware (first:true) стоит в пайплайне ПОСЛЕ UseStaticache —
 //    HIT-ы до нас не доходят, наблюдаем только MISS; для сбора достаточно (URL миснёт хоть раз);
 //  • ключ Staticache = Scheme+Host+Path+Query (Staticache.getQueryKeys) → реплей обязан нести
 //    ОРИГИНАЛЬНЫЙ Host (и X-Forwarded-Proto для записей со scheme=https), иначе греется чужой ключ;
-//  • ключ деталей обязан посимвольно совпасть с клиентским по api_key/append_to_response/language
-//    (email/uid — в SkipQueryKeys, не важны) → шаблон query СНИМАЕМ с реального клиентского
-//    запроса деталей; до первого наблюдения — дефолт из CoreInit.conf.cub.api_key (тот же ключ
-//    зашит в бандле; ⚠️ TMDB_API_KEY из .env — ДРУГОЙ ключ, с ним прогрелся бы чужой кеш-ключ);
+//  • ⚠️ форма URL деталей: клиент НЕ ходит в /cub/tmdb./3/... — XHR-патч lampainit-invc.js
+//    переписывает детали карточки на {localhost}/tmdb/api/3/movie|tv/<id>, а нормализации путей
+//    в ключе Staticache нет → до qdl 2.19 прогрев деталей грел бакет, который никто не спрашивает
+//    (в логах «details miss» не сходился к нулю). Греем ровно клиентскую форму;
+//  • ключ деталей обязан совпасть с клиентским по append_to_response/language (email/uid — в
+//    SkipQueryKeys; api_key с qdl 2.19 в ignoreQueryKeys эндпоинта /tmdb/api и на ключ не влияет —
+//    TmdbProxy всё равно подставляет апстриму серверный) → шаблон query СНИМАЕМ с реального
+//    клиентского запроса деталей; до первого наблюдения — дефолт из CoreInit.conf.cub.api_key
+//    (тот же ключ зашит в бандле; ⚠️ TMDB_API_KEY из .env — ДРУГОЙ ключ, сюда его не тащить);
 //  • реплей на 127.0.0.1:<port> — локальный запрос, D1VPerimeter пропускает;
 //  • тело ответа дочитываем целиком: StaticacheWriter сохраняет запись по завершении ответа;
 //  • ?query= (поиск) не запоминаем — одноразовые URL забили бы LRU-кап;
@@ -45,14 +51,18 @@ public static class CatalogWarmup
         public DateTime lastSeen { get; set; }
     }
 
-    public readonly record struct Card(long id, bool tv, string poster);
+    public readonly record struct Card(long id, bool tv, string poster, string backdrop);
+
+    // Маркер собственного реплея: наблюдатель не должен принимать наш же прогрев деталей
+    // за «живой клиентский запрос» и подменять им снятый с клиента шаблон query.
+    public const string WarmupHeader = "X-QDL-Warmup";
 
     static readonly ConcurrentDictionary<string, Entry> _rows = new();
     static readonly HttpClient _http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
     static Timer _timer;
     static int _ticking = 0;
     static bool _dirty;
-    static int _posterOffset, _detailOffset;          // ротация хвоста между тиками
+    static int _posterOffset, _backdropOffset, _detailOffset;   // ротация хвоста между тиками
     static volatile string _detailQuery;              // шаблон query деталей, снятый с живого клиента
 
     static string StorePath => Path.Combine(ModInit.conf?.cachePath ?? "/qdl-data", "catalog-warmup.json");
@@ -88,11 +98,20 @@ public static class CatalogWarmup
             if (req == null || !HttpMethods.IsGet(req.Method)) return true;
 
             string path = req.Path.Value;
-            if (path == null || !path.StartsWith("/cub/tmdb.", StringComparison.OrdinalIgnoreCase)) return true;
+            if (path == null) return true;
+
+            bool cub = path.StartsWith("/cub/tmdb.", StringComparison.OrdinalIgnoreCase);
+            // /tmdb/api/ — форма деталей после XHR-патча клиента (ряды сюда не ходят)
+            if (!cub && !path.StartsWith("/tmdb/api/", StringComparison.OrdinalIgnoreCase)) return true;
+
+            // собственный реплей клиентом не считаем: иначе MISS нашего же прогрева обновлял бы
+            // lastSeen ряда (catalogWarmupPruneDays никогда не срабатывал) и переписывал шаблон
+            // query деталей нашим же дефолтом поверх снятого с живого клиента
+            if (req.Headers.ContainsKey(WarmupHeader)) return true;
 
             string query = req.QueryString.HasValue ? req.QueryString.Value : string.Empty;
 
-            if (IsRowUrl(path, query))
+            if (cub && IsRowUrl(path, query))
                 Note(req.Scheme, req.Host.Value, path + query);
             else if (IsDetailUrl(path) && query.Contains("api_key=", StringComparison.OrdinalIgnoreCase))
                 _detailQuery = query;   // живой шаблон точнее дефолта (language/append_to_response клиента)
@@ -119,10 +138,15 @@ public static class CatalogWarmup
         return true;
     }
 
-    // Деталь карточки: /cub/tmdb.<mirror>/3/movie/<id> | /3/tv/<id> (сезоны/прочее не считаем)
+    // Деталь карточки: /tmdb/api/3/movie/<id> | /3/tv/<id> (форма клиента после XHR-патча)
+    // либо старая /cub/tmdb.<mirror>/3/... (сезоны/персоны/прочее не считаем).
     public static bool IsDetailUrl(string path)
     {
-        if (path == null || !path.StartsWith("/cub/tmdb.", StringComparison.OrdinalIgnoreCase))
+        if (path == null)
+            return false;
+
+        if (!path.StartsWith("/cub/tmdb.", StringComparison.OrdinalIgnoreCase)
+            && !path.StartsWith("/tmdb/api/", StringComparison.OrdinalIgnoreCase))
             return false;
 
         int i = path.IndexOf("/3/", StringComparison.Ordinal);
@@ -162,7 +186,10 @@ public static class CatalogWarmup
                 string poster = el.TryGetProperty("poster_path", out var p) && p.ValueKind == JsonValueKind.String
                     ? p.GetString() : null;
 
-                cards.Add(new Card(id, tv, poster));
+                string backdrop = el.TryGetProperty("backdrop_path", out var b) && b.ValueKind == JsonValueKind.String
+                    ? b.GetString() : null;
+
+                cards.Add(new Card(id, tv, poster, backdrop));
             }
         }
         catch { }
@@ -171,6 +198,32 @@ public static class CatalogWarmup
 
     public static string DefaultDetailQuery(string apiKey)
         => "?api_key=" + apiKey + "&append_to_response=content_ratings,release_dates,keywords,alternative_titles&language=ru";
+
+    // Путь деталей — ровно тот, что просит клиент (XHR-патч lampainit-invc.js → {localhost}/tmdb/api/…).
+    public static string DetailPath(long id, bool tv)
+        => "/tmdb/api/3/" + (tv ? "tv/" : "movie/") + id;
+
+    // Картинка через свой TMDB-прокси; file уже начинается с '/' (как в TMDB: "/abc.jpg").
+    public static string ImgPath(string size, string file)
+        => "/tmdb/img/t/p/" + size + file;
+
+    // Фоны карточек (backdrop_path, w1280 — размер, который берёт полная карточка) для первых
+    // perRow карточек ряда. Карточки без backdrop_path пропускаем и добираем следующими: бюджет
+    // фонов маленький (фон в 5-10 раз тяжелее постера), тратить его на «дыры» незачем.
+    public static List<string> BackdropPaths(IReadOnlyList<Card> cards, int perRow)
+    {
+        var list = new List<string>();
+        if (cards == null || perRow <= 0)
+            return list;
+
+        for (int i = 0; i < cards.Count && list.Count < perRow; i++)
+        {
+            string b = cards[i].backdrop;
+            if (!string.IsNullOrEmpty(b) && b[0] == '/')
+                list.Add(ImgPath("w1280", b));
+        }
+        return list;
+    }
 
     static void Note(string scheme, string host, string pathQuery)
     {
@@ -220,14 +273,18 @@ public static class CatalogWarmup
             int cardsPerRow = Math.Max(1, conf.catalogWarmupCardsPerRow);
             int posterBudget = Math.Max(0, conf.catalogWarmupPosterBudget);
             int detailBudget = Math.Max(0, conf.catalogWarmupDetailBudget);
+            int backdropBudget = Math.Max(0, conf.catalogWarmupBackdropBudget);
+            int backdropsPerRow = Math.Max(0, conf.catalogWarmupBackdropsPerRow);
 
             // свежие ряды первыми: их карточки первыми попадут под бюджеты постеров/деталей
             var rows = _rows.Values.OrderByDescending(e => e.lastSeen).ToArray();
 
             int miss = 0, fail = 0;
             var posters = new List<(string host, string scheme, string path)>();
+            var backdrops = new List<(string host, string scheme, string path)>();
             var details = new List<(string host, string scheme, string path)>();
             var posterSeen = new HashSet<string>(StringComparer.Ordinal);
+            var backdropSeen = new HashSet<string>(StringComparer.Ordinal);
             var detailSeen = new HashSet<string>(StringComparer.Ordinal);
 
             string detailQuery = _detailQuery;
@@ -247,25 +304,33 @@ public static class CatalogWarmup
                 // карточки ряда → очереди прогрева (дедуп по host+идентичности между рядами)
                 if (body != null && body.Length < 3_000_000 && contentType?.StartsWith("application/json") == true)
                 {
-                    foreach (var card in ExtractCards(body, cardsPerRow))
+                    var cards = ExtractCards(body, cardsPerRow);
+
+                    foreach (var card in cards)
                     {
                         if (!string.IsNullOrEmpty(card.poster) && card.poster.StartsWith('/')
                             && posterSeen.Add(en.host + "|" + card.poster))
-                            posters.Add((en.host, en.scheme, "/tmdb/img/t/p/w300" + card.poster));
+                            posters.Add((en.host, en.scheme, ImgPath("w300", card.poster)));
 
                         if (detailQuery != null && detailSeen.Add(en.host + "|" + card.tv + "|" + card.id))
-                            details.Add((en.host, en.scheme, "/cub/tmdb./3/" + (card.tv ? "tv/" : "movie/") + card.id + detailQuery));
+                            details.Add((en.host, en.scheme, DetailPath(card.id, card.tv) + detailQuery));
                     }
+
+                    // фон берут только первые карточки ряда — они же первыми открываются с пульта
+                    foreach (string bd in BackdropPaths(cards, backdropsPerRow))
+                        if (backdropSeen.Add(en.host + "|" + bd))
+                            backdrops.Add((en.host, en.scheme, bd));
                 }
 
                 await Task.Delay(100);
             }
 
             int posterMiss = await WarmList(port, posters, posterBudget, _posterOffset, v => _posterOffset = v);
+            int backdropMiss = await WarmList(port, backdrops, backdropBudget, _backdropOffset, v => _backdropOffset = v);
             int detailMiss = await WarmList(port, details, detailBudget, _detailOffset, v => _detailOffset = v);
 
-            if (miss > 0 || fail > 0 || posterMiss > 0 || detailMiss > 0)
-                Console.WriteLine($"[QbitDownload] catalog warmup: rows {rows.Length} (miss {miss}, fail {fail}), posters {Math.Min(posters.Count, posterBudget)}/{posters.Count} (miss {posterMiss}), details {Math.Min(details.Count, detailBudget)}/{details.Count} (miss {detailMiss})");
+            if (miss > 0 || fail > 0 || posterMiss > 0 || backdropMiss > 0 || detailMiss > 0)
+                Console.WriteLine($"[QbitDownload] catalog warmup: rows {rows.Length} (miss {miss}, fail {fail}), posters {Math.Min(posters.Count, posterBudget)}/{posters.Count} (miss {posterMiss}), backdrops {Math.Min(backdrops.Count, backdropBudget)}/{backdrops.Count} (miss {backdropMiss}), details {Math.Min(details.Count, detailBudget)}/{details.Count} (miss {detailMiss})");
 
             if (_dirty) { _dirty = false; Save(); }
         }
@@ -294,6 +359,7 @@ public static class CatalogWarmup
         {
             using var rq = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{port}{pathQuery}");
             rq.Headers.TryAddWithoutValidation("Host", host);
+            rq.Headers.TryAddWithoutValidation(WarmupHeader, "1");   // чтобы наблюдатель не принял реплей за клиента
             if (string.Equals(scheme, "https", StringComparison.OrdinalIgnoreCase))
                 rq.Headers.TryAddWithoutValidation("X-Forwarded-Proto", "https");
 

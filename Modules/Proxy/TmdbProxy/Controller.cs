@@ -94,12 +94,16 @@ public class TmdbProxyController : BaseController
     #endregion
 
     #region API
+    // ignoreQueryKeys api_key (qdl 2.19): апстриму всё равно уходит СЕРВЕРНЫЙ ключ (см. ApiKey),
+    // ответ от клиентского ключа не зависит → держать его в ключе кеша значило бы плодить бакеты
+    // (публичный ключ бандла + свой ключ Android-оболочки + прогрев каталога = три копии одного JSON).
     [HttpGet]
     [Staticache(
         always: true,
         setHeadersNoCache: true,
         skipUids: true,
-        queryKeys = [".*"]
+        queryKeys = [".*"],
+        ignoreQueryKeys = ["api_key"]
     )]
     [Route("tmdb/api/{*suffix}")]
     async public Task TmdbAPI()
@@ -114,7 +118,7 @@ public class TmdbProxyController : BaseController
 
         var result = await Http.BaseGetReaderAsync(
             e => CopyStream(BodyWriter, e.stream, e.ct),
-            url: RequestUri(tmdbApiHost, path, HttpContext.Request.Query),
+            url: RequestUri(tmdbApiHost, path, HttpContext.Request.Query, forceApiKey: ApiKey()),
             timeoutSeconds: 15,
             httpversion: ModInit.conf.httpversion,
             proxy: proxyManager?.Get(),
@@ -136,12 +140,15 @@ public class TmdbProxyController : BaseController
                 if (ModInit.conf.cache_api > 0)
                     HttpContext.Features.Set(new StatiCacheEntry(DateTimeOffset.Now.AddMinutes(ModInit.conf.cache_api)));
             }
+            else
+                NoCache();
         }
         else
         {
             proxyManager?.Refresh();
             HttpContext.Response.StatusCode = StatusCodes.Status408RequestTimeout;
             HttpContext.Response.BodyWriter.Write("{\"status_code\":1,\"status_message\":\"408 Request Timeout\",\"success\":false}"u8);
+            NoCache();
         }
     }
     #endregion
@@ -185,7 +192,10 @@ public class TmdbProxyController : BaseController
                     HttpContext.Features.Set(new StatiCacheEntry(DateTimeOffset.Now.AddMinutes(ModInit.conf.cache_img)));
             }
             else
+            {
                 proxyManager?.Refresh();
+                NoCache();
+            }
 
             if (result.response.Content.Headers.ContentLength.HasValue)
                 HttpContext.Response.ContentLength = result.response.Content.Headers.ContentLength.Value;
@@ -212,6 +222,29 @@ public class TmdbProxyController : BaseController
     #endregion
 
     #region Helpers
+    // Запрет записи ответа в Staticache (qdl 2.19).
+    // Зачем: StaticacheWriter пишет на диск ЛЮБОЙ не-редирект с непустым телом — для не-200 он лишь
+    // укорачивает TTL до 1 минуты (StaticacheWriter.cs: `if (StatusCode != 200) ex = now+1min`),
+    // а Staticache на HIT возвращает сохранённый statusCode. Из-за этого 401/404/429 от TMDB
+    // «залипали» на минуту: повторный запрос отдавался за 2 мс с X-StatiCache-Status: HIT и тем же
+    // кодом, не доходя до апстрима. saveCache:false — единственный штатный способ это отменить
+    // (StaticacheWriter уважает флаг ДО записи файла), тело клиенту при этом отдаётся как обычно.
+    void NoCache() => HttpContext.Features.Set(new StatiCacheEntry(default, false));
+
+    // Серверный ключ TMDB: секция "tmdb" init.conf → фолбэк на общий cub.api_key (он же зашит
+    // в бандле Lampa). null = ключа нет, идём с тем, что прислал клиент (старое поведение).
+    static string ApiKey()
+    {
+        string key = ModInit.conf?.api_key;
+
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            try { key = CoreInit.conf.cub?.api_key; } catch { key = null; }
+        }
+
+        return string.IsNullOrWhiteSpace(key) ? null : key;
+    }
+
     static ReadOnlySpan<char> RequestPath(string pathString, string route)
     {
         ReadOnlySpan<char> path = pathString
@@ -227,7 +260,9 @@ public class TmdbProxyController : BaseController
         return path;
     }
 
-    static string RequestUri(ReadOnlySpan<char> host, ReadOnlySpan<char> path, IQueryCollection query)
+    // forceApiKey != null → клиентский api_key выбрасывается, апстриму уходит серверный
+    // (в т.ч. когда клиент ключа не прислал вовсе). Форма ответа не меняется.
+    static string RequestUri(ReadOnlySpan<char> host, ReadOnlySpan<char> path, IQueryCollection query, string forceApiKey = null)
     {
         var uri = StringBuilderPool.ThreadInstance;
 
@@ -240,6 +275,9 @@ public class TmdbProxyController : BaseController
         foreach (var q in query)
         {
             if (CoreInit.SkipQueryKeys.Contains(q.Key))
+                continue;
+
+            if (forceApiKey != null && q.Key.Equals("api_key", StringComparison.OrdinalIgnoreCase))
                 continue;
 
             var values = q.Value;
@@ -256,6 +294,12 @@ public class TmdbProxyController : BaseController
                 uri.Append(q.Key).Append('=').Append(value);
                 firstArg = false;
             }
+        }
+
+        if (forceApiKey != null)
+        {
+            uri.Append(firstArg ? '?' : '&');
+            uri.Append("api_key=").Append(forceApiKey);
         }
 
         return uri.ToString();

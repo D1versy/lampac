@@ -13,6 +13,14 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _watchTimer;
     static System.Threading.Timer _notifyTimer;
     static System.Threading.Timer _huntTimer;
+    static System.TimeSpan _huntPeriod = System.TimeSpan.FromHours(4);
+
+    // Ранний повтор охоты (EpisodeHunter): индексатор не дал кандидатов → следующий тик раньше срока.
+    // Change() перезадаёт и периодику, поэтому период передаём явно (иначе он стал бы «раз в due»).
+    public static void RescheduleHunt(System.TimeSpan due)
+    {
+        try { _huntTimer?.Change(due, _huntPeriod); } catch { }
+    }
 
     public void Loaded(InitspaceModel baseconf)
     {
@@ -47,14 +55,37 @@ public class ModInit : IModuleLoaded
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] donor reconcile: " + ex); }
         });
 
-        // фоновое слежение за сериалами: первая проверка через 10 мин, далее каждые N часов
+        // Охота за сериями (EpisodeHunter) дорогая — опрос индексатора → всех трекеров, поэтому свой
+        // редкий таймер; кламп ≥1 ч. Догон пропущенных тиков: каждый рестарт контейнера отодвигал
+        // первый прогон на +15 мин и обнулял отсчёт периода, так что при частых рестартах охота не
+        // запускалась вовсе. Если с прошлого прогона (hunt.lastRun в watch.json) прошло больше
+        // 1.5 периода — стартуем раньше.
+        int huntHours = (conf != null && conf.episodeHuntIntervalHours > 0) ? System.Math.Max(1, conf.episodeHuntIntervalHours) : 4;
+        _huntPeriod = System.TimeSpan.FromHours(huntHours);
+        bool huntOverdue = false;
+        var huntSince = System.TimeSpan.Zero;
+        try { huntOverdue = QbitController.HuntOverdue(_huntPeriod, out huntSince); }
+        catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] hunt overdue: " + ex.Message); }
+
+        // Все три контура берут общий _watchGate (skip-if-busy) — опоздавший тик просто пропадает до
+        // следующего периода, поэтому старты разведены. Догонная охота идёт минутами, так что
+        // слежение при догоне сдвигаем за неё (у него период 6 ч — 20 минут роли не играют).
+        var notifyFirst = System.TimeSpan.FromMinutes(2);
+        var huntFirst = System.TimeSpan.FromMinutes(huntOverdue ? 4 : 15);
+        var watchFirst = System.TimeSpan.FromMinutes(huntOverdue ? 30 : 10);
+        if (huntOverdue)
+            System.Console.WriteLine("[QbitDownload] hunt: догон после рестарта — прошлый прогон "
+                + (huntSince == System.TimeSpan.Zero ? "не зафиксирован" : System.Math.Round(huntSince.TotalHours, 1) + " ч назад")
+                + ", период " + huntHours + " ч → первый тик через " + huntFirst.TotalMinutes + " мин");
+
+        // фоновое слежение за сериалами: первая проверка через watchFirst, далее каждые N часов
         int hours = (conf != null && conf.watchIntervalHours > 0) ? conf.watchIntervalHours : 6;
         _watchTimer?.Dispose();
         _watchTimer = new System.Threading.Timer(async _ =>
         {
             try { await QbitController.CheckWatches(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] watch timer: " + ex); }
-        }, null, System.TimeSpan.FromMinutes(10), System.TimeSpan.FromHours(hours));
+        }, null, watchFirst, System.TimeSpan.FromHours(hours));
 
         // сканер «серия докачалась» → уведомления: первый запуск через 2 мин, далее каждые N минут
         int notifyMin = (conf != null && conf.notifyScanIntervalMinutes > 0) ? conf.notifyScanIntervalMinutes : 15;
@@ -63,17 +94,14 @@ public class ModInit : IModuleLoaded
         {
             try { await QbitController.ScanEpisodeNotifications(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] notify timer: " + ex); }
-        }, null, System.TimeSpan.FromMinutes(2), System.TimeSpan.FromMinutes(notifyMin));
+        }, null, notifyFirst, System.TimeSpan.FromMinutes(notifyMin));
 
-        // охота за сериями по всем раздачам (EpisodeHunter): дорого (опрос индексатора → всех
-        // трекеров), поэтому свой редкий таймер; кламп ≥1 ч. Первый запуск через 15 мин.
-        int huntHours = (conf != null && conf.episodeHuntIntervalHours > 0) ? System.Math.Max(1, conf.episodeHuntIntervalHours) : 4;
         _huntTimer?.Dispose();
         _huntTimer = new System.Threading.Timer(async _ =>
         {
             try { await QbitController.HuntAll(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] hunt timer: " + ex); }
-        }, null, System.TimeSpan.FromMinutes(15), System.TimeSpan.FromHours(huntHours));
+        }, null, huntFirst, _huntPeriod);
     }
 
     public void Dispose()

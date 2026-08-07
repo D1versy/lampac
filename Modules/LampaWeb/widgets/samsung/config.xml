@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" version="1.4.1" viewmodes="maximized">
-    <access origin="*" subdomains="true"></access>
+    <!-- Единственный декларативный allowlist среди наших платформ: виджету разрешены только
+         наши хосты (было origin="*" — доступ куда угодно). Список должен совпадать с bootstrap
+         в loader.js; при смене доменов править оба места. -->
+    <access origin="http://192.168.87.24:9118"></access>
+    <access origin="https://tv.d1versy.com:9443"></access>
+    <access origin="https://tv2.d1versy.com:9443"></access>
+    <access origin="https://d1versy.com" subdomains="true"></access>
     <tizen:app-control>
         <tizen:src name="index.html" reload="disable"/>
         <tizen:operation name="http://samsung.com/appcontrol/operation/eden_resume"/>

@@ -24,7 +24,13 @@
     <script src="./vender/scrollbar/jquery.scrollbar.js"></script>
     <script src="./vender/navigator/navigator.js"></script>
     <script src="./vender/keypad/keypad.js"></script>
-    <script src="http://www.youtube.com/iframe_api" async></script>
+    <!-- Тег <script src="http://www.youtube.com/iframe_api"> убран: грузился безусловно при
+         КАЖДОМ старте виджета, причём по открытому HTTP — это и обращение наружу до всякого
+         действия пользователя, и вектор подмены (чужой JS исполнился бы в контексте приложения).
+         Трейлерам он не нужен: внутренний плеер Lampa открывает youtube.html в iframe, а тот
+         подтягивает iframe_api сам. -->
+
+
     
      <!-- loader.js резолвит живой хост (мульти-хост фолбек D1Vision) и сам грузит с него
           lampainit.js + app.min.js; статичный тег {localhost}/lampainit.js убран — при фолбеке

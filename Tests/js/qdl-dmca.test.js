@@ -112,7 +112,7 @@ test('XHR-патч: GET карточки CUB переписан на прокс�
   assert.strictEqual(d._url, '{localhost}/cub/api/checker', 'watch-пинг → локальная заглушка (2.15)');
 });
 
-test('XHR-патч: домен CUB запоминается из живых запросов → /blocked идёт на зеркало', () => {
+test('XHR-патч: домен CUB запоминается из живых запросов → /blocked идёт на зеркало (через наш прокси)', () => {
   const reqs = [];
   const lampa = H.makeLampa({
     Reguest: function () {
@@ -124,7 +124,7 @@ test('XHR-патч: домен CUB запоминается из живых за
 
   new sandbox.window.XMLHttpRequest().open('GET', 'https://tmdb.mirror-kurwa.men/3/movie/5?api_key=k');
   qdl.whenDmca(() => {});
-  assert.deepStrictEqual(reqs, ['https://tmdb.mirror-kurwa.men/blocked']);
+  assert.deepStrictEqual(reqs, ['{localhost}/cub/tmdb.mirror-kurwa.men/blocked'], '2.19: URL сразу локальный (наш CubProxy), а не через cubproxy.js на request_before');
 });
 
 test('lampainit-invc: ранний XHR-патч (deep-link) — стоит до qdl.js, ставит флаг и домен', () => {
@@ -194,7 +194,7 @@ test('whenDmca: одна загрузка /blocked на всех ожидающ�
   qdl.whenDmca(() => calls++);
   qdl.whenDmca(() => calls++);   // список уже загружен первым вызовом → сразу
   assert.strictEqual(calls, 2);
-  assert.deepStrictEqual(reqs, ['https://tmdb.cub.rip/blocked'], 'ровно один сетевой запрос');
+  assert.deepStrictEqual(reqs, ['{localhost}/cub/tmdb.cub.rip/blocked'], 'ровно один сетевой запрос, и он локальный (2.19)');
   assert.strictEqual(qdl.isDmca('movie', 7), true);
 
   const cache = lampa._storage.get('qdl_dmca_cache');
@@ -221,7 +221,7 @@ test('whenDmca: протухший кэш → сеть; ошибка сети �
   let called = false;
   qdl.whenDmca(() => { called = true; });
   assert.strictEqual(called, true);
-  assert.deepStrictEqual(reqs, ['https://tmdb.cub.rip/blocked']);
+  assert.deepStrictEqual(reqs, ['{localhost}/cub/tmdb.cub.rip/blocked']);
   assert.strictEqual(qdl.isDmca('tv', 42), true, 'протухший список лучше пустого');
 });
 

@@ -13,6 +13,14 @@ public class ModuleConf : ModuleBaseConf
 
     public bool responseContentLength { get; set; }
 
+    /// <summary>
+    /// Серверный ключ TMDB для /tmdb/api: подставляется апстриму ВМЕСТО клиентского (и вместо
+    /// его отсутствия). Пусто = фолбэк на CoreInit.conf.cub.api_key. Задаётся в init.conf,
+    /// секция "tmdb". Ключ клиента при этом исключён из ключа Staticache (ignoreQueryKeys),
+    /// поэтому кеш не фрагментируется по чужим ключам (в Android-оболочке зашит свой).
+    /// </summary>
+    public string api_key { get; set; }
+
 
     public TmdbProxyApiConf proxyapi { get; set; }
 

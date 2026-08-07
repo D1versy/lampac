@@ -654,11 +654,31 @@ public partial class QbitController
     #endregion
 
     #region HuntAll / HuntOne — сама охота
+
+    // Ранний повтор при пустой выдаче индексатора: не чаще раза в HuntRetryMinutes и не более
+    // HuntRetryMax раз подряд — иначе долгий даунтайм трекеров превращается в бесконечный опрос.
+    const int HuntRetryMinutes = 15;
+    const int HuntRetryMax = 4;
+    static int _huntRetries;
+
+    // Итог прохода по одному сериалу. searched — дошли до опроса индексатора; barren — выдача пустая
+    // (сбой трекеров неотличим от «новых серий нет», поэтому такой проход не засчитываем).
+    sealed class HuntOneResult { public int grabbed; public bool searched; public bool barren; }
+
+    // Ранний повтор оправдан только если пусто у ВСЕХ опрошенных сериалов: у одного — бывает
+    // (нишевый тайтл), у всех сразу — это индексатор/трекеры лежат.
+    static bool ShouldRetryHunt(int searched, int barren, int retries)
+        => searched > 0 && barren == searched && retries < HuntRetryMax;
+
     public static async Task<int> HuntAll(string onlyHash = null)
     {
         if (!ModInit.conf.episodeHunt) return 0;
-        if (!await _watchGate.WaitAsync(0)) return 0;   // общий фоновый гейт (был _hunting): сериализуем с CheckWatches/ScanEpisodeNotifications
-        int grabbed = 0;
+        if (!await _watchGate.WaitAsync(0))   // общий фоновый гейт (был _hunting): сериализуем с CheckWatches/ScanEpisodeNotifications
+        {
+            Console.WriteLine("[QbitDownload] hunt: тик пропущен — занят другой фоновый проход (watch/notify/hunt)");
+            return 0;
+        }
+        int grabbed = 0, series = 0, searched = 0, barren = 0;
         try
         {
             JArray list; HashSet<string> orig;
@@ -670,20 +690,142 @@ public partial class QbitController
             foreach (var m in list.OfType<JObject>())
             {
                 if (onlyHash != null && !onlyHash.Equals(m.Value<string>("hash"), StringComparison.OrdinalIgnoreCase)) continue;
-                try { grabbed += await HuntOne(c, m); changed = true; }   // HuntOne всегда обновляет hunt.lastRun
+                try
+                {
+                    var r = await HuntOne(c, m);   // штамп hunt.lastRun ставит сам HuntOne — и только на удачном проходе
+                    grabbed += r.grabbed; changed = true; series++;
+                    if (r.searched) searched++;
+                    if (r.barren) barren++;
+                }
                 catch (Exception ex) { Console.WriteLine("[QbitDownload] hunt item: " + ex); }
             }
             if (changed) SaveWatchReconciled(list, orig);
+            if (series > 0)
+                Console.WriteLine($"[QbitDownload] hunt: проход завершён — записей {series}, опрошено {searched}, пустых выдач {barren}, добыто серий {grabbed}");
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] hunt: " + ex); }
         finally { _watchGate.Release(); }
+
+        // Пустая выдача у всех — почти всегда сбой индексатора/трекеров, а не «новых серий нет»:
+        // при обычном интервале (часы) такая тишина стоила бы суток. Просим таймер прийти раньше.
+        // Точечный прогон (onlyHash) — ручной, общее расписание им не двигаем.
+        if (onlyHash == null)
+        {
+            if (ShouldRetryHunt(searched, barren, _huntRetries))
+            {
+                _huntRetries++;
+                ModInit.RescheduleHunt(TimeSpan.FromMinutes(HuntRetryMinutes));
+                Console.WriteLine($"[QbitDownload] hunt: индексатор не дал кандидатов ни по одному из {searched} сериалов — ранний повтор через {HuntRetryMinutes} мин (попытка {_huntRetries}/{HuntRetryMax})");
+            }
+            else if (searched > 0 && barren == searched)
+                Console.WriteLine("[QbitDownload] hunt: индексатор по-прежнему молчит, лимит ранних повторов исчерпан — ждём обычный интервал");
+            else
+                _huntRetries = 0;   // проход не «глухой» (или опрашивать было некого) — серия повторов закрыта
+        }
         return grabbed;
+    }
+
+    // Догон пропущенных тиков (М2.5): контейнер перезапускается чаще, чем срабатывает редкий таймер
+    // охоты, поэтому она могла не идти сутками. true = с прошлого удачного прогона прошло больше
+    // 1.5 периода либо штампа нет вовсе (охота ни разу не доходила до конца). Только чтение — зовём
+    // со старта модуля, любая ошибка = «не просрочено» (обычное расписание).
+    public static bool HuntOverdue(TimeSpan period, out TimeSpan since)
+    {
+        since = TimeSpan.Zero;
+        try
+        {
+            if (ModInit.conf == null || !ModInit.conf.episodeHunt) return false;
+            JArray list;
+            lock (_watchLock) { list = LoadWatch(); }
+            if (list.Count == 0) return false;
+
+            DateTime? last = null;
+            foreach (var m in list.OfType<JObject>())
+            {
+                string s = (m["hunt"] as JObject)?.Value<string>("lastRun");
+                if (!string.IsNullOrEmpty(s) &&
+                    DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var t) &&
+                    (last == null || t > last)) last = t;
+            }
+            if (last == null) return true;
+            since = DateTime.UtcNow - last.Value;
+            return since > period * 1.5;
+        }
+        catch { return false; }
     }
 
     static void SetHuntStamp(JObject m, DateTime now, int maxClaim)
     {
+        // перезаписью объекта целиком сбрасывается и счётчик пустых выдач — проход удачный
         m["hunt"] = new JObject { ["lastRun"] = now.ToString("o"), ["lastMaxClaim"] = maxClaim };
     }
+
+    // Пустая выдача индексатора: lastRun НЕ трогаем (иначе сбой трекеров выглядит как «новых серий
+    // нет» и стоит целый интервал), пишем только диагностику подряд идущих пустых попыток.
+    static void MarkHuntBarren(JObject m, DateTime now)
+    {
+        if (m["hunt"] is not JObject h) { h = new JObject(); m["hunt"] = h; }
+        h["lastEmpty"] = now.ToString("o");
+        h["emptyStreak"] = (h.Value<int?>("emptyStreak") ?? 0) + 1;
+    }
+
+    // ── сводка отсева для лога ────────────────────────────────────────────
+    // Причина отсева ТОЛЬКО для лога: решение принимает FilterDonorCandidates (её не трогаем),
+    // здесь повторяется порядок её проверок. Расхождение испортит текст лога, но не решение;
+    // от дрейфа стережёт тест HunterCoverageTests.DropReason_MirrorsFilter.
+    static string DropReason(JObject t, HuntCtx h)
+    {
+        string title = t.Value<string>("title") ?? "";
+        if (!NameMatchesSeries(title, h.titleNorm, h.originalNorm)) return "имя";
+        if ((t.Value<int?>("sid") ?? 0) < h.minSeeds) return "сиды";
+
+        int q = t.Value<int?>("quality") ?? 0;
+        if (h.minQuality > 0 && q > 0 && q < h.minQuality) return "качество";
+
+        string btih = MagnetHash(t.Value<string>("magnet"));
+        string parselink = t.Value<string>("parselink");
+        if (!string.IsNullOrEmpty(btih) && h.knownHashes.Contains(btih)) return "уже есть";
+        if (!string.IsNullOrEmpty(btih) && h.blacklistKeys.Contains(btih)) return "blacklist";
+        if (!string.IsNullOrWhiteSpace(parselink) && h.blacklistKeys.Contains(parselink)) return "blacklist";
+        if (string.IsNullOrEmpty(btih) && string.IsNullOrWhiteSpace(parselink)) return "без ссылки";
+        if (h.selfTopicKey != null && TopicKey(parselink) == h.selfTopicKey) return "своя раздача";
+
+        var seasons = TorrentScoring.ParseSeasons(title);
+        if (h.season > 0 && seasons.Count > 0 && !seasons.Contains(h.season)) return "сезон";
+        if (h.season > 1 && seasons.Count == 0) return "сезон не заявлен";
+
+        long sizeBytes = t.Value<long?>("sizeBytes") ?? 0;
+        var cov = TorrentScoring.ParseEpCoverage(title);
+        int haveCount = cov?.have ?? 0;
+        if (haveCount == 0)
+        {
+            var pe = ParseEp(StripSeasonMarks(title));
+            if (pe != null && pe.any && pe.kind == "RANGE" && pe.ep2 >= pe.ep) haveCount = pe.ep2 - pe.ep + 1;
+            else if (pe != null && pe.any && pe.kind == null && pe.ep >= 0) haveCount = 1;
+        }
+        if (sizeBytes > 0 && haveCount > 0 && !EpSizeOk(EstimateEpBytes(sizeBytes, haveCount), h.minMb, h.maxGb)) return "вес серии";
+
+        return null;
+    }
+
+    static string DropSummary(JArray scored, int keptCount, HuntCtx h)
+    {
+        int dropped = scored.Count - keptCount;
+        if (dropped <= 0) return "";
+        var by = new Dictionary<string, int>();
+        foreach (var t in scored.OfType<JObject>())
+        {
+            string r = DropReason(t, h);
+            if (r != null) by[r] = by.TryGetValue(r, out int n) ? n + 1 : 1;
+        }
+        var top = by.OrderByDescending(x => x.Value).Take(4).Select(x => x.Key + " " + x.Value).ToList();
+        return " (отсев " + dropped + (top.Count > 0 ? ": " + string.Join(", ", top) : "") + ")";
+    }
+
+    static string WantedText(List<int> wanted)
+        => wanted.Count == 0 ? "—"
+         : wanted.Count == 1 ? "E" + wanted[0]
+         : "E" + wanted[0] + "–E" + wanted[wanted.Count - 1] + " (" + wanted.Count + ")";
 
     // доминирующий сезон по видеофайлам (то, что реально качаем); 0 = не определить
     static int DominantSeason(JArray files)
@@ -699,11 +841,12 @@ public partial class QbitController
         return counts.Count > 0 ? counts.OrderByDescending(x => x.Value).First().Key : 0;
     }
 
-    static async Task<int> HuntOne(HttpClient c, JObject m)
+    static async Task<HuntOneResult> HuntOne(HttpClient c, JObject m)
     {
+        var res = new HuntOneResult();
         var conf = ModInit.conf;
         string mainHash = m.Value<string>("hash");
-        if (!ValidHash(mainHash)) return 0;
+        if (!ValidHash(mainHash)) return res;
 
         // только сериалы: ctx.is_serial==2, иначе media_type из меты
         var ctx = m["ctx"] as JObject;
@@ -718,15 +861,15 @@ public partial class QbitController
             }
             catch { }
         }
-        if (!isSerial) return 0;
+        if (!isSerial) return res;
 
         string ctitle = ctx?.Value<string>("title");
         if (string.IsNullOrWhiteSpace(ctitle)) ctitle = m.Value<string>("query");
         if (string.IsNullOrWhiteSpace(ctitle)) ctitle = m.Value<string>("title");
-        if (string.IsNullOrWhiteSpace(ctitle)) return 0;
+        if (string.IsNullOrWhiteSpace(ctitle)) return res;
 
         var mainFiles = await QbitFiles(c, mainHash);
-        if (mainFiles == null || mainFiles.Count == 0) return 0;   // основная сама ещё без метаданных
+        if (mainFiles == null || mainFiles.Count == 0) return res;   // основная сама ещё без метаданных
 
         var now = DateTime.UtcNow;
         PruneBlacklist(m, now);
@@ -736,11 +879,30 @@ public partial class QbitController
         if (season <= 0) season = Math.Max(1, ctx?.Value<int?>("season") ?? 1);
 
         var inv = InventoryEps(mainFiles, donors, season);
+        string stitle = m.Value<string>("title");
+        if (string.IsNullOrWhiteSpace(stitle)) stitle = ctitle;
 
-        if ((donors?.Count ?? 0) >= conf.donorMaxPerSeries) { SetHuntStamp(m, now, 0); return 0; }
+        if ((donors?.Count ?? 0) >= conf.donorMaxPerSeries)
+        {
+            SetHuntStamp(m, now, 0);
+            Console.WriteLine($"[QbitDownload] hunt «{stitle}» S{season}: пропуск — доноров уже {donors?.Count ?? 0}/{conf.donorMaxPerSeries}");
+            return res;
+        }
 
         var scored = await SearchScored(ctitle, ctitle, ctx?.Value<string>("title_original"),
                                         ctx?.Value<int?>("year") ?? 0, 2, season, null);
+        res.searched = true;
+
+        // Пусто = либо трекеры отдали ошибку (JacRed InternalServerError и т.п.), либо индексатор лёг.
+        // Это НЕ «новых серий нет»: штамп не ставим (иначе следующая диагностика соврёт), сигналим
+        // наверх — HuntAll попросит таймер прийти раньше.
+        if (scored.Count == 0)
+        {
+            MarkHuntBarren(m, now);
+            res.barren = true;
+            Console.WriteLine($"[QbitDownload] hunt «{stitle}» S{season}: индексатор не дал кандидатов (подряд {(m["hunt"] as JObject)?.Value<int?>("emptyStreak") ?? 1}) — проход не засчитан");
+            return res;
+        }
 
         var h = new HuntCtx
         {
@@ -775,14 +937,17 @@ public partial class QbitController
         int maxClaim = MaxClaim(eligible);
         var wanted = ComputeWanted(inv, maxClaim);
         SetHuntStamp(m, now, maxClaim);
-        if (wanted.Count == 0) return 0;   // новее ничего не заявлено — основная и так самая полная
+        Console.WriteLine($"[QbitDownload] hunt «{stitle}» S{season}: кандидатов {scored.Count} → годных {eligible.Count}{DropSummary(scored, eligible.Count, h)}; заявлено серий до {maxClaim}, нужно {WantedText(wanted)}");
+        if (wanted.Count == 0) return res;   // новее ничего не заявлено — основная и так самая полная
 
         int grabbed = 0, probes = 0;
         long minB = conf.epSizeMinMb * 1024L * 1024, maxB = conf.epSizeMaxGb * 1024L * 1024 * 1024;
 
-        // ТОЛЬКО топ-1 из выдачи Лампа-торрента (по требованию владельца: не перебирать всё, брать
-        // единственную самую релевантную альтернативу). Не подошла по файлам → в этот проход больше не ищем.
-        foreach (var cand in OrderByCover(eligible, season, wanted).Take(1))
+        // Топ-N из выдачи Лампа-торрента, N = donorProbesPerRun: первая по релевантности раздача
+        // часто не подтверждается файлами (нет серии/нет метаданных), и на топ-1 проход уходил
+        // впустую до следующего интервала. Перебор всё равно жёстко ограничен: probes ниже и кап
+        // donorMaxPerSeries (перечитывается на каждой итерации — доноры добавляются прямо в цикле).
+        foreach (var cand in ProbeCandidates(eligible, season, wanted, conf.donorProbesPerRun))
         {
             if (probes >= Math.Max(1, conf.donorProbesPerRun)) break;
             if (((m["donors"] as JArray)?.Count ?? 0) >= conf.donorMaxPerSeries) break;
@@ -858,8 +1023,16 @@ public partial class QbitController
             Console.WriteLine("[QbitDownload] hunt: донор " + btih + " (" + cand.Value<string>("tracker") + ") — серии " + string.Join(",", found.Select(f => f.ep)) + " для «" + m.Value<string>("title") + "»");
             if (wanted.Count == 0) break;
         }
-        return grabbed;
+        if (grabbed == 0)
+            Console.WriteLine($"[QbitDownload] hunt «{stitle}» S{season}: ничего не добыто (проб {probes} из {eligible.Count} годных)");
+        res.grabbed = grabbed;
+        return res;
     }
+
+    // Сколько кандидатов пробуем за проход: топ-N в порядке OrderByCover (уверенные Yes, затем Maybe).
+    // Кламп ≥1 — нулевой/отрицательный donorProbesPerRun не должен выключать охоту молча.
+    static List<JObject> ProbeCandidates(List<JObject> eligible, int season, List<int> wanted, int probesPerRun)
+        => OrderByCover(eligible, season, wanted).Take(Math.Max(1, probesPerRun)).ToList();
 
     [HttpGet, AllowAnonymous]
     [Route("qdl/hunt/run")]

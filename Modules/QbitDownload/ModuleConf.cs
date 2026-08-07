@@ -143,5 +143,9 @@ public class ModuleConf : ModuleBaseConf
     public int catalogWarmupPruneDays { get; set; } = 14;    // ряд не запрашивался клиентами N дней → забыть
     public int catalogWarmupCardsPerRow { get; set; } = 12;  // сколько первых карточек ряда греть (видимая часть на ТВ)
     public int catalogWarmupPosterBudget { get; set; } = 120; // постеров за тик (ротация курсора добирает хвост)
-    public int catalogWarmupDetailBudget { get; set; } = 32;  // деталей за тик (каждый MISS = поход в tmdb.cub.red)
+    public int catalogWarmupDetailBudget { get; set; } = 32;  // деталей за тик (каждый MISS = поход в api.themoviedb.org)
+    // Фон карточки (backdrop_path, w1280) весит 130-280 КБ против 20-40 КБ у постера w300, поэтому
+    // отдельный, заведомо меньший бюджет вместо общего счётчика штук: 24 фона ≈ 120 постеров по байтам.
+    public int catalogWarmupBackdropsPerRow { get; set; } = 3; // сколько первых карточек ряда греть фоном
+    public int catalogWarmupBackdropBudget { get; set; } = 24; // фонов за тик (ротация курсора добирает хвост)
 }

@@ -12,7 +12,11 @@ namespace QbitDownload;
 //                 NoticeLampa/pushNotice НЕ трогаем — classes.lampa читается бандлом без гарда;
 //   menu-items  — пункты левого меню «Релизы»/«Расписание»/«Подписки»;
 //   tt-extract  — фоновый парсер TimeTable: TMDB-запрос каждые 30 сек вечным циклом;
-//   tt-rows     — ряды «Скоро выйдут»/«Недавно вышли» на главной (питались от TimeTable).
+//   tt-rows     — ряды «Скоро выйдут»/«Недавно вышли» на главной (питались от TimeTable);
+//   preroll     — рекламный преролл перед плеером: Preroll.show() тянет Google IMA SDK
+//                 (https://imasdk.googleapis.com/js/sdkloader/ima3.js) и крутит VAST из data.vast_url.
+//                 Штатного выключателя нет: disable_features.ads в текущем бандле не читается
+//                 (0 вхождений) — только патч. Заменяем ветку на безусловный запуск плеера.
 // Якоря — неминглящиеся литералы бандла (пин tree в LampaWeb/ModInit). Смена tree →
 // якорь тихо не найдётся (warn в лог), остатки прячет CSS-фолбэк в lampainit-invc.js.
 public static class AppPatch
@@ -37,6 +41,14 @@ public static class AppPatch
         new P("tt-rows",
             "if (screen == 'category' && params.url == 'movie') return;",
             "return;/*qdl-cut:tt-rows*/"),
+        // Ранний выход из Preroll.show — ровно та же ветка, которой бандл сам пропускает рекламу
+        // (`if (type.any) return call();` чуть ниже по коду), поэтому плеер стартует как обычно,
+        // а IMA SDK не грузится вовсе. Точка выбрана по ОТДАВАЕМОМУ бандлу: прежний однострочный
+        // якорь `if (data.vast_url) Preroll.show(...)` в нём не встречается — там `Preroll.show`
+        // зовётся из четырёх мест с колбэком-функцией.
+        new P("preroll",
+            "function show$5(data, call) {",
+            "function show$5(data, call) {return call();/*qdl-cut:preroll*/"),
     };
 
     public static void Attach() => EventListener.AppReplace += OnAppReplace;

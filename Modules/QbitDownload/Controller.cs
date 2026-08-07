@@ -195,10 +195,12 @@ public partial class QbitController : BaseController
     public ActionResult D1VisionHosts()
     {
         SetHeadersNoCache();
-        // Фильтруем null/пустые (в init.conf может оказаться "clientHosts": [null] или "") — иначе
-        // мусор уедет клиентам в hosts[]; если после фильтра пусто — падаем на дефолты.
+        // Фильтруем null/пустые (в init.conf может оказаться "clientHosts": [null] или "") и чужие
+        // адреса — иначе мусор уедет клиентам в hosts[]; если после фильтра пусто — падаем на дефолты.
+        // Форма ответа не меняется: отсеянный хост просто не попадает в массив (старые mac/iOS-сборки
+        // читают тот же {ver,brand,hosts}).
         var hosts = (ModInit.conf.clientHosts ?? Enumerable.Empty<string>())
-            .Where(h => !string.IsNullOrWhiteSpace(h)).Distinct().ToList();
+            .Where(h => !string.IsNullOrWhiteSpace(h)).Select(h => h.Trim()).Where(IsOurClientHost).Distinct().ToList();
         if (hosts.Count == 0)
             hosts = defaultClientHosts;
         var payload = new JObject
@@ -208,6 +210,22 @@ public partial class QbitController : BaseController
             ["hosts"] = new JArray(hosts)
         };
         return ContentTo(payload.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
+
+    // Наш ли адрес: домен проекта или приватный IP. Те же правила, по которым клиенты решают, кому
+    // предъявлять ключ периметра (Android D1VAuth.isOurHost, Tizen loader.js) — чужой хост, попавший
+    // в clientHosts, стал бы для клиента «своим» и получил бы ключ.
+    static bool IsOurClientHost(string url)
+    {
+        try
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var u)) return false;
+            string h = (u.Host ?? "").ToLowerInvariant();
+            if (h.Length == 0) return false;
+            if (h == "d1versy.com" || h.EndsWith(".d1versy.com")) return true;
+            return IsPrivateHost(u);
+        }
+        catch { return false; }
     }
     #endregion
 
@@ -1021,7 +1039,7 @@ public partial class QbitController : BaseController
     static readonly ConcurrentDictionary<string, DateTime> _hlsTouch = new();    // последняя активность (защита от удаления при просмотре)
     static readonly TimeSpan _hlsFailTtl = TimeSpan.FromMinutes(3);
     static readonly TimeSpan _hlsTouchTtl = TimeSpan.FromMinutes(30);
-    static readonly System.Threading.Timer _hlsIdleTimer = new(_ => KillIdleHls(), null, 60_000, 30_000);   // держим ссылку от GC
+    static readonly System.Threading.Timer _hlsIdleTimer = new(_ => { KillIdleHls(); CleanupHlsThrottled(300); }, null, 60_000, 30_000);   // держим ссылку от GC
 
     // Зритель закрыл приложение/поставил долгую паузу — запросы сегментов прекратились, а ffmpeg
     // молотил бы до конца файла (для _m-профиля это весь фильм на GPU впустую). Глушим VOD-сессии
@@ -1122,7 +1140,7 @@ public partial class QbitController : BaseController
                         {
                             var (src, extAudio, audioMap) = await ResolveHlsInputs(hash, index, audio);
                             if (src == null) return NotFound();
-                            CleanupHls();
+                            CleanupHlsThrottled(60);
                             StartHls(key, dir, src, extAudio, audioMap, n, mobile);
                         }
                         for (int i = 0; i < 40 && !SegReady(dir, n); i++)   // short-poll до 10с вместо слепых ретраев hls.js
@@ -1136,6 +1154,10 @@ public partial class QbitController : BaseController
                 }
                 if (!System.IO.File.Exists(target)) return NotFound();
                 var ts = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                // Внутри ключа сегмент иммутабелен (ключ = hash+index+дорожка+профиль, нарезка сетки
+                // фиксирована HlsSegSec+copyts) → клиент/edge не ревалидируют его повторно. Ставим
+                // только на успешном ответе: заголовок на 404 «не готового» сегмента залипнет навсегда.
+                HttpContext.Response.Headers["Cache-Control"] = "public,max-age=31536000,immutable";
                 return File(ts, "video/mp2t", enableRangeProcessing: true);
             }
 
@@ -1153,7 +1175,9 @@ public partial class QbitController : BaseController
                 }
                 if (dur > 0)
                 {
-                    CleanupHls();
+                    // чистку отсюда убрали: обход /qdl-hls через 9p стоил ~2.7 с на КАЖДУЮ отдачу
+                    // плейлиста (цена не зависит от размера ключа) — её тянет фоновый _hlsIdleTimer
+                    HttpContext.Response.Headers["Cache-Control"] = "no-cache";   // VOD-плейлист генерится (подпись d1v, длительность)
                     return Content(SignHlsPlaylist(BuildVodPlaylist(dur), d1vKey), "application/vnd.apple.mpegurl");
                 }
                 // dur == 0 → легаси-фолбэк (короткий источник, start_time сдвинут или ffprobe не смог)
@@ -1172,7 +1196,7 @@ public partial class QbitController : BaseController
                 var (src, extAudio, audioMap) = await ResolveHlsInputs(hash, index, audio);
                 if (src == null) return NotFound();
 
-                CleanupHls();
+                CleanupHlsThrottled(60);
                 StartHls(key, dir, src, extAudio, audioMap, mobile: mobile);
 
                 // ждём появления плейлиста + первого сегмента (event-playlist растёт по мере транскода)
@@ -1193,6 +1217,7 @@ public partial class QbitController : BaseController
             if (!m3u8.Contains("#EXT-X-START"))
                 m3u8 = m3u8.Replace("#EXTM3U", "#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES");
 
+            HttpContext.Response.Headers["Cache-Control"] = "no-cache";   // легаси-плейлист ffmpeg ДОПИСЫВАЕТ по мере нарезки
             return Content(SignHlsPlaylist(m3u8, d1vKey), "application/vnd.apple.mpegurl");
         }
         catch (Exception ex)
@@ -1966,24 +1991,47 @@ public partial class QbitController : BaseController
         catch { }
     }
 
+    // Троттлинг чистки. Обход /qdl-hls — это stat каждого файла через 9p-маунт: 4400 файлов = ~2.7 с,
+    // и цена НЕ зависит от того, большой ключ или маленький. Поэтому чистка не должна висеть в горячем
+    // пути (плейлист вообще не зовёт её, seek-рестарт — не чаще раза в минуту, фоновый таймер — в 5 минут).
+    static long _hlsCleanupAt;    // Ticks последнего запуска (0 = не запускалась)
+    static int _hlsCleanupBusy;   // 0/1 — обход уже идёт (два потока не топчутся по каталогу)
+
+    static void CleanupHlsThrottled(int minIntervalSec)
+    {
+        long now = DateTime.UtcNow.Ticks;
+        long prev = Interlocked.Read(ref _hlsCleanupAt);
+        if (prev != 0 && now - prev < TimeSpan.TicksPerSecond * (long)minIntervalSec) return;
+        if (Interlocked.CompareExchange(ref _hlsCleanupAt, now, prev) != prev) return;   // слот забрал другой поток
+        CleanupHls();
+    }
+
     // не даём HLS-кэшу (дублирует видео) разрастаться: при превышении капа чистим старые папки
     static void CleanupHls()
     {
+        if (Interlocked.CompareExchange(ref _hlsCleanupBusy, 1, 0) != 0) return;
         try
         {
             string root = ModInit.conf.hlsPath;
             if (!Directory.Exists(root)) return;
             long cap = Math.Max(1, ModInit.conf.hlsCacheCapGb) * 1024L * 1024 * 1024;
 
-            var list = new List<(DirectoryInfo d, long size, DateTime atime)>();
+            // один обход каталога (он и есть вся цена), а вот список с сортировкой строим ТОЛЬКО при
+            // превышении капа — обычный случай выходит сразу после подсчёта
+            var dirs = new DirectoryInfo(root).GetDirectories();
+            var sizes = new long[dirs.Length];
+            var atimes = new DateTime[dirs.Length];
             long total = 0;
-            foreach (var d in new DirectoryInfo(root).GetDirectories())
+            for (int i = 0; i < dirs.Length; i++)
             {
-                long s = 0; DateTime at = d.CreationTimeUtc;
-                foreach (var f in d.GetFiles()) { s += f.Length; if (f.LastWriteTimeUtc > at) at = f.LastWriteTimeUtc; }
-                total += s; list.Add((d, s, at));
+                long s = 0; DateTime at = dirs[i].CreationTimeUtc;
+                foreach (var f in dirs[i].GetFiles()) { s += f.Length; if (f.LastWriteTimeUtc > at) at = f.LastWriteTimeUtc; }
+                sizes[i] = s; atimes[i] = at; total += s;
             }
             if (total <= cap) return;
+
+            var list = new List<(DirectoryInfo d, long size, DateTime atime)>(dirs.Length);
+            for (int i = 0; i < dirs.Length; i++) list.Add((dirs[i], sizes[i], atimes[i]));
 
             var now = DateTime.UtcNow;
             list.Sort((a, b) => a.atime.CompareTo(b.atime));   // старые первыми
@@ -1996,6 +2044,7 @@ public partial class QbitController : BaseController
             }
         }
         catch { }
+        finally { Interlocked.Exchange(ref _hlsCleanupBusy, 0); }
     }
     #endregion
 
@@ -2771,6 +2820,10 @@ public partial class QbitController : BaseController
                 m["pendingSwitch"] = null;   // топик ожил — предложение переключения снимается
                 changed = true; regrabbed++;
                 Console.WriteLine("[QbitDownload] watch: re-grab " + m.Value<string>("title") + " " + curHash + "->" + newHash);
+
+                // «началась загрузка»: серии докачаются не сразу, зритель узнаёт о них только из
+                // ScanEpisodeNotifications через час-другой — даём сигнал сразу (дедуп по newHash)
+                AddStartNotification(m.Value<int?>("id") ?? 0, link, newHash, m.Value<string>("title"));
             }
             catch (Exception ex) { Console.WriteLine("[QbitDownload] watch item: " + ex); }
         }
@@ -2780,6 +2833,7 @@ public partial class QbitController : BaseController
         catch (Exception ex) { Console.WriteLine("[QbitDownload] checkwatches: " + ex); }
         finally { _watchGate.Release(); }
         }
+        else Console.WriteLine("[QbitDownload] watch check: тик пропущен (gate занят)");
 
         // после возможного re-grab — заодно собрать уведомления о докачавшихся сериях (берёт гейт сам)
         try { await ScanEpisodeNotifications(); } catch (Exception ex) { Console.WriteLine("[QbitDownload] post-checkwatches scan: " + ex); }
@@ -2923,10 +2977,53 @@ public partial class QbitController : BaseController
         catch (Exception ex) { Console.WriteLine("[QbitDownload] seed baseline: " + ex); }
     }
 
+    // Уведомление «началась загрузка» (kind=START). Зовут контуры, которые ТОЛЬКО ЧТО поставили
+    // раздачу на закачку (re-grab в CheckWatches, донор из охоты) — номера серий там ещё не
+    // известны, поэтому ep обычно null и текст общий; докачавшиеся серии придут отдельно из
+    // ScanEpisodeNotifications.
+    // Дедуп — строкой в той же таблице seen: epkey = "start:<btih>:<ep|all>" (с EpKey-ключами не
+    // пересекается). Возвращает true, если запись создана.
+    internal static bool AddStartNotification(int seriesId, string link, string hash, string title, string ep = null)
+    {
+        try
+        {
+            if (!ValidHash(hash)) return false;
+            string sk = SeriesKey(seriesId, link);
+            if (string.IsNullOrEmpty(sk)) return false;
+            string dedup = StartKey(hash, ep);
+
+            using var db = new SqlContext();
+            // анти-флуд: у сериала ещё нет базы отсечения (слежение только что включили, seen пуст) —
+            // молчим, иначе стартовое добавление раздачи само себе пришлёт уведомление
+            if (!db.seen.Any(x => x.seriesKey == sk)) return false;
+            if (db.seen.Any(x => x.seriesKey == sk && x.epkey == dedup)) return false;
+
+            db.seen.Add(new SeenModel { seriesKey = sk, epkey = dedup });
+            db.noti.Add(new NotiModel
+            {
+                seriesKey = sk, seriesId = seriesId, hash = hash, title = title ?? "",
+                season = -1, episode = -1, kind = "START", epkey = dedup,
+                label = "раздача обновилась, качаются новые серии", created = DateTime.UtcNow, read = false
+            });
+            db.SaveChanges();
+            Console.WriteLine("[QbitDownload] notify (start): " + (title ?? "") + " — " + hash);
+            return true;
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] notify start: " + ex.Message); return false; }
+    }
+
+    // ключ дедупа START-уведомлений (общий для всех контуров, которые их создают)
+    internal static string StartKey(string hash, string ep)
+        => "start:" + (hash ?? "").ToLowerInvariant() + ":" + (string.IsNullOrWhiteSpace(ep) ? "all" : ep);
+
     // основной сканер: для каждой отслеживаемой раздачи — новые докачавшиеся серии → записи в noti
     public static async Task<int> ScanEpisodeNotifications()
     {
-        if (!await _watchGate.WaitAsync(0)) return 0;   // общий фоновый гейт (был _scanning)
+        if (!await _watchGate.WaitAsync(0))   // общий фоновый гейт (был _scanning)
+        {
+            Console.WriteLine("[QbitDownload] noti scan: тик пропущен (gate занят)");
+            return 0;
+        }
         int created = 0;
         try
         {
@@ -3042,6 +3139,8 @@ public partial class QbitController : BaseController
             try { db.SaveChanges(); }
             catch (Exception ex) { Console.WriteLine("[QbitDownload] noti save: " + ex); }
 
+            if (created > 0) PushNotiSignal(created);   // не ждём следующего опроса колокольчика
+
             // замещение: основная догнала и докачала свою версию серии → файл донора убираем,
             // опустевшие/мёртвые доноры удаляем целиком (EpisodeHunter.ScanReplacements)
             try { await ScanReplacements(c, list, orig); }
@@ -3050,6 +3149,28 @@ public partial class QbitController : BaseController
         catch (Exception ex) { Console.WriteLine("[QbitDownload] noti scan: " + ex); }
         finally { _watchGate.Release(); }
         return created;
+    }
+
+    // Мгновенный сигнал по /nws: «есть новые уведомления — дёрни /qdl/notifications».
+    // Источником истины остаётся HTTP-опрос, по сокету едет только счётчик, поэтому потеря сигнала
+    // (Sync выключен → Startup.Nws == null, клиент без сокета) ничего не ломает.
+    // Рассылаем по ВСЕМ соединениям: NwsEvents.SendAsync адресует по uid, а уведомления общие.
+    internal static void PushNotiSignal(int count)
+    {
+        try
+        {
+            var nws = Startup.Nws;
+            if (nws == null) return;
+            var conns = nws.AllConnections();
+            if (conns == null || conns.IsEmpty) return;
+
+            string data = "{\"count\":" + count + "}";
+            foreach (var kv in conns)
+            {
+                try { _ = nws.SendAsync(kv.Key, "event", "", "qdl_noti", data); } catch { }
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] noti push: " + ex.Message); }
     }
 
     [HttpGet, AllowAnonymous]

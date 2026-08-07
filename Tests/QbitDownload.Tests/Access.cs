@@ -257,6 +257,22 @@ public static class Access
         int worker = (int)F("_tcWorker").GetValue(null);
         return empty && worker == 0;
     }
+
+    // ── HLS cleanup throttle / START-уведомления / фильтр OTA-хостов ──────
+    public static void CleanupHlsThrottled(int minIntervalSec) => Call("CleanupHlsThrottled", minIntervalSec);
+
+    /// <summary>Метка «когда последний раз чистили» (Ticks; 0 — ещё ни разу).</summary>
+    public static long HlsCleanupAt
+    {
+        get => (long)F("_hlsCleanupAt").GetValue(null);
+        set => F("_hlsCleanupAt").SetValue(null, value);
+    }
+
+    public static string StartKey(string hash, string ep) => (string)Call("StartKey", hash, ep);
+    public static bool IsOurClientHost(string url) => (bool)Call("IsOurClientHost", url);
+    public static bool AddStartNotification(int seriesId, string link, string hash, string title, string ep)
+        => (bool)Call("AddStartNotification", seriesId, link, hash, title, ep);
+    public static void PushNotiSignal(int count) => Call("PushNotiSignal", count);
 }
 
 /// <summary>Reflection view над приватным QbitController+TcJob (state/progress/error).</summary>
