@@ -51,6 +51,7 @@
     <Compile Include="..\..\Modules\QbitDownload\CatalogWarmup.cs" Link="Module\CatalogWarmup.cs" />
     <Compile Include="..\..\Modules\QbitDownload\CubExtensions.cs" Link="Module\CubExtensions.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Bitmagnet.cs" Link="Module\Bitmagnet.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\SearchMonitor.cs" Link="Module\SearchMonitor.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Controller.cs" Link="Module\Controller.cs" />
   </ItemGroup>
 

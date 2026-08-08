@@ -1464,9 +1464,15 @@ public partial class QbitController : BaseController
             string vpath = await ResolveFileCached(hash, vindex, c);
             foreach (var a in ProbeAudioCached(vpath)) opts.Add(a);
 
-            // внешние озвучки — устойчивый матчер (студия + серия, много фолбэков; claude/06 §T)
+            // внешние озвучки — устойчивый матчер (студия + серия, много фолбэков; claude/06 §T).
+            // Язык русский по построению: это отдельные файлы-дубляжи из русских раздач.
+            bool langOn = ModInit.conf?.audioLangEnable != false;
             foreach (var d in DubsForVideo(files, vf))
-                opts.Add(new JObject { ["id"] = d.id, ["label"] = d.label, ["lang"] = "rus" });
+            {
+                var o = new JObject { ["id"] = d.id, ["label"] = d.label, ["lang"] = "rus" };
+                if (langOn) { o["lang2"] = "ru"; o["langName"] = "Русский"; }
+                opts.Add(o);
+            }
 
             return ContentTo(opts.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
         }
@@ -1527,7 +1533,15 @@ public partial class QbitController : BaseController
                 // иначе у транскодов §Y все озвучки становились безликим «Русский»
                 if (string.IsNullOrWhiteSpace(title)) title = tags?.Value<string>("name");
                 string label = !string.IsNullOrWhiteSpace(title) ? title : LangName(lang);
-                res.Add(new JObject { ["id"] = "e" + ord, ["label"] = label + " (ориг.)", ["lang"] = lang });
+                var o = new JObject { ["id"] = "e" + ord, ["label"] = label + " (ориг.)", ["lang"] = lang };
+                // lang2 — НОРМАЛИЗОВАННЫЙ код языка для клиента. Сырой lang оставляем как был:
+                // это ffprobe-тег, на него могли завязаться другие потребители.
+                if (ModInit.conf?.audioLangEnable != false)
+                {
+                    string code = LangCode(lang, title);
+                    if (code != null) { o["lang2"] = code; o["langName"] = LangName(code); }
+                }
+                res.Add(o);
                 ord++;
             }
         }
@@ -1542,9 +1556,59 @@ public partial class QbitController : BaseController
             case "jpn": case "ja": return "Японский";
             case "eng": case "en": return "Английский";
             case "rus": case "ru": return "Русский";
+            case "ukr": case "uk": return "Украинский";
+            case "deu": case "ger": case "de": return "Немецкий";
+            case "fra": case "fre": case "fr": return "Французский";
+            case "spa": case "es": return "Испанский";
+            case "ita": case "it": return "Итальянский";
+            case "kor": case "ko": return "Корейский";
+            case "zho": case "chi": case "zh": return "Китайский";
             case "": return "Оригинал";
             default: return l;
         }
+    }
+
+    // Русские студии/маркеры озвучки — для дорожек, у которых ffprobe-тег языка пуст
+    // (у большинства рипов он именно такой).
+    static readonly Regex _dubRuRx = new Regex(
+        @"(?i)(дубляж|дублирован|многоголос|двухголос|одноголос|закадров|профессиональн|любительск|\bрус\w*|lostfilm|hdrezka|kubik|кубик|jaskier|newstudio|coldfilm|baibako|amedia|tvshows|кураж|гоблин)",
+        RegexOptions.Compiled);
+    static readonly Regex _dubEnRx = new Regex(@"(?i)(\benglish\b|\bангл\w*)", RegexOptions.Compiled);
+    static readonly Regex _dubJaRx = new Regex(@"(?i)(\bjapanese\b|\bяпон\w*)", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Нормализованный код языка дорожки: сначала ffprobe-тег, и ТОЛЬКО при пустом теге —
+    /// эвристика по подписи. Возвращает null, когда язык определить нельзя (клиент тогда
+    /// считает дорожку «без языка» и не прячет её).
+    /// </summary>
+    internal static string LangCode(string raw, string label)
+    {
+        switch ((raw ?? "").Trim().ToLowerInvariant())
+        {
+            case "rus": case "ru": return "ru";
+            case "eng": case "en": return "en";
+            case "jpn": case "ja": case "jp": return "ja";
+            case "ukr": case "uk": return "uk";
+            case "deu": case "ger": case "de": return "de";
+            case "fra": case "fre": case "fr": return "fr";
+            case "spa": case "es": return "es";
+            case "ita": case "it": return "it";
+            case "kor": case "ko": return "ko";
+            case "zho": case "chi": case "zh": return "zh";
+            case "":
+            case "und":
+                break;                 // тега нет — пробуем подпись
+            default:
+                return null;           // экзотика: не выдумываем
+        }
+
+        // ⚠️ Только осмысленная подпись. При пустом теге label формируется как LangName("") =
+        // «Оригинал», и классифицировать эту строку нельзя — она ничего о языке не говорит.
+        if (string.IsNullOrWhiteSpace(label)) return null;
+        if (_dubRuRx.IsMatch(label)) return "ru";
+        if (_dubEnRx.IsMatch(label)) return "en";
+        if (_dubJaRx.IsMatch(label)) return "ja";
+        return null;
     }
 
     // ───────── Устойчивый матчер озвучек (видео↔внешние аудио). См. claude/06 §T ─────────

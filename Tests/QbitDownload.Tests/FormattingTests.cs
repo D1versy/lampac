@@ -106,7 +106,8 @@ public class FormattingTests
 
     [Theory]
     // unknown values pass through UNCHANGED (returns original `l`, not lowercased).
-    [InlineData("fre", "fre")]
+    // ⚠️ «fre» больше не пример неизвестного: в qdl 2.24 словарь расширен (fre → Французский).
+    [InlineData("swe", "swe")]
     [InlineData("Deutsch", "Deutsch")]
     [InlineData("XYZ", "XYZ")]          // case preserved on passthrough
     [InlineData("English", "English")] // not exactly "eng"/"en"

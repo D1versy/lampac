@@ -13,6 +13,7 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _watchTimer;
     static System.Threading.Timer _notifyTimer;
     static System.Threading.Timer _huntTimer;
+    static System.Threading.Timer _diagTimer;
     static System.TimeSpan _huntPeriod = System.TimeSpan.FromHours(4);
 
     // Ранний повтор охоты (EpisodeHunter): индексатор не дал кандидатов → следующий тик раньше срока.
@@ -102,6 +103,26 @@ public class ModInit : IModuleLoaded
             try { await QbitController.HuntAll(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] hunt timer: " + ex); }
         }, null, huntFirst, _huntPeriod);
+
+        // Мониторинг поиска (SearchMonitor.cs). Первый тик через 20 мин — после notify@2 / watch@10 /
+        // hunt@15, чтобы старты не толкались. Таймер создаётся ВСЕГДА: при интервале 0 тик выходит
+        // сразу, зато включение мониторинга не требует рестарта — updateConf() перезаводит период.
+        _diagTimer?.Dispose();
+        _diagTimer = new System.Threading.Timer(async _ =>
+        {
+            try
+            {
+                if ((conf?.searchMonitorIntervalMinutes ?? 0) <= 0) return;
+                await QbitController.SearchMonitorTick();
+            }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] searchmon timer: " + ex); }
+        }, null, System.TimeSpan.FromMinutes(20), DiagPeriod());
+    }
+
+    static System.TimeSpan DiagPeriod()
+    {
+        int m = conf?.searchMonitorIntervalMinutes ?? 0;
+        return System.TimeSpan.FromMinutes(m > 0 ? System.Math.Max(15, m) : 60);
     }
 
     public void Dispose()
@@ -116,11 +137,15 @@ public class ModInit : IModuleLoaded
         _notifyTimer = null;
         _huntTimer?.Dispose();
         _huntTimer = null;
+        _diagTimer?.Dispose();
+        _diagTimer = null;
     }
 
     void updateConf()
     {
         conf = ModuleInvoke.Init("QbitDownload", new ModuleConf());
+        // период мониторинга правится в init.conf на лету — иначе включение требовало бы рестарта
+        try { _diagTimer?.Change(DiagPeriod(), DiagPeriod()); } catch { }
     }
 
     // ── mylocalip без api.ipify.org (qdl 2.15) ──

@@ -50,6 +50,7 @@ public static class Access
     public static string ConfinedCombine(string baseDir, string rel) => (string)Call("ConfinedCombine", baseDir, rel);
     public static string MimeType(string p) => (string)Call("MimeType", p);
     public static string LangName(string l) => (string)Call("LangName", l);
+    public static string LangCode(string raw, string label) => (string)Call("LangCode", raw, label);
     public static string StripNoise(string s) => (string)Call("StripNoise", s);
     public static bool IsGenericFolder(string s) => (bool)Call("IsGenericFolder", s);
     public static string CleanStudio(string s) => (string)Call("CleanStudio", s);

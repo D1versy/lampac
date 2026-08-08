@@ -99,6 +99,24 @@ public class ModuleConf : ModuleBaseConf
     public int recommendMinSeeds { get; set; } = 5;        // гейт «⭐ рекомендуемая»
     public string indexerApikey { get; set; } = "";        // apikey JacRed для ФОНОВЫХ поисков (охота/переключение); пусто = без ключа
 
+    // ── Язык аудиодорожки на экране серий (qdl 2.24) ──
+    // false → сервер не отдаёт lang2/langName, и клиент ведёт себя ровно как до фичи.
+    public bool audioLangEnable { get; set; } = true;
+
+    // ── Мониторинг поиска (SearchMonitor.cs): канарейки по индексатору, трекерам и ⭐ ──
+    // Поломка «Раздачи не найдены» жила незамеченной, пока владелец не увидел её глазами.
+    public int searchMonitorIntervalMinutes { get; set; } = 180;   // 0 = выключено; кламп ≥15
+    public bool searchMonitorNotify { get; set; } = false;         // false = только лог (обкатка без спама)
+    public bool searchMonitorTrackers { get; set; } = true;        // следить за пропажей отдельных трекеров
+    public int searchMonitorMinResults { get; set; } = 10;         // абсолютный пол по числу раздач
+    public int searchMonitorDropPercent { get; set; } = 60;        // и падение ниже % от медианы
+    public int searchMonitorFailStreak { get; set; } = 3;          // сколько провалов подряд = тревога
+    public int searchMonitorBaselineRuns { get; set; } = 10;       // глубина истории для медианы
+    public int searchMonitorCooldownHours { get; set; } = 12;      // антидребезг поверх переходов
+    // ⚠️ Без инициализатора: ModuleInvoke.Init популейтит JSON поверх готового инстанса, и Json.NET
+    // ДОПОЛНЯЕТ заполненную коллекцию → дубли. Дефолт живёт в SearchMonitor._defaultCanaries.
+    public List<string> searchMonitorTitles { get; set; }
+
     // ── bitmagnet: локальный индекс DHT-краулера (Postgres на хосте) ──
     // Ищем ТОЛЬКО по TMDB id карточки, а не по названию: совпадение точное, поэтому чужой фильм
     // притащить нельзя в принципе. Свободный текстовый поиск сознательно не делаем — в базе

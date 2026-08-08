@@ -132,7 +132,7 @@ const AUDIO = [{ id: 'e1', label: 'Русский' }, { id: 'd5', label: 'LostFi
 
 test('озвучка без префа: кнопка «выбрать», вопрос ОДИН раз при первом плее, преф сохраняется', () => {
   const m = mount({ audio: AUDIO });
-  const btn = m.root.find('.qdl-btn-focus');
+  const btn = m.root.find('.qdl-audio-btn');
   assert.strictEqual(btn.length, 1, 'кнопка озвучки есть при >1 дорожке');
   assert.strictEqual(btn.text(), 'Озвучка: выбрать');
 
@@ -157,7 +157,7 @@ test('озвучка с префом: применяется молча, кно�
     audio: AUDIO,
     before: (lampa) => { lampa.Storage.set('qdl_audio2', { [HASH]: 'd5' }); },
   });
-  assert.strictEqual(m.root.find('.qdl-btn-focus').text(), 'Озвучка: LostFilm');
+  assert.strictEqual(m.root.find('.qdl-audio-btn').text(), 'Озвучка: LostFilm');
   m.r.$(rowsOf(m)[0]).trigger('hover:enter');
   assert.strictEqual(m.calls.plays.length, 1, 'сразу плей');
   assert.strictEqual(m.calls.selects.length, 0, 'без вопроса');
@@ -168,14 +168,14 @@ test('смена озвучки кнопкой: преф обновлён, сл�
     audio: AUDIO,
     before: (lampa) => { lampa.Storage.set('qdl_audio2', { [HASH]: 'd5' }); },
   });
-  m.root.find('.qdl-btn-focus').trigger('hover:enter');
+  m.root.find('.qdl-audio-btn').trigger('hover:enter');
   assert.strictEqual(m.calls.selects.length, 1, 'селект смены озвучки');
   assert.ok(m.calls.selects[0].items[0].title.indexOf('✓') === 0, 'запомненная — первой с галочкой');
 
   const rus = m.calls.selects[0].items.filter((i) => i.id === 'e1')[0];
   m.calls.selects[0].onSelect(rus);
   assert.strictEqual(m.r.lampa.Storage.get('qdl_audio2')[HASH], 'e1', 'преф перезаписан');
-  assert.strictEqual(m.root.find('.qdl-btn-focus').text(), 'Озвучка: Русский');
+  assert.strictEqual(m.root.find('.qdl-audio-btn').text(), 'Озвучка: Русский');
   assert.strictEqual(m.calls.plays.length, 0, 'смена озвучки сама по себе не играет');
 });
 

@@ -827,10 +827,48 @@
     function setAudioPref(hash, id) { try { var m = Lampa.Storage.get('qdl_audio2', {}) || {}; m[hash] = id; Lampa.Storage.set('qdl_audio2', m); } catch (e) {} }
     function dropAudioPref(hash) { try { var m = Lampa.Storage.get('qdl_audio2', {}) || {}; if (m[hash] !== undefined) { delete m[hash]; Lampa.Storage.set('qdl_audio2', m); } } catch (e) {} }
 
+    // ── Язык дорожки (qdl 2.24). По умолчанию русский: сервер отдаёт нормализованный lang2,
+    // клиент сам ничего не угадывает. Преф ГЛОБАЛЬНЫЙ, а не на сериал: язык — свойство зрителя,
+    // в отличие от озвучки (qdl_audio2), которая осмысленна только внутри конкретной раздачи.
+    function audioLang(o) { return (o && o.lang2) ? String(o.lang2) : null; }   // нет поля → null, не падаем
+    function getLangPref() { try { return Lampa.Storage.get('qdl_audio_lang', 'ru') || 'ru'; } catch (e) { return 'ru'; } }
+    function setLangPref(c) { try { Lampa.Storage.set('qdl_audio_lang', c || 'ru'); } catch (e) {} }
+
+    // языки, реально представленные в дорожках, в порядке появления
+    function audioLangs(opts) {
+        var seen = {}, res = [];
+        (opts || []).forEach(function (o) {
+            var c = audioLang(o);
+            if (!c || seen[c]) return;
+            seen[c] = 1;
+            res.push({ code: c, name: o.langName || c });
+        });
+        return res;
+    }
+
+    // ⚠️ НИКОГДА не возвращает пусто: нет дорожек нужного языка → отдаём все.
+    // Фича не имеет права спрятать контент — иначе «нет русской» выглядело бы как поломка.
+    function filterByLang(opts, code) {
+        if (!code || code === 'all') return opts || [];
+        var hit = (opts || []).filter(function (o) { return audioLang(o) === code; });
+        return hit.length ? hit : (opts || []);
+    }
+
+    function langLabel(opts, code) {
+        if (!code || code === 'all') return 'Все языки';
+        var langs = audioLangs(opts), hit = null;
+        langs.forEach(function (l) { if (l.code === code) hit = l; });
+        if (hit) return hit.name;
+        // язык выбран, но таких дорожек нет — честно говорим, что показаны все
+        return (code === 'ru' ? 'Русский' : code) + ' (нет — показаны все)';
+    }
+
     // определить озвучку (из памяти или спросить один раз), затем cb(audioId)
     function ensureAudio(hash, index, cb) {
         req(API + '/qdl/audio?hash=' + hash + '&index=' + (index >= 0 ? index : -1), function (opts) {
             opts = opts || [];
+            // сузили до языка зрителя → одна русская дорожка играется без единого вопроса
+            opts = filterByLang(opts, getLangPref());
             if (opts.length <= 1) { cb(opts[0] && opts[0].id); return; }
             var pref = getAudioPref(hash);
             // показываем меню КАЖДЫЙ раз (можно сменить), запомненную озвучку — первой, с галочкой
@@ -977,6 +1015,7 @@
         var last;
         var rows = [];        // [{el, f}] — отметки обновляются на месте, DOM не перестраивается (фокус жив)
         var audioBtn = null;
+        var langBtn = null;
         var hash = object.qdl_hash;
         var name = object.qdl_name || '';
 
@@ -1006,12 +1045,23 @@
             return this.render();
         };
 
-        // озвучка без вопросов: единственная дорожка или валидный преф; иначе спросим при первом плее
+        // дорожки языка зрителя (или все, если таких нет) — на них работают и автовыбор, и меню озвучки
+        function langOpts() { return filterByLang(comp.audioOpts, getLangPref()); }
+
+        // озвучка без вопросов: единственная дорожка, валидный преф или единственная дорожка
+        // нужного языка; иначе спросим при первом плее
         function resolveAudioSilent() {
             var opts = comp.audioOpts;
             if (opts.length <= 1) { comp.audio = opts[0] && opts[0].id; comp.audioReady = true; return; }
+
+            // Преф на сериал ВЫИГРЫВАЕТ у языка: человек уже выбрал руками, переучивать его нельзя.
             var pref = getAudioPref(srcHash(comp.vids[0], hash));
-            if (pref && opts.some(function (o) { return o.id === pref; })) { comp.audio = pref; comp.audioReady = true; }
+            if (pref && opts.some(function (o) { return o.id === pref; })) { comp.audio = pref; comp.audioReady = true; return; }
+
+            // ⚠️ Автовыбор строго при ОДНОЙ подходящей дорожке. Три русские (дубляж/многоголоска/
+            // оригинал) — это выбор, который нельзя делать за зрителя молча.
+            var cand = langOpts();
+            if (cand.length === 1) { comp.audio = cand[0].id; comp.audioReady = true; }
         }
 
         function audioLabel() {
@@ -1019,10 +1069,33 @@
             return comp.audioReady ? ((hit && hit.label) || 'по умолчанию') : 'выбрать';
         }
 
+        function askLang() {
+            var cur = getLangPref();
+            var items = audioLangs(comp.audioOpts).map(function (l) {
+                return { title: (l.code === cur ? '✓ ' : '') + l.name, code: l.code };
+            });
+            items.push({ title: (cur === 'all' ? '✓ ' : '') + 'Все языки', code: 'all' });
+            Lampa.Select.show({
+                title: 'Язык дорожки',
+                items: items,
+                onSelect: function (s) {
+                    setLangPref(s.code);
+                    // язык сменился — прежний выбор озвучки мог оказаться из другого языка
+                    comp.audio = null; comp.audioReady = false;
+                    resolveAudioSilent();
+                    if (langBtn) langBtn.text('Язык: ' + langLabel(comp.audioOpts, getLangPref()));
+                    if (audioBtn) audioBtn.text('Озвучка: ' + audioLabel());
+                    Lampa.Controller.toggle('content');
+                },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }
+
         function askAudio(cb) {
             var ahash = srcHash(comp.vids[0], hash);
             var pref = getAudioPref(ahash);
-            var ordered = comp.audioOpts.slice().sort(function (a, b) { return (b.id === pref ? 1 : 0) - (a.id === pref ? 1 : 0); });
+            // меню — только по дорожкам выбранного языка (сужение, о котором просил владелец)
+            var ordered = langOpts().slice().sort(function (a, b) { return (b.id === pref ? 1 : 0) - (a.id === pref ? 1 : 0); });
             Lampa.Select.show({
                 title: 'Озвучка',
                 items: ordered.map(function (o) { return { title: (o.id === pref ? '✓ ' : '') + o.label, id: o.id }; }),
@@ -1081,13 +1154,28 @@
 
             if (!vids.length) body.append(liveMsg('Видеофайлы не найдены'));
             else {
+                // Кнопки в одном ряду. Классы РАЗНЫЕ: общий .qdl-btn-focus остаётся ради стиля фокуса,
+                // но селектить их надо точечно (иначе .text() на коллекции склеит подписи).
+                var btnCss = 'display:inline-block;margin:.2em 0 .6em .0;padding:.7em 1.2em;background:rgba(255,255,255,.1);border-radius:.8em;font-size:1.3em';
+                var bar = $('<div style="padding:0 1.4em;display:flex;gap:.8em;flex-wrap:wrap"></div>');
+
+                // язык показываем только когда он реально ЕСТЬ из чего выбрать — иначе лишний шум
+                if (audioLangs(comp.audioOpts).length > 1) {
+                    langBtn = $('<div class="selector qdl-btn-focus qdl-lang-btn" style="' + btnCss + '"></div>');
+                    langBtn.text('Язык: ' + langLabel(comp.audioOpts, getLangPref()));
+                    langBtn.on('hover:focus', function () { last = langBtn[0]; scroll.update(langBtn, true); });
+                    langBtn.on('hover:enter', function () { askLang(); });
+                    bar.append(langBtn);
+                }
                 if (comp.audioOpts.length > 1) {
-                    audioBtn = $('<div class="selector qdl-btn-focus" style="display:inline-block;margin:.2em 1.4em .6em;padding:.7em 1.2em;background:rgba(255,255,255,.1);border-radius:.8em;font-size:1.3em"></div>');
+                    audioBtn = $('<div class="selector qdl-btn-focus qdl-audio-btn" style="' + btnCss + '"></div>');
                     audioBtn.text('Озвучка: ' + audioLabel());
                     audioBtn.on('hover:focus', function () { last = audioBtn[0]; scroll.update(audioBtn, true); });
                     audioBtn.on('hover:enter', function () { askAudio(null); });
-                    body.append($('<div></div>').append(audioBtn));
+                    bar.append(audioBtn);
                 }
+                if (bar.children().length) body.append(bar);
+
                 vids.forEach(function (f, i) { body.append(rowEl(f, i)); });
                 comp.refreshMarks();   // отметки + подсветка текущей + стартовый фокус на ней
             }

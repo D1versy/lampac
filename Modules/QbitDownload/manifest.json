@@ -17,6 +17,7 @@
     "CatalogWarmup.cs",
     "CubExtensions.cs",
     "AppReplace.cs",
+    "SearchMonitor.cs",
     "Controller.cs"
   ]
 }
