@@ -14,6 +14,8 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _notifyTimer;
     static System.Threading.Timer _huntTimer;
     static System.Threading.Timer _diagTimer;
+    static System.Threading.Timer _crawlTimer;
+    static System.Threading.Timer _pruneTimer;
     static System.TimeSpan _huntPeriod = System.TimeSpan.FromHours(4);
 
     // Ранний повтор охоты (EpisodeHunter): индексатор не дал кандидатов → следующий тик раньше срока.
@@ -117,6 +119,33 @@ public class ModInit : IModuleLoaded
             }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] searchmon timer: " + ex); }
         }, null, System.TimeSpan.FromMinutes(20), DiagPeriod());
+
+        // Обходчик индекса — самый низкоприоритетный контур: первый тик через 25 мин, после всех
+        // остальных. Внутри он ещё раз уступает дорогу охоте, если та занята.
+        _crawlTimer?.Dispose();
+        _crawlTimer = new System.Threading.Timer(async _ =>
+        {
+            try
+            {
+                if ((conf?.indexCrawlPerTick ?? 0) <= 0) return;
+                await QbitController.IndexCrawlTick();
+            }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] crawler timer: " + ex); }
+        }, null, System.TimeSpan.FromMinutes(25), CrawlPeriod());
+
+        // Ретенция индекса — раз в сутки, первый прогон через час после старта.
+        _pruneTimer?.Dispose();
+        _pruneTimer = new System.Threading.Timer(async _ =>
+        {
+            try { await QbitController.IndexPrune(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] index prune: " + ex); }
+        }, null, System.TimeSpan.FromHours(1), System.TimeSpan.FromHours(24));
+    }
+
+    static System.TimeSpan CrawlPeriod()
+    {
+        int m = conf?.indexCrawlIntervalMinutes ?? 0;
+        return System.TimeSpan.FromMinutes(m > 0 ? System.Math.Max(15, m) : 60);
     }
 
     static System.TimeSpan DiagPeriod()
@@ -139,6 +168,10 @@ public class ModInit : IModuleLoaded
         _huntTimer = null;
         _diagTimer?.Dispose();
         _diagTimer = null;
+        _crawlTimer?.Dispose();
+        _crawlTimer = null;
+        _pruneTimer?.Dispose();
+        _pruneTimer = null;
     }
 
     void updateConf()
@@ -146,6 +179,7 @@ public class ModInit : IModuleLoaded
         conf = ModuleInvoke.Init("QbitDownload", new ModuleConf());
         // период мониторинга правится в init.conf на лету — иначе включение требовало бы рестарта
         try { _diagTimer?.Change(DiagPeriod(), DiagPeriod()); } catch { }
+        try { _crawlTimer?.Change(CrawlPeriod(), CrawlPeriod()); } catch { }
     }
 
     // ── mylocalip без api.ipify.org (qdl 2.15) ──

@@ -300,6 +300,14 @@ public partial class QbitController : BaseController
         var bitmagnetPass = FetchBitmagnet(tmdb_id, is_serial);
         passes.Add(bitmagnetPass);
 
+        // Проход 4 — НАШ индекс: всё, что когда-либо отдавали все источники вместе.
+        // Идёт ПОСЛЕДНИМ в дедупе (см. ниже) — живые источники всегда побеждают, индекс
+        // добавляет только то, чего сейчас не отдал никто. Именно это и делает его страховкой
+        // на случай смерти чужого удалённого хоста, не меняя выдачу в обычной ситуации.
+        string queryNorm = Shared.Services.Utilities.SearchNameTo.Convert(!string.IsNullOrWhiteSpace(title) ? title : query) ?? "";
+        var localIndexPass = FetchLocalIndex(tmdb_id, queryNorm, year, is_serial);
+        passes.Add(localIndexPass);
+
         var all = await Task.WhenAll(passes);
 
         // FetchIndexer возвращает null именно на СБОЕ (не на пустой выдаче) — если развалились
@@ -337,7 +345,11 @@ public partial class QbitController : BaseController
                 wantSeason = season,
                 preferredQuality = ModInit.conf.preferredQuality
             };
-            return TorrentScoring.SortAndMark(result, ctx, ModInit.conf.recommendMinSeeds);
+            var sorted = TorrentScoring.SortAndMark(result, ctx, ModInit.conf.recommendMinSeeds);
+            // fire-and-forget: пользователь не должен ждать индекс. Пишем ПОСЛЕ отсева —
+            // мусор и чужие тайтлы в базу не попадают by design.
+            IndexStoreAsync(sorted, tmdb_id, ctx.titleNorm, year, is_serial);
+            return sorted;
         }
 
         // самые «живые» раздачи сверху (надёжнее докачиваются)

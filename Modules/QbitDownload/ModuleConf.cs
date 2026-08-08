@@ -99,6 +99,22 @@ public class ModuleConf : ModuleBaseConf
     public int recommendMinSeeds { get; set; } = 5;        // гейт «⭐ рекомендуемая»
     public string indexerApikey { get; set; } = "";        // apikey JacRed для ФОНОВЫХ поисков (охота/переключение); пусто = без ключа
 
+    // ── Свой индекс раздач (LocalIndex.cs, Postgres) ──
+    // Копит всё, что видели ВСЕ источники, в своей БД: страховка от смерти чужого удалённого
+    // индекса и мгновенный локальный поиск. Пусто = источник выключен целиком.
+    public string localIndexConnection { get; set; } = "";
+    public int localIndexLimit { get; set; } = 200;        // сколько раздач тянуть на тайтл
+    public int localIndexTimeoutSec { get; set; } = 5;
+    public int localIndexPruneDays { get; set; } = 180;    // не виденные N дней удаляются (0 = не чистить)
+    public bool localIndexVerbose { get; set; } = false;   // лог каждой записи (для обкатки)
+
+    // Обходчик индекса (IndexCrawler.cs): наполняет индекс, не дожидаясь ручных поисков.
+    // ⚠️ Каждый тайтл = запрос ко ВСЕМ трекерам. Бан по IP на rutor/nnmclub/kinozal хуже,
+    // чем медленное наполнение, поэтому бюджет маленький и с паузой. 0 = обходчик выключен.
+    public int indexCrawlPerTick { get; set; } = 5;
+    public int indexCrawlIntervalMinutes { get; set; } = 60;   // кламп ≥15
+    public int indexCrawlPauseSec { get; set; } = 20;          // пауза между тайтлами, кламп ≥5
+
     // ── Язык аудиодорожки на экране серий (qdl 2.24) ──
     // false → сервер не отдаёт lang2/langName, и клиент ведёт себя ровно как до фичи.
     public bool audioLangEnable { get; set; } = true;

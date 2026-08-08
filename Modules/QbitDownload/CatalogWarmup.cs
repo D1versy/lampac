@@ -67,6 +67,23 @@ public static class CatalogWarmup
 
     static string StorePath => Path.Combine(ModInit.conf?.cachePath ?? "/qdl-data", "catalog-warmup.json");
 
+    // ── карточки главной для обходчика индекса (LocalIndex/IndexCrawler) ──
+    // Только id + признак сериала: этого хватает, чтобы взять название из нашего же
+    // TMDB-прокси (детали этих карточек прогрев уже положил в кеш). Набор ограничен —
+    // это «что показывали недавно», а не полная история.
+    static readonly ConcurrentDictionary<long, bool> _cardIds = new();
+    const int CardIdsCap = 3000;
+
+    internal static void NoteCard(long id, bool tv)
+    {
+        if (id <= 0) return;
+        if (_cardIds.Count >= CardIdsCap && !_cardIds.ContainsKey(id)) return;
+        _cardIds[id] = tv;
+    }
+
+    internal static IReadOnlyList<(long id, bool tv)> KnownCards()
+        => _cardIds.Select(kv => (kv.Key, kv.Value)).ToList();
+
     public static void Attach()
     {
         Load();
@@ -305,6 +322,10 @@ public static class CatalogWarmup
                 if (body != null && body.Length < 3_000_000 && contentType?.StartsWith("application/json") == true)
                 {
                     var cards = ExtractCards(body, cardsPerRow);
+
+                    // Обходчик индекса (IndexCrawler) переиспользует уже разобранные карточки
+                    // главной: своих запросов к TMDB он из-за этого не делает.
+                    foreach (var card in cards) NoteCard(card.id, card.tv);
 
                     foreach (var card in cards)
                     {

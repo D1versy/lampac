@@ -18,6 +18,8 @@
     "CubExtensions.cs",
     "AppReplace.cs",
     "SearchMonitor.cs",
+    "LocalIndex.cs",
+    "IndexCrawler.cs",
     "Controller.cs"
   ]
 }
