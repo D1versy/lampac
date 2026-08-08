@@ -111,6 +111,43 @@ public class TorrentScoringTests
         Assert.Single(res);
     }
 
+    // ── язык: русское в топ ───────────────────────────────────────────────
+    [Theory]
+    [InlineData("Миньоны / Minions (2015) BDRip 1080p", null)]              // кириллица
+    [InlineData("Minions.2015.BDRip-AVC.Dub.stalkerok.new-team.mkv", null)] // рус. дубляж, БД врёт «en»
+    [InlineData("Minions.2015.WEB-DL.KP.1080p-SOFCJ.mkv", null)]            // KP = Кинопоиск
+    [InlineData("Minions.2015.720p.WEB-DL.Rus.HDCLUB.mkv", null)]
+    [InlineData("Minions.2015.2160p.BluRay.REMUX.HEVC", true)]              // подсказка из БД
+    public void IsRussian_True(string title, bool? hint) => Assert.True(TorrentScoring.IsRussian(title, hint));
+
+    [Theory]
+    [InlineData("Minions.2015.UHD.BluRay.2160p.TrueHD.Atmos.7.1.HEVC.REMUX-FraMeSToR")]
+    [InlineData("[ OxTorrent.com ] Minions.2015.TRUEFRENCH.BDRiP.XViD-AViTECH.avi")]
+    [InlineData("Minions (2015) 2160p H265 10 bit ita eng AC3 5.1 sub ita eng Licdom")]
+    public void IsRussian_False(string title) => Assert.False(TorrentScoring.IsRussian(title));
+
+    // Русская раздача обязана быть выше иностранной, даже если у той кратно больше сидов
+    [Fact]
+    public void Russian_Beats_Foreign_EvenWithFarMoreSeeds()
+    {
+        var ru = Tor("Миньоны / Minions (2015) BDRip 1080p", 5);
+        var foreign = Tor("Minions.2015.UHD.BluRay.2160p.TrueHD.Atmos.HEVC.REMUX-FraMeSToR", 300);
+
+        var res = TorrentScoring.SortAndMark(new JArray(foreign, ru), Ctx("Миньоны", "Minions", 2015, false), 5);
+
+        Assert.Equal(2, res.Count);
+        Assert.Equal(5, res[0].Value<int>("sid"));   // русская первой, несмотря на 5 против 300
+    }
+
+    // Раздача, найденная по TMDB id, не проверяется по имени и не режется как «чужой тайтл»
+    [Fact]
+    public void IdMatch_SurvivesNameFilter()
+    {
+        var byId = new JObject { ["title"] = "Dune.2021.BDREMUX.2160p.HDR.mkv", ["sid"] = 3, ["id_match"] = true };
+        var res = TorrentScoring.SortAndMark(new JArray(byId), Ctx("Дюна", null, 2021, false), 5);
+        Assert.Single(res);   // без id_match латиница против русской карточки = nameMiss = вылет
+    }
+
     static JObject Tor(string title, int sid) => new JObject { ["title"] = title, ["sid"] = sid };
 
     static ScoreCtx Ctx(string ru, string en, int year, bool serial) => new ScoreCtx

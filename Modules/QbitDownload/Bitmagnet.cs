@@ -45,7 +45,9 @@ select t.name,
        tc.video_resolution,
        tc.video_codec,
        tc.published_at,
-       tc.updated_at
+       tc.updated_at,
+       -- @> вместо оператора ? : знак вопроса Npgsql может принять за плейсхолдер параметра
+       (tc.languages @> '[""ru""]'::jsonb) as lang_ru
 from torrent_contents tc
 join torrents t on t.info_hash = tc.info_hash
 where tc.content_source = 'tmdb'
@@ -81,14 +83,16 @@ limit @lim";
                 string vcodec = r.IsDBNull(6) ? null : r.GetString(6);
                 DateTime? published = r.IsDBNull(7) ? (DateTime?)null : r.GetDateTime(7);
                 DateTime? updated = r.IsDBNull(8) ? (DateTime?)null : r.GetDateTime(8);
+                bool langRu = !r.IsDBNull(9) && r.GetBoolean(9);
 
-                // Сиды обновляются только пока краулер работает. Если срез подтух, отдавать
-                // архивные цифры в скоринг нельзя: живая раздача трекера проиграет ⭐ мертвецу.
+                // Сиды обновляются только пока краулер работает. Обнулять их нельзя — тогда
+                // источник не участвует в ранжировании вовсе; но и верить архивным цифрам
+                // наравне с живыми трекерными тоже нельзя. Компромисс — половина веса.
                 int staleDays = ModInit.conf.bitmagnetStaleSeedsDays;
                 if (staleDays > 0 && (updated == null || updated.Value < DateTime.Now.AddDays(-staleDays)))
                 {
-                    sid = 0;
-                    pir = 0;
+                    sid /= 2;
+                    pir /= 2;
                 }
 
                 result.Add(new JObject
@@ -105,7 +109,15 @@ limit @lim";
                     // video_resolution у bitmagnet вида V2160p/V1080p; если пусто — падаем на разбор имени
                     ["quality"] = QualityFromResolution(res) ?? QualityFromTitle(name),
                     ["codec"] = NormalizeCodec(vcodec) ?? CodecFromTitle(name),
-                    ["date"] = published?.ToString("MM/dd/yyyy HH:mm:ss")
+                    ["date"] = published?.ToString("MM/dd/yyyy HH:mm:ss"),
+                    // Подсказка языка из БД. Она НЕПОЛНАЯ: русские дубляжи вроде
+                    // «Minions.2015.BDRip-AVC.Dub…new-team» краулер помечает как ["en"],
+                    // поэтому скоринг дополнительно смотрит маркеры в имени.
+                    ["lang_ru"] = langRu,
+                    // Совпадение по TMDB id — сильнее любого сравнения имён: скоринг не должен
+                    // проверять имя (у bitmagnet они латиницей, «Dune.2021…» против карточки
+                    // «Дюна» дал бы nameMiss и раздача вылетела бы фильтром «чужой тайтл»).
+                    ["id_match"] = true
                 });
             }
         }

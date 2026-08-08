@@ -155,6 +155,22 @@ public static class TorrentScoring
     public static bool IsNonVideo(string title)
         => !string.IsNullOrEmpty(title) && _nonVideoRx.IsMatch(title) && !_videoMarkRx.IsMatch(title);
 
+    // ── язык раздачи ────────────────────────────────────────────────────────
+    // Кириллица в названии — сама по себе надёжный признак русского релиза
+    // (так распознаются почти все раздачи русских трекеров).
+    static readonly Regex _cyrillicRx = new Regex(@"[А-Яа-яЁё]", RegexOptions.Compiled);
+
+    // Латиничные имена (в основном из bitmagnet) — по маркерам озвучки и русским
+    // релиз-группам: краулер помечает такие раздачи как ["en"], хотя дубляж русский.
+    static readonly Regex _ruMarkRx = new Regex(
+        @"(?i)(?<![a-z0-9])(rus|rux|dub|mvo|dvo|avo|kp|hdclub|hdt|new-?team|sofcj|kinoreys|lostfilm|newstudio|hdrezka|kubik|jaskier|tvshows|baibako|coldfilm|amedia|selezen|elektri4ka|dexter|kerob|scarabey|hellywood|domino|exkinoray)(?![a-z0-9])",
+        RegexOptions.Compiled);
+
+    /// <summary>Русская ли раздача: подсказка источника (может отсутствовать) + кириллица + маркеры озвучки.</summary>
+    public static bool IsRussian(string title, bool? langRuHint = null)
+        => langRuHint == true
+        || (!string.IsNullOrEmpty(title) && (_cyrillicRx.IsMatch(title) || _ruMarkRx.IsMatch(title)));
+
     static readonly Regex _yearRx = new Regex(@"(?<!\d)(19|20)\d{2}(?!\d)", RegexOptions.Compiled);
     public static List<int> ParseYears(string title)
     {
@@ -207,8 +223,13 @@ public static class TorrentScoring
         double score = 0;
 
         // ── имя (0..40): голова title против нормализованных названий карточки ──
+        // Источник, нашедший раздачу по TMDB id (bitmagnet), уже гарантировал тайтл —
+        // сверять имя не нужно и вредно: имена там латиницей и против русской карточки
+        // всегда давали бы nameMiss.
+        bool idMatch = t.Value<bool?>("id_match") == true;
         bool haveNames = !string.IsNullOrEmpty(ctx.titleNorm) || !string.IsNullOrEmpty(ctx.originalNorm);
-        if (!haveNames)
+        if (idMatch) { score += 40; r.why.Add("точное совпадение по TMDB"); }
+        else if (!haveNames)
             score += 20;   // без контекста имён скорить нечего — нейтрально
         else
         {
@@ -227,6 +248,18 @@ public static class TorrentScoring
                 else r.nameMiss = true;
             }
         }
+
+        // ── язык (−18..+18): русское — в топ ──
+        // Вес подобран так, чтобы перевесить сиды (−20..+15) и качество (1..8): иностранная
+        // раздача с 300 сидами обязана оказаться НИЖЕ русской. Внутри каждой группы порядок
+        // по-прежнему решают сиды/качество/свежесть. Особенно важно для bitmagnet — там
+        // подавляющее большинство раздач нерусские.
+        if (IsRussian(title, t.Value<bool?>("lang_ru")))
+        {
+            score += 18;
+            r.why.Add("русская");
+        }
+        else score -= 18;
 
         // ── год (−15..10) + отсечение сериалов из фильмовой выдачи ──
         var years = ParseYears(title);
