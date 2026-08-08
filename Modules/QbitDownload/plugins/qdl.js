@@ -1917,6 +1917,9 @@
             + (year ? '&year=' + year : '')
             + '&is_serial=' + isSerial
             + (season ? '&season=' + season : '')
+            // TMDB id — для локального индекса bitmagnet: поиск по id, а не по названию,
+            // поэтому чужой фильм в выдачу попасть не может
+            + (movie.id ? '&tmdb_id=' + encodeURIComponent(movie.id) : '')
             + (apikey ? '&apikey=' + encodeURIComponent(apikey) : '');
 
         req(url, function (list) {

@@ -260,16 +260,19 @@ public partial class QbitController : BaseController
     [HttpGet, AllowAnonymous]
     [Route("qdl/search")]
     async public Task<ActionResult> Search(string query, string title = null, string title_original = null,
-                                           int year = 0, int is_serial = -1, int season = 0, string apikey = null)
+                                           int year = 0, int is_serial = -1, int season = 0, string apikey = null,
+                                           string tmdb_id = null)
     {
-        var sorted = await SearchScored(query, title, title_original, year, is_serial, season, apikey);
+        var sorted = await SearchScored(query, title, title_original, year, is_serial, season, apikey, tmdb_id);
         return ContentTo(sorted.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
     }
 
-    // Весь пайплайн поиска (2 прохода + дедуп + скоринг) — статический: переиспользуется
-    // фоновыми контурами (EpisodeHunter, предложение переключения в CheckWatches).
+    // Весь пайплайн поиска (проходы индексатора + bitmagnet + дедуп + скоринг) — статический:
+    // переиспользуется фоновыми контурами (EpisodeHunter, предложение переключения в CheckWatches).
+    // tmdb_id опционален: без него просто не работает источник bitmagnet, остальное как раньше.
     static async Task<JArray> SearchScored(string query, string title, string title_original,
-                                           int year, int is_serial, int season, string apikey)
+                                           int year, int is_serial, int season, string apikey,
+                                           string tmdb_id = null)
     {
         string search = !string.IsNullOrWhiteSpace(query) ? query
                       : !string.IsNullOrWhiteSpace(title) ? title : title_original;
@@ -289,11 +292,28 @@ public partial class QbitController : BaseController
         if (is_serial >= 1)
             passes.Add(FetchIndexer(query, title, title_original, year, 0, apikey));
 
+        int indexerPasses = passes.Count;
+
+        // Проход 3 — локальный индекс bitmagnet по TMDB id (точное совпадение, мусор невозможен).
+        // Идёт параллельно с трекерами и его сбой не влияет на них: FetchBitmagnet сам глушит
+        // исключения и отдаёт пустой список.
+        var bitmagnetPass = FetchBitmagnet(tmdb_id, is_serial);
+        passes.Add(bitmagnetPass);
+
         var all = await Task.WhenAll(passes);
+
+        // FetchIndexer возвращает null именно на СБОЕ (не на пустой выдаче) — если развалились
+        // все проходы к индексатору, это не «раздач нет», а «индексатор недоступен».
+        // bitmagnet в счёт не идёт: он дополнительный и никогда не возвращает null.
+        if (all.Take(indexerPasses).All(a => a == null))
+            Console.WriteLine($"[QbitDownload] поиск «{search}»: все проходы индексатора провалились"
+                            + (bitmagnetPass.Result.Count > 0 ? $" — выдачу спас bitmagnet ({bitmagnetPass.Result.Count})" : " — клиенту уйдёт пустой список"));
 
         var result = new JArray();
         var seen = new HashSet<string>();
         foreach (var arr in all)
+        {
+            if (arr == null) continue;
             foreach (var t in arr)
             {
                 string mag = t.Value<string>("magnet");
@@ -302,6 +322,7 @@ public partial class QbitController : BaseController
                 if (!string.IsNullOrEmpty(dedupe) && !seen.Add(dedupe)) continue;
                 result.Add(t);
             }
+        }
 
         // Умный порядок: релевантность (имя/год/тип/сезон/полнота/свежесть) доминирует над сидами;
         // ⭐ rec + why у лучшей прошедшей гейты. Kill-switch searchScoring → старая сортировка по сидам.
@@ -341,45 +362,57 @@ public partial class QbitController : BaseController
 
         string raw = await Http.Get(sb.ToString(), timeoutSeconds: 40);
 
-        var result = new JArray();
-        if (!string.IsNullOrEmpty(raw))
+        // Раньше любой сбой индексатора молча превращался в пустой список, неотличимый от
+        // «ничего не нашлось», и наверх уходило «Раздачи не найдены». Теперь возвращаем null
+        // (= сбой) и пишем причину: Http.Get отдаёт null на любом не-200 и на таймауте, а
+        // JacRed умеет ответить 200 с текстом («apikey», «typesearch == null»), который не JSON.
+        if (string.IsNullOrEmpty(raw))
         {
-            try
-            {
-                var arr = JObject.Parse(raw)["Results"] as JArray;
-                if (arr != null)
-                {
-                    foreach (var t in arr)
-                    {
-                        string mag = t.Value<string>("MagnetUri");
-                        string link = t.Value<string>("Link");
-                        if (string.IsNullOrWhiteSpace(mag) && string.IsNullOrWhiteSpace(link)) continue;   // нечего качать
+            Console.WriteLine($"[QbitDownload] индексатор не ответил (не-200/таймаут): «{search}» is_serial={is_serial}");
+            return null;
+        }
 
-                        string ttl = t.Value<string>("Title") ?? "";
-                        var it = new JObject
-                        {
-                            ["title"] = ttl,
-                            ["magnet"] = mag,
-                            ["parselink"] = link,
-                            ["tracker"] = t.Value<string>("Tracker"),
-                            ["sid"] = t.Value<int?>("Seeders") ?? 0,
-                            ["size"] = HumanSize(t.Value<long?>("Size") ?? 0),
-                            ["quality"] = QualityFromTitle(ttl),
-                            ["codec"] = CodecFromTitle(ttl),
-                            // мета для скоринга/охоты (раньше выбрасывалась)
-                            ["pir"] = t.Value<int?>("Peers") ?? 0,
-                            ["date"] = t.Value<string>("PublishDate"),
-                            ["sizeBytes"] = t.Value<long?>("Size") ?? 0
-                        };
-                        if (t["Category"] is JArray catArr)
-                            it["cats"] = catArr;
-                        if (t["Info"] is JObject info)
-                            it["info"] = info;   // только typesearch=red; в jackett-режиме отсутствует
-                        result.Add(it);
-                    }
+        var result = new JArray();
+        try
+        {
+            var arr = JObject.Parse(raw)["Results"] as JArray;
+            if (arr != null)
+            {
+                foreach (var t in arr)
+                {
+                    string mag = t.Value<string>("MagnetUri");
+                    string link = t.Value<string>("Link");
+                    if (string.IsNullOrWhiteSpace(mag) && string.IsNullOrWhiteSpace(link)) continue;   // нечего качать
+
+                    string ttl = t.Value<string>("Title") ?? "";
+                    var it = new JObject
+                    {
+                        ["title"] = ttl,
+                        ["magnet"] = mag,
+                        ["parselink"] = link,
+                        ["tracker"] = t.Value<string>("Tracker"),
+                        ["sid"] = t.Value<int?>("Seeders") ?? 0,
+                        ["size"] = HumanSize(t.Value<long?>("Size") ?? 0),
+                        ["quality"] = QualityFromTitle(ttl),
+                        ["codec"] = CodecFromTitle(ttl),
+                        // мета для скоринга/охоты (раньше выбрасывалась)
+                        ["pir"] = t.Value<int?>("Peers") ?? 0,
+                        ["date"] = t.Value<string>("PublishDate"),
+                        ["sizeBytes"] = t.Value<long?>("Size") ?? 0
+                    };
+                    if (t["Category"] is JArray catArr)
+                        it["cats"] = catArr;
+                    if (t["Info"] is JObject info)
+                        it["info"] = info;   // только typesearch=red; в jackett-режиме отсутствует
+                    result.Add(it);
                 }
             }
-            catch { }
+        }
+        catch (System.Exception ex)
+        {
+            // тело не JSON — почти всегда осмысленный текст от JacRed, его и показываем
+            Console.WriteLine($"[QbitDownload] индексатор отдал не-JSON ({ex.GetType().Name}): «{search}» → {raw.Substring(0, System.Math.Min(120, raw.Length))}");
+            return null;
         }
         return result;
     }

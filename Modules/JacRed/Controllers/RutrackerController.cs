@@ -64,7 +64,7 @@ namespace JacRed.Controllers
             string cookie = await getCookie();
             if (string.IsNullOrEmpty(cookie))
             {
-                consoleErrorLog("rutracker");
+                consoleErrorLog("rutracker", "login failed");
                 return null;
             }
             #endregion
@@ -72,13 +72,14 @@ namespace JacRed.Controllers
             #region Кеш html
             string html = await Http.Get($"{jackett.Rutracker.host}/forum/tracker.php?nm=" + HttpUtility.UrlEncode(query), proxy: proxyManager.Get(), cookie: cookie, timeoutSeconds: jackett.timeoutSeconds);
 
-            if (html != null)
+            // html == null (таймаут / 403 / Cloudflare-челлендж) обязан отсекаться ЗДЕСЬ же:
+            // иначе Split ниже кидает NRE, он всплывает через Task.WhenAll в JackettApi и роняет
+            // весь /api/v2.0/indexers/all/results в 500 — выдача пустеет по ВСЕМ трекерам сразу.
+            if (html == null || !html.Contains("id=\"logged-in-username\""))
             {
-                if (!html.Contains("id=\"logged-in-username\""))
-                {
-                    consoleErrorLog("rutracker");
-                    return null;
-                }
+                consoleErrorLog("rutracker", html == null ? "no html" : "not logged in");
+                proxyManager.Refresh();
+                return null;
             }
             #endregion
 

@@ -227,10 +227,15 @@ namespace JacRed.Engine
             if (is_serial == 1 && year > 0)
                 result = result.Where(i => i.title.Contains(year.ToString()) || i.title.Contains($"{year + 1}") || i.title.Contains($"{year - 1}"));
 
-            if (ModInit.conf.Jackett.cacheToMinutes > 0)
-                hybridCache.Set(mkey, result.ToList(), DateTime.Now.AddMinutes(ModInit.conf.Jackett.cacheToMinutes), inmemory: false);
+            var resultList = result.ToList();
 
-            return result.ToList();
+            // Пустую выдачу не кешируем: hybridCache пишет с inmemory:false, то есть на диск
+            // (cache/fdb), и запись переживает перезапуск контейнера. Разовый сбой трекеров
+            // раньше замораживал «раздачи не найдены» на cacheToMinutes и после рестарта тоже.
+            if (ModInit.conf.Jackett.cacheToMinutes > 0 && resultList.Count > 0)
+                hybridCache.Set(mkey, resultList, DateTime.Now.AddMinutes(ModInit.conf.Jackett.cacheToMinutes), inmemory: false);
+
+            return resultList;
         }
         #endregion
 

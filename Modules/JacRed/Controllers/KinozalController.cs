@@ -28,15 +28,23 @@ namespace JacRed.Controllers
             var proxyManager = new ProxyManager("kinozal", jackett.Kinozal);
 
             #region Download
+            // Логинимся, если куки ещё нет: без неё скачивание закрыто так же, как и поиск.
+            if (string.IsNullOrEmpty(jackett.Kinozal.cookie) && Cookie == null &&
+                !string.IsNullOrWhiteSpace(jackett.Kinozal.login?.u) && !string.IsNullOrWhiteSpace(jackett.Kinozal.login?.p))
+                await TakeLogin();
+
             if (jackett.Kinozal.cookie != null || Cookie != null)
             {
-                var _t = await Http.Download("http://dl.kinozal.tv/download.php?id=" + id, proxy: proxyManager.Get(), cookie: jackett.Kinozal.cookie ?? Cookie, referer: jackett.Kinozal.host, timeoutSeconds: 10);
+                // Хост берём из конфига: захардкоженный dl.kinozal.tv мёртв (не резолвится),
+                // а {host}/download.php на текущем домене отдаёт настоящий .torrent.
+                var _t = await Http.Download($"{jackett.Kinozal.host}/download.php?id=" + id, proxy: proxyManager.Get(), cookie: jackett.Kinozal.cookie ?? Cookie, referer: jackett.Kinozal.host, timeoutSeconds: 10);
                 if (_t != null && BencodeTo.Magnet(_t) != null)
                     return File(_t, "application/x-bittorrent");
             }
             #endregion
 
-            string srv_details = await Http.Post($"{jackett.Kinozal.host}/get_srv_details.php?id={id}&action=2", $"id={id}&action=2", "__cfduid=d476ac2d9b5e18f2b67707b47ebd9b8cd1560164391; uid=20520283; pass=ouV5FJdFCd;", proxy: proxyManager.Get(), timeoutSeconds: 10);
+            // Фолбэк по инфо-хешу — с нашей живой кукой, а не с захардкоженной протухшей.
+            string srv_details = await Http.Post($"{jackett.Kinozal.host}/get_srv_details.php?id={id}&action=2", $"id={id}&action=2", jackett.Kinozal.cookie ?? Cookie, proxy: proxyManager.Get(), timeoutSeconds: 10);
             if (srv_details != null)
             {
                 string torrentHash = new Regex("<ul><li>Инфо хеш: +([^<]+)</li>").Match(srv_details).Groups[1].Value;
@@ -55,17 +63,34 @@ namespace JacRed.Controllers
             var torrents = new List<TorrentDetails>();
             var proxyManager = new ProxyManager("kinozal", jackett.Kinozal);
 
-            string html = await Http.Get($"{jackett.Kinozal.host}/browse.php?s={HttpUtility.UrlEncode(query)}&g=0&c=0&v=0&d=0&w=0&t=0&f=0", proxy: proxyManager.Get(), timeoutSeconds: jackett.timeoutSeconds);
+            // Гостевой поиск на kinozal закрыт: browse.php без куки редиректит на login.php.
+            // Логинимся ДО запроса и ждём результат (раньше TakeLogin() был async void и его
+            // не ждали, поэтому текущий запрос куку всё равно не получал).
+            if (string.IsNullOrEmpty(jackett.Kinozal.cookie) && Cookie == null &&
+                !string.IsNullOrWhiteSpace(jackett.Kinozal.login?.u) && !string.IsNullOrWhiteSpace(jackett.Kinozal.login?.p))
+                await TakeLogin();
 
-            if (html != null && html.Contains("Кинозал.ТВ</title>"))
+            string html = await getSearchHtml(query, proxyManager);
+
+            // Кука протухла (сервер вернул страницу входа) — перелогиниваемся и пробуем один раз.
+            if (html != null && isLoginPage(html) &&
+                !string.IsNullOrWhiteSpace(jackett.Kinozal.login?.u) && !string.IsNullOrWhiteSpace(jackett.Kinozal.login?.p))
             {
-                if (!html.Contains(">Выход</a>") && !string.IsNullOrWhiteSpace(jackett.Kinozal.login.u) && !string.IsNullOrWhiteSpace(jackett.Kinozal.login.p))
-                    TakeLogin();
+                dropCookie();
+                await TakeLogin(force: true);
+                html = await getSearchHtml(query, proxyManager);
             }
-            else if (html == null)
+
+            if (html == null)
             {
-                consoleErrorLog("kinozal");
+                consoleErrorLog("kinozal", "no html");
                 proxyManager.Refresh();
+                return null;
+            }
+
+            if (isLoginPage(html))
+            {
+                consoleErrorLog("kinozal", "not logged in");
                 return null;
             }
 
@@ -200,13 +225,74 @@ namespace JacRed.Controllers
         #endregion
 
 
-        #region Cookie / TakeLogin
-        static string Cookie;
+        #region getSearchHtml / isLoginPage
+        static Task<string> getSearchHtml(string query, ProxyManager proxyManager)
+        {
+            return Http.Get($"{jackett.Kinozal.host}/browse.php?s={HttpUtility.UrlEncode(query)}&g=0&c=0&v=0&d=0&w=0&t=0&f=0",
+                            proxy: proxyManager.Get(), cookie: jackett.Kinozal.cookie ?? Cookie, timeoutSeconds: jackett.timeoutSeconds);
+        }
 
-        async static void TakeLogin()
+        // Маркер по ASCII, а не по «Кинозал.ТВ»: домен переезжает (сейчас .GURU), а форма входа
+        // всегда постит на takelogin.php. Заодно не зависит от кодировки страницы (WINDOWS-1251).
+        static bool isLoginPage(string html) => html.Contains("takelogin.php") && !html.Contains("details.php?id=");
+        #endregion
+
+
+        #region Cookie / TakeLogin
+        // Кука переживает перезапуск: простой файл на томе lampac-cache. Без этого после
+        // каждого рестарта первый поиск уходил анонимно и kinozal молча отдавал ноль.
+        // Не HybridCache: он держит запись в RAM cache.extend (45 мин) и только потом
+        // сбрасывает в cache/fdb — то есть ровно от рестарта и не защищает.
+        const string cookieFile = "cache/kinozal.cookie";
+
+        static string _cookie;
+
+        static string Cookie
+        {
+            get
+            {
+                if (_cookie == null)
+                {
+                    try
+                    {
+                        // System.IO.File явно: в контроллере File — это ControllerBase.File(...)
+                        if (System.IO.File.Exists(cookieFile))
+                        {
+                            string saved = System.IO.File.ReadAllText(cookieFile).Trim();
+                            if (!string.IsNullOrEmpty(saved))
+                                _cookie = saved;
+                        }
+                    }
+                    catch { }
+                }
+
+                return _cookie;
+            }
+            set
+            {
+                _cookie = value;
+
+                try
+                {
+                    if (string.IsNullOrEmpty(value))
+                        System.IO.File.Delete(cookieFile);
+                    else
+                        System.IO.File.WriteAllText(cookieFile, value);
+                }
+                catch { }
+            }
+        }
+
+        // Сбросить и в памяти, и на диске: простого _cookie = null мало — геттер тут же
+        // перечитал бы протухшее значение из файла и перелогин не состоялся бы.
+        static void dropCookie() => Cookie = null;
+
+        // force — когда кука уже доказанно мертва (сервер отдал форму входа): 20-секундный
+        // антифлуд в этом случае только мешает, иначе перелогин молча не состоится.
+        async static Task TakeLogin(bool force = false)
         {
             string authKey = "kinozal:TakeLogin()";
-            if (Startup.memoryCache.TryGetValue(authKey, out _))
+            if (!force && Startup.memoryCache.TryGetValue(authKey, out _))
                 return;
 
             Startup.memoryCache.Set(authKey, 0, TimeSpan.FromSeconds(20));

@@ -1,10 +1,14 @@
 {
   "enable": true,
   "dynamic": true,
+  "references": [
+    "references/"
+  ],
   "tree": [
     "ModuleConf.cs",
     "ModInit.cs",
     "SqlContext.cs",
+    "Bitmagnet.cs",
     "FfWorker.cs",
     "TorrentScoring.cs",
     "EpisodeHunter.cs",
