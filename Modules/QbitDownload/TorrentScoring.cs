@@ -134,6 +134,27 @@ public static class TorrentScoring
         return set.ToList();
     }
 
+    // ── отсев «левых» раздач ────────────────────────────────────────────────
+    // Скоринг даёт +25 за одно лишь УПОМИНАНИЕ названия в строке, поэтому аудиокниги
+    // «Фрэнк Герберт - Дюна 4 (2021) MP3» и саундтреки набирали 42+ и лезли в середину
+    // выдачи фильма. Категории тут не спасают: у 790 из 913 раздач cats пустые.
+    static readonly Regex _nonVideoRx = new Regex(
+        @"(?i)(?<![a-z0-9])(mp3|flac|ape\b|wav\b|m4b|epub|fb2|mobi|djvu|pdf|аудиокниг\w*|дискограф\w*|саундтрек\w*|ost)(?![a-z0-9])",
+        RegexOptions.Compiled);
+
+    // Видео-признак. Проверяем его ОБЯЗАТЕЛЬНО: иначе «Дюна (2021) BDRemux + OST» —
+    // нормальный релиз с бонусной дорожкой — улетел бы в мусор из-за одного слова.
+    static readonly Regex _videoMarkRx = new Regex(
+        @"(?i)(?<![a-z0-9])(bd\s?rip|bd\s?remux|blu-?ray|web-?dl|web-?rip|web-?dlrip|hd\s?rip|dvd\s?rip|dvd\d?|hdtv\w*|tvrip|camrip|ts\b|satrip|remux|[xh]\.?\s?26[45]|hevc|avc|av1|xvid|divx|\d{3,4}p|2160|1080|720|480)(?![a-z0-9])",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// «Левая» раздача — то, что не может быть искомым фильмом/сериалом в принципе:
+    /// не-видео контент (музыка, книги, аудиокниги, саундтреки) без единого видео-признака.
+    /// </summary>
+    public static bool IsNonVideo(string title)
+        => !string.IsNullOrEmpty(title) && _nonVideoRx.IsMatch(title) && !_videoMarkRx.IsMatch(title);
+
     static readonly Regex _yearRx = new Regex(@"(?<!\d)(19|20)\d{2}(?!\d)", RegexOptions.Compiled);
     public static List<int> ParseYears(string title)
     {
@@ -316,19 +337,48 @@ public static class TorrentScoring
 
     // Скоринг всего списка: дописывает score/watchable/ep в каждый JObject, сортирует
     // score→sid→date, помечает ⭐ (rec=true + why) у первого прошедшего гейты.
-    public static JArray SortAndMark(JArray items, ScoreCtx ctx, int recommendMinSeeds)
+    public static JArray SortAndMark(JArray items, ScoreCtx ctx, int recommendMinSeeds, bool dropIrrelevant = true)
     {
         var scored = new List<(JObject t, ScoreResult r)>();
+        var nameMissed = new List<(JObject t, ScoreResult r)>();   // отложены, а не выброшены (см. предохранитель ниже)
+        int dropNonVideo = 0;
+
         foreach (var tok in items)
         {
             if (tok is not JObject t) continue;
             var r = Score(t, ctx);
+
             t["score"] = Math.Round(r.score, 1);
             t["watchable"] = ctx.isSerial && !string.IsNullOrWhiteSpace(t.Value<string>("parselink"));
             if (r.ep != null && r.ep.total > 0)
                 t["ep"] = new JObject { ["have"] = r.ep.have, ["total"] = r.ep.total, ["ongoing"] = r.ep.ongoing };
+
+            // Отсев, а не понижение: такие раздачи в списке фильма не нужны ВООБЩЕ —
+            // именно они раньше «попадали не в тот фильм». Действует и на фоновые
+            // контуры (охота за сериями), потому что те ходят через тот же SortAndMark.
+            if (dropIrrelevant)
+            {
+                if (IsNonVideo(t.Value<string>("title"))) { dropNonVideo++; continue; }
+                // nameMiss = названия карточки нет в строке НИ в русском, ни в оригинальном
+                // виде → это просто другой тайтл (так в выдаче «Дюны» жил «Отдел С.С.С.Р»).
+                if (r.nameMiss) { nameMissed.Add((t, r)); continue; }
+            }
+
             scored.Add((t, r));
         }
+
+        // Предохранитель: если по именам не прошло НИЧЕГО, а раздачи были — это скорее
+        // угол нормализации имени, чем «все чужие». Пустой экран тут хуже лишних строк:
+        // с него и начиналась вся история с «Раздачи не найдены».
+        if (scored.Count == 0 && nameMissed.Count > 0)
+        {
+            Console.WriteLine($"[QbitDownload] скоринг «{ctx.titleNorm}»: по имени не прошла ни одна из {nameMissed.Count} раздач — показываю как есть (проверь нормализацию имени)");
+            scored.AddRange(nameMissed);
+            nameMissed.Clear();
+        }
+
+        if (dropNonVideo > 0 || nameMissed.Count > 0)
+            Console.WriteLine($"[QbitDownload] скоринг «{ctx.titleNorm}»: отсев {dropNonVideo + nameMissed.Count} (не видео {dropNonVideo}, чужое имя {nameMissed.Count}), осталось {scored.Count}");
 
         var ordered = scored
             .OrderByDescending(x => x.r.score)

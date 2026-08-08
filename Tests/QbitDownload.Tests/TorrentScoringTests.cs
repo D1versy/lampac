@@ -69,6 +69,59 @@ public class TorrentScoringTests
     public void ParseEpCoverage_Garbage_Null()
         => Assert.Null(TorrentScoring.ParseEpCoverage("Просто фильм (2024) BDRip 1080p"));
 
+    // ── IsNonVideo: «левые» раздачи, которые не могут быть фильмом ────────
+    [Theory]
+    [InlineData("Фрэнк Герберт - Дюна 4, Бог-император Дюны (2021) MP3")]
+    [InlineData("OST - Minions / Миньоны - Саундтрек [Score] (2015) MP3")]
+    [InlineData("Электроклуб - Дискография (11 Альбомов + 1 Миньон) (1987-2008) MP3")]
+    [InlineData("Татьяна Коростышевская | Цикл: «Миньон» [3 книги] (2018-2020) [EPUB]")]
+    [InlineData("Елизавета Павлова | Монстры с человеческим лицом (2025) [FB2, MOBI]")]
+    public void IsNonVideo_Junk(string title) => Assert.True(TorrentScoring.IsNonVideo(title));
+
+    // Видео-признак обязателен: релиз с бонусной звуковой дорожкой — не мусор
+    [Theory]
+    [InlineData("Дюна / Dune (2021) BDRemux 1080p + OST")]
+    [InlineData("Миньоны / Minions (2015) BDRip 720p | MP3 5.1")]
+    [InlineData("Дюна / Dune (2021) WEB-DL 2160p")]
+    [InlineData("Укрытие (Бункер) (3 сезон: 1-6 серии из 10) / Silo / 2026")]
+    [InlineData("Ghost in the Shell (1995) BDRip")]          // «ost» внутри слова — не маркер
+    public void IsNonVideo_RealRelease_False(string title) => Assert.False(TorrentScoring.IsNonVideo(title));
+
+    // ── SortAndMark: отсев чужих тайтлов ──────────────────────────────────
+    [Fact]
+    public void SortAndMark_DropsForeignTitleAndNonVideo()
+    {
+        var items = new JArray(
+            Tor("Дюна / Dune (2021) BDRemux 1080p", 50),
+            Tor("Фрэнк Герберт - Дюна 4, Бог-император Дюны (2021) MP3", 90),
+            Tor("Отдел «С.С.С.Р» / Серии 1-8 из 8 (2012) HDTVRip", 90));
+
+        var res = TorrentScoring.SortAndMark(items, Ctx("Дюна", "Dune", 2021, false), 5);
+
+        Assert.Single(res);
+        Assert.Equal("Дюна / Dune (2021) BDRemux 1080p", res[0].Value<string>("title"));
+    }
+
+    // Предохранитель: пустой экран хуже лишних строк
+    [Fact]
+    public void SortAndMark_AllNameMissed_KeepsList()
+    {
+        var items = new JArray(Tor("Совсем другой фильм (2021) BDRip", 10));
+        var res = TorrentScoring.SortAndMark(items, Ctx("Дюна", "Dune", 2021, false), 5);
+        Assert.Single(res);
+    }
+
+    static JObject Tor(string title, int sid) => new JObject { ["title"] = title, ["sid"] = sid };
+
+    static ScoreCtx Ctx(string ru, string en, int year, bool serial) => new ScoreCtx
+    {
+        titleNorm = Shared.Services.Utilities.SearchNameTo.Convert(ru),
+        originalNorm = Shared.Services.Utilities.SearchNameTo.Convert(en),
+        year = year,
+        isSerial = serial,
+        preferredQuality = 2160
+    };
+
     [Fact]
     public void ParseEpCoverage_Ongoing()
     {
@@ -100,7 +153,13 @@ public class TorrentScoringTests
         var sorted = TorrentScoring.SortAndMark(new JArray(alien, relevant), SerialCtx(), 5);
         Assert.Equal(30, sorted[0].Value<int>("sid"));   // релевантная — первой
         Assert.True(sorted[0].Value<bool?>("rec") == true);
-        Assert.False(sorted[1].Value<bool?>("rec") == true);   // nameMiss не может быть ⭐
+        // чужой тайтл теперь не просто лишён ⭐, а вырезан из списка (раньше оставался ниже)
+        Assert.Single(sorted);
+
+        // без отсева поведение прежнее: чужая остаётся, но ⭐ не получает
+        var kept = TorrentScoring.SortAndMark(new JArray(alien, relevant), SerialCtx(), 5, dropIrrelevant: false);
+        Assert.Equal(2, kept.Count);
+        Assert.False(kept[1].Value<bool?>("rec") == true);
     }
 
     [Fact]
