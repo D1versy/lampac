@@ -28,6 +28,9 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+    <!-- Bitmagnet.cs — в рантайме DLL приезжает из Modules/QbitDownload/references/,
+         тестам нужен тот же Npgsql пакетом (версия обязана совпадать с той DLL). -->
+    <PackageReference Include="Npgsql" Version="9.0.3" />
   </ItemGroup>
 
   <ItemGroup>
@@ -47,6 +50,7 @@
     <Compile Include="..\..\Modules\QbitDownload\AppReplace.cs" Link="Module\AppReplace.cs" />
     <Compile Include="..\..\Modules\QbitDownload\CatalogWarmup.cs" Link="Module\CatalogWarmup.cs" />
     <Compile Include="..\..\Modules\QbitDownload\CubExtensions.cs" Link="Module\CubExtensions.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\Bitmagnet.cs" Link="Module\Bitmagnet.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Controller.cs" Link="Module\Controller.cs" />
   </ItemGroup>
 

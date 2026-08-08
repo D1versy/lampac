@@ -46,6 +46,11 @@ public static class TorrentScoring
     #region парсеры названия
     // «1-8 из 12» / «8 из 12» / «[09 из 24]» / «Серии: 1-16 (16)»; «из XX» (неизвестный итог) → total=0.
     // Гард: «Сезон 1 из 3» — это сезоны, не серии (смотрим слово перед числом).
+    // Формат kinozal: «(3 сезон: 1-5 серии из 10)». Между диапазоном и «из» стоит слово,
+    // поэтому _covRangeRx его не видел, а стоящее ПЕРЕД «сезон:» ещё и включало season-гард —
+    // полнота серий у kinozal терялась целиком. Явное «серии» двусмысленность снимает,
+    // поэтому пробуем этот шаблон первым и без гарда.
+    static readonly Regex _covSeriesWordRx = new Regex(@"(?i)(?:\d{1,3}\s*-\s*)?(\d{1,3})\s*сери[ияйе]\w*\s*из\s*(\d{1,4}|[?xXхХ]+)", RegexOptions.Compiled);
     static readonly Regex _covRangeRx = new Regex(@"(\d{1,3})\s*-\s*(\d{1,3})\s*из\s*(\d{1,4}|[?xXхХ]+)", RegexOptions.Compiled);
     static readonly Regex _covPlainRx = new Regex(@"(?<![-\d])(\d{1,3})\s*из\s*(\d{1,4}|[?xXхХ]+)", RegexOptions.Compiled);
     static readonly Regex _covSeriesParenRx = new Regex(@"(?i)сери[ия][:\s]*\s*(?:\d{1,3}\s*-\s*)?(\d{1,3})\s*\(\s*(\d{1,4})\s*\)", RegexOptions.Compiled);
@@ -67,6 +72,14 @@ public static class TorrentScoring
     public static EpCoverage ParseEpCoverage(string title)
     {
         string t = title ?? "";
+
+        var sw = _covSeriesWordRx.Match(t);   // «1-5 серии из 10» (kinozal)
+        if (sw.Success)
+        {
+            int have = int.Parse(sw.Groups[1].Value), total = ParseTotal(sw.Groups[2].Value);
+            if (have <= 999 && (total == 0 || have <= total))
+                return new EpCoverage { have = have, total = total };
+        }
 
         foreach (Match m in _covRangeRx.Matches(t))
         {

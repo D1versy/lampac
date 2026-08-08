@@ -33,6 +33,10 @@ public class TorrentScoringTests
     [InlineData("Сериал (8 из 12)", 8, 12)]
     [InlineData("Тайтл [09 из 24] WEB-DL", 9, 24)]
     [InlineData("Серии: 1-16 (16)", 16, 16)]
+    // формат kinozal: слово «серии» между диапазоном и «из», плюс «сезон:» перед ним
+    [InlineData("Укрытие (Бункер) (3 сезон: 1-5 серии из 10) / Silo / 2026", 5, 10)]
+    [InlineData("Аутсорс (1 сезон: 1-8 серии из 8) / 2024 / РУ, СТ", 8, 8)]
+    [InlineData("Сериал (2 сезон: 3 серия из 12)", 3, 12)]
     public void ParseEpCoverage_Formats(string title, int have, int total)
     {
         var c = TorrentScoring.ParseEpCoverage(title);
