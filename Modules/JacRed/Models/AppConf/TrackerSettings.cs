@@ -32,6 +32,9 @@ namespace JacRed.Models.AppConf
         public string cookie { get; set; }
 
 
+        /// <summary>Гонять запросы этого трекера через FlareSolverr (обход Cloudflare).</summary>
+        public bool useflaresolverr { get; set; }
+
         public bool useproxy { get; set; }
 
         public bool useproxystream { get; set; }

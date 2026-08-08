@@ -1,3 +1,4 @@
+using JacRed.Models.AppConf;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Memory;
@@ -11,11 +12,62 @@ namespace JacRed.Controllers
         #region search
         public static Task<bool> search(string host, ConcurrentBag<TorrentDetails> torrents, string query, string[] cats)
         {
-            if (!jackett.Rutracker.enable || string.IsNullOrEmpty(jackett.Rutracker.cookie ?? jackett.Rutracker.login.u) || jackett.Rutracker.showdown)
+            // showdown игнорируем при работе через солвер: сторожевой пинг в ModInit ходит
+            // ОБЫЧНЫМ HttpClient и для rutracker всегда получит 403 → трекер молча выключился бы.
+            if (!jackett.Rutracker.enable || string.IsNullOrEmpty(jackett.Rutracker.cookie ?? jackett.Rutracker.login.u))
+                return Task.FromResult(false);
+            if (jackett.Rutracker.showdown && !useFs)
                 return Task.FromResult(false);
 
             return Joinparse(torrents, () => parsePage(host, query, cats));
         }
+
+        // ── FlareSolverr ──────────────────────────────────────────────────────
+        static FlareSolverrConf fs => jackett.flaresolverr;
+        static bool useFs => jackett.Rutracker.useflaresolverr && FlareSolverr.Available(fs);
+
+        // Логинимся один раз на сессию солвера: кука живёт в его же браузере, забрать её
+        // в HttpClient бессмысленно — Cloudflare привязывает клиренс к TLS-отпечатку.
+        static DateTime _fsLoginAt;
+
+        // ⚠️ Логин тоже НЕ должен блокировать пользовательский поиск: он идёт через тот же
+        // браузер и стоит те же десятки секунд. При нулевом бюджете отправляем его в фон —
+        // rutracker подключится со следующего поиска. Первая версия ждала логин и разогнала
+        // обычный поиск с 2 до 11 секунд.
+        static Task _fsLoginTask;
+
+        static Task EnsureFsLogin(int budgetSeconds)
+        {
+            if ((DateTime.Now - _fsLoginAt).TotalMinutes < 60) return Task.CompletedTask;
+
+            lock (_fsLoginLock)
+            {
+                if (_fsLoginTask == null || _fsLoginTask.IsCompleted)
+                {
+                    _fsLoginTask = Task.Run(async () =>
+                    {
+                        var sol = await FlareSolverr.PostForm(fs, $"{jackett.Rutracker.host}/forum/login.php",
+                            new Dictionary<string, string>
+                            {
+                                ["login_username"] = jackett.Rutracker.login.u,
+                                ["login_password"] = jackett.Rutracker.login.p,
+                                ["login"] = "Вход"
+                            });
+                        if (sol != null) { _fsLoginAt = DateTime.Now; Console.WriteLine("[FlareSolverr] rutracker: логин выполнен"); }
+                        else consoleErrorLog("rutracker", "flaresolverr login failed");
+                    });
+                }
+            }
+
+            if (budgetSeconds <= 0) return Task.CompletedTask;
+            return Task.WhenAny(_fsLoginTask, Task.Delay(TimeSpan.FromSeconds(budgetSeconds)));
+        }
+
+        static readonly object _fsLoginLock = new object();
+
+        // Сколько ждать солвер: пользовательский поиск — почти нисколько (иначе каждая карточка
+        // открывалась бы десятки секунд), фоновые контуры — полный бюджет.
+        static int FsBudget() => Math.Max(0, fs?.userWaitSeconds ?? 0);
         #endregion
 
 
@@ -24,6 +76,23 @@ namespace JacRed.Controllers
         {
             if (!jackett.Rutracker.enable || ModInit.conf.disableJackett)
                 return Content("disable");
+
+            // ⚠️ Ветка солвера — РАННИЙ выход, ДО блока Download. Это структурная гарантия того,
+            // что мы не уйдём за .torrent на dl.php: FlareSolverr умеет отдавать только текст,
+            // бинарь через него не забрать. Здесь ждём полный бюджет — человек нажал «Скачать»
+            // и ждёт осознанно, в отличие от открытия карточки.
+            if (useFs)
+            {
+                if (jackett.Rutracker.priority == "torrent")
+                    Console.WriteLine("[FlareSolverr] rutracker: priority=torrent несовместим с солвером — иду за magnet");
+
+                await EnsureFsLogin(Math.Max(30, fs?.timeoutSeconds ?? 120));
+                var sol = await FlareSolverr.Get(fs, $"{jackett.Rutracker.host}/forum/viewtopic.php?t=" + id);
+                string m = sol?.html == null ? null
+                    : Regex.Match(sol.html, "href=\"(magnet:[^\"]+)\"").Groups[1].Value;
+                if (!string.IsNullOrWhiteSpace(m)) return Redirect(System.Web.HttpUtility.HtmlDecode(m));
+                return Content("error");
+            }
 
             string cookie = await getCookie();
             if (string.IsNullOrEmpty(cookie))
@@ -60,28 +129,45 @@ namespace JacRed.Controllers
             var torrents = new List<TorrentDetails>();
             var proxyManager = new ProxyManager("rutracker", jackett.Rutracker);
 
-            #region Авторизация
-            string cookie = await getCookie();
-            if (string.IsNullOrEmpty(cookie))
-            {
-                consoleErrorLog("rutracker", "login failed");
-                return null;
-            }
-            #endregion
+            string html;
 
-            #region Кеш html
-            string html = await Http.Get($"{jackett.Rutracker.host}/forum/tracker.php?nm=" + HttpUtility.UrlEncode(query), proxy: proxyManager.Get(), cookie: cookie, timeoutSeconds: jackett.timeoutSeconds);
+            if (useFs)
+            {
+                // Через солвер: логин живёт в его сессии, кука нам не нужна.
+                await EnsureFsLogin(FsBudget());
+                html = await FlareSolverr.CachedHtml(fs, "fs:rutracker:search:" + query,
+                    $"{jackett.Rutracker.host}/forum/tracker.php?nm=" + HttpUtility.UrlEncode(query),
+                    FsBudget());
+            }
+            else
+            {
+                #region Авторизация
+                string cookie = await getCookie();
+                if (string.IsNullOrEmpty(cookie))
+                {
+                    consoleErrorLog("rutracker", "login failed");
+                    return null;
+                }
+                #endregion
+
+                #region Кеш html
+                html = await Http.Get($"{jackett.Rutracker.host}/forum/tracker.php?nm=" + HttpUtility.UrlEncode(query), proxy: proxyManager.Get(), cookie: cookie, timeoutSeconds: jackett.timeoutSeconds);
+                #endregion
+            }
 
             // html == null (таймаут / 403 / Cloudflare-челлендж) обязан отсекаться ЗДЕСЬ же:
             // иначе Split ниже кидает NRE, он всплывает через Task.WhenAll в JackettApi и роняет
             // весь /api/v2.0/indexers/all/results в 500 — выдача пустеет по ВСЕМ трекерам сразу.
             if (html == null || !html.Contains("id=\"logged-in-username\""))
             {
-                consoleErrorLog("rutracker", html == null ? "no html" : "not logged in");
-                proxyManager.Refresh();
+                // На пути солвера пустой html при нулевом бюджете — это НОРМА, а не сбой:
+                // solve ушёл в фон, раздачи приедут следующим поиском из кеша. Не шумим.
+                bool fsPending = useFs && html == null && FsBudget() == 0;
+                if (!fsPending)
+                    consoleErrorLog("rutracker", html == null ? "no html" : "not logged in");
+                if (!useFs) proxyManager.Refresh();
                 return null;
             }
-            #endregion
 
             foreach (string row in html.Split("class=\"tCenter hl-tr\"").Skip(1))
             {

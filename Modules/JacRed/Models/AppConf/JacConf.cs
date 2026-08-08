@@ -8,6 +8,10 @@
 
         public int timeoutSeconds = 8;
 
+        // FlareSolverr — один на все трекеры (сервис один). Включение по трекеру:
+        // TrackerSettings.useflaresolverr, как это сделано у useproxy.
+        public FlareSolverrConf flaresolverr = new FlareSolverrConf();
+
 
         public TrackerSettings Rutor = new TrackerSettings("https://rutor.info"/*, priority: "torrent"*/);
 
