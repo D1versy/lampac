@@ -68,9 +68,14 @@ namespace JacRed.Engine
                     MegapeerController.search(host, torrents, search, "80"),  // Зарубежные фильмы
                     MegapeerController.search(host, torrents, search, "76"),  // Мультипликация
 
-                    TorrentByController.search(host, torrents, search, "1"), // movie
-                    TorrentByController.search(host, torrents, search, "2"), // movie
-                    TorrentByController.search(host, torrents, search, "5"), // multfilm
+                    // ⚠️ torrent.by — ОДИН запрос на поиск, category=0 («Все категории»).
+                    // Сайт лимитит по IP: ~50 запросов за пару минут — и он отдаёт 200 OK со
+                    // страницей капчи «С вашего IP адреса поступают подозрительные запросы»
+                    // вместо результатов, минут на 10+. Веер по 3-5 категориям выбивал лимит за
+                    // ОДИН прогон замера (11 тайтлов = 45-55 запросов). Категория 0 ищет по всем
+                    // сразу — включая 14 «Наши сериалы», куда веер не заходил вовсе.
+                    // Маркер id="find" капчу отсекает, мусор в выдачу не попадает (только лог).
+                    TorrentByController.search(host, torrents, search, "0"), // все категории одним запросом
 
                     KinozalController.search(host, torrents, search, new string[] { "movie", "multfilm", "tvshow" }),
                     NNMClubController.search(host, torrents, search, new string[] { "movie", "multfilm", "documovie" }),
@@ -102,10 +107,7 @@ namespace JacRed.Engine
                     MegapeerController.search(host, torrents, search, "57"), // tvshow
                     MegapeerController.search(host, torrents, search, "76"), // multserial
 
-                    TorrentByController.search(host, torrents, search, "3"),  // serial
-                    TorrentByController.search(host, torrents, search, "5"),  // multserial
-                    TorrentByController.search(host, torrents, search, "4"),  // tvshow
-                    TorrentByController.search(host, torrents, search, "12"), // tvshow
+                    TorrentByController.search(host, torrents, search, "0"), // все категории одним запросом (лимит по IP, см. ветку movie)
 
                     KinozalController.search(host, torrents, search, new string[] { "serial", "multserial", "tvshow" }),
                     NNMClubController.search(host, torrents, search, new string[] { "serial", "multserial", "docuserial" }),
@@ -126,8 +128,7 @@ namespace JacRed.Engine
                 {
                     RutorController.search(host, torrents, search, "6"),
                     MegapeerController.search(host, torrents, search, "57"),
-                    TorrentByController.search(host, torrents, search, "4"),
-                    TorrentByController.search(host, torrents, search, "12"),
+                    TorrentByController.search(host, torrents, search, "0"), // все категории одним запросом (лимит по IP, см. ветку movie)
                     KinozalController.search(host, torrents, search, new string[] { "tvshow" }),
                     NNMClubController.search(host, torrents, search, new string[] { "docuserial", "documovie" }),
                     TolokaController.search(host, torrents, search, new string[] { "docuserial", "documovie" }),
