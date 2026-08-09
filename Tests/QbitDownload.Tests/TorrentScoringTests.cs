@@ -215,12 +215,32 @@ public class TorrentScoringTests
     [InlineData("Show S01-S03 Complete", new[] { 1, 2, 3 })]
     [InlineData("Show Season 2", new[] { 2 })]
     [InlineData("Сериал [1-2 сезоны]", new[] { 1, 2 })]
+    // Формат kinozal «N сезон: A-B серии»: A-B — это СЕРИИ. Раньше отдавалось {1..10}, множество
+    // накрывало любой охотимый сезон, и раздача 2-го сезона уезжала донором в 3-й («Укрытие»).
+    [InlineData("Укрытие (Бункер) (2 сезон: 1-10 серии из 10) / Silo / 2024 / ПМ (NewComers), СТ / WEB-DLRip | NewComers", new[] { 2 })]
+    [InlineData("Укрытие (Бункер) (3 сезон: 1-6 серии из 10) / Silo / 2026 / ПМ (HDrezka Studio), СТ", new[] { 3 })]
+    [InlineData("Укрытие (Бункер) (1-3 сезоны: 1-23 серии из 30) / Silo / 2023-2026", new[] { 1, 2, 3 })]
+    [InlineData("Сериал (12 сезон: 1-10 серии)", new[] { 12 })]
+    // легитимные диапазоны сезонов — не сломать
+    [InlineData("Сериал (Сезон 1-3 из 5)", new[] { 1, 2, 3 })]
+    [InlineData("Сериал 2024 Сезон: 1-3", new[] { 1, 2, 3 })]
+    [InlineData("Show Season 1-3", new[] { 1, 2, 3 })]
+    [InlineData("Укрытие / Silo / Сезон: 3 / Серии: 1-6 из 10 [2026]", new[] { 3 })]
     public void ParseSeasons_Formats(string title, int[] expected)
         => Assert.Equal(expected, TorrentScoring.ParseSeasons(title));
 
     [Fact]
     public void ParseSeasons_NoFalsePositives_OnQuality()
         => Assert.Empty(TorrentScoring.ParseSeasons("Фильм (2024) WEB-DL 1080p x264"));
+
+    // Гард ParseSeasons не должен задеть фикс §AZ: полнота серий у того же kinozal-формата цела.
+    [Fact]
+    public void ParseEpCoverage_KinozalFormat_StillParsed()
+    {
+        var cov = TorrentScoring.ParseEpCoverage("Укрытие (Бункер) (2 сезон: 1-10 серии из 10) / Silo / 2024");
+        Assert.Equal(10, cov.have);
+        Assert.Equal(10, cov.total);
+    }
 
     // ── Score / SortAndMark ──────────────────────────────────────────────
     [Fact]

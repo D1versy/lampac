@@ -157,8 +157,13 @@ public class ModuleConf : ModuleBaseConf
     public int donorProbesPerRun { get; set; } = 3;        // проб add-paused за проход на сериал
     public int donorMetadataTimeoutSec { get; set; } = 90;
     public int donorStaleDays { get; set; } = 7;           // донор не докачал за N дней → снять и в blacklist
-    public int donorBlacklistTtlDays { get; set; } = 30;   // пустышки (нет серии); meta-timeout — всегда 1 день
+    public int donorBlacklistTtlDays { get; set; } = 30;   // пустышки (нет серии); транзиенты (сеть/qBit) — бэкофф от 30 мин
     public string donorCategory { get; set; } = "";        // пусто → category + "-donor"
+    // Апгрейд уже добытой донорской серии на раздачу получше (⭐/выше качество/выше скор).
+    // Серия из основной раздачи НИКОГДА не апгрейдится донором — основная всегда приоритетнее.
+    public bool donorUpgrade { get; set; } = true;
+    public int donorUpgradeMinScore { get; set; } = 15;    // насколько кандидат должен обойти текущего донора
+    public bool tmdbAiredCap { get; set; } = true;         // не охотиться за сериями, которые ещё не вышли
 
     // ── D1VERSY LIVE: записи домашнего видеорегистратора (проект IPCamLive) ──
     // Регистратор доступен только из LAN, клиенты ходят к нему через наш прокси /qdl/live/*

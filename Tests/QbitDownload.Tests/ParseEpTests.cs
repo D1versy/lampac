@@ -196,6 +196,15 @@ public class ParseEpTests
     [InlineData("S3E7 720p x264", 3, 7)]              // noise stripped first
     [InlineData("Naruto S02E13 [BDRip]", 2, 13)]      // BDRip noise stripped
     [InlineData("S01E05 extra 1", 1, 5)]              // trailing bare number ignored
+    // 7b) разделитель между S## и E##. Без него сезон не читался, срабатывало правило «E07»
+    // (season=-1), и fail-open гейт охоты штамповал файлу сезон основной — 4 серии 2-го сезона
+    // «Укрытия» попали в 3-й (инцидент 2026-08-09).
+    [InlineData("Silo.S02.E07.Rus.Eng.by.Сибиряк", 2, 7)]
+    [InlineData("Укрытие - Silo S03 E05 1080p", 3, 5)]
+    [InlineData("Show_S02_E07", 2, 7)]
+    [InlineData("Show S02-E07", 2, 7)]
+    [InlineData("Show.S02.EP07", 2, 7)]
+    [InlineData("Show S2 [E05]", 2, 5)]
     public void SeasonEpisode(string input, int season, int ep)
     {
         var e = Access.ParseEp(input);
@@ -204,6 +213,28 @@ public class ParseEpTests
         Assert.Equal(ep, e.ep);
         Assert.Equal(-1, e.ep2);
         Assert.True(e.any);
+    }
+
+    // Разделитель не должен породить ложных сезонов: между S## и E## только пунктуация,
+    // цифру или букву проглотить нельзя по построению шаблона.
+    [Theory]
+    [InlineData("S02 Extras 05")]
+    [InlineData("S1 Episode 5")]
+    [InlineData("Show S02 2024 07")]
+    [InlineData("Dogulwang.EP01.2026.1080p.WEB-DL")]
+    public void SeasonEpisode_Separator_NoFalsePositives(string input)
+        => Assert.Equal(-1, Access.ParseEp(input).season);
+
+    // RANGE-правило стоит ВЫШЕ — склейка серий не должна стать одиночкой из-за нового разделителя.
+    [Theory]
+    [InlineData("S01E01-E12", 1, 12)]
+    [InlineData("Silo.S02.E07-E08", 7, 8)]
+    public void SeasonEpisode_Separator_DoesNotStealRange(string input, int ep, int ep2)
+    {
+        var e = Access.ParseEp(input);
+        Assert.Equal("RANGE", e.kind);
+        Assert.Equal(ep, e.ep);
+        Assert.Equal(ep2, e.ep2);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

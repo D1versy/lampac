@@ -1659,7 +1659,11 @@ public partial class QbitController : BaseController
         string c = StripNoise(s);
         if ((m = Regex.Match(c, @"(?i)(?:S\d{1,2})?E0*(\d{1,3})\s*-\s*E?0*(\d{1,3})")).Success) return new Ep { kind = "RANGE", ep = int.Parse(m.Groups[1].Value), ep2 = int.Parse(m.Groups[2].Value) };
         if ((m = Regex.Match(c, @"(?:^|[\s._\[-])0*(\d{1,3})\s*-\s*0*(\d{1,3})(?=[\s._\]-]|$)")).Success) return new Ep { kind = "RANGE", ep = int.Parse(m.Groups[1].Value), ep2 = int.Parse(m.Groups[2].Value) };
-        if ((m = Regex.Match(c, @"(?i)(?<![A-Za-z0-9])S(\d{1,2})E0*(\d{1,3})(?!\d)")).Success) return new Ep { season = int.Parse(m.Groups[1].Value), ep = int.Parse(m.Groups[2].Value) };
+        // Разделитель между S## и E## обязателен к поддержке: «Silo.S02.E07», «Silo S03 E05»,
+        // «Show.S01_E03» — раздачи так называют файлы сплошь и рядом. Без него сезон не читался,
+        // срабатывало более позднее правило «E07» (season=-1), и сезонный гейт охоты (fail-open)
+        // штамповал файлу сезон основной раздачи — 4 серии 2-го сезона «Укрытия» попали в 3-й.
+        if ((m = Regex.Match(c, @"(?i)(?<![A-Za-z0-9])S(\d{1,2})[\s._\-\[\]()]{0,3}E[Pp]?[\s._-]?0*(\d{1,3})(?!\d)")).Success) return new Ep { season = int.Parse(m.Groups[1].Value), ep = int.Parse(m.Groups[2].Value) };
         if ((m = Regex.Match(c, @"(?i)(?<![A-Za-z0-9])(\d{1,2})x0*(\d{1,3})(?!\d)")).Success) return new Ep { season = int.Parse(m.Groups[1].Value), ep = int.Parse(m.Groups[2].Value) };
         if ((m = Regex.Match(c, @"(?i)(?<![A-Za-z0-9])E[Pp]?\.?\s*0*(\d{1,3})(?!\d)")).Success) return new Ep { ep = int.Parse(m.Groups[1].Value) };
         if ((m = Regex.Match(c, @"(?i)(?:серия|episode|эпизод|вып(?:уск)?)\s*[№#]?\s*0*(\d{1,3})(?!\d)")).Success) return new Ep { ep = int.Parse(m.Groups[1].Value) };
@@ -3206,6 +3210,17 @@ public partial class QbitController : BaseController
         return (e.season >= 0 ? "s" + e.season : "") + "e" + e.ep;
     }
 
+    // Серия уже «виденная», даже если её ключ раньше писался БЕЗ сезона. Файл «Show.S02.E07.mkv»
+    // до фикса ParseEp (разделитель между S## и E##) давал season=-1 → epkey «e7», после фикса —
+    // «s2e7». Без этой эквивалентности первый же проход после деплоя счёл бы все такие серии
+    // новыми и выдал залп уведомлений о том, что зритель давно посмотрел.
+    static bool SeenAlready(HashSet<string> seenKeys, Ep e, string key)
+    {
+        if (key == null) return false;
+        if (seenKeys.Contains(key)) return true;
+        return e != null && e.kind == null && e.season >= 0 && e.ep >= 0 && seenKeys.Contains("e" + e.ep);
+    }
+
     // человекочитаемая подпись серии
     static string EpLabel(Ep e)
     {
@@ -3343,7 +3358,7 @@ public partial class QbitController : BaseController
                         if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
                         var ep = NormSeason(ParseEp(BaseNoExt(f)), dom);
                         string key = EpKey(ep);
-                        if (key == null || seenKeys.Contains(key)) continue;
+                        if (key == null || SeenAlready(seenKeys, ep, key)) continue;
 
                         if (baseline) { StageSeen(sk, key); seenKeys.Add(key); continue; }
 
@@ -3383,7 +3398,7 @@ public partial class QbitController : BaseController
                                 if ((f.Value<double?>("progress") ?? 0) < 0.999) continue;   // серия ещё качается (или prio 0)
                                 var ep = NormSeason(ParseEp(BaseNoExt(f)), ddom > 0 ? ddom : dom);
                                 string key = EpKey(ep);
-                                if (key == null || seenKeys.Contains(key)) continue;
+                                if (key == null || SeenAlready(seenKeys, ep, key)) continue;
                                 if (IsEpisodeLike(ep) && StageNoti(sk, key))
                                 {
                                     db.noti.Add(new NotiModel

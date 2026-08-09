@@ -131,6 +131,163 @@ public class EpisodeHunterTests
         Assert.All(res, t => Assert.Equal(10, t.Value<int>("sid")));
     }
 
+    // ── сезон донора (инцидент 2026-08-09, «Укрытие») ────────────────────
+    const string SiloS02Title = "Укрытие (Бункер) (2 сезон: 1-10 серии из 10) / Silo / 2024 / ПМ (NewComers), СТ / WEB-DLRip | NewComers";
+
+    [Fact]
+    public void FilterDonorCandidates_KinozalOtherSeason_Rejected()
+    {
+        var scored = new JArray(Cand(SiloS02Title, 35));
+        var h = HunterAccess.MakeHuntCtx(MainHash, 3, new[] { MainHash }, null, 3, 1080, 150, 8, "укрытие", "silo");
+        Assert.Empty(HunterAccess.FilterDonorCandidates(scored, h));
+        Assert.Equal("сезон", HunterAccess.DropReason(scored[0] as JObject, h));
+    }
+
+    [Theory]
+    [InlineData("Укрытие.S02.WEB-DLRip.NewComers/Silo.S02.E07.avi", 2)]
+    [InlineData("Silo (Season 3) WEB-DL 1080p/Silo.S03E01.mkv", 3)]
+    [InlineData("Dogulwang.S01/Dogulwang.EP01.mkv", 1)]
+    [InlineData("Silo.S01-S03.Complete/ep.mkv", 0)]   // неоднозначно — пусть решает сам файл
+    [InlineData("Show.2024.1080p/ep.mkv", 0)]
+    [InlineData("ep.mkv", 0)]                          // папки нет
+    public void SeasonFromPath_Cases(string name, int expected)
+        => Assert.Equal(expected, HunterAccess.SeasonFromPath(name));
+
+    [Fact]
+    public void FindEpFiles_ForeignSeason_FailClosed()
+    {
+        // ровно те файлы, что уехали в 3-й сезон «Укрытия»
+        var files = new JArray(
+            File(14, "Укрытие.S02.WEB-DLRip.NewComers/Silo.S02.E07.Rus.Eng.by.Сибиряк.avi", 1, 764_588_032),
+            File(16, "Укрытие.S02.WEB-DLRip.NewComers/Silo.S02.E08.Rus.Eng.by.Сибиряк.avi", 1, 733_130_752));
+
+        Assert.Equal(2, HunterAccess.DonorSeasons(files).Count == 1 ? 2 : 0);   // сезон донора однозначен
+        Assert.Equal(2, HunterAccess.DonorSeason(files, SiloS02Title));
+
+        var wanted = new List<int> { 7, 8, 9, 10 };
+        Assert.Empty(HunterAccess.FindEpFiles(files, 3, wanted, null, 2));   // охотим 3-й — не берём ничего
+        Assert.Equal(2, HunterAccess.FindEpFiles(files, 2, wanted, null, 2).Count);   // 2-й — берём обе
+    }
+
+    [Fact]
+    public void FindEpFiles_UnknownSeason_S1_Works_S3_FailClosed()
+    {
+        var files = new JArray(File(0, "[Group] Show - 07.mkv", 1, 400_000_000));
+        var wanted = new List<int> { 7 };
+        // односезонники/аниме без маркеров — как раньше
+        Assert.Single(HunterAccess.FindEpFiles(files, 1, wanted, null, 0));
+        // не первый сезон и сезон ничем не подтверждён — не берём
+        Assert.Empty(HunterAccess.FindEpFiles(files, 3, wanted, null, 0));
+        // но если сезон донора подтверждён — берём и проставляем его
+        var got = HunterAccess.FindEpFiles(files, 3, wanted, null, 3);
+        Assert.Single(got);
+        Assert.Equal(3, got[0].season);
+        Assert.Equal("s3e7", got[0].epkey);
+    }
+
+    [Fact]
+    public void FindEpFiles_MultiSeasonPack_TakesOnlyHuntedSeason()
+    {
+        var files = new JArray(
+            File(0, "Silo.S01-S03/Silo.S02.E07.mkv", 1, 1_500_000_000),
+            File(1, "Silo.S01-S03/Silo.S03.E07.mkv", 1, 1_500_000_000));
+        var got = HunterAccess.FindEpFiles(files, 3, new List<int> { 7 }, null, 0);
+        Assert.Single(got);
+        Assert.Equal(1, got[0].index);
+        Assert.Equal(3, got[0].season);
+    }
+
+    // ── MaxClaim: «серия существует» ≠ «отсюда можно качать» ─────────────
+    [Fact]
+    public void MaxClaim_CountsIdentityOnly_NotDonorEligibility()
+    {
+        // фикстуры «Великого расхитителя гробниц»: три кандидата с 5 сериями отсеяны как доноры
+        var scored = new JArray(
+            Cand("Великий расхититель гробниц [1 сезон, 5 из 12] 1080p", 17, parselink: "http://t/kinozal?id=2146746"),  // blacklist
+            Cand("Великий расхититель гробниц [1 сезон, 5 из 12] 1080p", 29, parselink: "http://t/self?id=6882889"),     // свой топик
+            Cand("Великий расхититель гробниц [1 сезон, 5 из 12] 720p", 8, quality: 720),                                 // качество
+            Cand("Великий расхититель гробниц [1 сезон, 1 из 12] 1080p", 5, parselink: "http://t/other?id=9", sizeBytes: 2_000_000_000));   // единственный годный
+
+        var h = HunterAccess.MakeHuntCtx(MainHash, 1, new[] { MainHash }, new[] { "http://t/kinozal?id=2146746" },
+                                         3, 1080, 150, 8,
+                                         Shared.Services.Utilities.SearchNameTo.Convert("Великий расхититель гробниц"), null,
+                                         "http://t/self?id=6882889");
+
+        Assert.Single(HunterAccess.FilterDonorCandidates(scored, h));
+        Assert.Equal(1, HunterAccess.MaxClaim(HunterAccess.FilterDonorCandidates(scored, h)));   // как было — врало
+        Assert.Equal(4, HunterAccess.ClaimCandidates(scored, h).Count);
+        Assert.Equal(5, HunterAccess.MaxClaim(HunterAccess.ClaimCandidates(scored, h)));         // правда
+
+        Assert.Equal(new[] { 3, 4, 5 }, HunterAccess.ComputeWanted(new HashSet<int> { 1, 2 }, 5));
+        Assert.Equal(5, HunterAccess.SelfTopicClaim(scored, h));   // свой топик перевыложен → пора re-grab
+    }
+
+    // ── апгрейд донорской серии на раздачу получше ───────────────────────
+    static JObject Donor(string hash, double score, int quality, params int[] eps)
+    {
+        var arr = new JArray();
+        foreach (int e in eps)
+            arr.Add(new JObject { ["epkey"] = "s1e" + e, ["season"] = 1, ["ep"] = e, ["fileIndex"] = e, ["status"] = "hunted" });
+        return new JObject { ["hash"] = hash, ["link"] = "http://t/d?id=" + hash, ["score"] = score, ["quality"] = quality, ["eps"] = arr };
+    }
+
+    [Fact]
+    public void ComputeUpgrades_PicksBetterRelease_SkipsEpisodesMainAlreadyHas()
+    {
+        var donors = new JArray(Donor(DonorHash, 60, 720, 5, 6));
+        var better = Cand("Сериал [1 сезон, 1-6 из 12] 1080p", 40, parselink: "http://t/better?id=2", score: 90);
+        var scored = new JArray(better);
+
+        // E5 апгрейдим, E6 уже есть в ОСНОВНОЙ — её донором не трогаем (основная приоритетнее)
+        var up = HunterAccess.ComputeUpgrades(donors, scored, new List<JObject> { better }, new HashSet<int> { 6 }, 1, 15);
+        Assert.Equal(new[] { 5 }, up);
+
+        // кандидат не лучше — апгрейда нет
+        var same = Cand("Сериал [1 сезон, 1-6 из 12] 720p", 40, parselink: "http://t/same?id=3", quality: 720, score: 62);
+        Assert.Empty(HunterAccess.ComputeUpgrades(donors, new JArray(same), new List<JObject> { same }, new HashSet<int>(), 1, 15));
+    }
+
+    [Fact]
+    public void PlanReplacements_UpgradedDonor_DroppedOnlyWhenWinnerComplete()
+    {
+        var oldD = Donor(DonorHash, 60, 720, 5);
+        var newD = Donor("cccccccccccccccccccccccccccccccccccccccc", 95, 1080, 5);
+        var item = new JObject { ["hash"] = MainHash, ["donors"] = new JArray(oldD, newD) };
+
+        var oldFiles = new JArray(File(5, "old/Show.S01E05.avi", 1));
+        var newFilesPartial = new JArray(File(5, "new/Show.S01E05.mkv", 0.4));
+        var newFilesDone = new JArray(File(5, "new/Show.S01E05.mkv", 1));
+        var main = new JArray(File(0, "Show.S01E01.mkv", 1));
+
+        var files = new Dictionary<string, JArray> { [DonorHash] = oldFiles, ["cccccccccccccccccccccccccccccccccccccccc"] = newFilesPartial };
+        Assert.DoesNotContain(HunterAccess.PlanReplacements(main, item, files, Now, 7), a => a.kind == "upgraded");   // новый ещё качается — старый не трогаем
+
+        files["cccccccccccccccccccccccccccccccccccccccc"] = newFilesDone;
+        var acts = HunterAccess.PlanReplacements(main, item, files, Now, 7);
+        Assert.Contains(acts, a => a.kind == "upgraded" && a.donorHash == DonorHash);   // снимаем ХУДШЕГО
+        Assert.DoesNotContain(acts, a => a.kind == "upgraded" && a.donorHash == "cccccccccccccccccccccccccccccccccccccccc");
+    }
+
+    [Fact]
+    public void PlanReplacements_WrongSeasonRecord_SelfHeals()
+    {
+        // запись, сделанная до fail-closed гейта: season=3, а файл — S02
+        var d = new JObject
+        {
+            ["hash"] = DonorHash, ["link"] = "http://t/d",
+            ["eps"] = new JArray(new JObject { ["epkey"] = "e7", ["season"] = 3, ["ep"] = 7, ["fileIndex"] = 14, ["status"] = "hunted" })
+        };
+        var item = new JObject { ["hash"] = MainHash, ["donors"] = new JArray(d) };
+        var main = new JArray(File(0, "Silo (Season 3) WEB-DL 1080p/Silo.S03E01.mkv", 1));
+        var files = new Dictionary<string, JArray>
+        {
+            [DonorHash] = new JArray(File(14, "Укрытие.S02.WEB-DLRip.NewComers/Silo.S02.E07.Rus.Eng.by.Сибиряк.avi", 1))
+        };
+        var acts = HunterAccess.PlanReplacements(main, item, files, Now, 7);
+        Assert.Contains(acts, a => a.kind == "wrong-season" && a.fileIndex == 14);
+        Assert.Contains(acts, a => a.kind == "delete-donor");   // серий не осталось → донор снимается
+    }
+
     [Fact]
     public void FilterDonorCandidates_Blacklist()
     {
@@ -286,8 +443,11 @@ public class EpisodeHunterTests
         Assert.Contains(DonorHash, keys);
         Assert.Contains("http://t/parsemagnet?id=3", keys);
 
+        // BlacklistKeys теперь time-aware: отдаёт только ДЕЙСТВУЮЩИЕ блокировки (until > now).
+        // Сама запись после истечения TTL живёт ещё сутки (grace) — но только ради счётчика попыток
+        // бэкоффа, блокировкой она уже не является.
         HunterAccess.PruneBlacklist(item, now.AddDays(2));   // meta-timeout (1 день) протух
-        keys = HunterAccess.BlacklistKeys(item);
+        keys = HunterAccess.BlacklistKeys(item, now.AddDays(2));
         Assert.Contains(DonorHash, keys);
         Assert.DoesNotContain("cccccccccccccccccccccccccccccccccccccccc", keys);
 

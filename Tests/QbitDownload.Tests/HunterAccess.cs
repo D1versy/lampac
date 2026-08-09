@@ -79,10 +79,10 @@ public static class HunterAccess
     public static List<JObject> OrderByCover(List<JObject> eligible, int season, List<int> wanted)
         => (List<JObject>)Access.Call("OrderByCover", eligible, season, wanted);
 
-    public static List<(int index, int ep, int season, string epkey, long size)> FindEpFiles(JArray files, int season, List<int> wanted, string candidateTitle)
+    public static List<(int index, int ep, int season, string epkey, long size)> FindEpFiles(JArray files, int season, List<int> wanted, string candidateTitle, int donorSeason = 0)
     {
         object titleEp = candidateTitle == null ? null : Access.Call("ParseEp", candidateTitle);
-        var raw = (IEnumerable)Access.Call("FindEpFiles", files, season, wanted, titleEp);
+        var raw = (IEnumerable)Access.Call("FindEpFiles", files, season, wanted, titleEp, donorSeason);
         var res = new List<(int, int, int, string, long)>();
         foreach (var it in raw)
             res.Add(((int)EpFileT.GetField("index").GetValue(it), (int)EpFileT.GetField("ep").GetValue(it),
@@ -109,7 +109,23 @@ public static class HunterAccess
     public static void BlacklistAdd(JObject item, string btih, string parselink, string reason, int ttlDays)
         => Access.Call("BlacklistAdd", item, btih, parselink, reason, ttlDays);
     public static void PruneBlacklist(JObject item, DateTime now) => Access.Call("PruneBlacklist", item, now);
-    public static HashSet<string> BlacklistKeys(JObject item) => (HashSet<string>)Access.Call("BlacklistKeys", item);
+    public static HashSet<string> BlacklistKeys(JObject item) => BlacklistKeys(item, DateTime.UtcNow);
+    public static HashSet<string> BlacklistKeys(JObject item, DateTime now) => (HashSet<string>)Access.Call("BlacklistKeys", item, now);
+    public static void BlacklistAddMinutes(JObject item, string btih, string parselink, string reason, int minutes, int attempt)
+        => Access.Call("BlacklistAddMinutes", item, btih, parselink, reason, minutes, attempt);
+    public static int TransientFailMinutes(int attempt) => (int)Access.Call("TransientFailMinutes", attempt);
+    public static int BlacklistAttempts(JObject item, string key, string reason) => (int)Access.Call("BlacklistAttempts", item, key, reason);
+
+    // ── сезон донора / учёт заявленных серий ──────────────────────────────
+    public static int SeasonFromPath(string relName) => (int)Access.Call("SeasonFromPath", relName);
+    public static HashSet<int> DonorSeasons(JArray files) => (HashSet<int>)Access.Call("DonorSeasons", files);
+    public static int DonorSeason(JArray files, string title) => (int)Access.Call("DonorSeason", files, title);
+    public static int ClaimOf(JObject t) => (int)Access.Call("ClaimOf", t);
+    public static List<JObject> ClaimCandidates(JArray scored, object huntCtx) => (List<JObject>)Access.Call("ClaimCandidates", scored, huntCtx);
+    public static int SelfTopicClaim(JArray scored, object huntCtx) => (int)Access.Call("SelfTopicClaim", scored, huntCtx);
+
+    public static List<int> ComputeUpgrades(JArray donors, JArray scored, List<JObject> eligible, HashSet<int> mainEps, int season, int minScoreGain)
+        => (List<int>)Access.Call("ComputeUpgrades", donors, scored, eligible, mainEps, season, minScoreGain, null);
 
     // ── qBit-хелперы (инъецируемый HttpClient) ────────────────────────────
     public static Task<bool> QbitAddMagnetEx(HttpClient c, string magnet, string category, string tags = null, bool stopAfterMeta = false)

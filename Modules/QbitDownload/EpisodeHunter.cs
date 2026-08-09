@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
+using Shared;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -466,9 +467,7 @@ public partial class QbitController
             // у перерегистрации ДРУГОЙ infohash. Сверяем именно топик.
             if (h.selfTopicKey != null && TopicKey(parselink) == h.selfTopicKey) continue;
 
-            var seasons = TorrentScoring.ParseSeasons(title);
-            if (h.season > 0 && seasons.Count > 0 && !seasons.Contains(h.season)) continue;
-            if (h.season > 1 && seasons.Count == 0) continue;   // охотим не первый сезон, а раздача сезон не заявляет — риск не тот
+            if (!SeasonOk(title, h)) continue;
 
             // оценка веса одной серии по названию (точная проверка — после метаданных, по самому файлу)
             long sizeBytes = t.Value<long?>("sizeBytes") ?? 0;
@@ -546,29 +545,135 @@ public partial class QbitController
         return res;
     }
 
-    // максимум серий, который заявляют кандидаты («N из M» / одиночки / диапазоны)
-    static int MaxClaim(List<JObject> eligible)
+    // сколько серий заявляет ОДИН кандидат («N из M» / одиночка / диапазон)
+    static int ClaimOf(JObject t)
     {
         int max = 0;
-        foreach (var t in eligible)
+        string title = t.Value<string>("title") ?? "";
+        var cov = TorrentScoring.ParseEpCoverage(title);
+        if (cov != null && cov.have > max) max = cov.have;
+        var e = ParseEp(StripSeasonMarks(title));
+        if (e != null && e.any)
         {
-            string title = t.Value<string>("title") ?? "";
-            var cov = TorrentScoring.ParseEpCoverage(title);
-            if (cov != null && cov.have > max) max = cov.have;
-            var e = ParseEp(StripSeasonMarks(title));
-            if (e != null && e.any)
+            if (e.kind == "RANGE" && e.ep2 > max) max = e.ep2;
+            else if (e.kind == null && e.ep > max) max = e.ep;
+        }
+        return max;
+    }
+
+    // максимум серий, который заявляют кандидаты («N из M» / одиночки / диапазоны)
+    static int MaxClaim(List<JObject> candidates)
+    {
+        int max = 0;
+        foreach (var t in candidates) { int c = ClaimOf(t); if (c > max) max = c; }
+        return max;
+    }
+
+    // Сезонный гейт кандидата (общий для FilterDonorCandidates, DropReason и ClaimCandidates).
+    static bool SeasonOk(string title, HuntCtx h)
+    {
+        var seasons = TorrentScoring.ParseSeasons(title);
+        if (h.season > 0 && seasons.Count > 0 && !seasons.Contains(h.season)) return false;
+        if (h.season > 1 && seasons.Count == 0) return false;   // охотим не первый сезон, а раздача сезон не заявляет — риск не тот
+        return true;
+    }
+
+    // «Этот кандидат ДОКАЗЫВАЕТ, что серия существует» — только идентичность: тот же сериал, тот же
+    // сезон. Сиды/качество/вес/blacklist/своя раздача отвечают на ДРУГОЙ вопрос — «можно ли качать
+    // отсюда», к факту выхода серии отношения не имеют.
+    // Раньше MaxClaim считался по донорски пригодным, и у «Великого расхитителя гробниц» три
+    // кандидата с «5 из 12» (blacklist после сбоя резолва / свой перевыложенный топик / 720p)
+    // выпали из подсчёта — охота записала «заявлено серий до 1, нужно —» при пяти вышедших.
+    static bool IdentityMatches(JObject t, HuntCtx h)
+    {
+        string title = t.Value<string>("title") ?? "";
+        return NameMatchesSeries(title, h.titleNorm, h.originalNorm) && SeasonOk(title, h);
+    }
+
+    static List<JObject> ClaimCandidates(JArray scored, HuntCtx h)
+        => scored.OfType<JObject>().Where(t => IdentityMatches(t, h)).ToList();
+
+    #region апгрейд донорской серии на раздачу получше
+    // Текущие «ставки» донора: скор и качество. Сперва по СВЕЖЕЙ выдаче (скор плывёт вместе с сидами
+    // и датой), иначе — то, что записали при захвате. (-1, -1) = не с чем сравнивать → не апгрейдим.
+    static (double score, int quality) DonorBaseline(JObject donor, JArray scored)
+    {
+        string dh = donor.Value<string>("hash") ?? "", link = donor.Value<string>("link") ?? "";
+        foreach (var t in scored.OfType<JObject>())
+        {
+            bool same = (!string.IsNullOrEmpty(dh) && string.Equals(MagnetHash(t.Value<string>("magnet")), dh, StringComparison.OrdinalIgnoreCase))
+                     || (!string.IsNullOrWhiteSpace(link) && string.Equals(t.Value<string>("parselink"), link, StringComparison.OrdinalIgnoreCase));
+            if (same) return (t.Value<double?>("score") ?? 0, t.Value<int?>("quality") ?? 0);
+        }
+        var s = donor.Value<double?>("score");
+        return s.HasValue ? (s.Value, donor.Value<int?>("quality") ?? 0) : (-1, -1);
+    }
+
+    // Серия «временно с другой раздачи» стоит апгрейда, если среди годных кандидатов есть раздача
+    // ЯВНО лучше той, с которой мы её взяли: выше качество или скор выше на minScore (⭐ — это и есть
+    // верх скора, отдельного признака не нужно). Серии, которые уже есть в ОСНОВНОЙ, не трогаем:
+    // основная всегда приоритетнее донора, её версия придёт штатным замещением.
+    // why (может быть null) — заполняется человекочитаемым «с чего на что» для лога.
+    static List<int> ComputeUpgrades(JArray donors, JArray scored, List<JObject> eligible, HashSet<int> mainEps,
+                                     int season, int minScoreGain, Dictionary<int, string> why)
+    {
+        var res = new List<int>();
+        if (donors == null || eligible.Count == 0) return res;
+
+        foreach (var d in donors.OfType<JObject>())
+        {
+            var (bscore, bquality) = DonorBaseline(d, scored);
+            if (bscore < 0) continue;   // не с чем сравнивать (старая запись и раздачи нет в выдаче)
+
+            foreach (var e in (d["eps"] as JArray ?? new JArray()).OfType<JObject>())
             {
-                if (e.kind == "RANGE" && e.ep2 > max) max = e.ep2;
-                else if (e.kind == null && e.ep > max) max = e.ep;
+                if (e.Value<string>("status") != "hunted") continue;
+                int ep = e.Value<int?>("ep") ?? -1;
+                if (ep < 0 || mainEps.Contains(ep) || res.Contains(ep)) continue;
+
+                foreach (var t in eligible)   // eligible уже отсортирован по скору (выдача SearchScored)
+                {
+                    if (TitleCoversEp(t.Value<string>("title") ?? "", season, ep) != DonorCover.Yes) continue;
+                    double cs = t.Value<double?>("score") ?? 0;
+                    int cq = t.Value<int?>("quality") ?? 0;
+                    bool better = (cq > 0 && bquality > 0 && cq > bquality) || cs >= bscore + minScoreGain;
+                    if (!better) continue;
+                    res.Add(ep);
+                    if (why != null) why[ep] = $"E{ep}: {bquality}p/{Math.Round(bscore, 1)} → {cq}p/{Math.Round(cs, 1)}";
+                    break;
+                }
             }
         }
+        res.Sort();
+        return res;
+    }
+    #endregion
+
+    // Сколько серий заявляет ТОТ ЖЕ топик, что у основной раздачи (перевыложенная наша же раздача).
+    // Донором его брать нельзя (§AK) — но это единственный сигнал «пора делать re-grab».
+    static int SelfTopicClaim(JArray scored, HuntCtx h)
+    {
+        if (h.selfTopicKey == null) return 0;
+        int max = 0;
+        foreach (var t in scored.OfType<JObject>())
+            if (TopicKey(t.Value<string>("parselink")) == h.selfTopicKey && IdentityMatches(t, h))
+                max = Math.Max(max, ClaimOf(t));
         return max;
     }
 
     // Подтверждение по РЕАЛЬНЫМ файлам донора: какие из wanted-серий в нём есть.
     // RANGE-файлы отвергаем (серию из склейки адресно не сыграть); спецвыпуски не охотим.
     // Спецслучай: единственный видеофайл без номера + Title-одиночка → номер из Title.
-    static List<EpFile> FindEpFiles(JArray files, int season, List<int> wanted, Ep titleEp)
+    // donorSeason — сезон донора целиком (DonorSeason), подпорка для файлов без номера сезона; 0 = неизвестен.
+    // Сезонный гейт FAIL-CLOSED, но асимметрично:
+    //   • season > 1 — требуем ПОЛОЖИТЕЛЬНОГО доказательства сезона (имя файла / папка / сезон донора).
+    //     Раньше гейт падал открытым (season < 0 проходил и получал сезон основной вслепую) — так в
+    //     3-й сезон «Укрытия» и приехали файлы Silo.S02.E07…E10 (инцидент 2026-08-09);
+    //   • season <= 1 — как раньше: аниме и односезонники сплошь без сезонных маркеров, строгость
+    //     там просто выключила бы охоту.
+    // Та же асимметрия уже есть на уровне кандидата: FilterDonorCandidates отвергает раздачу без
+    // заявленного сезона при h.season > 1.
+    static List<EpFile> FindEpFiles(JArray files, int season, List<int> wanted, Ep titleEp, int donorSeason)
     {
         var res = new List<EpFile>();
         var vids = new List<JToken>();
@@ -579,15 +684,21 @@ public partial class QbitController
         {
             var e = ParseEp(BaseNoExt(f));
             if (e == null || !e.any || e.kind != null || e.ep < 0) continue;
-            if (e.season >= 0 && season > 0 && e.season != season) continue;
+
+            int fs = FileSeason(f);                              // имя файла → папка
+            if (fs <= 0) fs = donorSeason;                       // → сезон донора целиком
+            if (season > 0 && fs > 0 && fs != season) continue;  // явное расхождение
+            if (season > 1 && fs <= 0) continue;                 // не первый сезон и ничем не подтверждён
+
             if (!wanted.Contains(e.ep)) continue;
             if (res.Any(x => x.ep == e.ep)) continue;   // один файл на серию
+            int es = fs > 0 ? fs : season;
             res.Add(new EpFile
             {
                 index = f.Value<int?>("index") ?? -1,
                 ep = e.ep,
-                season = e.season >= 0 ? e.season : season,
-                epkey = EpKey(e),
+                season = es,
+                epkey = EpKey(new Ep { season = es, ep = e.ep }),
                 size = f.Value<long?>("size") ?? 0,
                 name = f.Value<string>("name")
             });
@@ -600,17 +711,21 @@ public partial class QbitController
             var fe = ParseEp(BaseNoExt(f));
             if (fe == null || !fe.any || fe.ep < 0)
             {
-                int s = titleEp.season >= 0 ? titleEp.season : season;
-                var e = new Ep { season = s, ep = titleEp.ep };
-                res.Add(new EpFile
+                int s = titleEp.season >= 0 ? titleEp.season : (donorSeason > 0 ? donorSeason : SeasonFromPath(f.Value<string>("name")));
+                if (s <= 0) s = season;
+                if (season <= 1 || s == season)   // тот же fail-closed для одиночки
                 {
-                    index = f.Value<int?>("index") ?? -1,
-                    ep = titleEp.ep,
-                    season = s,
-                    epkey = EpKey(e),
-                    size = f.Value<long?>("size") ?? 0,
-                    name = f.Value<string>("name")
-                });
+                    var e = new Ep { season = s, ep = titleEp.ep };
+                    res.Add(new EpFile
+                    {
+                        index = f.Value<int?>("index") ?? -1,
+                        ep = titleEp.ep,
+                        season = s,
+                        epkey = EpKey(e),
+                        size = f.Value<long?>("size") ?? 0,
+                        name = f.Value<string>("name")
+                    });
+                }
             }
         }
 
@@ -621,6 +736,13 @@ public partial class QbitController
 
     #region blacklist пустышек (per watch-запись, TTL)
     static void BlacklistAdd(JObject item, string btih, string parselink, string reason, int ttlDays)
+        => BlacklistAddMinutes(item, btih, parselink, reason, Math.Max(1, ttlDays) * 1440, 1);
+
+    // TTL в МИНУТАХ + номер попытки. Старая форма клампила ttlDays к «не меньше суток», поэтому
+    // разовый сетевой сбой резолва парселинка банил ЛУЧШЕГО кандидата на сутки — и охота ещё и
+    // переставала учитывать его серии («Великий расхититель гробниц»: 5 вышедших серий, а в логе
+    // «заявлено серий до 1, нужно —»).
+    static void BlacklistAddMinutes(JObject item, string btih, string parselink, string reason, int minutes, int attempt)
     {
         if (item["blacklist"] is not JArray bl) { bl = new JArray(); item["blacklist"] = bl; }
         bl.Add(new JObject
@@ -628,24 +750,56 @@ public partial class QbitController
             ["btih"] = string.IsNullOrEmpty(btih) ? null : btih.ToLowerInvariant(),
             ["parselink"] = parselink,
             ["reason"] = reason,
-            ["until"] = DateTime.UtcNow.AddDays(Math.Max(1, ttlDays)).ToString("o")
+            ["attempt"] = attempt,
+            ["until"] = DateTime.UtcNow.AddMinutes(Math.Max(1, minutes)).ToString("o")
         });
     }
+
+    // Транзиентные отказы (сеть/трекер), а не дефект раздачи: 30м → 1ч → 2ч → 4ч → 8ч → 12ч, и лишь
+    // с 6-й неудачи подряд — сутки (похоже, раздача правда мертва).
+    static int TransientFailMinutes(int attempt)
+        => attempt >= 6 ? 1440 : Math.Min(720, 30 * (1 << Math.Max(0, attempt - 1)));
+
+    // Сколько раз подряд этот кандидат уже падал с той же причиной (история переживает истечение TTL
+    // благодаря grace в PruneBlacklist).
+    static int BlacklistAttempts(JObject item, string key, string reason)
+    {
+        if (string.IsNullOrWhiteSpace(key) || item["blacklist"] is not JArray bl) return 0;
+        int max = 0;
+        foreach (var b in bl.OfType<JObject>())
+        {
+            if (b.Value<string>("reason") != reason) continue;
+            if (!string.Equals(b.Value<string>("btih"), key, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(b.Value<string>("parselink"), key, StringComparison.OrdinalIgnoreCase)) continue;
+            max = Math.Max(max, b.Value<int?>("attempt") ?? 1);
+        }
+        return max;
+    }
+
+    // Grace: запись живёт ещё сутки ПОСЛЕ истечения TTL — только ради счётчика попыток (иначе бэкофф
+    // обнулялся бы на каждом разбане и вечно сидел на 30 минутах). Действующей блокировкой она уже
+    // не является — это решает BlacklistKeys по времени.
+    const int BlacklistGraceHours = 24;
 
     static void PruneBlacklist(JObject item, DateTime now)
     {
         if (item["blacklist"] is not JArray bl) return;
         for (int i = bl.Count - 1; i >= 0; i--)
-            if (!DateTime.TryParse(bl[i].Value<string>("until"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var u) || u < now)
+            if (!DateTime.TryParse(bl[i].Value<string>("until"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var u)
+                || u.AddHours(BlacklistGraceHours) < now)
                 bl.RemoveAt(i);
     }
 
-    static HashSet<string> BlacklistKeys(JObject item)
+    // Ключи ДЕЙСТВУЮЩИХ блокировок (until > now). Раньше функция полагалась на то, что PruneBlacklist
+    // позвали прямо перед ней; с grace-хранением истории это стало обязательным условием, поэтому
+    // проверка времени теперь здесь и явная.
+    static HashSet<string> BlacklistKeys(JObject item, DateTime now)
     {
         var res = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (item["blacklist"] is JArray bl)
             foreach (var b in bl)
             {
+                if (!DateTime.TryParse(b.Value<string>("until"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var u) || u <= now) continue;
                 var h = b.Value<string>("btih"); if (!string.IsNullOrEmpty(h)) res.Add(h);
                 var p = b.Value<string>("parselink"); if (!string.IsNullOrEmpty(p)) res.Add(p);
             }
@@ -663,7 +817,8 @@ public partial class QbitController
 
     // Итог прохода по одному сериалу. searched — дошли до опроса индексатора; barren — выдача пустая
     // (сбой трекеров неотличим от «новых серий нет», поэтому такой проход не засчитываем).
-    sealed class HuntOneResult { public int grabbed; public bool searched; public bool barren; }
+    // regrab — свой топик перевыложен с бо́льшим числом серий: просим CheckWatches отработать вне очереди.
+    sealed class HuntOneResult { public int grabbed; public bool searched; public bool barren; public bool regrab; }
 
     // Ранний повтор оправдан только если пусто у ВСЕХ опрошенных сериалов: у одного — бывает
     // (нишевый тайтл), у всех сразу — это индексатор/трекеры лежат.
@@ -679,6 +834,7 @@ public partial class QbitController
             return 0;
         }
         int grabbed = 0, series = 0, searched = 0, barren = 0;
+        bool regrabAsk = false;
         try
         {
             JArray list; HashSet<string> orig;
@@ -696,6 +852,7 @@ public partial class QbitController
                     grabbed += r.grabbed; changed = true; series++;
                     if (r.searched) searched++;
                     if (r.barren) barren++;
+                    if (r.regrab) regrabAsk = true;
                 }
                 catch (Exception ex) { Console.WriteLine("[QbitDownload] hunt item: " + ex); }
             }
@@ -705,6 +862,17 @@ public partial class QbitController
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] hunt: " + ex); }
         finally { _watchGate.Release(); }
+
+        // Своя раздача перевыложена — просим штатного владельца обновления отработать сейчас, а не
+        // через свой 6-часовой тик. Строго ПОСЛЕ release: _watchGate не реентрантный (тот же приём,
+        // что CheckWatches → ScanEpisodeNotifications). Мы ничего не добавляем и не удаляем сами —
+        // все защиты §AK остаются внутри CheckWatches.
+        if (regrabAsk)
+        {
+            Console.WriteLine("[QbitDownload] hunt: обнаружено обновление своей раздачи — внеочередная проверка слежения");
+            try { await CheckWatches(); }
+            catch (Exception ex) { Console.WriteLine("[QbitDownload] hunt→watch: " + ex); }
+        }
 
         // Пустая выдача у всех — почти всегда сбой индексатора/трекеров, а не «новых серий нет»:
         // при обычном интервале (часы) такая тишина стоила бы суток. Просим таймер прийти раньше.
@@ -790,7 +958,7 @@ public partial class QbitController
         if (string.IsNullOrEmpty(btih) && string.IsNullOrWhiteSpace(parselink)) return "без ссылки";
         if (h.selfTopicKey != null && TopicKey(parselink) == h.selfTopicKey) return "своя раздача";
 
-        var seasons = TorrentScoring.ParseSeasons(title);
+        var seasons = TorrentScoring.ParseSeasons(title);   // порядок повторяет SeasonOk, но с разными подписями причин
         if (h.season > 0 && seasons.Count > 0 && !seasons.Contains(h.season)) return "сезон";
         if (h.season > 1 && seasons.Count == 0) return "сезон не заявлен";
 
@@ -827,6 +995,56 @@ public partial class QbitController
          : wanted.Count == 1 ? "E" + wanted[0]
          : "E" + wanted[0] + "–E" + wanted[wanted.Count - 1] + " (" + wanted.Count + ")";
 
+    // Сезон из ПУТИ внутри торрента. BaseNoExt (Controller.cs) отрезает папки, а сезон часто написан
+    // именно там: «Укрытие.S02.WEB-DLRip.NewComers/Silo.S02.E07….avi». Уверенный ответ — только когда
+    // сегмент называет РОВНО один сезон; «Silo.S01-S03/…» → 0 (пусть решает сам файл).
+    static int SeasonFromPath(string relName)
+    {
+        string p = (relName ?? "").Replace('\\', '/');
+        int cut = p.LastIndexOf('/');
+        if (cut <= 0) return 0;
+        var segs = p.Substring(0, cut).Split('/');
+        for (int i = segs.Length - 1; i >= 0; i--)   // ближняя папка важнее корневой
+        {
+            var ss = TorrentScoring.ParseSeasons(segs[i]);
+            if (ss.Count == 1) return ss[0];
+            if (ss.Count > 1) return 0;
+        }
+        return 0;
+    }
+
+    // Сезон конкретного видеофайла: сперва имя файла, затем путь. 0 = неизвестно.
+    static int FileSeason(JToken f)
+    {
+        var e = ParseEp(BaseNoExt(f));
+        if (e != null && e.any && e.kind == null && e.season > 0) return e.season;
+        return SeasonFromPath(f?.Value<string>("name") ?? "");
+    }
+
+    // Сезоны, которые РЕАЛЬНО лежат в файлах раздачи (только уверенные).
+    static HashSet<int> DonorSeasons(JArray files)
+    {
+        var set = new HashSet<int>();
+        foreach (var f in files ?? new JArray())
+        {
+            if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
+            int s = FileSeason(f);
+            if (s > 0) set.Add(s);
+        }
+        return set;
+    }
+
+    // Сезон донора «одним числом» — подпорка для файлов без номера сезона: файлы → название раздачи.
+    // 0 = неизвестен (в т.ч. многосезонный пак: там каждый файл отвечает сам за себя).
+    static int DonorSeason(JArray files, string title)
+    {
+        var set = DonorSeasons(files);
+        if (set.Count == 1) return set.First();
+        if (set.Count > 1) return 0;
+        var ts = TorrentScoring.ParseSeasons(title ?? "");
+        return ts.Count == 1 ? ts[0] : 0;
+    }
+
     // доминирующий сезон по видеофайлам (то, что реально качаем); 0 = не определить
     static int DominantSeason(JArray files)
     {
@@ -840,6 +1058,59 @@ public partial class QbitController
         }
         return counts.Count > 0 ? counts.OrderByDescending(x => x.Value).First().Key : 0;
     }
+
+    #region потолок по реально вышедшим сериям (TMDB)
+    // Кэш на процесс: сезон опрашивается раз в 6 ч. Ключ — tmdbId:season.
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (int aired, DateTime at)> _airedCache = new();
+
+    // Сколько серий сезона УЖЕ ВЫШЛО (air_date <= сегодня). 0 = неизвестно → потолок берётся из
+    // названий раздач, как раньше (fail-open: TMDB лежит — охота не должна вставать).
+    //
+    // Зачем: «1-6 серии из 10» в названии — это план сезона, а не факт эфира. Охота считала
+    // недостающими E7–E10, которых ещё нет в природе, и закрывала эту дыру чем попало — у «Укрытия»
+    // приехали серии 7–10 ВТОРОГО сезона (инцидент 2026-08-09).
+    //
+    // Ходим в СВОЙ же прокси /tmdb/api/... на 127.0.0.1 (тот же приём, что CatalogWarmup): ответ уже
+    // кешируется Staticache, отдельного ключа TMDB и внешнего доступа не нужно.
+    static async Task<int> AiredEpisodes(int tmdbId, int season)
+    {
+        if (tmdbId <= 0 || season <= 0) return 0;
+        string key = tmdbId + ":" + season;
+        if (_airedCache.TryGetValue(key, out var e) && (DateTime.UtcNow - e.at).TotalHours < 6) return e.aired;
+
+        int port = 9118;
+        try { if (CoreInit.conf.listen.port > 0) port = CoreInit.conf.listen.port; } catch { }
+
+        int aired = 0;
+        try
+        {
+            using var rc = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+            string body = await rc.GetStringAsync($"http://127.0.0.1:{port}/tmdb/api/3/tv/{tmdbId}/season/{season}");
+            var eps = JObject.Parse(body)["episodes"] as JArray;
+            if (eps == null) return 0;
+            var today = DateTime.UtcNow.Date;
+            foreach (var ep in eps.OfType<JObject>())
+            {
+                // без даты выхода серия считается вышедшей: пустой air_date у TMDB частый, и
+                // трактовать его как «не вышла» значило бы глушить охоту на ровном месте
+                string ad = ep.Value<string>("air_date");
+                if (!string.IsNullOrWhiteSpace(ad)
+                    && DateTime.TryParse(ad, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)
+                    && d.Date > today) continue;
+                int n = ep.Value<int?>("episode_number") ?? 0;
+                if (n > aired) aired = n;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[QbitDownload] hunt: TMDB сезон " + tmdbId + "/" + season + " недоступен (" + ex.Message + ") — потолок серий по названиям");
+            return 0;
+        }
+
+        _airedCache[key] = (aired, DateTime.UtcNow);
+        return aired;
+    }
+    #endregion
 
     static async Task<HuntOneResult> HuntOne(HttpClient c, JObject m)
     {
@@ -882,7 +1153,11 @@ public partial class QbitController
         string stitle = m.Value<string>("title");
         if (string.IsNullOrWhiteSpace(stitle)) stitle = ctitle;
 
-        if ((donors?.Count ?? 0) >= conf.donorMaxPerSeries)
+        // Кап доноров. При включённом апгрейде проход всё же идём: замена плохой серии на хорошую
+        // важнее экономии одного слота, а перебор ограничен ровно +1 донором и самоустраняется —
+        // проигравший уходит в ScanReplacements, опустевший донор снимается.
+        bool atCap = (donors?.Count ?? 0) >= conf.donorMaxPerSeries;
+        if (atCap && !conf.donorUpgrade)
         {
             SetHuntStamp(m, now, 0);
             Console.WriteLine($"[QbitDownload] hunt «{stitle}» S{season}: пропуск — доноров уже {donors?.Count ?? 0}/{conf.donorMaxPerSeries}");
@@ -909,7 +1184,7 @@ public partial class QbitController
             mainHash = mainHash.ToLowerInvariant(),
             season = season,
             knownHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { mainHash },
-            blacklistKeys = BlacklistKeys(m),
+            blacklistKeys = BlacklistKeys(m, now),
             minSeeds = conf.donorMinSeeds,
             minQuality = conf.donorMinQuality,
             minMb = conf.epSizeMinMb,
@@ -934,10 +1209,65 @@ public partial class QbitController
         catch { }
 
         var eligible = FilterDonorCandidates(scored, h);
-        int maxClaim = MaxClaim(eligible);
+        var claims = ClaimCandidates(scored, h);     // ⊇ eligible: гейты пригодности тут не применяются
+        int maxClaim = MaxClaim(claims);
+        int eligibleClaim = MaxClaim(eligible);
+
+        // Потолок по РЕАЛЬНО ВЫШЕДШИМ сериям (TMDB). «1-6 серии из 10» в названии — план сезона, а не
+        // факт эфира: у «Укрытия» это давало wanted E7–E10, которых ещё нет, и охота, не найдя их в
+        // третьем сезоне, утащила серии 7–10 ВТОРОГО. Fail-open: TMDB недоступен → работаем как раньше.
+        int aired = conf.tmdbAiredCap ? await AiredEpisodes(m.Value<int?>("id") ?? 0, season) : 0;
+        if (aired > 0 && maxClaim > aired)
+        {
+            Console.WriteLine($"[QbitDownload] hunt «{stitle}» S{season}: потолок серий {maxClaim} → {aired} (по TMDB вышло {aired})");
+            maxClaim = aired;
+        }
+
         var wanted = ComputeWanted(inv, maxClaim);
+
+        // Апгрейд: серия уже лежит «временно с другой раздачи», но в выдаче есть раздача получше.
+        // Идёт ДОПОЛНИТЕЛЬНО к недостающим сериям (ComputeWanted смотрит только вперёд от максимума).
+        var upgrades = new List<int>();
+        if (conf.donorUpgrade)
+        {
+            var mainEps = new HashSet<int>();
+            foreach (var f in mainFiles)
+            {
+                if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
+                var fe = ParseEp(BaseNoExt(f));
+                if (fe != null && fe.any && fe.kind == null && fe.ep >= 0) mainEps.Add(fe.ep);
+            }
+            var upWhy = new Dictionary<int, string>();
+            upgrades = ComputeUpgrades(donors, scored, eligible, mainEps, season, conf.donorUpgradeMinScore, upWhy);
+            foreach (int ep in upgrades)
+                if (!wanted.Contains(ep)) wanted.Add(ep);
+            if (upgrades.Count > 0)
+            {
+                wanted.Sort();
+                Console.WriteLine($"[QbitDownload] hunt «{stitle}» S{season}: апгрейд донорских серий — {string.Join("; ", upgrades.Select(x => upWhy[x]))}");
+            }
+        }
+
+        if (atCap) wanted = upgrades;   // слотов нет: берём ТОЛЬКО ради замены на лучшее, новые серии ждут
+
         SetHuntStamp(m, now, maxClaim);
-        Console.WriteLine($"[QbitDownload] hunt «{stitle}» S{season}: кандидатов {scored.Count} → годных {eligible.Count}{DropSummary(scored, eligible.Count, h)}; заявлено серий до {maxClaim}, нужно {WantedText(wanted)}");
+        string claimNote = maxClaim != eligibleClaim ? $" (годные заявляют {eligibleClaim})" : "";
+        string upNote = upgrades.Count > 0 ? $", апгрейд {upgrades.Count}" : "";
+        string capNote = atCap ? $" [доноров {donors?.Count ?? 0}/{conf.donorMaxPerSeries} — только апгрейд]" : "";
+        Console.WriteLine($"[QbitDownload] hunt «{stitle}» S{season}: кандидатов {scored.Count} → годных {eligible.Count}{DropSummary(scored, eligible.Count, h)}; заявлено серий до {maxClaim}{claimNote}, нужно {WantedText(wanted)}{upNote}{capNote}");
+
+        // Свой топик перевыложен с бо́льшим числом серий. Донором его брать НЕЛЬЗЯ (§AK: он вот-вот
+        // станет основной, и контур замещения снёс бы его С ФАЙЛАМИ) — владелец обновления только
+        // re-grab в CheckWatches. Раньше охота молча выбрасывала этот кандидат, и обновление
+        // раздачи ждало своего 6-часового тика («Великий расхититель гробниц»: 2 серии вместо 5).
+        int mainVideos = mainFiles.Count(f => _videoExtRx.IsMatch(f.Value<string>("name") ?? ""));
+        int selfClaim = SelfTopicClaim(scored, h);
+        if (selfClaim > mainVideos)
+        {
+            res.regrab = true;
+            Console.WriteLine($"[QbitDownload] hunt «{stitle}» S{season}: свой топик заявляет {selfClaim} серий, у основной {mainVideos} файлов — раздача перевыложена, запрашиваю re-grab");
+        }
+
         if (wanted.Count == 0) return res;   // новее ничего не заявлено — основная и так самая полная
 
         int grabbed = 0, probes = 0;
@@ -950,7 +1280,7 @@ public partial class QbitController
         foreach (var cand in ProbeCandidates(eligible, season, wanted, conf.donorProbesPerRun))
         {
             if (probes >= Math.Max(1, conf.donorProbesPerRun)) break;
-            if (((m["donors"] as JArray)?.Count ?? 0) >= conf.donorMaxPerSeries) break;
+            if (((m["donors"] as JArray)?.Count ?? 0) >= conf.donorMaxPerSeries + (atCap ? 1 : 0)) break;
             probes++;
 
             string parselink = cand.Value<string>("parselink");
@@ -958,7 +1288,16 @@ public partial class QbitController
             if (string.IsNullOrWhiteSpace(magnet))
             {
                 magnet = await ResolveMagnetStatic(parselink);
-                if (string.IsNullOrWhiteSpace(magnet)) { BlacklistAdd(m, null, parselink, "resolve-failed", 1); continue; }
+                if (string.IsNullOrWhiteSpace(magnet))
+                {
+                    // сеть/трекер, а не дефект раздачи → короткая пауза с бэкоффом; в учёте серий
+                    // (ClaimCandidates) кандидат при этом ОСТАЁТСЯ
+                    int at = BlacklistAttempts(m, parselink, "resolve-failed") + 1;
+                    int ttl = TransientFailMinutes(at);
+                    BlacklistAddMinutes(m, null, parselink, "resolve-failed", ttl, at);
+                    Console.WriteLine($"[QbitDownload] hunt: парселинк не резолвится (попытка {at}) — пауза {ttl} мин («{cand.Value<string>("title")}»)");
+                    continue;
+                }
             }
             string btih = MagnetHash(magnet);
             if (string.IsNullOrEmpty(btih) || h.knownHashes.Contains(btih) || h.blacklistKeys.Contains(btih)) continue;
@@ -971,7 +1310,11 @@ public partial class QbitController
 
             // двухфазный захват: add со стопом после метаданных → подтверждение по файлам
             if (!await QbitAddMagnetEx(c, magnet, DonorCategory, DonorTag, stopAfterMeta: true))
-            { BlacklistAdd(m, btih, parselink, "add-failed", 1); continue; }
+            {
+                int at = BlacklistAttempts(m, btih, "add-failed") + 1;
+                BlacklistAddMinutes(m, btih, parselink, "add-failed", TransientFailMinutes(at), at);   // сбой qBit — транзиент
+                continue;
+            }
 
             // Аварийные выходы ниже удаляют кандидата С ФАЙЛАМИ — только через QbitDeleteDonorSafe.
             // Оба гейта выше (knownHashes из категории lampa и pre-check) FAIL-OPEN: запрос к qBit мог
@@ -981,12 +1324,25 @@ public partial class QbitController
             if (dfiles == null || dfiles.Count == 0)
             {
                 await QbitDeleteDonorSafe(c, btih, mainHash);
-                BlacklistAdd(m, btih, parselink, "meta-timeout", 1);   // короткий TTL: возможно, просто не было сидов
+                int at = BlacklistAttempts(m, btih, "meta-timeout") + 1;
+                BlacklistAddMinutes(m, btih, parselink, "meta-timeout", TransientFailMinutes(at), at);   // возможно, просто не было сидов
+                continue;
+            }
+
+            // Сезонный отсев ПО ФАЙЛАМ — последний рубеж перед скачиванием. Название могло соврать
+            // (kinozal «2 сезон: 1-10 серии» долго читался как сезоны 1..10), файлы — не врут.
+            // Многосезонный пак ({2,3} при охоте на 3) не отвергаем: из него возьмутся только файлы S03.
+            var dseasons = DonorSeasons(dfiles);
+            if (season > 0 && dseasons.Count > 0 && !dseasons.Contains(season))
+            {
+                await QbitDeleteDonorSafe(c, btih, mainHash);   // только safe-путь (§AK)
+                BlacklistAdd(m, btih, parselink, "wrong-season", conf.donorBlacklistTtlDays);
+                Console.WriteLine($"[QbitDownload] hunt: донор {btih} отвергнут — в файлах сезон(ы) {string.Join(",", dseasons.OrderBy(x => x))}, охотим S{season} («{cand.Value<string>("title")}»)");
                 continue;
             }
 
             var titleEp = ParseEp(StripSeasonMarks(cand.Value<string>("title") ?? ""));
-            var found = FindEpFiles(dfiles, season, wanted, titleEp);
+            var found = FindEpFiles(dfiles, season, wanted, titleEp, DonorSeason(dfiles, cand.Value<string>("title")));
             found.RemoveAll(f => f.size > 0 && (f.size < minB || f.size > maxB));   // теперь вес известен точно
             if (found.Count == 0)
             {
@@ -1016,7 +1372,10 @@ public partial class QbitController
             {
                 ["hash"] = btih, ["link"] = string.IsNullOrWhiteSpace(parselink) ? magnet : parselink,
                 ["title"] = cand.Value<string>("title"), ["tracker"] = cand.Value<string>("tracker"),
-                ["sid"] = cand.Value<int?>("sid") ?? 0, ["addedAt"] = now.ToString("o"), ["eps"] = epsArr
+                ["sid"] = cand.Value<int?>("sid") ?? 0, ["addedAt"] = now.ToString("o"),
+                // база для сравнения при апгрейде: с чем именно мы согласились, когда брали эту серию
+                ["score"] = cand.Value<double?>("score") ?? 0, ["quality"] = cand.Value<int?>("quality") ?? 0,
+                ["eps"] = epsArr
             });
             h.knownHashes.Add(btih);
             grabbed += found.Count;
@@ -1064,6 +1423,52 @@ public partial class QbitController
 
         string mainHash = item.Value<string>("hash") ?? "";
 
+        // Сезон основной для самолечения записей: только ОДНОЗНАЧНЫЙ. 0 (не определить или пак из
+        // нескольких сезонов) → чужой сезон у донора не диагностируем и ничего не трогаем.
+        var mainSeasons = DonorSeasons(mainFiles);
+        int mainSeason = mainSeasons.Count == 1 ? mainSeasons.First() : 0;
+
+        // Апгрейд: одну и ту же серию держат два донора (охота добавила лучшего). Победитель —
+        // ДОКАЧАННЫЙ и с бо́льшим скором; проигравшего снимаем. Пока новый файл не готов, старый не
+        // трогаем ни при каких условиях — иначе зритель остался бы без серии.
+        var upgradeLosers = new HashSet<JObject>();
+        {
+            var byEp = new Dictionary<string, List<(JObject donor, JObject ep, double score, bool done)>>();
+            foreach (var d in donors.OfType<JObject>())
+            {
+                string dh0 = d.Value<string>("hash") ?? "";
+                if (donorFiles == null || !donorFiles.TryGetValue(dh0, out JArray df) || df == null) continue;
+                double sc = d.Value<double?>("score") ?? -1;
+                foreach (var e in (d["eps"] as JArray ?? new JArray()).OfType<JObject>())
+                {
+                    if (e.Value<string>("status") != "hunted") continue;
+                    int en0 = e.Value<int?>("ep") ?? -1, es0 = e.Value<int?>("season") ?? -1;
+                    if (en0 < 0) continue;
+                    int fi = e.Value<int?>("fileIndex") ?? -1;
+                    var f = df.FirstOrDefault(x => (x.Value<int?>("index") ?? -1) == fi);
+                    bool done = f != null && (f.Value<double?>("progress") ?? 0) >= 0.999;
+                    string k = es0 + ":" + en0;
+                    if (!byEp.TryGetValue(k, out var lst)) byEp[k] = lst = new List<(JObject, JObject, double, bool)>();
+                    lst.Add((d, e, sc, done));
+                }
+            }
+            foreach (var kv in byEp)
+            {
+                if (kv.Value.Count < 2) continue;
+                var winner = kv.Value.Where(x => x.done).OrderByDescending(x => x.score).FirstOrDefault();
+                if (winner.ep == null) continue;   // ни одна копия не докачана — ждём
+                foreach (var x in kv.Value)
+                {
+                    if (ReferenceEquals(x.ep, winner.ep)) continue;
+                    // НЕдокачанную копию с не меньшим скором не трогаем: это и есть апгрейд в полёте,
+                    // ради которого охота её и добавила. Снести её значило бы отменять апгрейд каждый
+                    // проход и качать заново.
+                    if (!x.done && x.score >= winner.score) continue;
+                    upgradeLosers.Add(x.ep);
+                }
+            }
+        }
+
         foreach (var d in donors.OfType<JObject>())
         {
             string dh = d.Value<string>("hash") ?? "";
@@ -1087,6 +1492,28 @@ public partial class QbitController
             {
                 if (e.Value<string>("status") != "hunted") continue;
                 int en = e.Value<int?>("ep") ?? -1, es = e.Value<int?>("season") ?? -1;
+
+                // Самолечение записей, сделанных до fail-closed сезонного гейта: сезон файла читается
+                // уверенно и НЕ совпадает с сезоном основной → это чужой сезон, замещения не было и не
+                // будет. Снимаем как drop-file (не «replaced»: серия не замещена, а ошибочна) —
+                // опустевший донор дальше уйдёт штатным delete-donor через QbitDeleteDonorSafe.
+                int fi0 = e.Value<int?>("fileIndex") ?? -1;
+                var df0 = fi0 >= 0 ? dfiles.FirstOrDefault(x => (x.Value<int?>("index") ?? -1) == fi0) : null;
+                int realSeason = df0 != null ? FileSeason(df0) : 0;
+                if (mainSeason > 0 && realSeason > 0 && realSeason != mainSeason)
+                {
+                    res.Add(new ReplaceAction { kind = "wrong-season", donorHash = dh, fileIndex = fi0, ep = e, donor = d });
+                    drops++;
+                    continue;
+                }
+
+                if (upgradeLosers.Contains(e))   // ту же серию уже держит донор получше, и он докачан
+                {
+                    res.Add(new ReplaceAction { kind = "upgraded", donorHash = dh, fileIndex = fi0, ep = e, donor = d });
+                    drops++;
+                    continue;
+                }
+
                 bool mainHas = en >= 0 && mainDone.Any(md => md.ep == en && (md.season < 0 || es <= 0 || md.season == es));
                 if (mainHas)
                 {
@@ -1180,11 +1607,11 @@ public partial class QbitController
             }
 
             var actions = PlanReplacements(mainFiles, m, donorFiles, DateTime.UtcNow, ModInit.conf.donorStaleDays);
-            foreach (var a in actions.OrderBy(x => x.kind == "drop-file" ? 0 : 1))   // сперва файлы, потом снятие доноров
+            foreach (var a in actions.OrderBy(x => (x.kind == "drop-file" || x.kind == "wrong-season" || x.kind == "upgraded") ? 0 : 1))   // сперва файлы, потом снятие доноров
             {
                 try
                 {
-                    if (a.kind == "drop-file")
+                    if (a.kind == "drop-file" || a.kind == "wrong-season" || a.kind == "upgraded")
                     {
                         if (a.fileIndex >= 0) await QbitFilePrio(c, a.donorHash, new[] { a.fileIndex }, 0);
                         await DeleteDonorFile(c, a.donorHash, a.fileIndex, donorFiles.GetValueOrDefault(a.donorHash), mainPaths);
@@ -1192,7 +1619,12 @@ public partial class QbitController
                         a.ep["status"] = "replaced";
                         a.ep["replacedAt"] = DateTime.UtcNow.ToString("o");
                         changed = true;
-                        Console.WriteLine("[QbitDownload] hunt: серия " + a.ep.Value<string>("epkey") + " замещена основной (донор " + a.donorHash + ")");
+                        Console.WriteLine("[QbitDownload] hunt: серия " + a.ep.Value<string>("epkey") + (a.kind switch
+                        {
+                            "wrong-season" => " снята — файл оказался ЧУЖОГО сезона",
+                            "upgraded" => " снята — ту же серию держит раздача получше",
+                            _ => " замещена основной"
+                        }) + " (донор " + a.donorHash + ")");
                     }
                     else if (a.kind == "delete-donor" || a.kind == "dead-donor")
                     {
@@ -1360,6 +1792,13 @@ public partial class QbitController
                     var f = dfiles.FirstOrDefault(x => (x.Value<int?>("index") ?? -1) == fi);
                     if (f == null) continue;
 
+                    // Сезон берём из САМОГО ФАЙЛА, запись — только фолбэк. Записи, сделанные до фикса
+                    // сезонного гейта, врут: у «Укрытия» файлы Silo.S02.E07…E10 лежали как season=3.
+                    // Так чужой сезон исчезает из карточки сразу после рестарта, не дожидаясь охоты.
+                    int fseason = FileSeason(f);
+                    if (fseason > 0) es = fseason;
+                    if (season > 0 && es > 0 && es != season) continue;
+
                     var mainSame = parsed.FirstOrDefault(x => x.Value<string>("source") == "main"
                         && x.Value<int?>("episode") == ep
                         && (es <= 0 || x.Value<int?>("season") == (es > 0 ? es : season)));
@@ -1368,12 +1807,30 @@ public partial class QbitController
                         if ((mainSame.Value<double?>("progress") ?? 0) >= 0.999) continue;   // основная готова — донор не нужен
                         parsed.Remove(mainSame);                                             // основная ещё качается → пока донор
                     }
-                    parsed.Add(entry(dh, f, "donor", es, ep));
+
+                    // Апгрейд в процессе: ту же серию держат два донора (старый и новый, получше).
+                    // Пока проигравшего не снял ScanReplacements, показываем ОДНУ копию — докачанную,
+                    // а при равенстве ту, у которой скор выше.
+                    var donorSame = parsed.FirstOrDefault(x => x.Value<string>("source") == "donor"
+                        && x.Value<int?>("episode") == ep && x.Value<int?>("season") == (es > 0 ? es : season));
+                    if (donorSame != null)
+                    {
+                        double haveP = donorSame.Value<double?>("progress") ?? 0, newP = f.Value<double?>("progress") ?? 0;
+                        double haveS = donorSame.Value<double?>("dscore") ?? -1, newS = donor.Value<double?>("score") ?? -1;
+                        bool newWins = newP >= 0.999 && haveP < 0.999 || (newP >= 0.999) == (haveP >= 0.999) && newS > haveS;
+                        if (!newWins) continue;
+                        parsed.Remove(donorSame);
+                    }
+
+                    var de = entry(dh, f, "donor", es, ep);
+                    de["dscore"] = donor.Value<double?>("score") ?? -1;   // служебное: только для выбора копии выше
+                    parsed.Add(de);
                 }
             }
 
         var ordered = parsed.OrderBy(x => x.Value<int?>("season") ?? 0).ThenBy(x => x.Value<int?>("episode") ?? 0).ToList();
         ordered.AddRange(unparsed);
+        foreach (var o in ordered) o.Remove("dscore");   // служебное поле наружу не отдаём
         return new JArray(ordered);
     }
 

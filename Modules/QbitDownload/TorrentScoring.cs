@@ -105,26 +105,50 @@ public static class TorrentScoring
     }
 
     // «2 сезон» / «Сезон: 1-3» / «Сезоны 1-3» / «S02» / «S01-S03» / «Season 2» → множество номеров сезонов.
+    // Индексы 4 и 6 («сезон[:] A-B» / «season A-B») ДВУСМЫСЛЕННЫ и прикрыты гардом RangeIsEpisodes —
+    // см. комментарий там.
     static readonly Regex[] _seasonRx =
     {
         new Regex(@"(?i)(?<![A-Za-z0-9])S(\d{1,2})\s*-\s*S?(\d{1,2})(?![0-9])", RegexOptions.Compiled),
         new Regex(@"(?i)(?<![A-Za-z0-9])S(\d{1,2})(?![0-9\-])", RegexOptions.Compiled),
         new Regex(@"(?i)(\d{1,2})\s*-\s*(\d{1,2})\s*сезон", RegexOptions.Compiled),
         new Regex(@"(?i)(?<![-\d])(\d{1,2})\s*сезон", RegexOptions.Compiled),
-        new Regex(@"(?i)сезон\w*\s*[:№#]?\s*(\d{1,2})\s*-\s*(\d{1,2})", RegexOptions.Compiled),
+        new Regex(@"(?i)сезон\w*\s*[:№#]?\s*(\d{1,2})\s*-\s*(\d{1,2})(?![0-9])", RegexOptions.Compiled),
         new Regex(@"(?i)сезон\w*\s*[:№#]?\s*(\d{1,2})(?![0-9\-])", RegexOptions.Compiled),
-        new Regex(@"(?i)season\s*(\d{1,2})\s*-\s*(\d{1,2})", RegexOptions.Compiled),
+        new Regex(@"(?i)season\s*(\d{1,2})\s*-\s*(\d{1,2})(?![0-9])", RegexOptions.Compiled),
         new Regex(@"(?i)season\s*(\d{1,2})(?![0-9\-])", RegexOptions.Compiled),
     };
+
+    // Формат kinozal «(2 сезон: 1-10 серии из 10)»: диапазон после слова «сезон» — это СЕРИИ, а не
+    // сезоны. Зеркало гарда _covSeriesWordRx выше (там та же двусмысленность ломала полноту серий,
+    // claude/06 §AZ), только в другую сторону. Без гарда раздача ВТОРОГО сезона отдавала {1..10},
+    // множество накрывало любой охотимый сезон — сезонный гейт охоты (FilterDonorCandidates)
+    // пропускал её донором, скоринг давал +12 «сезон совпал», и в 3-й сезон «Укрытия» приехали
+    // серии 2-го (инцидент 2026-08-09).
+    // Два независимых признака «это серии»:
+    //   • номер сезона уже назван ПЕРЕД словом («2 сезон: 1-10») — второй раз его не объявляют;
+    //   • сразу после диапазона стоит слово серий («1-10 серии»).
+    // Слово «из» признаком НЕ является: «Сезон 1-3 из 5» — легитимные сезоны.
+    static readonly Regex _numBeforeSeasonRx = new Regex(@"(?<!\d)\d{1,2}\s*$", RegexOptions.Compiled);
+    static readonly Regex _epWordAfterRangeRx = new Regex(@"(?i)^\s*(?:сери[ияйе]\w*|серий|эпизод\w*|episodes?\b)", RegexOptions.Compiled);
+
+    static bool RangeIsEpisodes(string t, Match m)
+    {
+        int from = Math.Max(0, m.Index - 6);
+        if (_numBeforeSeasonRx.IsMatch(t.Substring(from, m.Index - from))) return true;
+        int end = m.Index + m.Length, len = Math.Min(12, t.Length - end);
+        return len > 0 && _epWordAfterRangeRx.IsMatch(t.Substring(end, len));
+    }
 
     public static List<int> ParseSeasons(string title)
     {
         var set = new SortedSet<int>();
         string t = title ?? "";
-        foreach (var rx in _seasonRx)
+        for (int i = 0; i < _seasonRx.Length; i++)
         {
-            foreach (Match m in rx.Matches(t))
+            foreach (Match m in _seasonRx[i].Matches(t))
             {
+                if ((i == 4 || i == 6) && RangeIsEpisodes(t, m)) continue;   // «N сезон: A-B серии» — это серии
                 int a = int.Parse(m.Groups[1].Value);
                 int b = m.Groups.Count > 2 && m.Groups[2].Success ? int.Parse(m.Groups[2].Value) : a;
                 if (b < a || b - a > 30 || a <= 0) continue;
