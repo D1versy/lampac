@@ -131,6 +131,20 @@ RUN apt-get update \
     /usr/share/info \
     /usr/share/common-licenses
 
+# Промежуточные сертификаты, которые сайты трекеров забывают досылать в цепочке.
+# Проблема: torrent.by отдаёт ТОЛЬКО лист без промежуточного YE2 → OpenSSL внутри
+# контейнера обрывает рукопожатие («unable to get local issuer certificate»), хотя из
+# Windows на хосте сайт открывается: schannel умеет дотягивать недостающее звено по AIA,
+# а curl/OpenSSL — нет. Локальная копия промежуточного закрывает дыру.
+# ⚠️ Если трекер снова отвалится с unknown CA — значит он перевыпустился под другим
+# промежуточным. Лечится за минуту: взять URL из AIA сертификата и положить сюда файл
+#   openssl s_client -connect <host>:443 -servername <host> </dev/null | \
+#     openssl x509 -noout -text | grep -A1 "Authority Information Access"
+#   curl -s <URI> | openssl x509 -inform DER -out certs/<name>.pem
+COPY certs/*.pem /usr/local/share/ca-certificates/
+RUN for f in /usr/local/share/ca-certificates/*.pem; do mv "$f" "${f%.pem}.crt"; done \
+    && update-ca-certificates
+
 # Create non-root user before COPY to use --chown
 RUN groupadd -r -g 1000 lampac \
     && useradd -r -u 1000 -g lampac -d /lampac lampac
