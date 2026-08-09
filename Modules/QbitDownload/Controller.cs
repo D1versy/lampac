@@ -288,9 +288,16 @@ public partial class QbitController : BaseController
         // и всё, что узкие ветки «фильм/сериал» пропускают. Аниме TMDB отдаёт как media_type='tv' →
         // is_serial=2 его теряет, а «через торрент» находит именно широкой веткой. Мержим «и ту, и свою»
         // выдачу с дедупом по btih/parselink. См. claude/06 §A2.
+        // ⚠️ Широкий проход идёт БЕЗ года — намеренно. Удалённый индекс, получив ПАРУ
+        // «title + year», требует, чтобы год нашёлся и в самой раздаче. По отдельности
+        // каждый параметр безобиден, а вместе они режут выдачу: у «Великий расхититель
+        // гробниц» (корейский дунхуа 2026) из трёх существующих раздач доходила ОДНА —
+        // две с rutracker (одна с 29 сидами) отваливались, потому что года в их названиях нет.
+        // Смысл широкого прохода в том, чтобы ловить всё, что теряют узкие ветки, поэтому
+        // сужать его ещё и годом неправильно. Релевантность добирает наш отсев по имени.
         var passes = new List<Task<JArray>> { FetchIndexer(query, title, title_original, year, is_serial, apikey) };
         if (is_serial >= 1)
-            passes.Add(FetchIndexer(query, title, title_original, year, 0, apikey));
+            passes.Add(FetchIndexer(query, title, title_original, 0, 0, apikey));
 
         int indexerPasses = passes.Count;
 

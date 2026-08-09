@@ -87,6 +87,47 @@ public class TorrentScoringTests
     [InlineData("Ghost in the Shell (1995) BDRip")]          // «ost» внутри слова — не маркер
     public void IsNonVideo_RealRelease_False(string title) => Assert.False(TorrentScoring.IsNonVideo(title));
 
+    // ── IsOtherMovieYear: сиквел франшизы — это другой фильм ──────────────
+    [Theory]
+    // «Дюна (2021)» ищем — «Часть вторая (2024)» не она
+    [InlineData("Дюна: Часть вторая / Dune: Part Two (2024) UHD BDRemux", 2021, false, true)]
+    [InlineData("Миньоны: Грювитация / Minions: The Rise of Gru (2022) BDRip", 2015, false, true)]
+    public void IsOtherMovieYear_Sequel(string title, int year, bool serial, bool expected)
+        => Assert.Equal(expected, TorrentScoring.IsOtherMovieYear(title, year, serial));
+
+    [Theory]
+    // сам фильм — год сходится (в т.ч. ±1: релиз мог выйти на границе года)
+    [InlineData("Дюна / Dune (2021) BDRemux 1080p", 2021, false)]
+    [InlineData("Дюна / Dune (2022) WEB-DL", 2021, false)]
+    // ⚠️ год в САМОМ названии: «2049» — часть имени, спасает второй найденный год 2017
+    [InlineData("Бегущий по лезвию 2049 / Blade Runner 2049 (2017) BDRip", 2017, false)]
+    // года в названии нет вовсе → отсутствие данных не улика, не режем
+    [InlineData("Дюна / Dune BDRemux 2160p", 2021, false)]
+    // сериал: раздачи законно датируются годами позже старта (сезоны)
+    [InlineData("Игра престолов / Game of Thrones (2019) 8 сезон", 2011, true)]
+    public void IsOtherMovieYear_НеРежет(string title, int year, bool serial)
+        => Assert.False(TorrentScoring.IsOtherMovieYear(title, year, serial));
+
+    [Fact]
+    public void Год_карточки_неизвестен_фильтр_молчит()
+        => Assert.False(TorrentScoring.IsOtherMovieYear("Дюна: Часть вторая (2024)", 0, false));
+
+    [Fact]
+    public void SortAndMark_ВырезаетСиквел_НоНеТронетIdMatch()
+    {
+        var right = Tor("Дюна / Dune (2021) BDRemux 1080p", 20);
+        var sequel = Tor("Дюна: Часть вторая / Dune: Part Two (2024) UHD BDRemux", 90);
+        // найдено по TMDB id — совпадение точное, год ему не указ
+        var byId = new JObject { ["title"] = "Dune.2024.Part.Two.2160p", ["sid"] = 5, ["id_match"] = true };
+
+        var res = TorrentScoring.SortAndMark(new JArray(right, sequel, byId), Ctx("Дюна", "Dune", 2021, false), 5);
+
+        var titles = res.Select(x => x.Value<string>("title")).ToList();
+        Assert.DoesNotContain(titles, t => t.Contains("Часть вторая"));
+        Assert.Contains(titles, t => t.Contains("(2021)"));
+        Assert.Contains(titles, t => t.Contains("Dune.2024.Part.Two"));   // id_match уцелел
+    }
+
     // ── SortAndMark: отсев чужих тайтлов ──────────────────────────────────
     [Fact]
     public void SortAndMark_DropsForeignTitleAndNonVideo()

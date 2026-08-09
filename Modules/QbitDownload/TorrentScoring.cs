@@ -155,6 +155,23 @@ public static class TorrentScoring
     public static bool IsNonVideo(string title)
         => !string.IsNullOrEmpty(title) && _nonVideoRx.IsMatch(title) && !_videoMarkRx.IsMatch(title);
 
+    /// <summary>
+    /// Другой фильм той же франшизы: в названии ЗАЯВЛЕН год, и ни один из заявленных не сходится
+    /// с годом карточки. «Дюна: Часть вторая (2024)» в выдаче «Дюны (2021)» — именно этот случай.
+    ///
+    /// Только для ФИЛЬМОВ: у сериала раздачи законно датируются годами позже старта (сезоны).
+    /// Год в названии не заявлен → НЕ режем: отсутствие данных не улика.
+    /// Достаточно одного совпадения из всех найденных — «Бегущий по лезвию 2049 (2017)» даёт
+    /// годы {2049, 2017}, и 2017 спасает раздачу от ложного отсева.
+    /// </summary>
+    public static bool IsOtherMovieYear(string title, int wantYear, bool isSerial)
+    {
+        if (isSerial || wantYear <= 0 || string.IsNullOrEmpty(title)) return false;
+        var years = ParseYears(title);
+        if (years.Count == 0) return false;
+        return !years.Any(y => Math.Abs(y - wantYear) <= 1);
+    }
+
     // ── язык раздачи ────────────────────────────────────────────────────────
     // Кириллица в названии — сама по себе надёжный признак русского релиза
     // (так распознаются почти все раздачи русских трекеров).
@@ -374,7 +391,7 @@ public static class TorrentScoring
     {
         var scored = new List<(JObject t, ScoreResult r)>();
         var nameMissed = new List<(JObject t, ScoreResult r)>();   // отложены, а не выброшены (см. предохранитель ниже)
-        int dropNonVideo = 0;
+        int dropNonVideo = 0, dropOtherYear = 0;
 
         foreach (var tok in items)
         {
@@ -392,6 +409,11 @@ public static class TorrentScoring
             if (dropIrrelevant)
             {
                 if (IsNonVideo(t.Value<string>("title"))) { dropNonVideo++; continue; }
+                // Другой фильм франшизы (сиквел/приквел): широкий проход намеренно ходит без
+                // года, поэтому отсекать «Часть вторую» из выдачи первой части приходится здесь.
+                // ⚠️ id_match не трогаем: там совпадение по TMDB id, оно сильнее любого года.
+                if (t.Value<bool?>("id_match") != true && IsOtherMovieYear(t.Value<string>("title"), ctx.year, ctx.isSerial))
+                { dropOtherYear++; continue; }
                 // nameMiss = названия карточки нет в строке НИ в русском, ни в оригинальном
                 // виде → это просто другой тайтл (так в выдаче «Дюны» жил «Отдел С.С.С.Р»).
                 if (r.nameMiss) { nameMissed.Add((t, r)); continue; }
@@ -410,8 +432,8 @@ public static class TorrentScoring
             nameMissed.Clear();
         }
 
-        if (dropNonVideo > 0 || nameMissed.Count > 0)
-            Console.WriteLine($"[QbitDownload] скоринг «{ctx.titleNorm}»: отсев {dropNonVideo + nameMissed.Count} (не видео {dropNonVideo}, чужое имя {nameMissed.Count}), осталось {scored.Count}");
+        if (dropNonVideo > 0 || dropOtherYear > 0 || nameMissed.Count > 0)
+            Console.WriteLine($"[QbitDownload] скоринг «{ctx.titleNorm}»: отсев {dropNonVideo + dropOtherYear + nameMissed.Count} (не видео {dropNonVideo}, другой год {dropOtherYear}, чужое имя {nameMissed.Count}), осталось {scored.Count}");
 
         var ordered = scored
             .OrderByDescending(x => x.r.score)
