@@ -35,6 +35,14 @@ namespace JacRed.Models.AppConf
         /// <summary>Гонять запросы этого трекера через FlareSolverr (обход Cloudflare).</summary>
         public bool useflaresolverr { get; set; }
 
+        /// <summary>
+        /// Персональный выключатель прямого фолбэка при отказе прокси.
+        /// null (по умолчанию) = наследовать Jackett.proxyFallbackDirect.
+        /// ⚠️ Именно bool?, а не bool: трёхзначность обязательна — трекер, у которого забанен наш
+        /// собственный IP, должен уметь сказать false, а остальные — не переопределять дефолт.
+        /// </summary>
+        public bool? proxyFallbackDirect { get; set; }
+
         public bool useproxy { get; set; }
 
         public bool useproxystream { get; set; }

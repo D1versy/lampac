@@ -12,6 +12,19 @@
         // TrackerSettings.useflaresolverr, как это сделано у useproxy.
         public FlareSolverrConf flaresolverr = new FlareSolverrConf();
 
+        /// <summary>
+        /// Прокси не ответил (или отдал не тот сайт) — сходить тем же запросом напрямую.
+        /// Ровно ОДИН ретрай. При useproxy:false ветка недостижима, поведение не меняется.
+        /// Персональное отключение на трекере — TrackerSettings.proxyFallbackDirect.
+        /// </summary>
+        public bool proxyFallbackDirect = true;
+
+        /// <summary>
+        /// Сколько секунд помнить вердикт: удачный прямой путь → ходим сразу мимо прокси;
+        /// оба пути мертвы → ретрай выключен (лежит трекер, а не прокси). Клампится снизу до 30.
+        /// </summary>
+        public int proxyFallbackCooldownSeconds = 300;
+
 
         public TrackerSettings Rutor = new TrackerSettings("https://rutor.info"/*, priority: "torrent"*/);
 

@@ -54,7 +54,12 @@ namespace JacRed.Controllers
             #region html
             var proxyManager = new ProxyManager("toloka", jackett.Toloka);
 
-            string html = await Http.Get($"{jackett.Toloka.host}/tracker.php?prev_sd=0&prev_a=0&prev_my=0&prev_n=0&prev_shc=0&prev_shf=1&prev_sha=1&prev_cg=0&prev_ct=0&prev_at=0&prev_nt=0&prev_de=0&prev_nd=0&prev_tcs=1&prev_shs=0&f%5B%5D=-1&o=1&s=2&tm=-1&shf=1&sha=1&tcs=1&sns=-1&sds=-1&nm={HttpUtility.UrlEncode(query)}&pn=&send=%D0%9F%D0%BE%D1%88%D1%83%D0%BA", proxy: proxyManager.Get(), cookie: cookie, timeoutSeconds: jackett.timeoutSeconds);
+            // Маркер «дошли до toloka» — критерий валидности для прокси-фолбэка. Страница входа
+            // тоже отдаёт lang="uk", и это правильно: >Вихід ниже — про логин, а не про транспорт.
+            static bool ok(string h) => h != null && h.Contains("<html lang=\"uk\"");
+
+            string html = await HttpOrDirect("toloka", jackett.Toloka, proxyManager, ok,
+                p => Http.Get($"{jackett.Toloka.host}/tracker.php?prev_sd=0&prev_a=0&prev_my=0&prev_n=0&prev_shc=0&prev_shf=1&prev_sha=1&prev_cg=0&prev_ct=0&prev_at=0&prev_nt=0&prev_de=0&prev_nd=0&prev_tcs=1&prev_shs=0&f%5B%5D=-1&o=1&s=2&tm=-1&shf=1&sha=1&tcs=1&sns=-1&sds=-1&nm={HttpUtility.UrlEncode(query)}&pn=&send=%D0%9F%D0%BE%D1%88%D1%83%D0%BA", proxy: p, cookie: cookie, timeoutSeconds: jackett.timeoutSeconds));
 
             if (html != null && html.Contains("<html lang=\"uk\""))
             {

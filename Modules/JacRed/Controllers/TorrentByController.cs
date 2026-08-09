@@ -45,9 +45,16 @@ namespace JacRed.Controllers
             #region html
             var proxyManager = new ProxyManager("torrentby", jackett.TorrentBy);
 
-            string html = await Http.Get($"{jackett.TorrentBy.host}/search/?search={HttpUtility.UrlEncode(query)}&category={cat}", proxy: proxyManager.Get(), timeoutSeconds: jackett.timeoutSeconds);
+            // ⚠️ id="find" — форма поиска. Она есть на любой НАСТОЯЩЕЙ странице torrent.by и её
+            // НЕТ на странице капчи, которую сайт отдаёт с кодом 200 при превышении лимита
+            // запросов с одного IP («С вашего IP адреса поступают подозрительные запросы»).
+            // Поэтому маркер заодно защищает выдачу от мусора — см. claude/06 §BB.
+            static bool ok(string h) => h != null && h.Contains("id=\"find\"");
 
-            if (html == null || !html.Contains("id=\"find\""))
+            string html = await HttpOrDirect("torrentby", jackett.TorrentBy, proxyManager, ok,
+                p => Http.Get($"{jackett.TorrentBy.host}/search/?search={HttpUtility.UrlEncode(query)}&category={cat}", proxy: p, timeoutSeconds: jackett.timeoutSeconds));
+
+            if (!ok(html))
             {
                 consoleErrorLog("torrentby");
                 proxyManager.Refresh();

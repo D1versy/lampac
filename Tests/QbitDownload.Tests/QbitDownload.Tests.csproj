@@ -55,6 +55,12 @@
     <Compile Include="..\..\Modules\QbitDownload\LocalIndex.cs" Link="Module\LocalIndex.cs" />
     <Compile Include="..\..\Modules\QbitDownload\IndexCrawler.cs" Link="Module\IndexCrawler.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Controller.cs" Link="Module\Controller.cs" />
+
+    <!-- JacRed: линкуем ТОЛЬКО ProxyFallback.cs — он намеренно не обращается ни к ModInit, ни к
+         BaseController, поэтому коллизии JacRed.ModInit / QbitDownload.ModInit не возникает.
+         ⚠️ Не линковать сюда GlobalUsings.cs модуля: его global using подействовал бы на ВСЮ
+         тестовую сборку. -->
+    <Compile Include="..\..\Modules\JacRed\Engine\ProxyFallback.cs" Link="JacRed\ProxyFallback.cs" />
   </ItemGroup>
 
 </Project>

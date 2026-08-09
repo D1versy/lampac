@@ -228,9 +228,17 @@ namespace JacRed.Controllers
         #region getSearchHtml / isLoginPage
         static Task<string> getSearchHtml(string query, ProxyManager proxyManager)
         {
-            return Http.Get($"{jackett.Kinozal.host}/browse.php?s={HttpUtility.UrlEncode(query)}&g=0&c=0&v=0&d=0&w=0&t=0&f=0",
-                            proxy: proxyManager.Get(), cookie: jackett.Kinozal.cookie ?? Cookie, timeoutSeconds: jackett.timeoutSeconds);
+            // Обёрнут ТОЛЬКО этот метод: оба его вызова в parsePage (обычный и после перелогина)
+            // наследуют фолбэк, а к моменту второго вердикт уже записан — третьего запроса не будет.
+            return HttpOrDirect("kinozal", jackett.Kinozal, proxyManager, reached,
+                p => Http.Get($"{jackett.Kinozal.host}/browse.php?s={HttpUtility.UrlEncode(query)}&g=0&c=0&v=0&d=0&w=0&t=0&f=0",
+                              proxy: p, cookie: jackett.Kinozal.cookie ?? Cookie, timeoutSeconds: jackett.timeoutSeconds));
         }
+
+        // ⚠️ Для прокси-фолбэка вопрос «дошли ли мы до kinozal», а НЕ «залогинены ли мы»: страница
+        // входа — это тоже kinozal, протухшую куку лечит перелогин ниже, а не прямой запрос.
+        // Если сюда подставить isLoginPage, каждый протухший cookie стоил бы лишнего похода.
+        static bool reached(string h) => h != null && (h.Contains("takelogin.php") || h.Contains("details.php?id="));
 
         // Маркер по ASCII, а не по «Кинозал.ТВ»: домен переезжает (сейчас .GURU), а форма входа
         // всегда постит на takelogin.php. Заодно не зависит от кодировки страницы (WINDOWS-1251).

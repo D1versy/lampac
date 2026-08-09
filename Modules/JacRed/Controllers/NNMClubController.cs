@@ -70,7 +70,14 @@ namespace JacRed.Controllers
 
             #region html
             string data = $"prev_sd=0&prev_a=0&prev_my=0&prev_n=0&prev_shc=0&prev_shf=1&prev_sha=1&prev_shs=0&prev_shr=0&prev_sht=0&o=1&s=2&tm=-1&shf=1&sha=1&ta=-1&sns=-1&sds=-1&nm={HttpUtility.UrlEncode(query, Encoding.GetEncoding(1251))}&pn=&submit=%CF%EE%E8%F1%EA";
-            string html = await Http.Post($"{jackett.NNMClub.host}/forum/tracker.php", new System.Net.Http.StringContent(data, Encoding.UTF8, "application/x-www-form-urlencoded"), encoding: Encoding.GetEncoding(1251), proxy: proxyManager.Get(), timeoutSeconds: jackett.timeoutSeconds);
+
+            // Маркер «дошли до nnmclub» — критерий валидности для прокси-фолбэка (страница входа
+            // тоже содержит его, и это правильно: перелогин лечится не прямым запросом).
+            // ⚠️ StringContent строится ВНУТРИ лямбды: отправленное тело не переиспользуется.
+            static bool ok(string h) => h != null && h.Contains("NNM-Club</title>");
+
+            string html = await HttpOrDirect("nnmclub", jackett.NNMClub, proxyManager, ok,
+                p => Http.Post($"{jackett.NNMClub.host}/forum/tracker.php", new System.Net.Http.StringContent(data, Encoding.UTF8, "application/x-www-form-urlencoded"), encoding: Encoding.GetEncoding(1251), proxy: p, timeoutSeconds: jackett.timeoutSeconds));
 
             if (html != null && html.Contains("NNM-Club</title>"))
             {

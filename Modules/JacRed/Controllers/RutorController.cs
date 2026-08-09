@@ -47,9 +47,13 @@ namespace JacRed.Controllers
 
             var proxyManager = new ProxyManager("rutor", jackett.Rutor);
 
-            string html = await Http.Get($"{jackett.Rutor.host}/search" + (cat == "0" ? $"/{HttpUtility.UrlEncode(query)}" : $"/0/{cat}/000/0/{HttpUtility.UrlEncode(query)}"), proxy: proxyManager.Get(), timeoutSeconds: jackett.timeoutSeconds);
+            // Маркер «дошли до rutor» — он же критерий валидности для прокси-фолбэка.
+            static bool ok(string h) => h != null && h.Contains("id=\"logo\"");
 
-            if (html == null || !html.Contains("id=\"logo\""))
+            string html = await HttpOrDirect("rutor", jackett.Rutor, proxyManager, ok,
+                p => Http.Get($"{jackett.Rutor.host}/search" + (cat == "0" ? $"/{HttpUtility.UrlEncode(query)}" : $"/0/{cat}/000/0/{HttpUtility.UrlEncode(query)}"), proxy: p, timeoutSeconds: jackett.timeoutSeconds));
+
+            if (!ok(html))
             {
                 consoleErrorLog("rutor");
                 proxyManager.Refresh();

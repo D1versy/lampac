@@ -43,7 +43,10 @@ namespace JacRed.Controllers
                 string id = new Regex("href=\"/index.php\\?do=download&id=([0-9]+)").Match(html).Groups[1].Value;
                 if (!string.IsNullOrWhiteSpace(id))
                 {
-                    var _t = await Http.Download($"{jackett.Selezen.host}/index.php?do=download&id={id}", cookie: cookie, referer: jackett.Selezen.host, timeoutSeconds: 10);
+                    // proxy: раньше эта загрузка одна во всём контроллере ходила МИМО прокси —
+                    // при useproxy:true торрент-файл утекал с реального IP. Фолбэка тут нет
+                    // намеренно: разовое пользовательское действие, ниже уже есть запасной магнит.
+                    var _t = await Http.Download($"{jackett.Selezen.host}/index.php?do=download&id={id}", cookie: cookie, referer: jackett.Selezen.host, timeoutSeconds: 10, proxy: proxyManager.Get());
                     if (_t != null && BencodeTo.Magnet(_t) != null)
                         return File(_t, "application/x-bittorrent");
                 }
@@ -72,7 +75,12 @@ namespace JacRed.Controllers
             #region html
             var proxyManager = new ProxyManager("selezen", jackett.Selezen);
 
-            string html = await Http.Post($"{jackett.Selezen.host}/index.php?do=search", $"do=search&subaction=search&search_start=0&full_search=0&result_from=1&story={HttpUtility.UrlEncode(query)}&titleonly=0&searchuser=&replyless=0&replylimit=0&searchdate=0&beforeafter=after&sortby=date&resorder=desc&showposts=0&catlist%5B%5D=9", proxy: proxyManager.Get(), cookie: cookie, timeoutSeconds: jackett.timeoutSeconds);
+            // Маркер «дошли до selezen» (движок DLE) — критерий валидности для прокси-фолбэка;
+            // проверка логина ниже отдельно, прямым запросом она не лечится.
+            static bool ok(string h) => h != null && h.Contains("dle_root");
+
+            string html = await HttpOrDirect("selezen", jackett.Selezen, proxyManager, ok,
+                p => Http.Post($"{jackett.Selezen.host}/index.php?do=search", $"do=search&subaction=search&search_start=0&full_search=0&result_from=1&story={HttpUtility.UrlEncode(query)}&titleonly=0&searchuser=&replyless=0&replylimit=0&searchdate=0&beforeafter=after&sortby=date&resorder=desc&showposts=0&catlist%5B%5D=9", proxy: p, cookie: cookie, timeoutSeconds: jackett.timeoutSeconds));
 
             if (html != null && html.Contains("dle_root"))
             {

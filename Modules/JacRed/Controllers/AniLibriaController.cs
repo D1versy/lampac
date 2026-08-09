@@ -33,8 +33,16 @@ namespace JacRed.Controllers
 
             var proxyManager = new ProxyManager("anilibria", jackett.Anilibria);
 
-            var roots = await Http.Get<List<RootObject>>("https://api.anilibria.tv/v2/searchTitles?search=" + HttpUtility.UrlEncode(query), timeoutSeconds: jackett.timeoutSeconds, proxy: proxyManager.Get(), IgnoreDeserializeObject: true);
-            if (roots == null || roots.Count == 0)
+            // Здесь JSON, а не HTML: «дошли» = распарсился непустой список.
+            // ⚠️ Пустая выдача по редкому тайтлу тоже считается отказом и потратит один прямой
+            // запрос — это осознанный размен: отличить «ничего не найдено» от «прокси лёг» на
+            // этом API нечем, а вердикт NoRetry гасит повтор до конца кулдауна.
+            static bool ok(List<RootObject> r) => r != null && r.Count > 0;
+
+            var roots = await HttpOrDirect("anilibria", jackett.Anilibria, proxyManager, ok,
+                p => Http.Get<List<RootObject>>("https://api.anilibria.tv/v2/searchTitles?search=" + HttpUtility.UrlEncode(query), timeoutSeconds: jackett.timeoutSeconds, proxy: p, IgnoreDeserializeObject: true));
+
+            if (!ok(roots))
             {
                 consoleErrorLog("anilibria");
                 proxyManager.Refresh();

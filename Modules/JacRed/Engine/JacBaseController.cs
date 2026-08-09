@@ -1,4 +1,5 @@
 ﻿using JacRed.Models.AppConf;
+using System.Net;
 
 namespace JacRed.Engine
 {
@@ -41,5 +42,24 @@ namespace JacRed.Engine
         {
             Console.WriteLine($"JacRed: InternalServerError - {plugin}" + (reason != null ? $" ({reason})" : ""));
         }
+
+        /// <summary>
+        /// Запрос с фолбэком на прямой IP: прокси не ответил (или отдал не тот сайт) — ровно один
+        /// прямой ретрай. Вся политика и состояние — в <see cref="ProxyFallback"/>; обёртка живёт
+        /// здесь, чтобы формат лога (consoleErrorLog) остался в ОДНОМ месте, а ProxyFallback не
+        /// тянул за собой ни ModInit, ни BaseController и линковался в тесты одной строкой.
+        ///
+        /// Выключатели: Jackett.proxyFallbackDirect (глобально) + TrackerSettings.proxyFallbackDirect
+        /// (персонально, null = наследовать) — у трекера, забанившего наш собственный IP, должно
+        /// быть право отказаться от прямого пути.
+        /// </summary>
+        public static Task<T> HttpOrDirect<T>(string plugin, TrackerSettings tracker, ProxyManager proxyManager,
+                                              Func<T, bool> ok, Func<WebProxy, Task<T>> send) where T : class
+            => ProxyFallback.Run(plugin,
+                                 proxyManager != null ? proxyManager.Get : null,
+                                 send, ok,
+                                 tracker?.proxyFallbackDirect ?? jackett.proxyFallbackDirect,
+                                 jackett.proxyFallbackCooldownSeconds,
+                                 consoleErrorLog);
     }
 }

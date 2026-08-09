@@ -42,18 +42,22 @@ namespace JacRed.Controllers
             #region html
             var proxyManager = new ProxyManager("megapeer", jackett.Megapeer);
 
-            string html = await Http.Get($"{jackett.Megapeer.host}/browse.php?search={HttpUtility.UrlEncode(query, Encoding.GetEncoding(1251))}&cat={cat}", encoding: Encoding.GetEncoding(1251), proxy: proxyManager.Get(), timeoutSeconds: jackett.timeoutSeconds, headers: HeadersModel.Init(
-                ("dnt", "1"),
-                ("pragma", "no-cache"),
-                ("referer", $"{jackett.Megapeer.host}"),
-                ("sec-fetch-dest", "document"),
-                ("sec-fetch-mode", "navigate"),
-                ("sec-fetch-site", "same-origin"),
-                ("sec-fetch-user", "?1"),
-                ("upgrade-insecure-requests", "1")
-            ));
+            // Маркер «дошли до megapeer» — он же критерий валидности для прокси-фолбэка.
+            static bool ok(string h) => h != null && h.Contains("id=\"logo\"") && !h.Contains("<H1>Раздачи за последние");
 
-            if (html == null || !html.Contains("id=\"logo\"") || html.Contains("<H1>Раздачи за последние"))
+            string html = await HttpOrDirect("megapeer", jackett.Megapeer, proxyManager, ok,
+                p => Http.Get($"{jackett.Megapeer.host}/browse.php?search={HttpUtility.UrlEncode(query, Encoding.GetEncoding(1251))}&cat={cat}", encoding: Encoding.GetEncoding(1251), proxy: p, timeoutSeconds: jackett.timeoutSeconds, headers: HeadersModel.Init(
+                    ("dnt", "1"),
+                    ("pragma", "no-cache"),
+                    ("referer", $"{jackett.Megapeer.host}"),
+                    ("sec-fetch-dest", "document"),
+                    ("sec-fetch-mode", "navigate"),
+                    ("sec-fetch-site", "same-origin"),
+                    ("sec-fetch-user", "?1"),
+                    ("upgrade-insecure-requests", "1")
+                )));
+
+            if (!ok(html))
             {
                 consoleErrorLog("megapeer");
                 proxyManager.Refresh();

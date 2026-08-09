@@ -41,9 +41,13 @@ namespace JacRed.Controllers
             var proxyManager = new ProxyManager("bigfangroup", jackett.BigFanGroup);
 
             #region Кеш html
-            string html = await Http.Get($"{jackett.BigFanGroup.host}/browse.php?search=" + HttpUtility.UrlEncode(query), proxy: proxyManager.Get(), timeoutSeconds: jackett.timeoutSeconds);
+            // Маркер «дошли до bigfangroup» — он же критерий валидности для прокси-фолбэка.
+            static bool ok(string h) => h != null && h.Contains("id=\"searchinput\"");
 
-            if (html == null || !html.Contains("id=\"searchinput\""))
+            string html = await HttpOrDirect("bigfangroup", jackett.BigFanGroup, proxyManager, ok,
+                p => Http.Get($"{jackett.BigFanGroup.host}/browse.php?search=" + HttpUtility.UrlEncode(query), proxy: p, timeoutSeconds: jackett.timeoutSeconds));
+
+            if (!ok(html))
             {
                 consoleErrorLog("bigfangroup");
                 return null;

@@ -46,7 +46,17 @@ namespace JacRed
                                     return false;
 
                                 var proxyManager = new ProxyManager(name, settings);
-                                string html = await Http.Get($"{settings.host}", timeoutSeconds: conf.Jackett.timeoutSeconds, proxy: proxyManager.Get(), weblog: false);
+
+                                // ⚠️ Сторожевой пинг обязан ходить по тому же правилу, что и парсеры.
+                                // Иначе дохлый прокси гасит трекер (showdown=true → search() выходит
+                                // сразу) ДО того, как парсерный фолбэк успеет сработать, и вся фича
+                                // мертворождённая. Бонус: этот цикл раз в 5 минут ПРОГРЕВАЕТ вердикт
+                                // ProxyFallback — двойной запрос платит фон, а пользовательский поиск
+                                // идёт сразу правильным путём.
+                                string html = await JacBaseController.HttpOrDirect(name, settings, proxyManager,
+                                    h => h != null,
+                                    p => Http.Get($"{settings.host}", timeoutSeconds: conf.Jackett.timeoutSeconds, proxy: p, weblog: false));
+
                                 return html == null;
                             }
 
@@ -82,6 +92,11 @@ namespace JacRed
 
         void updateConf()
         {
+            // Вердикты фолбэка живут в статике и переживают перечит конфига намеренно — но смена
+            // выключателей должна применяться сразу, а не через кулдаун. Значит перечит init.conf
+            // это ещё и рычаг сброса «прокси мёртв / трекер лежит».
+            ProxyFallback.Reset();
+
             conf = ModuleInvoke.Init("JacRed", new JacRedConf()
             {
                 typesearch = "webapi",

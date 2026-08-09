@@ -58,9 +58,13 @@ namespace JacRed.Controllers
             #region html
             var proxyManager = new ProxyManager("anifilm", jackett.Anifilm);
 
-            string html = await Http.Get($"{jackett.Anifilm.host}/releases?title={HttpUtility.UrlEncode(query)}", timeoutSeconds: jackett.timeoutSeconds, proxy: proxyManager.Get());
+            // Маркер «дошли до anifilm» — он же критерий валидности для прокси-фолбэка.
+            static bool ok(string h) => h != null && h.Contains("id=\"ui-components\"");
 
-            if (html == null || !html.Contains("id=\"ui-components\""))
+            string html = await HttpOrDirect("anifilm", jackett.Anifilm, proxyManager, ok,
+                p => Http.Get($"{jackett.Anifilm.host}/releases?title={HttpUtility.UrlEncode(query)}", timeoutSeconds: jackett.timeoutSeconds, proxy: p));
+
+            if (!ok(html))
             {
                 consoleErrorLog("anifilm");
                 proxyManager.Refresh();

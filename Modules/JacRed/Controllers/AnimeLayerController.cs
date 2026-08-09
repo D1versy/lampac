@@ -55,7 +55,12 @@ namespace JacRed.Controllers
             var proxyManager = new ProxyManager("animelayer", jackett.Animelayer);
 
             #region html
-            string html = await Http.Get($"{jackett.Animelayer.host}/torrents/anime/?q={HttpUtility.UrlEncode(query)}", proxy: proxyManager.Get(), cookie: cookie, timeoutSeconds: jackett.timeoutSeconds);
+            // Маркер «дошли до animelayer» — критерий валидности для прокси-фолбэка; проверка
+            // логина ниже отдельно, прямым запросом протухшая кука не лечится.
+            static bool ok(string h) => h != null && h.Contains("id=\"wrapper\"");
+
+            string html = await HttpOrDirect("animelayer", jackett.Animelayer, proxyManager, ok,
+                p => Http.Get($"{jackett.Animelayer.host}/torrents/anime/?q={HttpUtility.UrlEncode(query)}", proxy: p, cookie: cookie, timeoutSeconds: jackett.timeoutSeconds));
 
             if (html != null && html.Contains("id=\"wrapper\""))
             {

@@ -49,7 +49,11 @@ namespace JacRed.Controllers
                 string serie = Regex.Match(html, "href=\"/series/([^\"]+)\" class=\"no-decoration\"").Groups[1].Value;
                 if (!string.IsNullOrWhiteSpace(serie))
                 {
-                    html = await Http.Get($"{jackett.Lostfilm.host}/series/{serie}/seasons/", timeoutSeconds: jackett.timeoutSeconds);
+                    // proxy: второй шаг цепочки один во всём парсере ходил МИМО прокси — при
+                    // useproxy:true половина обхода утекала с реального IP. Прокси-фолбэк сюда не
+                    // ставим: «валидность» тут это ЦЕПОЧКА из двух запросов, обёртка потребовала бы
+                    // перестройки работающего парсера.
+                    html = await Http.Get($"{jackett.Lostfilm.host}/series/{serie}/seasons/", timeoutSeconds: jackett.timeoutSeconds, proxy: proxyManager.Get());
                     if (html != null && html.Contains("LostFilm.TV"))
                         validrq = true;
                 }

@@ -41,9 +41,13 @@ namespace JacRed.Controllers
             #region html
             var proxyManager = new ProxyManager("bitru", jackett.Bitru);
 
-            string html = await Http.Get($"{jackett.Bitru.host}/browse.php?s={HttpUtility.HtmlEncode(query)}&sort=&tmp=&cat=&subcat=&year=&country=&sound=&soundtrack=&subtitles=#content", proxy: proxyManager.Get(), timeoutSeconds: jackett.timeoutSeconds);
+            // Маркер «дошли до bitru» — он же критерий валидности для прокси-фолбэка.
+            static bool ok(string h) => h != null && h.Contains("id=\"logo\"");
 
-            if (html == null || !html.Contains("id=\"logo\""))
+            string html = await HttpOrDirect("bitru", jackett.Bitru, proxyManager, ok,
+                p => Http.Get($"{jackett.Bitru.host}/browse.php?s={HttpUtility.HtmlEncode(query)}&sort=&tmp=&cat=&subcat=&year=&country=&sound=&soundtrack=&subtitles=#content", proxy: p, timeoutSeconds: jackett.timeoutSeconds));
+
+            if (!ok(html))
             {
                 consoleErrorLog("bitru");
                 proxyManager.Refresh();

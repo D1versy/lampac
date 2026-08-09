@@ -151,7 +151,15 @@ namespace JacRed.Controllers
                 #endregion
 
                 #region Кеш html
-                html = await Http.Get($"{jackett.Rutracker.host}/forum/tracker.php?nm=" + HttpUtility.UrlEncode(query), proxy: proxyManager.Get(), cookie: cookie, timeoutSeconds: jackett.timeoutSeconds);
+                // Прокси-фолбэк только на НЕ-солверном пути: у FlareSolverr свой транспорт, свой
+                // кулдаун и свой кеш, WebProxy там не участвует вообще.
+                // ⚠️ Предикат здесь — логин-чек (тот же, что в гарде ниже), в порядке исключения:
+                // на rutracker без куки страница поиска не отдаётся в принципе, так что «дошли»
+                // и «залогинены» это одно и то же. Разлогин стоит одного лишнего запроса, дальше
+                // вердикт NoRetry его гасит.
+                html = await HttpOrDirect("rutracker", jackett.Rutracker, proxyManager,
+                    h => h != null && h.Contains("id=\"logged-in-username\""),
+                    p => Http.Get($"{jackett.Rutracker.host}/forum/tracker.php?nm=" + HttpUtility.UrlEncode(query), proxy: p, cookie: cookie, timeoutSeconds: jackett.timeoutSeconds));
                 #endregion
             }
 
