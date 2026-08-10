@@ -199,4 +199,72 @@ public class ModuleConf : ModuleBaseConf
     // отдельный, заведомо меньший бюджет вместо общего счётчика штук: 24 фона ≈ 120 постеров по байтам.
     public int catalogWarmupBackdropsPerRow { get; set; } = 3; // сколько первых карточек ряда греть фоном
     public int catalogWarmupBackdropBudget { get; set; } = 24; // фонов за тик (ротация курсора добирает хвост)
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // jut.su — вкладка аниме (JutSu*.cs).
+    // Разведка сайта и рунбук: E:\Media-server\claude\jut\
+    // ─────────────────────────────────────────────────────────────────────────
+    public bool jutEnable { get; set; } = true;
+    public string jutHost { get; set; } = "https://jut.su";
+
+    // 🔥 Куки решают ВСЁ: без них jut.su подменяет ссылки на gen.jut.su/.../pixel.png —
+    // заглушку БЕЗ текста ошибки, при целой разметке (label/res на месте). Нужна ровно пара
+    // dle_user_id + dle_password (PHPSESSID и LB_member_sc не влияют ни на что).
+    // ⚠️ Значения — ТОЛЬКО в init.conf (D:\docker\config\lampac, вне git). Сюда не коммитить.
+    public string jutUserId { get; set; } = "";
+    public string jutPassword { get; set; } = "";
+
+    // 🔥 ОДНА константа UA на весь пайплайн (HTML-страница И байты у CDN): hash в CDN-ссылке
+    // криптографически связан с UA, которым запрошена страница. Плеер с чужим UA получит 403 —
+    // поэтому ссылку нельзя отдавать клиенту, только проксировать. Смена значения немедленно
+    // инвалидирует все выданные ссылки. Пусто → JutNet.DefaultUa.
+    public string jutUserAgent { get; set; } = "";
+
+    // Прокси: по умолчанию ходим со СВОЕГО IP, а фолбэк вооружён и подхватывает сам, если
+    // прямой путь отвалился (reached=false). Полная матрица режимов — claude/jut/02-architecture.md.
+    // Обе ручки трёхзначные (bool?): надо отличать «не задано» от «явно выключено» (§BB.4).
+    public JutProxyConf jutProxy { get; set; } = new JutProxyConf();
+    public bool? jutProxyFallbackEnable { get; set; }            // null = true (вооружён)
+    public bool? jutProxyFallbackDirect { get; set; }            // при useproxy:true; false = киллсвич «только прокси»
+    public int jutProxyFallbackCooldownSeconds { get; set; } = 300;  // кламп ≥30
+
+    // Кеши (свои, не Staticache: его ключ = path+query, без queryKeys разные ?page= слиплись бы — §AN)
+    public int jutCatalogTtlMin { get; set; } = 30;
+    public int jutTitleTtlHours { get; set; } = 12;
+    public int jutOngoingTtlHours { get; set; } = 2;   // онгоингу нужен более свежий список серий
+    public int jutSearchTtlMin { get; set; } = 10;
+    public int jutLinkTtlSec { get; set; } = 240;      // реальный TTL токена ≥9 мин — берём запас ×2
+    public int jutTimeoutSec { get; set; } = 20;       // только для API-запросов; медиа — без общего таймаута
+    public int jutMaxConcurrent { get; set; } = 3;     // гейт запросов к jut.su
+    public int jutStreamConcurrent { get; set; } = 6;  // гейт на СТАРТ стрима (отпускается после заголовков)
+
+    // 0 = всегда максимум из фактически доступных (требование владельца).
+    // Число (1080/720/...) — ПОТОЛОК: берём наибольшее не выше него.
+    public int jutPreferredQuality { get; set; } = 0;
+    public bool jutForceHls { get; set; } = false;     // аварийный: гнать через /qdl/hls (если аудио не AAC)
+
+    // Скачивание. ⚠️ /downloads смонтирован :ro — нужен отдельный rw-бинд на /downloads/jutsu.
+    public string jutDownloadsPath { get; set; } = "/downloads/jutsu";
+    public int jutDownloadConcurrency { get; set; } = 1;   // один файл за раз: щадим и CDN, и шпиндель
+    public int jutGrabRetries { get; set; } = 5;
+    public int jutGrabPaceMs { get; set; } = 0;            // мягкий кап скорости (>0 = пауза между чанками)
+    public int jutMinFreeGb { get; set; } = 20;            // серия 1080p ≈ 489 МиБ, сезон ≈ 12 ГБ
+    public bool jutTmdbMatch { get; set; } = true;         // сматчить с TMDB по alternateName+год (fail-open)
+
+    // Слежение — ТОЛЬКО по jut.su. В торренты за этими сериями не ходим (три пояса изоляции,
+    // см. JutSuWatch.cs и claude/jut/02-architecture.md §9).
+    public int jutWatchIntervalHours { get; set; } = 24;   // кламп ≥1
+    public int jutWatchTitlesPerTick { get; set; } = 30;   // бюджет ПОЛНЫХ опросов страниц тайтлов
+    public bool jutWatchAutoGrab { get; set; } = true;     // новая серия сезона → сразу в очередь скачивания
+    public bool jutWatchSeasonSwitch { get; set; } = true; // вышел новый сезон → переключить слежение на него
+}
+
+// Прокси-настройки jut.su для ProxyManager("jutsu", ...).
+// Отдельный класс, потому что ProxyManager принимает Iproxy, а не голый список.
+public class JutProxyConf : Shared.Models.Base.Iproxy
+{
+    public bool useproxy { get; set; } = false;        // дефолт: свой IP; прокси — только фолбэк
+    public bool useproxystream { get; set; } = false;
+    public string globalnameproxy { get; set; }
+    public Shared.Models.Base.ProxySettings proxy { get; set; } = new Shared.Models.Base.ProxySettings();
 }

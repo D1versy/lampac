@@ -16,6 +16,7 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _diagTimer;
     static System.Threading.Timer _crawlTimer;
     static System.Threading.Timer _pruneTimer;
+    static System.Threading.Timer _jutTimer;      // jut.su: слежение за сезоном (раз в сутки)
     static System.TimeSpan _huntPeriod = System.TimeSpan.FromHours(4);
 
     // Ранний повтор охоты (EpisodeHunter): индексатор не дал кандидатов → следующий тик раньше срока.
@@ -140,6 +141,35 @@ public class ModInit : IModuleLoaded
             try { await QbitController.IndexPrune(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] index prune: " + ex); }
         }, null, System.TimeSpan.FromHours(1), System.TimeSpan.FromHours(24));
+
+        // ── jut.su: слежение за сезоном, раз в сутки (решение владельца) ──
+        // Первый тик на 35-й минуте — позже всех существующих контуров
+        // (notify@2 / watch@10 / hunt@15 / diag@20 / crawl@25), чтобы не толкаться на старте.
+        // ⚠️ Догон обязателен: при СУТОЧНОМ такте без него каждый рестарт контейнера (дорогой —
+        // Roslyn-компиляция модулей) сдвигал бы проверку на новые сутки, и при частых рестартах
+        // слежение не срабатывало бы вообще.
+        int jutHours = System.Math.Max(1, conf?.jutWatchIntervalHours ?? 24);
+        bool jutOverdue = QbitController.JutWatchOverdue(System.TimeSpan.FromHours(jutHours), out var jutSince);
+        if (jutOverdue)
+            System.Console.WriteLine($"[QbitDownload] jut/watch: пропущено {jutSince.TotalHours:F1} ч — первый тик через 6 мин");
+
+        _jutTimer?.Dispose();
+        _jutTimer = new System.Threading.Timer(async _ =>
+        {
+            try
+            {
+                if (conf?.jutEnable != true) return;   // выключатель проверяется В НАЧАЛЕ тика
+                await QbitController.JutWatchTick();
+            }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut watch timer: " + ex); }
+        }, null, System.TimeSpan.FromMinutes(jutOverdue ? 6 : 35), System.TimeSpan.FromHours(jutHours));
+
+        // Недокачанные .part после рестарта — добрать в очередь (очередь живёт в памяти).
+        System.Threading.Tasks.Task.Run(async () =>
+        {
+            try { await QbitController.JutReconcile(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut reconcile: " + ex); }
+        });
     }
 
     static System.TimeSpan CrawlPeriod()
@@ -172,14 +202,26 @@ public class ModInit : IModuleLoaded
         _crawlTimer = null;
         _pruneTimer?.Dispose();
         _pruneTimer = null;
+        _jutTimer?.Dispose();
+        _jutTimer = null;
     }
 
     void updateConf()
     {
+        string prevUa = JutNet.Ua;
+
         conf = ModuleInvoke.Init("QbitDownload", new ModuleConf());
         // период мониторинга правится в init.conf на лету — иначе включение требовало бы рестарта
         try { _diagTimer?.Change(DiagPeriod(), DiagPeriod()); } catch { }
         try { _crawlTimer?.Change(CrawlPeriod(), CrawlPeriod()); } catch { }
+
+        // ── jut.su ──
+        // Вердикты прокси-фолбэка живут в статике (conf пересоздаётся целиком), иначе
+        // «прокси мёртв» залипал бы до конца кулдауна даже после правки init.conf.
+        try { JutProxyFallback.Reset(); } catch { }
+        // 🔥 Смена UA обесценивает ВСЕ выданные ссылки: hash в CDN-URL криптографически
+        // связан с UA, которым была запрошена страница. Не сбросить = массовые 403.
+        try { if (!string.Equals(prevUa, JutNet.Ua, System.StringComparison.Ordinal)) JutNet.ResetLinks(); } catch { }
     }
 
     // ── mylocalip без api.ipify.org (qdl 2.15) ──

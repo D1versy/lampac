@@ -1857,6 +1857,9 @@ public partial class QbitController
             if (loc != null && !LocalIsOverlay(loc))
             {
                 var arr0 = new JArray();
+                // jut.su: свой префикс таймлайна, чтобы прогресс ОНЛАЙН-просмотра не потерялся
+                // после скачивания (клиент строит тот же ключ qdltl:jut:<slug>:s1e7).
+                string jutTl = (loc["jut"] as JObject)?.Value<string>("tlPrefix");
                 foreach (var f in LocalFiles(loc))
                 {
                     if (!System.IO.File.Exists(f.path)) continue;
@@ -1865,7 +1868,8 @@ public partial class QbitController
                     if (e != null && e.any && e.kind == null && e.ep >= 0)
                     {
                         int ss = e.season > 0 ? e.season : 1;
-                        o["season"] = ss; o["episode"] = e.ep; o["epkey"] = "s" + ss + "e" + e.ep; o["tl"] = sk + ":s" + ss + "e" + e.ep;
+                        o["season"] = ss; o["episode"] = e.ep; o["epkey"] = "s" + ss + "e" + e.ep;
+                        o["tl"] = (jutTl ?? sk) + ":s" + ss + "e" + e.ep;
                     }
                     arr0.Add(o);
                 }

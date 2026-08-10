@@ -969,6 +969,12 @@ public partial class QbitController : BaseController
             var loc = LoadLocal(hash);
             if (loc != null && !LocalIsOverlay(loc))
             {
+                // jut.su: подписка живёт в ОТДЕЛЬНОМ файле, о котором PurgeCache не знает.
+                // Не снять её здесь — и при автоскачивании следующая серия молча пересоздаст
+                // карточку и папку: «удалил, а оно вернулось».
+                string jutSlug = (loc["jut"] as JObject)?.Value<string>("slug");
+                if (!string.IsNullOrEmpty(jutSlug)) JutForgetOnDelete(jutSlug);
+
                 if (deleteFiles) DeleteLocalFiles(loc);
                 try { using var c2 = await Qbit(); await DeleteDonorsOf(c2, hash); } catch { }   // хвосты охоты, если были
                 DropHlsCache(hash);

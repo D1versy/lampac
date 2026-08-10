@@ -20,6 +20,12 @@
     "SearchMonitor.cs",
     "LocalIndex.cs",
     "IndexCrawler.cs",
+    "JutSuParse.cs",
+    "JutSuHttp.cs",
+    "JutSu.cs",
+    "JutSuStream.cs",
+    "JutSuGrab.cs",
+    "JutSuWatch.cs",
     "Controller.cs"
   ]
 }

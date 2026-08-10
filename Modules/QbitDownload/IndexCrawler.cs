@@ -55,6 +55,12 @@ public partial class QbitController
                     string title = m.Value<string>("title");
                     if (string.IsNullOrWhiteSpace(title)) continue;
 
+                    // 🔴 ПОЯС 2 изоляции jut.su: за сериями оттуда в торренты не ходим вообще
+                    // (требование владельца). Обходчик иначе подхватил бы jut-мету и начал
+                    // дёргать по ней ВСЕ трекеры. См. JutSuWatch.cs и claude/jut/02-architecture.md §9.
+                    if (string.Equals(m.Value<string>("source"), "jutsu", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
                     string date = m.Value<string>("release_date") ?? m.Value<string>("first_air_date") ?? "";
                     int year = date.Length >= 4 && int.TryParse(date.Substring(0, 4), out int y) ? y : 0;
                     bool tv = (m.Value<string>("media_type") == "tv") || m["original_name"] != null || m["number_of_seasons"] != null;

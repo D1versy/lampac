@@ -11,6 +11,7 @@
     var BELL = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 8a6 6 0 1112 0c0 7 3 9 3 9H3s3-2 3-9z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.3 21a1.94 1.94 0 003.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     var CAM = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.8 7.4l14.4-3.3 1.3 5.6L4.1 13 2.8 7.4z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M6.5 12.2V15a3 3 0 003 3h1.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="18.5" cy="18" r="2.6" stroke="currentColor" stroke-width="2"/><path d="M18 9.9l3.2 1.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
     var REC = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/></svg>';
+    var ANIME = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="4" width="18" height="14" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M10 8.5l4.5 2.5L10 13.5v-5z" fill="currentColor"/><path d="M8 21h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
     function req(url, cb, err) {
         try {
@@ -2867,6 +2868,15 @@
     }
 
     // Записи (день одной записью) — D1versy Rec
+    // Текст пункта — ровно «jut.su» (решение владельца), не «Аниме»
+    function buildJutMenuItem() {
+        var item = $('<li class="menu__item selector qdl-jut-menu"><div class="menu__ico">' + ANIME + '</div><div class="menu__text">jut.su</div></li>');
+        item.on('hover:enter', function () {
+            Lampa.Activity.push({ url: '', title: 'jut.su', component: 'jut_catalog', page: 1 });
+        });
+        return item;
+    }
+
     function buildLiveMenuItem() {
         var item = $('<li class="menu__item selector qdl-live-menu"><div class="menu__ico">' + REC + '</div><div class="menu__text">D1versy Rec</div></li>');
         item.on('hover:enter', function () {
@@ -2927,6 +2937,15 @@
             if (w.length) {
                 if (!live.length) w.after(buildLiveMenuItem());
                 else if (live.prev('.menu__item')[0] !== w[0]) { live.detach(); w.after(live); }
+            }
+
+            // «jut.su» — строго сразу после «D1versy Rec» (класс .qdl-live-menu, имена обманчивы:
+            // .qdl-watch-menu = Live/эфир, .qdl-live-menu = Rec/записи)
+            var lv = dedupe('.menu .qdl-live-menu');
+            var jut = dedupe('.menu .qdl-jut-menu');
+            if (lv.length) {
+                if (!jut.length) lv.after(buildJutMenuItem());
+                else if (jut.prev('.menu__item')[0] !== lv[0]) { jut.detach(); lv.after(jut); }
             }
         } catch (e) {}
     }
@@ -3023,6 +3042,436 @@
         } catch (e) {}
     }
 
+    // ═════════════════════════════════════════════════════════════════════════
+    // Вкладка jut.su: каталог → тайтл → серии → плеер, плюс «Скачать» и «Следить».
+    // Сервер уже выбрал максимальное качество и отдал готовый относительный URL —
+    // клиенту выбирать нечего (streamUrl() трогать не нужно, он про torrent-hash).
+    // Устройство и грабли ТВ-интерфейса: E:\Media-server\claude\jut\05-client.md
+    // ═════════════════════════════════════════════════════════════════════════
+
+    function jutErrText(r) {
+        var m = r && (r.message || r.error);
+        return m || 'jut.su недоступен';
+    }
+
+    function jutPosterUrl(slug) { return API + '/qdl/jut/poster?slug=' + encodeURIComponent(slug); }
+
+    // Ключ таймлайна строится в формате СЕРВЕРНОГО tl (qdltl:jut:<slug>:s1e7), чтобы прогресс
+    // онлайн-просмотра не потерялся после скачивания тайтла в «Загрузки».
+    function jutTl(slug, key) {
+        try { return Lampa.Timeline.view(Lampa.Utils.hash('qdltl:jut:' + slug + ':' + key)); }
+        catch (e) { return null; }
+    }
+
+    function jutEpTitle(e, titleName) {
+        var base = e.kind === 'film' ? (e.ep + ' фильм')
+                 : e.kind === 'ova' ? ('OVA ' + e.ep)
+                 : e.kind === 'gameova' ? ('Игровая OVA ' + e.ep)
+                 : (e.ep + ' серия');
+        if (e.name) base += ' — ' + e.name;
+        return (titleName ? titleName + ' · ' : '') + base;
+    }
+
+    function jutPlaylist(slug, items, titleName) {
+        return items.map(function (e) {
+            var it = { title: jutEpTitle(e, titleName), url: API + '/qdl/jut/stream?t=' };
+            it.jut = e;
+            return it;
+        });
+    }
+
+    // Плеер запускается ТОЛЬКО после resolve: прямую ссылку на CDN отдавать нельзя —
+    // hash в ней вяжется с UA, а у плеера он свой → 403.
+    function jutPlay(slug, e, titleName, siblings) {
+        Lampa.Noty.show('Готовлю ' + jutEpTitle(e, ''));
+        req(API + '/qdl/jut/resolve?slug=' + encodeURIComponent(slug) +
+            '&season=' + e.season + '&ep=' + e.ep + '&kind=' + encodeURIComponent(e.kind === 'gameova' ? 'game-ova' : e.kind),
+            function (r) {
+                if (!r || !r.ok) { Lampa.Noty.show(jutErrText(r)); return; }
+                var item = { title: jutEpTitle(e, titleName), url: API + r.url };
+                var tl = jutTl(slug, e.key); if (tl) item.timeline = tl;
+                try {
+                    Lampa.Player.play(item);
+                    // Плейлист сезона — чтобы работал автопереход к следующей серии
+                    var list = (siblings || [e]).filter(function (x) { return x.kind === e.kind && x.season === e.season; });
+                    Lampa.Player.playlist(list.map(function (x) {
+                        var pi = { title: jutEpTitle(x, titleName) };
+                        pi.url = (x.key === e.key) ? (API + r.url) : (API + '/qdl/jut/stream?t=');
+                        var t2 = jutTl(slug, x.key); if (t2) pi.timeline = t2;
+                        return pi;
+                    }));
+                } catch (err) { Lampa.Noty.show('Плеер не запустился'); }
+            },
+            function () { Lampa.Noty.show('jut.su недоступен'); });
+    }
+
+    function jutDownload(slug, scope, e) {
+        var u = API + '/qdl/jut/download?slug=' + encodeURIComponent(slug) + '&scope=' + scope;
+        if (e) u += '&season=' + e.season + '&ep=' + e.ep + '&kind=' + encodeURIComponent(e.kind === 'gameova' ? 'game-ova' : e.kind);
+        req(u, function (r) {
+            if (!r || !r.ok) { Lampa.Noty.show(jutErrText(r)); return; }
+            Lampa.Noty.show('В очереди на скачивание: ' + (r.queued || 0) + ' — смотри «Загрузки»');
+        }, function () { Lampa.Noty.show('Не удалось поставить в очередь'); });
+    }
+
+    function jutDownloadMenu(slug, e, seasonNo) {
+        var items = [];
+        if (e) items.push({ title: 'Только ' + jutEpTitle(e, ''), scope: 'one' });
+        items.push({ title: 'Весь сезон' + (seasonNo ? ' ' + seasonNo : ''), scope: 'season' });
+        items.push({ title: 'Весь тайтл (может быть очень много)', scope: 'all' });
+        Lampa.Select.show({
+            title: 'Скачать с jut.su',
+            items: items,
+            onSelect: function (s) { jutDownload(slug, s.scope, s.scope === 'one' ? e : null); },
+            onBack: function () { Lampa.Controller.toggle('content'); }
+        });
+    }
+
+    function jutWatchToggle(slug, season, on, done) {
+        var u = on ? (API + '/qdl/jut/watch/remove?slug=' + encodeURIComponent(slug))
+                   : (API + '/qdl/jut/watch?slug=' + encodeURIComponent(slug) + '&season=' + (season || 1));
+        req(u, function (r) {
+            if (!r || !r.ok) { Lampa.Noty.show(jutErrText(r)); return; }
+            Lampa.Noty.show(on ? 'Слежение снято'
+                               : 'Слежу за сезоном: новые серии будут скачиваться сами');
+            if (done) done(!on);
+        }, function () { Lampa.Noty.show('Не удалось изменить слежение'); });
+    }
+
+    // ───────── Каталог jut.su (витрина order-by-add) ─────────
+    function ComponentJutCatalog(object) {
+        var comp = this;
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+        var html = $('<div></div>');
+        var body = $('<div class="category-full mapping--grid cols--6"></div>');
+        var last, page = 1, loading = false, hasNext = true, total = 0;
+        var query = object.jut_query || '';
+
+        function url(p) {
+            return query
+                ? API + '/qdl/jut/search?query=' + encodeURIComponent(query) + '&page=' + p
+                : API + '/qdl/jut/catalog?page=' + p + '&order=add';
+        }
+
+        this.create = function () {
+            this.activity.loader(true);
+            scroll.minus();                       // ⚠️ без этого на ТВ у .scroll нет высоты
+            html.append(scroll.render());
+            scroll.body().append(body);
+            // Догрузка следующей страницы по достижению конца ленты (46 страниц — кнопки не годятся)
+            scroll.onEnd = function () { comp.load(page + 1); };
+            this.load(1);
+            return this.render();
+        };
+
+        this.load = function (p) {
+            if (loading || (p > 1 && !hasNext)) return;
+            loading = true;
+            req(url(p), function (r) {
+                loading = false;
+                comp.activity.loader(false);
+                if (!r || !r.ok) {
+                    if (p === 1) comp.empty(jutErrText(r));
+                    return;
+                }
+                page = r.page || p;
+                hasNext = !!r.hasNext;
+                if (p === 1 && !query) comp.appendSearchTile();
+                if (p === 1 && r.stale) Lampa.Noty.show('jut.su недоступен — показываю сохранённое');
+                (r.items || []).forEach(comp.append);
+                total += (r.items || []).length;
+                if (p === 1 && total === 0) comp.empty(query ? 'Ничего не найдено' : 'Каталог пуст');
+                comp.activity.toggle();
+            }, function () {
+                loading = false;
+                comp.activity.loader(false);
+                if (p === 1) comp.empty('jut.su недоступен');
+            });
+        };
+
+        // ⚠️ width:100% — правило .cols--N > * даёт долю ширины ЛЮБОМУ прямому потомку,
+        // иначе сообщение сожмётся до ширины одной карточки
+        this.empty = function (txt) {
+            body.append($('<div style="width:100%;padding:2em;font-size:1.4em;opacity:.7">' + esc(txt) + '</div>'));
+            comp.activity.toggle();
+        };
+
+        // Ввод текста с пульта — штатной экранной клавиатурой Lampa
+        this.appendSearchTile = function () {
+            var el = Lampa.Template.get('card', { title: 'Поиск', release_year: 'по названию' });
+            el.addClass('qdl-jut-search');
+            var img = el.find('.card__img');
+            img.attr('src', './img/img_broken.svg');
+            var view = el.find('.card__view'); if (!view.length) view = el;
+            view.append('<div style="position:absolute;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:3em">🔍</div>');
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:enter', function () {
+                Lampa.Input.edit({ value: '', title: 'Поиск на jut.su', free: true }, function (q) {
+                    q = (q || '').trim();
+                    if (q) Lampa.Activity.push({ url: '', title: 'jut.su — ' + q, component: 'jut_catalog', jut_query: q, page: 1 });
+                });
+            });
+            body.append(el);
+            try { Lampa.Controller.collectionAppend(el); } catch (e) {}
+        };
+
+        this.append = function (c) {
+            var el = Lampa.Template.get('card', {
+                title: c.title || c.slug,
+                release_year: (c.years && c.years.length ? c.years[c.years.length - 1] : '') + ''
+            });
+            var img = el.find('.card__img');
+            img.attr('src', jutPosterUrl(c.slug));
+            img.on('error', function () { this.src = './img/img_broken.svg'; });
+
+            var view = el.find('.card__view'); if (!view.length) view = el;
+            if (c.ongoing)
+                view.append('<div style="position:absolute;left:.4em;top:.4em;background:rgba(40,160,80,.92);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">онгоинг</div>');
+            if (c.episodes)
+                view.append('<div style="position:absolute;right:.4em;top:.4em;background:rgba(0,0,0,.65);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">' + c.episodes + '</div>');
+
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:enter', function () {
+                Lampa.Activity.push({ url: '', title: c.title || c.slug, component: 'jut_title', jut_slug: c.slug, jut_card: c });
+            });
+            el.on('hover:long', function () { jutDownloadMenu(c.slug, null, 0); });
+
+            body.append(el);
+            // ⚠️ Без регистрации в коллекции фокуса стрелки пульта не дойдут до 2-й страницы:
+            // элементы в DOM есть, а навигатор о них не знает.
+            try { Lampa.Controller.collectionAppend(el); } catch (e) {}
+        };
+
+        this.render = function () { return html; };
+        this.start = function () {
+            Lampa.Controller.add('content', {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                right: function () { Navigator.move('right'); },
+                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
+                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
+                back: function () { Lampa.Activity.backward(); }
+            });
+            Lampa.Controller.toggle('content');
+        };
+        this.pause = function () {};
+        this.stop = function () {};
+        this.destroy = function () { scroll.destroy(); html.remove(); };
+    }
+
+    // ───────── Карточка тайтла: здесь живут «Смотреть», «Скачать», «Следить» ─────────
+    function ComponentJutTitle(object) {
+        var comp = this;
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+        var html = $('<div></div>');
+        var body = $('<div></div>');
+        var last;
+        var slug = object.jut_slug;
+        var data = null, watching = false;
+
+        this.create = function () {
+            this.activity.loader(true);
+            scroll.minus();
+            html.append(scroll.render());
+            scroll.body().append(body);
+            req(API + '/qdl/jut/title?slug=' + encodeURIComponent(slug), function (r) {
+                if (!r || !r.ok) { comp.fail(jutErrText(r)); return; }
+                data = r;
+                req(API + '/qdl/jut/watch/list', function (w) {
+                    try {
+                        watching = !!(w && w.items || []).filter(function (x) { return x.slug === slug; }).length;
+                    } catch (e) {}
+                    comp.build();
+                }, function () { comp.build(); });
+            }, function () { comp.fail('jut.su недоступен'); });
+            return this.render();
+        };
+
+        this.fail = function (txt) {
+            body.append($('<div style="width:100%;padding:2em;font-size:1.4em;opacity:.7">' + esc(txt) + '</div>'));
+            this.activity.loader(false);
+            this.activity.toggle();
+        };
+
+        function firstPlayable() {
+            var eps = (data.items || []).filter(function (e) { return e.kind === 'episode'; });
+            return eps.length ? eps[0] : (data.items || [])[0];
+        }
+
+        this.build = function () {
+            var head = $('<div style="display:flex;gap:1.5em;padding:1.5em 0"></div>');
+            var poster = $('<img style="width:12em;border-radius:.6em;flex:0 0 auto" src="' + jutPosterUrl(slug) + '">');
+            poster.on('error', function () { this.src = './img/img_broken.svg'; });
+            head.append(poster);
+
+            var info = $('<div style="flex:1 1 auto"></div>');
+            info.append('<div style="font-size:1.9em;font-weight:600">' + esc(data.title || slug) + '</div>');
+            if (data.original) info.append('<div style="opacity:.6;font-size:1.15em;margin-top:.2em">' + esc(data.original) + '</div>');
+
+            var facts = [];
+            if (data.years && data.years.length) facts.push(data.years.join(', '));
+            if (data.rating) facts.push('★ ' + data.rating);
+            if (data.ongoing) facts.push('онгоинг');
+            if (data.count) facts.push(data.count + ' эп.');
+            if (facts.length) info.append('<div style="margin-top:.5em;opacity:.8;font-size:1.1em">' + esc(facts.join('  ·  ')) + '</div>');
+
+            if (data.genres && data.genres.length) {
+                var g = $('<div style="margin-top:.7em"></div>');
+                data.genres.forEach(function (x) { g.append(chip(x)); });
+                info.append(g);
+            }
+            head.append(info);
+            body.append(head);
+
+            var btns = $('<div style="display:flex;flex-wrap:wrap;gap:.7em;padding-bottom:1.2em"></div>');
+            function mkBtn(label, onEnter) {
+                var b = $('<div class="selector" style="background:rgba(255,255,255,.12);padding:.8em 1.3em;border-radius:.5em;font-size:1.2em">' + esc(label) + '</div>');
+                b.on('hover:focus', function () { last = b[0]; scroll.update(b, true); });
+                b.on('hover:enter', function () { onEnter(b); });
+                btns.append(b);
+                return b;
+            }
+
+            var ep0 = firstPlayable();
+            if (ep0) mkBtn('▶ Смотреть', function () { jutPlay(slug, ep0, data.title, data.items); });
+            mkBtn('📄 Серии', function () {
+                Lampa.Activity.push({ url: '', title: 'Серии — ' + (data.title || slug),
+                                      component: 'jut_episodes', jut_slug: slug, jut_data: data });
+            });
+            mkBtn('⬇ Скачать', function () { jutDownloadMenu(slug, ep0, ep0 ? ep0.season : 1); });
+            var wb = mkBtn(watching ? '🔔 Слежу' : '🔔 Следить', function (b) {
+                jutWatchToggle(slug, ep0 ? ep0.season : 1, watching, function (now) {
+                    watching = now;
+                    b.text(now ? '🔔 Слежу' : '🔔 Следить');
+                });
+            });
+            body.append(btns);
+
+            if (data.descr)
+                body.append($('<div style="opacity:.85;font-size:1.15em;line-height:1.5;padding-bottom:2em">' + esc(data.descr) + '</div>'));
+
+            this.activity.loader(false);
+            this.activity.toggle();
+        };
+
+        this.render = function () { return html; };
+        this.start = function () {
+            Lampa.Controller.add('content', {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                right: function () { Navigator.move('right'); },
+                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
+                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
+                back: function () { Lampa.Activity.backward(); }
+            });
+            Lampa.Controller.toggle('content');
+        };
+        this.pause = function () {};
+        this.stop = function () {};
+        this.destroy = function () { scroll.destroy(); html.remove(); };
+    }
+
+    // ───────── Экран серий jut.su ─────────
+    // Копия структуры ComponentEpisodes (тот жёстко завязан на torrent-hash и /qdl/audio).
+    // Инварианты, которые нельзя терять, перечислены в claude/jut/05-client.md §3.
+    function ComponentJutEpisodes(object) {
+        var comp = this;
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+        var html = $('<div></div>');
+        var body = $('<div></div>');
+        var last;
+        var rows = [];        // отметки обновляются на месте — DOM не перестраивается, фокус жив
+        var slug = object.jut_slug;
+        var data = object.jut_data || null;
+
+        this.create = function () {
+            injectCss();
+            this.activity.loader(true);
+            scroll.minus();
+            html.append(scroll.render());
+            scroll.body().append(body);
+            if (data) { this.build(); return this.render(); }
+            req(API + '/qdl/jut/title?slug=' + encodeURIComponent(slug), function (r) {
+                if (r && r.ok) data = r;
+                comp.build();
+            }, function () { comp.build(); });
+            return this.render();
+        };
+
+        function view(e) { return jutTl(slug, e.key); }
+
+        this.build = function () {
+            if (!data || !(data.items || []).length) {
+                body.append($('<div style="width:100%;padding:2em;font-size:1.4em;opacity:.7">Серий не найдено</div>'));
+                this.activity.loader(false); this.activity.toggle(); return;
+            }
+
+            var groups = {};
+            (data.items || []).forEach(function (e) {
+                var g = e.kind === 'episode' ? ('Сезон ' + e.season)
+                      : e.kind === 'film' ? 'Фильмы'
+                      : e.kind === 'ova' ? 'OVA' : 'Прочее';
+                (groups[g] = groups[g] || []).push(e);
+            });
+
+            Object.keys(groups).forEach(function (g) {
+                body.append($('<div style="font-size:1.3em;opacity:.7;margin:1.2em 0 .6em">' + esc(g) + '</div>'));
+                groups[g].forEach(function (e) {
+                    var el = $('<div class="selector qdl-ep" style="padding:.9em 1.1em;margin-bottom:.4em;background:rgba(255,255,255,.07);border-radius:.5em;font-size:1.2em">' +
+                        '<span class="qdl-ep-mark"></span>' + esc(jutEpTitle(e, '')) + '</div>');
+                    el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+                    el.on('hover:enter', function () { jutPlay(slug, e, data.title, data.items); });
+                    el.on('hover:long', function () { jutDownloadMenu(slug, e, e.season); });
+                    body.append(el);
+                    rows.push({ el: el, e: e });
+                });
+            });
+
+            this.activity.loader(false);
+            this.activity.toggle();
+        };
+
+        // Свежие ✓/►N% — зовётся из start() при каждом возврате, в том числе из плеера
+        this.refreshMarks = function () {
+            if (!rows.length) return;
+            var cur = null;
+            rows.forEach(function (r) {
+                var v = view(r.e) || {};
+                var pct = v.percent || 0;
+                r.el.find('.qdl-ep-mark').text(epMark(pct));
+                if (!cur && pct >= 5 && pct < 90) cur = r;
+            });
+            // Стартовый фокус на продолжаемой серии; явный выбор пользователя не перебиваем
+            if (cur && !last) last = cur.el[0];
+        };
+
+        this.render = function () { return html; };
+        this.start = function () {
+            comp.refreshMarks();
+            Lampa.Controller.add('content', {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                right: function () { Navigator.move('right'); },
+                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
+                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
+                back: function () { Lampa.Activity.backward(); }
+            });
+            Lampa.Controller.toggle('content');
+        };
+        this.pause = function () {};
+        this.stop = function () {};
+        this.destroy = function () { scroll.destroy(); html.remove(); };
+    }
+
     function start() {
         Lampa.Component.add('qdl_downloads', ComponentDownloads);
         Lampa.Component.add('qdl_episodes', ComponentEpisodes);
@@ -3031,6 +3480,9 @@
         Lampa.Component.add('qdl_live', ComponentLive);
         Lampa.Component.add('qdl_live_camera', ComponentLiveCamera);
         Lampa.Component.add('qdl_live_watch', ComponentLiveWatch);
+        Lampa.Component.add('jut_catalog', ComponentJutCatalog);
+        Lampa.Component.add('jut_title', ComponentJutTitle);
+        Lampa.Component.add('jut_episodes', ComponentJutEpisodes);
         Lampa.Listener.follow('full', addButton);
         startMenuWatcher();
         startHeaderNotiWatcher();

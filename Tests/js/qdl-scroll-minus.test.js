@@ -34,6 +34,10 @@ const COMPONENTS = [
   'ComponentLive',
   'ComponentLiveWatch',
   'ComponentLiveCamera',
+  // jut.su (qdl 2.26) — новые компоненты обязаны попадать в этот регресс-контур
+  'ComponentJutCatalog',
+  'ComponentJutTitle',
+  'ComponentJutEpisodes',
 ];
 
 for (const name of COMPONENTS) {
