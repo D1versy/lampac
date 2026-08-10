@@ -1338,6 +1338,7 @@
         var builtStamp = -1;   // colStamp на момент build: разошёлся — грид устарел
 
         this.create = function () {
+            injectCss();   // .qdl-col-card: экран, открытый первым после загрузки, иначе без стилей
             this.activity.loader(true);
             scroll.minus();
             html.append(scroll.render());
@@ -3154,6 +3155,7 @@
         }
 
         this.create = function () {
+            injectCss();                          // фокус-стили: см. §AK.3 (без них фокус на ТВ невидим)
             this.activity.loader(true);
             scroll.minus();                       // ⚠️ без этого на ТВ у .scroll нет высоты
             html.append(scroll.render());
@@ -3273,6 +3275,7 @@
         var data = null, watching = false;
 
         this.create = function () {
+            injectCss();   // фокус-стили кнопок: не полагаемся, что другой экран уже инъецировал
             this.activity.loader(true);
             scroll.minus();
             html.append(scroll.render());
@@ -3328,7 +3331,10 @@
 
             var btns = $('<div style="display:flex;flex-wrap:wrap;gap:.7em;padding-bottom:1.2em"></div>');
             function mkBtn(label, onEnter) {
-                var b = $('<div class="selector" style="background:rgba(255,255,255,.12);padding:.8em 1.3em;border-radius:.5em;font-size:1.2em">' + esc(label) + '</div>');
+                // qdl-btn-focus обязателен: Lampa вешает класс .focus, но генерического
+                // .selector.focus в её CSS НЕТ — без своего правила фокус на ТВ невидим,
+                // и это читается как «пульт не работает» (та же грабля, что была в Rec, §AK.3)
+                var b = $('<div class="selector qdl-btn-focus" style="background:rgba(255,255,255,.12);padding:.8em 1.3em;border-radius:.5em;font-size:1.2em">' + esc(label) + '</div>');
                 b.on('hover:focus', function () { last = b[0]; scroll.update(b, true); });
                 b.on('hover:enter', function () { onEnter(b); });
                 btns.append(b);
@@ -3423,7 +3429,9 @@
             Object.keys(groups).forEach(function (g) {
                 body.append($('<div style="font-size:1.3em;opacity:.7;margin:1.2em 0 .6em">' + esc(g) + '</div>'));
                 groups[g].forEach(function (e) {
-                    var el = $('<div class="selector qdl-ep" style="padding:.9em 1.1em;margin-bottom:.4em;background:rgba(255,255,255,.07);border-radius:.5em;font-size:1.2em">' +
+                    // qdl-row-focus — см. комментарий у mkBtn: без своего focus-правила
+                    // строка на ТВ никак не подсвечивается (§AK.3)
+                    var el = $('<div class="selector qdl-ep qdl-row-focus" style="padding:.9em 1.1em;margin-bottom:.4em;background:rgba(255,255,255,.07);border-radius:.5em;font-size:1.2em">' +
                         '<span class="qdl-ep-mark"></span>' + esc(jutEpTitle(e, '')) + '</div>');
                     el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
                     el.on('hover:enter', function () { jutPlay(slug, e, data.title, data.items); });
