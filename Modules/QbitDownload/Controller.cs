@@ -709,6 +709,8 @@ public partial class QbitController : BaseController
                 {
                     var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var it in result) seen.Add(it.Value<string>("hash") ?? "");
+                    // подписки jut.su — один раз на весь список, не на карточку
+                    var jutWatched = JutWatchedSlugs();
                     foreach (var lf in Directory.GetFiles(localDir, "*.json"))
                     {
                         string h = Path.GetFileNameWithoutExtension(lf);
@@ -733,6 +735,19 @@ public partial class QbitController : BaseController
                             ["watched"] = false,
                             ["added"] = loc.Value<long?>("added") ?? MarkerFallbackAdded(lf)
                         };
+                        // jut.su: пробрасываем slug/сезон и РЕАЛЬНЫЙ статус подписки.
+                        // Без этого «Загрузки» не знают, что карточка из jut.su, и пункт
+                        // «Следить за новыми сериями» неоткуда было показать: торрентная
+                        // ветка гейтится по !local, а jut-карточка ровно локальная.
+                        // Сезон намеренно НЕ пробрасываем: маркер один на весь тайтл, а серии
+                        // в нём могут быть из разных сезонов — какой сезон «следить» решает
+                        // сервер (берёт последний вышедший) при вызове /qdl/jut/watch.
+                        string jslug = (loc["jut"] as JObject)?.Value<string>("slug");
+                        if (!string.IsNullOrEmpty(jslug))
+                        {
+                            item["jut"] = new JObject { ["slug"] = jslug };
+                            item["watched"] = jutWatched.Contains(jslug);
+                        }
                         // без Touch activity == added → финализированный транскод позицию не меняет (§AG)
                         item["activity"] = Math.Max(item.Value<long?>("added") ?? 0, ActivityStored(act, h));
                         if (System.IO.File.Exists(MetaPath(h)))

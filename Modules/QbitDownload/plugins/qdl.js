@@ -361,6 +361,13 @@
         return !!t && !t.local && t.state !== 'local' && (t.progress || 0) >= 1;
     }
 
+    // Карточка «Загрузок», пришедшая с jut.su: сервер кладёт {jut:{slug}} в /qdl/list,
+    // когда у локального маркера есть поле jut. Признак нужен, чтобы развести слежение
+    // (у торрентов — по infohash, здесь — по slug в отдельном контуре).
+    function isJut(t) {
+        return !!(t && t.jut && t.jut.slug);
+    }
+
     // поллинг прогресса транскода: «в очереди (N)» один раз, тост каждые ~10%, финал по done/error.
     // ⚠ ветка queued обязана продолжать поллинг, иначе полл тихо умрёт на стоящей в очереди задаче
     var tcPolls = {};
@@ -1893,7 +1900,12 @@
             { title: '🔊 Озвучка', act: 'audio' }
         ];
         if (canTranscode(t)) items.push({ title: '🎬 Транскодировать в MP4 (для браузера)', act: 'mp4' });
-        if (!t.local && t.state !== 'local')
+        // Слежение: у торрентов — по infohash, у jut.su — по slug в своём контуре.
+        // ⚠️ Торрентная ветка гейтится по !local (ей нужен живой торрент и links/<hash>.json),
+        // а jut-карточка ВСЕГДА local — из-за этого пункт был не виден вообще (жалоба владельца).
+        if (isJut(t))
+            items.push({ title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'jutwatch' });
+        else if (!t.local && t.state !== 'local')
             items.push({ title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'watch' });
         // в под-гриде коллекции — «Убрать», в общем гриде/карточке — «Добавить»
         if (ctx && ctx.collection) items.push({ title: '📁 Убрать из коллекции', act: 'uncol' });
@@ -1917,6 +1929,23 @@
                             onBack: function () { Lampa.Controller.toggle('content'); }
                         });
                     });
+                }
+                else if (b.act === 'jutwatch') {
+                    var jslug = t.jut.slug;
+                    if (t.watched)
+                        req(API + '/qdl/jut/watch/remove?slug=' + encodeURIComponent(jslug), function () {
+                            t.watched = false; Lampa.Noty.show('Слежение выключено');
+                        }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
+                    else
+                        req(API + '/qdl/jut/watch?slug=' + encodeURIComponent(jslug), function (r) {
+                            if (r && r.ok) {
+                                t.watched = true;
+                                // сервер сам выбирает последний сезон и сообщает baseline:
+                                // «Следить» качает только БУДУЩИЕ серии, уже вышедшие — кнопкой «Скачать сезон»
+                                Lampa.Noty.show(r.message || ('✓ Слежу за сезоном ' + (r.season || '')));
+                            }
+                            else Lampa.Noty.show('Не вышло: ' + ((r && r.error) || 'jut.su недоступен'));
+                        }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
                 }
                 else if (b.act === 'watch') {
                     if (t.watched)

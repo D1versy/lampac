@@ -46,6 +46,24 @@ public partial class QbitController
         return new JArray();
     }
 
+    /// <summary>
+    /// Множество слагов под подпиской — для отметки карточек в /qdl/list.
+    /// Читается ОДИН раз на запрос списка (не на карточку): файл маленький, но список
+    /// «Загрузок» перебирает десятки маркеров, и чтение на каждый было бы лишним IO.
+    /// Ошибка чтения → пустое множество: «не знаю» здесь честнее, чем «не следим»,
+    /// но обе трактовки безопасны — статус только рисует пункт меню.
+    /// </summary>
+    internal static HashSet<string> JutWatchedSlugs()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var x in JutLoadWatch().OfType<JObject>())
+        {
+            string s = x.Value<string>("slug");
+            if (!string.IsNullOrEmpty(s)) set.Add(s);
+        }
+        return set;
+    }
+
     static void JutSaveWatch(JArray arr)
     {
         try
