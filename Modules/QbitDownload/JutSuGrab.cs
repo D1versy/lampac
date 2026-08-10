@@ -505,13 +505,24 @@ public partial class QbitController
         {
             string pp = PosterPath(hash);
             Directory.CreateDirectory(Path.GetDirectoryName(pp));
-            if (!System.IO.File.Exists(pp) && !string.IsNullOrEmpty(t.poster))
+
+            // Апгрейженный постер (460×690) в приоритете над квадратом 186×186 с jut.su.
+            // Если апгрейд приедет ПОЗЖЕ — его положит сюда JutPosterSyncDownloads.
+            string up = JutUpPosterPath(slug);
+            if (JutHasUpPoster(slug))
+            {
+                System.IO.File.Copy(up, pp, true);
+            }
+            else if (!System.IO.File.Exists(pp) && !string.IsNullOrEmpty(t.poster))
             {
                 byte[] img = await JutFetchImage(t.poster);
                 if (img != null && img.Length > 128) await System.IO.File.WriteAllBytesAsync(pp, img);
             }
         }
         catch { }
+
+        // Тайтл скачивают — значит он точно интересен: ставим в очередь апгрейда, если ещё не решён.
+        JutPosterEnqueue(slug, t.titleRu, t.titleOrig, t.years, t.poster);
     }
 
     static async Task JutFinishFile(JutGrabItem it, string dst, int quality)

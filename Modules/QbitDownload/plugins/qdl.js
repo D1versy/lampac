@@ -3093,7 +3093,14 @@
         return m || 'jut.su недоступен';
     }
 
-    function jutPosterUrl(slug) { return API + '/qdl/jut/poster?slug=' + encodeURIComponent(slug); }
+    // pv приходит с сервера и означает «постер уже апгрейжен» (Shikimori → MAL id → AniList,
+    // 460×690 вместо квадрата 186×186 с jut.su). Версия в URL нужна как жёсткий сброс кеша:
+    // без неё уже показанная карточка держала бы миниатюру сутками.
+    function jutPosterUrl(slug, pv) {
+        return API + '/qdl/jut/poster?slug=' + encodeURIComponent(slug) + (pv ? '&v=' + pv : '');
+    }
+
+    function jutBackdropUrl(slug) { return API + '/qdl/jut/backdrop?slug=' + encodeURIComponent(slug); }
 
     // Ключ таймлайна строится в формате СЕРВЕРНОГО tl (qdltl:jut:<slug>:s1e7), чтобы прогресс
     // онлайн-просмотра не потерялся после скачивания тайтла в «Загрузки».
@@ -3198,7 +3205,8 @@
             scroll.minus();                       // ⚠️ без этого на ТВ у .scroll нет высоты
             html.append(scroll.render());
             scroll.body().append(body);
-            // Догрузка следующей страницы по достижению конца ленты (46 страниц — кнопки не годятся)
+            // Догрузка следующей страницы по достижению конца ленты (46 страниц — кнопки не годятся).
+            // Это страховка для мыши/тача; на пульте раньше срабатывает prefetch по фокусу.
             scroll.onEnd = function () { comp.load(page + 1); };
             this.load(1);
             return this.render();
@@ -3227,6 +3235,19 @@
                 comp.activity.loader(false);
                 if (p === 1) comp.empty('jut.su недоступен');
             });
+        };
+
+        // Догружаем ЗАРАНЕЕ — за два ряда до конца ленты, а не на самой последней карточке.
+        // На пульте иначе приходится доскроллить до упора и ТАМ ждать ответа сервера (просьба
+        // владельца). Считаем в карточках, а не в рядах: сетка cols--6, но ряд может быть уже.
+        // Повторные вызовы безопасны — load() отсекает их по флагу loading и по hasNext.
+        var PREFETCH_AHEAD = 12;
+
+        this.prefetch = function (el) {
+            if (loading || !hasNext) return;
+            var kids = body.children();
+            var i = kids.index(el);
+            if (i >= 0 && i >= kids.length - PREFETCH_AHEAD) comp.load(page + 1);
         };
 
         // ⚠️ width:100% — правило .cols--N > * даёт долю ширины ЛЮБОМУ прямому потомку,
@@ -3261,7 +3282,7 @@
                 release_year: (c.years && c.years.length ? c.years[c.years.length - 1] : '') + ''
             });
             var img = el.find('.card__img');
-            img.attr('src', jutPosterUrl(c.slug));
+            img.attr('src', jutPosterUrl(c.slug, c.pv));
             img.on('error', function () { this.src = './img/img_broken.svg'; });
 
             var view = el.find('.card__view'); if (!view.length) view = el;
@@ -3270,7 +3291,7 @@
             if (c.episodes)
                 view.append('<div style="position:absolute;right:.4em;top:.4em;background:rgba(0,0,0,.65);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">' + c.episodes + '</div>');
 
-            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); comp.prefetch(el); });
             el.on('hover:enter', function () {
                 Lampa.Activity.push({ url: '', title: c.title || c.slug, component: 'jut_title', jut_slug: c.slug, jut_card: c });
             });
@@ -3344,9 +3365,15 @@
 
         this.build = function () {
             var head = $('<div style="display:flex;gap:1.5em;padding:1.5em 0"></div>');
-            var poster = $('<img style="width:12em;border-radius:.6em;flex:0 0 auto" src="' + jutPosterUrl(slug) + '">');
+            var poster = $('<img style="width:12em;border-radius:.6em;flex:0 0 auto" src="' + jutPosterUrl(slug, data.pv) + '">');
             poster.on('error', function () { this.src = './img/img_broken.svg'; });
             head.append(poster);
+
+            // Фон 2560×1440 с самой страницы тайтла. Ошибиться тут нечем — это картинка того же
+            // тайтла, а не результат сопоставления с внешней базой.
+            if (data.backdrop) {
+                try { Lampa.Background.change(jutBackdropUrl(slug)); } catch (e) {}
+            }
 
             var info = $('<div style="flex:1 1 auto"></div>');
             info.append('<div style="font-size:1.9em;font-weight:600">' + esc(data.title || slug) + '</div>');

@@ -94,6 +94,7 @@ public sealed class JutTitle
     public string titleRu;
     public string titleOrig;
     public string poster;
+    public string backdrop;        // ⚠️ живёт в <style>, поэтому ищется ДО Strip() (см. ParseTitle)
     public string descr;
     public double rating;
     public int ratingCount;
@@ -325,6 +326,14 @@ public static class JutSuParse
     static readonly Regex _rxRatingCnt = new(@"<span itemprop=""ratingCount"">(?<v>\d+)</span>", RO);
     static readonly Regex _rxPosterMeta = new(@"<meta property=""yandex_recommendations_image"" content=""(?<v>[^""]*)""", RO);
     static readonly Regex _rxPosterCss = new(@"class=""all_anime_title""\s+style=""background:\s*url\('(?<v>[^']+)'\)", RO);
+
+    // Фон тайтла — 2560×1440, единственная крупная картинка, которую даёт сам сайт.
+    // ⚠️ Ищется по СЫРОМУ html: URL лежит внутри <style>, а Strip() его выпиливает.
+    // Исключение из правила «сначала Strip» безопасно ровно потому, что маркер
+    // chakranature/background/anime/ уникален — ложное срабатывание в CSS невозможно.
+    // ⚠️ Имя файла из слага НЕ выводится, как и у постера: /oneepiece/ → onepiece.jpg.
+    static readonly Regex _rxBackdrop =
+        new(@"url\('(?<v>https?://[^']*/chakranature/background/anime/[^']+\.jpg)'\)", RO);
     static readonly Regex _rxAge = new(@"age_rating_all age_rating_(?<v>\d+)", RO);
     static readonly Regex _rxOngoing = new(@"<a href=""/anime/ongoing/"">\s*<b>\s*онгоинг", RO);
     static readonly Regex _rxDescr = new(@"<p class=""under_video[^""]*""[^>]*>\s*<span>(?<v>.*?)</span>\s*</p>", ROS);
@@ -421,6 +430,16 @@ public static class JutSuParse
         m = _rxPosterMeta.Match(clean);
         if (!m.Success) m = _rxPosterCss.Match(clean);
         if (m.Success) t.poster = WebUtility.HtmlDecode(m.Groups["v"].Value);
+
+        // Фон — по СЫРОМУ html (он в <style>). Тёмный вариант предпочтительнее: сайт затемняет
+        // его специально под текст поверх, а у нас поверх фона идёт весь интерфейс тайтла.
+        foreach (Match bm in _rxBackdrop.Matches(html))
+        {
+            string v = WebUtility.HtmlDecode(bm.Groups["v"].Value);
+            if (t.backdrop == null || v.Contains(".dark.jpg", StringComparison.OrdinalIgnoreCase))
+                t.backdrop = v;
+            if (v.Contains(".dark.jpg", StringComparison.OrdinalIgnoreCase)) break;
+        }
 
         m = _rxAge.Match(clean);
         if (m.Success && int.TryParse(m.Groups["v"].Value, out int age)) t.ageRating = age;

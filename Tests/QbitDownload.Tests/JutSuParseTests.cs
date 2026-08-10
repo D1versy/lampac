@@ -87,6 +87,35 @@ public class JutSuParseTests
     }
 
     [Fact]
+    public void Каталог_даёт_оригинальное_название_всем_карточкам()
+    {
+        // 🔥 На этом держится апгрейд постеров: сопоставление с базой аниме идёт по романдзи
+        // из тултипа, и берётся оно из УЖЕ разобранного каталога — без единой лишней загрузки
+        // страницы тайтла. Если jut.su поменяет тултип, фича погаснет молча; кроме этого теста
+        // об этом сказать некому.
+        var page = JutSuParse.ParseCatalog(Fx("catalog-ajax.html"));
+        int withOrig = page.items.Count(c => !string.IsNullOrWhiteSpace(c.titleOrig));
+        Assert.True(withOrig >= page.items.Count - 2,
+                    $"оригинальных названий {withOrig} из {page.items.Count}");
+    }
+
+    [Theory]
+    [InlineData("title-spy-family.html", "spy-family")]
+    [InlineData("title-yani-neko.html", "yani-neko")]
+    [InlineData("title-oneepiece-content.html", "onepiece")]     // ⚠️ слаг oneepiece, файл onepiece
+    public void Фон_тайтла_разбирается_и_предпочитает_тёмный(string fixture, string namePart)
+    {
+        // ⚠️ Фон лежит в <style>, а Strip() вырезает style целиком — поэтому regex обязан
+        // работать по СЫРОМУ html. Тест ловит ровно эту регрессию.
+        var t = JutSuParse.ParseTitle(Fx(fixture));
+
+        Assert.False(string.IsNullOrEmpty(t.backdrop), "фон обязан быть распарсен");
+        Assert.Contains("/chakranature/background/anime/", t.backdrop);
+        Assert.Contains(namePart, t.backdrop);
+        Assert.EndsWith(".dark.jpg", t.backdrop);
+    }
+
+    [Fact]
     public void Aailines_считает_серии_сезоны_фильмы()
     {
         var card = JutSuParse.ParseCard("", 1,

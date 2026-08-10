@@ -55,7 +55,9 @@
     <Compile Include="..\..\Modules\QbitDownload\LocalIndex.cs" Link="Module\LocalIndex.cs" />
     <Compile Include="..\..\Modules\QbitDownload\IndexCrawler.cs" Link="Module\IndexCrawler.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuParse.cs" Link="Module\JutSuParse.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\JutSuMatch.cs" Link="Module\JutSuMatch.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuHttp.cs" Link="Module\JutSuHttp.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\JutSuPoster.cs" Link="Module\JutSuPoster.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSu.cs" Link="Module\JutSu.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuStream.cs" Link="Module\JutSuStream.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuGrab.cs" Link="Module\JutSuGrab.cs" />

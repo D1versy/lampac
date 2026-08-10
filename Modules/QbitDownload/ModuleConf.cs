@@ -249,7 +249,25 @@ public class ModuleConf : ModuleBaseConf
     public int jutGrabRetries { get; set; } = 5;
     public int jutGrabPaceMs { get; set; } = 0;            // мягкий кап скорости (>0 = пауза между чанками)
     public int jutMinFreeGb { get; set; } = 20;            // серия 1080p ≈ 489 МиБ, сезон ≈ 12 ГБ
-    public bool jutTmdbMatch { get; set; } = true;         // сматчить с TMDB по alternateName+год (fail-open)
+
+    // ── Апгрейд постеров (JutSuPoster.cs + JutSuMatch.cs) ──
+    // jut.su отдаёт КВАДРАТ 186×186 (10–25 КБ), а сетка Lampa ждёт портрет 2:3 — отсюда мыло.
+    // Большего варианта на сайте нет: карточка каталога и страница тайтла ссылаются на один файл.
+    // Цепочка: романдзи с jut → Shikimori (поиск; его id == MAL id) → AniList ПО idMal (без
+    // угадывания) → coverImage.extraLarge 460×690.
+    // 🔥 AniList нельзя использовать матчером: у него своё написание («SPY×FAMILY», «ONE PIECE»).
+    // 🔥 false работает как ПОЛНЫЙ откат: апгрейженные постеры перестают отдаваться сразу же,
+    //    файлы остаются на диске, обратное включение мгновенно.
+    public bool jutPosterUpgrade { get; set; } = true;
+    public bool jutBackdrop { get; set; } = true;          // фон экрана тайтла (2560×1440 с самого jut.su)
+    public int jutPosterPaceMs { get; set; } = 350;        // ≈3 rps при лимите Shikimori 5 rps / 90 rpm
+    public int jutPosterRetryDays { get; set; } = 14;      // ⚠️ отказ обязан протухать: новинки приезжают в базы позже
+    // Санити картинки: портрет и не миниатюра. ⚠️ Не поднимать выше 225 — запасной источник
+    // (Shikimori, 225–240 px) тогда перестаёт проходить, и лестница фолбэка становится мёртвой.
+    public int jutPosterMinWidth { get; set; } = 200;
+    public string jutShikimoriHost { get; set; } = "https://shikimori.io";   // ⚠️ .one отвечает 301 → .io
+    public string jutAniListUrl { get; set; } = "https://graphql.anilist.co";
+    public int jutAniListPaceMs { get; set; } = 900;       // ⚠️ лимит AniList 90/мин, в деградации 30 — темп обязателен
 
     // Слежение — ТОЛЬКО по jut.su. В торренты за этими сериями не ходим (три пояса изоляции,
     // см. JutSuWatch.cs и claude/jut/02-architecture.md §9).

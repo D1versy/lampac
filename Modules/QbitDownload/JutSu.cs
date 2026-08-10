@@ -33,6 +33,17 @@ public partial class QbitController
         return ContentTo(payload.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
     }
 
+    /// <summary>
+    /// То же, плюс отметка версии постера и посев очереди апгрейда (JutSuPoster.cs).
+    /// 🔥 Обязан стоять на ВСЕХ путях возврата каталога/поиска/тайтла, включая кеш и stale:
+    /// свежий разбор случается раз в 30 минут, а карточки показываются постоянно.
+    /// </summary>
+    ActionResult JutJsonArt(JToken payload)
+    {
+        JutPosterStamp(payload);
+        return JutJson(payload);
+    }
+
     // Ошибку отдаём 200 + {"error":...} — как в Live.cs: клиент показывает текст на экране,
     // а не молчаливый «пустой список» от провалившегося XHR.
     ActionResult JutErr(string code, string msg = null)
@@ -164,7 +175,7 @@ public partial class QbitController
         if (nocache == 0)
         {
             var cached = JutCacheRead("catalog", key, ttl, out bool stale);
-            if (cached != null && !stale) return JutJson(cached);
+            if (cached != null && !stale) return JutJsonArt(cached);
         }
 
         string url = JutCatalogUrl(page, genres, years, order);
@@ -177,7 +188,7 @@ public partial class QbitController
         {
             // Сайт лежит — отдаём последнее известное с честным флагом, а не пустой экран
             var stalePage = JutCacheRead("catalog", key, TimeSpan.MaxValue, out _);
-            if (stalePage != null) { stalePage["stale"] = true; return JutJson(stalePage); }
+            if (stalePage != null) { stalePage["stale"] = true; return JutJsonArt(stalePage); }
             return JutErr(resp?.error ?? "SITE_DOWN");
         }
 
@@ -194,7 +205,7 @@ public partial class QbitController
             ["items"] = JutCardsJson(parsed.items)
         };
         if (parsed.items.Count > 0) JutCacheWrite("catalog", key, payload);
-        return JutJson(payload);
+        return JutJsonArt(payload);
     }
 
     [HttpGet, AllowAnonymous]
@@ -212,7 +223,7 @@ public partial class QbitController
         if (nocache == 0)
         {
             var cached = JutCacheRead("search", key, ttl, out bool stale);
-            if (cached != null && !stale) return JutJson(cached);
+            if (cached != null && !stale) return JutJsonArt(cached);
         }
 
         // ⚠️ show_search обязан быть в UTF-8. В CP1251 сайт возвращает 0 результатов.
@@ -242,7 +253,7 @@ public partial class QbitController
             ["items"] = JutCardsJson(parsed.items)
         };
         JutCacheWrite("search", key, payload);
-        return JutJson(payload);
+        return JutJsonArt(payload);
     }
 
     #endregion
@@ -257,6 +268,7 @@ public partial class QbitController
         ["title"] = t.titleRu,
         ["original"] = t.titleOrig,
         ["poster"] = t.poster,
+        ["backdrop"] = t.backdrop,
         ["descr"] = t.descr,
         ["rating"] = t.rating,
         ["ratingCount"] = t.ratingCount,
@@ -333,19 +345,19 @@ public partial class QbitController
         if (nocache == 0)
         {
             var fresh = JutCacheRead("title", slug, ttl, out bool stale);
-            if (fresh != null && !stale) return JutJson(fresh);
+            if (fresh != null && !stale) return JutJsonArt(fresh);
         }
 
         var (t, err) = await JutLoadTitle(slug, nocache != 0);
         if (t == null)
         {
-            if (cached != null) { cached["stale"] = true; return JutJson(cached); }
+            if (cached != null) { cached["stale"] = true; return JutJsonArt(cached); }
             return JutErr(err);
         }
 
         var payload = JutTitleJson(t);
         JutCacheWrite("title", slug, payload);
-        return JutJson(payload);
+        return JutJsonArt(payload);
     }
 
     #endregion
@@ -391,22 +403,43 @@ public partial class QbitController
 
     [HttpGet, AllowAnonymous]
     [Route("qdl/jut/poster")]
-    async public Task<ActionResult> JutPoster(string slug)
+    async public Task<ActionResult> JutPoster(string slug, string v = null)
     {
         if (!JutOn) return NotFound();
         if (!JutSuParse.IsValidSlug(slug)) return NotFound();
 
+        // 1. Апгрейд (Shikimori → MAL id → AniList, см. JutSuPoster.cs). Его может не быть —
+        //    это штатно: неуверенный матч оставляет постер jut.su, см. JutSuMatch.Pick.
+        //    ⚠️ Выключатель jutPosterUpgrade:false гасит эту ветку СРАЗУ — полный откат,
+        //    файлы при этом остаются на диске и включение обратно мгновенно.
+        if (JutHasUpPoster(slug))
+        {
+            // immutable только когда клиент пришёл с версией: без ?v= URL постоянный и вечный кеш
+            // на нём означал бы, что следующий апгрейд до этого клиента уже не доедет.
+            HttpContext.Response.Headers["Cache-Control"] =
+                string.IsNullOrEmpty(v) ? "public,max-age=86400" : "public,max-age=31536000,immutable";
+            return PhysicalFile(JutUpPosterPath(slug), JutUpPosterCtype(slug));
+        }
+
         string path = Path.Combine(JutDir("img"), slug + ".jpg");
         if (System.IO.File.Exists(path))
         {
-            HttpContext.Response.Headers["Cache-Control"] = "public,max-age=604800";
+            // ⚠️ Сутки, а не неделя: апгрейд обязан доехать до уже показанной карточки
+            // даже к клиенту, который ?v= не увидел.
+            HttpContext.Response.Headers["Cache-Control"] = "public,max-age=86400";
             return PhysicalFile(path, "image/jpeg");
         }
 
         // Постер берём ТОЛЬКО из HTML: имя файла на CDN не выводится из слага
         // (/oneepiece/ → anime_onepiece.jpg, /boku-hero-academia/ → anime_boku-no-hero-academia.jpg).
-        var cached = JutCacheRead("title", slug, TimeSpan.MaxValue, out _);
-        string url = cached?["poster"]?.Value<string>();
+        // Каталог этот URL уже разобрал и положил в решение — так холодная страница из 30 карточек
+        // не превращается в 30 загрузок страниц тайтлов.
+        string url = JutRawPosterFromMatch(slug);
+        if (string.IsNullOrEmpty(url))
+        {
+            var cached = JutCacheRead("title", slug, TimeSpan.MaxValue, out _);
+            url = cached?["poster"]?.Value<string>();
+        }
         if (string.IsNullOrEmpty(url))
         {
             var (t, _) = await JutLoadTitle(slug, false);
@@ -417,6 +450,42 @@ public partial class QbitController
 
         byte[] bytes = await JutFetchImage(url);
         if (bytes == null || bytes.Length < 128) return NotFound();
+        try { await System.IO.File.WriteAllBytesAsync(path, bytes); } catch { }
+
+        HttpContext.Response.Headers["Cache-Control"] = "public,max-age=86400";
+        return File(bytes, "image/jpeg");
+    }
+
+    /// <summary>
+    /// Фон экрана тайтла — 2560×1440 с самой страницы jut.su. Риск ошибки нулевой: картинка
+    /// разобрана из HTML этого же тайтла, никакого сопоставления с внешними базами тут нет.
+    /// </summary>
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/jut/backdrop")]
+    async public Task<ActionResult> JutBackdrop(string slug)
+    {
+        if (!JutOn || ModInit.conf?.jutBackdrop == false) return NotFound();
+        if (!JutSuParse.IsValidSlug(slug)) return NotFound();
+
+        string path = Path.Combine(JutDir("bg"), slug + ".jpg");
+        if (System.IO.File.Exists(path))
+        {
+            HttpContext.Response.Headers["Cache-Control"] = "public,max-age=604800";
+            return PhysicalFile(path, "image/jpeg");
+        }
+
+        var cached = JutCacheRead("title", slug, TimeSpan.MaxValue, out _);
+        string url = cached?["backdrop"]?.Value<string>();
+        if (string.IsNullOrEmpty(url))
+        {
+            var (t, _) = await JutLoadTitle(slug, false);
+            url = t?.backdrop;
+            if (t != null) JutCacheWrite("title", slug, JutTitleJson(t));
+        }
+        if (string.IsNullOrEmpty(url)) return NotFound();
+
+        byte[] bytes = await JutFetchImage(url);
+        if (bytes == null || bytes.Length < 1024) return NotFound();
         try { await System.IO.File.WriteAllBytesAsync(path, bytes); } catch { }
 
         HttpContext.Response.Headers["Cache-Control"] = "public,max-age=604800";
@@ -473,10 +542,15 @@ public partial class QbitController
                 ["fallbackMode"] = mode,
                 ["until"] = until
             },
-            ["links"] = new JObject { ["cached"] = cached, ["oldestAgeSec"] = oldest }
+            ["links"] = new JObject { ["cached"] = cached, ["oldestAgeSec"] = oldest },
+            ["posters"] = JutPosterStats()
         };
 
         if (!JutOn) { jo["probe"] = "skipped: jutEnable=false"; return JutJson(jo); }
+
+        // Достижимы ли базы аниме ИЗ КОНТЕЙНЕРА — главный вопрос при гео- или UA-блокировке:
+        // фича fail-open, поэтому её отказ виден только здесь.
+        if (probeProxies != 0 || slug != null) jo["postersProbe"] = await JutPosterProbe();
 
         var probe = new JObject();
         jo["probe"] = probe;

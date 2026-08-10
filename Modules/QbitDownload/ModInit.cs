@@ -169,6 +169,11 @@ public class ModInit : IModuleLoaded
         {
             try { await QbitController.JutReconcile(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut reconcile: " + ex); }
+
+            // Апгрейд постеров у уже скачанного: в каталоге этих тайтлов может не быть,
+            // а карточка в «Загрузках» иначе навсегда останется с квадратом 186×186.
+            try { QbitController.JutPosterSeedDownloads(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut poster seed: " + ex); }
         });
     }
 
