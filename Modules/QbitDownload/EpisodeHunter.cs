@@ -1382,7 +1382,9 @@ public partial class QbitController
             Console.WriteLine("[QbitDownload] hunt: донор " + btih + " (" + cand.Value<string>("tracker") + ") — серии " + string.Join(",", found.Select(f => f.ep)) + " для «" + m.Value<string>("title") + "»");
             if (wanted.Count == 0) break;
         }
-        if (grabbed == 0)
+        if (grabbed > 0)
+            ActivityTouch(h.mainHash);   // карточка всплывает в момент ЗАХВАТА серии, не дожидаясь докачки
+        else
             Console.WriteLine($"[QbitDownload] hunt «{stitle}» S{season}: ничего не добыто (проб {probes} из {eligible.Count} годных)");
         res.grabbed = grabbed;
         return res;
@@ -2087,6 +2089,7 @@ public partial class QbitController
         }
         await QbitDelete(c, curHash, delOld);
         MigrateCache(curHash, newHash);
+        ActivityTouch(newHash);   // переключение = свежая загрузка, даже если торрент был дубликатом (added_on старый)
         m["hash"] = newHash;
         m["link"] = !string.IsNullOrWhiteSpace(parselink) ? parselink : magnet;
         m["stale"] = 0;

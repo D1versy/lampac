@@ -1364,7 +1364,7 @@
                 else
                     cg.items.forEach(function (t) { comp.append(t, { collection: cg.col }); });
             } else {
-                // главный грид: коллекции и фильмы вперемешку, по дате загрузки (новое сверху)
+                // главный грид: коллекции и фильмы вперемешку, по актуальности последней загрузки (новое сверху)
                 if (!g.cols.length && !g.singles.length)
                     body.append($('<div style="width:100%;padding:2em;font-size:1.4em;opacity:.7">В «Загрузках» пока пусто. Нажми «Скачать» на карточке фильма.</div>'));
                 gridOrder(g).forEach(function (e) {
@@ -1667,6 +1667,14 @@
 
     function itemTitle(t) { return (t && t.meta && t.meta.title) || (t && t.name) || ''; }
 
+    // «актуальность» карточки: activity сервера (новая серия от охоты/докачка двигают её вверх),
+    // фолбэк — added; мусор/отрицательное не протекает в сортировку
+    function itemActivity(t) {
+        var a = +(t && t.activity);
+        if (!isFinite(a) || a <= 0) a = +(t && t.added) || 0;
+        return a;
+    }
+
     // list (/qdl/list) + collections (/qdl/collections) → { cols: [{col, items, cover}], singles: [...] }
     // мёртвые хэши (удалены мимо нашего API) отбрасываются, коллекция без живых фильмов не рендерится,
     // cover — объект фильма-обложки (фолбек: первый живой)
@@ -1680,19 +1688,20 @@
             items.forEach(function (t) { inCol[t.hash] = true; });
             var cover = items.filter(function (t) { return t.hash === col.cover; })[0] || items[0];
             var added = 0;
-            items.forEach(function (t) { var a = +t.added || 0; if (a > added) added = a; });
+            items.forEach(function (t) { var a = itemActivity(t); if (a > added) added = a; });
             cols.push({ col: col, items: items, cover: cover, added: added });
         });
         var singles = list.filter(function (t) { return t && t.hash && !inCol[t.hash]; });
         return { cols: cols, singles: singles };
     }
 
-    // коллекции и одиночки вперемешку, по дате загрузки desc (дата коллекции = самая свежая её серия);
+    // коллекции и одиночки вперемешку, по актуальности последней загрузки desc (дата коллекции =
+    // самая свежая активность её серий: новая серия/докачка поднимает коллекцию наверх);
     // тай-брейк — прежний порядок (коллекции, затем одиночки): не полагаемся на стабильность sort старых TV
     function gridOrder(g) {
         var entries = [];
         g.cols.forEach(function (c) { entries.push({ col: c, added: +c.added || 0, idx: entries.length }); });
-        g.singles.forEach(function (t) { entries.push({ item: t, added: +t.added || 0, idx: entries.length }); });
+        g.singles.forEach(function (t) { entries.push({ item: t, added: itemActivity(t), idx: entries.length }); });
         entries.sort(function (a, b) { return (b.added - a.added) || (a.idx - b.idx); });
         return entries;
     }

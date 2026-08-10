@@ -60,6 +60,13 @@ public sealed class FakeQbit
     public IReadOnlyList<HttpRequestMessage> Requests => _handler?.Requests ?? (IReadOnlyList<HttpRequestMessage>)Array.Empty<HttpRequestMessage>();
 
     public HttpClient Build(string baseAddress = "http://qbit.test")
+        => new HttpClient(BuildHandler()) { BaseAddress = new Uri(baseAddress) };
+
+    /// <summary>
+    /// Тот же роутер, но голым handler'ом — для подсадки ПОД production-стек Qbit()
+    /// (Access.SeedQbitFake: QbitAuthHandler(inner) поверх нашего фейка).
+    /// </summary>
+    public HttpMessageHandler BuildHandler()
     {
         _handler = new FakeHttpMessageHandler(req =>
         {
@@ -68,6 +75,6 @@ public sealed class FakeQbit
                 if (url.Contains(needle, StringComparison.OrdinalIgnoreCase)) return resp(req);
             return new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("[]") };
         });
-        return new HttpClient(_handler) { BaseAddress = new Uri(baseAddress) };
+        return _handler;
     }
 }

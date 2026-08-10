@@ -102,6 +102,37 @@ public static class Access
     public static void CollectionsRemoveHash(string hash) => Call("CollectionsRemoveHash", hash);
     public static void CollectionsMigrateHash(string oldH, string newH) => Call("CollectionsMigrateHash", oldH, newH);
 
+    // ── activity («актуальность» карточки — сортировка «Загрузок») ────────
+    public static long CardActivity(long added, long completionOn, double progress, long stored, long now)
+        => (long)Call("CardActivity", added, completionOn, progress, stored, now);
+    // production-метод имеет default-параметр ts=0 — рефлексия требует явное значение
+    public static void ActivityTouch(string hash, long ts) => Call("ActivityTouch", hash, ts);
+    public static void ActivityRemove(string hash) => Call("ActivityRemove", hash);
+    public static void ActivityMigrate(string oldH, string newH) => Call("ActivityMigrate", oldH, newH);
+    public static JObject ActivityLoad() => (JObject)Call("ActivityLoad");
+    public static void ActivityPrune(HashSet<string> live, long now) => Call("ActivityPrune", live, now);
+
+    // ── e2e: фейковый qBit-стек вместо Qbit()+логина ──────────────────────
+    // Qbit() пересоздаёт стек при смене gen (host|user|pass) и перелогинивается по TTL SID —
+    // сажаем свой handler и свежий _qbitSidAt, чтобы ни пересоздания, ни логина не случилось.
+    public static void SeedQbitFake(HttpMessageHandler inner)
+    {
+        var t = C.GetNestedType("QbitAuthHandler", BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("QbitController+QbitAuthHandler not found");
+        F("_qbitAuth").SetValue(null, Activator.CreateInstance(t, new object[] { inner }));
+        F("_qbitPool").SetValue(null, new HttpClientHandler());
+        F("_qbitGen").SetValue(null, ModInit.conf.qbitHost + "|" + ModInit.conf.qbitUser + "|" + ModInit.conf.qbitPass);
+        F("_qbitSidAt").SetValue(null, DateTime.UtcNow);
+    }
+
+    /// <summary>Вернуть стек в исходное: следующий Qbit() пересоздаст всё сам (не отравлять соседние тесты).</summary>
+    public static void ResetQbitFake()
+    {
+        F("_qbitAuth").SetValue(null, null);
+        F("_qbitGen").SetValue(null, null);
+        F("_qbitSidAt").SetValue(null, DateTime.MinValue);
+    }
+
     // ── purge / transcode queue (§Z) ──────────────────────────────────────
     public static void PurgeCache(string hash) => Call("PurgeCache", hash);
     public static void MigrateCache(string oldH, string newH) => Call("MigrateCache", oldH, newH);

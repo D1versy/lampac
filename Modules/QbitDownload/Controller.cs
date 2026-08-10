@@ -669,23 +669,30 @@ public partial class QbitController : BaseController
                     foreach (var d in ds) { var dh = d.Value<string>("hash"); if (!string.IsNullOrEmpty(dh)) donorHashes.Add(dh); }
             }
 
+            // снапшот штампов активности один на запрос (Touch пишет из фоновых потоков — не дёргать файл на каждый элемент)
+            JObject act; lock (_activityLock) act = ActivityLoad();
+            long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
             var result = new JArray();
             foreach (var t in JArray.Parse(raw))
             {
                 string h = t.Value<string>("hash") ?? "";
                 if (donorHashes.Contains(h)) continue;   // раздачи-доноры (охота) — не карточки «Загрузок»
+                double prog = t.Value<double?>("progress") ?? 0;
+                long addedOn = t.Value<long?>("added_on") ?? 0;
                 var item = new JObject
                 {
                     ["hash"] = h,
                     ["name"] = t.Value<string>("name"),
-                    ["progress"] = t.Value<double?>("progress") ?? 0,
+                    ["progress"] = prog,
                     ["state"] = t.Value<string>("state"),
                     ["size"] = t.Value<long?>("size") ?? 0,
                     ["save_path"] = t.Value<string>("save_path"),
                     ["content_path"] = t.Value<string>("content_path"),
                     ["has_poster"] = ValidHash(h) && System.IO.File.Exists(PosterPath(h)),
                     ["watched"] = watched.Contains(h),
-                    ["added"] = t.Value<long?>("added_on") ?? 0
+                    ["added"] = addedOn,
+                    ["activity"] = CardActivity(addedOn, t.Value<long?>("completion_on") ?? 0, prog, ActivityStored(act, h), nowUnix)
                 };
                 if (ValidHash(h) && System.IO.File.Exists(MetaPath(h)))
                 {
@@ -726,6 +733,8 @@ public partial class QbitController : BaseController
                             ["watched"] = false,
                             ["added"] = loc.Value<long?>("added") ?? MarkerFallbackAdded(lf)
                         };
+                        // без Touch activity == added → финализированный транскод позицию не меняет (§AG)
+                        item["activity"] = Math.Max(item.Value<long?>("added") ?? 0, ActivityStored(act, h));
                         if (System.IO.File.Exists(MetaPath(h)))
                             try { item["meta"] = JObject.Parse(System.IO.File.ReadAllText(MetaPath(h))); } catch { }
                         result.Add(item);
@@ -734,8 +743,20 @@ public partial class QbitController : BaseController
             }
             catch (Exception ex) { Console.WriteLine("[QbitDownload] list local: " + ex.Message); }
 
-            // единый порядок по дате загрузки (новое сверху) — локальные транскоды не хвостом
-            var ordered = new JArray(result.OrderByDescending(x => x.Value<long?>("added") ?? 0));
+            // сироты в activity.json (карточка удалена мимо PurgeCache) — здесь единственное место с полным списком живых
+            try
+            {
+                var live = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var it in result) live.Add((it.Value<string>("hash") ?? "").ToLowerInvariant());
+                ActivityPrune(live, nowUnix);
+            }
+            catch { }
+
+            // единый порядок по актуальности последней загрузки (новое сверху): новая серия/докачка
+            // поднимает карточку; фолбэк и тай-брейк — прежняя дата добавления
+            var ordered = new JArray(result
+                .OrderByDescending(x => x.Value<long?>("activity") ?? x.Value<long?>("added") ?? 0)
+                .ThenByDescending(x => x.Value<long?>("added") ?? 0));
             return ContentTo(ordered.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
         }
         catch (Exception ex)
@@ -3096,6 +3117,8 @@ public partial class QbitController : BaseController
                 catch { }
 
                 MigrateCache(curHash, newHash);
+                // явный бамп: если раздачу уже качала охота, add — дубликат и added_on у торрента старый
+                ActivityTouch(newHash);
                 m["hash"] = newHash;
                 m["stale"] = 0;
                 m["pendingSwitch"] = null;   // топик ожил — предложение переключения снимается
@@ -3131,6 +3154,7 @@ public partial class QbitController : BaseController
         mv(LinkPath(oldH), LinkPath(newH));
         mv(LocalPath(oldH), LocalPath(newH));   // оверлей-маркер транскода следует за re-grab (пути внутри абсолютные)
         CollectionsMigrateHash(oldH, newH);
+        ActivityMigrate(oldH, newH);
     }
 
     static string MagnetHash(string magnet)
@@ -3330,6 +3354,9 @@ public partial class QbitController : BaseController
             // без этого оба стейджат одну (sk,epkey) → SaveChanges падает на UNIQUE-индексе и откатывает ВСЮ
             // пачку уведомлений. seenKeys грузятся ДО персиста, поэтому нужен общий на прогон набор.
             var staged = new HashSet<string>();
+            // основные хэши сериалов с реально созданными уведомлениями: бамп активности (карточка всплывает
+            // в «Загрузках») — строго ПОСЛЕ успешного SaveChanges, откат пачки не должен двигать карточки
+            var touched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             bool StageSeen(string sk2, string key2)
             {
                 if (!staged.Add("S|" + sk2 + "|" + key2)) return false;
@@ -3380,6 +3407,7 @@ public partial class QbitController : BaseController
                                 label = EpLabel(ep), created = DateTime.UtcNow, read = false
                             });
                             created++;
+                            touched.Add(hash);
                             Console.WriteLine("[QbitDownload] notify: " + title + " — " + EpLabel(ep));
                         }
                         StageSeen(sk, key);
@@ -3414,6 +3442,7 @@ public partial class QbitController : BaseController
                                         label = EpLabel(ep) + " · временно с другой раздачи", created = DateTime.UtcNow, read = false
                                     });
                                     created++;
+                                    touched.Add(hash);   // hash здесь — ОСНОВНОЙ (как и в noti): всплывает карточка сериала
                                     Console.WriteLine("[QbitDownload] notify (donor): " + title + " — " + EpLabel(ep));
                                 }
                                 StageSeen(sk, key);
@@ -3428,7 +3457,11 @@ public partial class QbitController : BaseController
                 catch (Exception ex) { Console.WriteLine("[QbitDownload] noti scan item: " + ex); }
             }
 
-            try { db.SaveChanges(); }
+            try
+            {
+                db.SaveChanges();
+                foreach (var th in touched) ActivityTouch(th);
+            }
             catch (Exception ex) { Console.WriteLine("[QbitDownload] noti save: " + ex); }
 
             if (created > 0) PushNotiSignal(created);   // не ждём следующего опроса колокольчика
@@ -3798,6 +3831,98 @@ public partial class QbitController : BaseController
     }
     #endregion
 
+    #region activity — «актуальность» карточки (сортировка «Загрузок» по последнему событию загрузки)
+    // Ключ сортировки грида — не только added_on: охота добавляет серию донором (другая категория qBit,
+    // added_on основной не меняется), докачка серии видна лишь сканеру уведомлений. Здесь — персистентный
+    // штамп «последней загрузки» по ОСНОВНОМУ hash: {lowercase infohash: unix seconds}. Транскод и jut.su
+    // сюда не пишут намеренно (транскод позицию не меняет — §AG; jut двигает added маркера сам).
+    static string ActivityFile => Path.Combine(ModInit.conf.cachePath, "activity.json");
+    static readonly object _activityLock = new();
+
+    static JObject ActivityLoad()
+    {
+        try { if (System.IO.File.Exists(ActivityFile)) return JObject.Parse(System.IO.File.ReadAllText(ActivityFile)); } catch { }
+        return new JObject();
+    }
+    static void ActivitySave(JObject a)
+    {
+        try { Directory.CreateDirectory(ModInit.conf.cachePath); System.IO.File.WriteAllText(ActivityFile, a.ToString(Newtonsoft.Json.Formatting.None)); } catch { }
+    }
+
+    // ts <= 0 → сейчас. Монотонный: запоздавший Touch не откатывает более свежий.
+    // Один метод с default-параметром, НЕ перегрузки (тестовый Access.Call матчит по числу аргументов).
+    internal static void ActivityTouch(string hash, long ts = 0)
+    {
+        if (!ValidHash(hash)) return;
+        hash = hash.ToLowerInvariant();
+        if (ts <= 0) ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        lock (_activityLock)
+        {
+            var a = ActivityLoad();
+            if ((a.Value<long?>(hash) ?? 0) >= ts) return;
+            a[hash] = ts;
+            ActivitySave(a);
+        }
+    }
+
+    static long ActivityStored(JObject snapshot, string hash)
+        => snapshot?.Value<long?>((hash ?? "").ToLowerInvariant()) ?? 0;
+
+    // Активность карточки: max(added, completion_on при валидности, сохранённый touch).
+    // completion_on берём только у докачанных (progress >= 0.999): у недокачанных qBit отдаёт мусор
+    // (-1 / 4294967295), а значение из будущего (потолок now+сутки) прибило бы карточку к топу навсегда.
+    internal static long CardActivity(long added, long completionOn, double progress, long stored, long now)
+    {
+        long act = Math.Max(added, stored);
+        if (progress >= 0.999 && completionOn > 0 && completionOn != 4294967295L && completionOn <= now + 86400)
+            act = Math.Max(act, completionOn);
+        return act;
+    }
+
+    internal static void ActivityRemove(string hash)
+    {
+        if (string.IsNullOrEmpty(hash)) return;
+        hash = hash.ToLowerInvariant();
+        lock (_activityLock)
+        {
+            var a = ActivityLoad();
+            if (a.Remove(hash)) ActivitySave(a);
+        }
+    }
+
+    // re-grab/switch: штамп переезжает на новый hash; при коллизии побеждает более свежий
+    internal static void ActivityMigrate(string oldH, string newH)
+    {
+        if (string.IsNullOrEmpty(oldH) || string.IsNullOrEmpty(newH)) return;
+        oldH = oldH.ToLowerInvariant(); newH = newH.ToLowerInvariant();
+        lock (_activityLock)
+        {
+            var a = ActivityLoad();
+            long ov = a.Value<long?>(oldH) ?? 0;
+            if (ov == 0) return;
+            if ((a.Value<long?>(newH) ?? 0) < ov) a[newH] = ov;
+            a.Remove(oldH);
+            ActivitySave(a);
+        }
+    }
+
+    // Ключи без живой карточки: грейс 7 суток, а не сразу — основная может временно числиться
+    // в донорской категории до PromoteIfDonor (самолечение ≤ 6 ч) и не попасть в liveHashes.
+    internal static void ActivityPrune(HashSet<string> liveHashes, long now)
+    {
+        lock (_activityLock)
+        {
+            var a = ActivityLoad();
+            var dead = a.Properties()
+                .Where(p => !liveHashes.Contains(p.Name) && (p.Value.Value<long?>() ?? 0) < now - 7 * 86400)
+                .Select(p => p.Name).ToList();
+            if (dead.Count == 0) return;
+            foreach (var k in dead) a.Remove(k);
+            ActivitySave(a);
+        }
+    }
+    #endregion
+
     #region helpers
     static string MetaPath(string hash) => Path.Combine(ModInit.conf.cachePath, "meta", hash + ".json");
     static string PosterPath(string hash) => Path.Combine(ModInit.conf.cachePath, "img", hash + ".jpg");
@@ -3962,6 +4087,7 @@ public partial class QbitController : BaseController
 
             // 4) коллекции: убрать фильм, опустевшие удалить
             CollectionsRemoveHash(hash);
+            ActivityRemove(hash);
 
             // 5) файловые артефакты — в последнюю очередь
             foreach (var p in new[] { MetaPath(hash), PosterPath(hash), LinkPath(hash), LocalPath(hash) })

@@ -112,6 +112,54 @@ test('gridOrder: элементы без added уходят вниз, при в�
   assert.strictEqual(o1[1].item.hash, HD, 'без added → вниз');
 });
 
+// ─────────────────────── актуальность (activity, qdl 2.28) ───────────────────────
+
+test('грид: activity поднимает сериал с новой серией выше свежих одиночек', () => {
+  // Дюна добавлена давно (added 100), но охота докачала серию (activity 500) → выше Риддика (added 300)
+  const { html } = mount({}, {
+    list: [{ ...F1, added: 100, activity: 500 }, { ...F3, added: 300 }],
+    collections: [],
+  });
+  assert.deepStrictEqual(cardTitles(html), ['Дюна', 'Риддик']);
+});
+
+test('грид: коллекция всплывает по max activity её элементов', () => {
+  // обе части «Дюны» старые по added, но у F2 свежая активность → коллекция первая
+  const { html } = mount({}, {
+    list: [{ ...F1, added: 100 }, { ...F2, added: 150, activity: 600 }, { ...F3, added: 300 }],
+    collections: [COL],
+  });
+  assert.deepStrictEqual(cardTitles(html), ['Дюна', 'Риддик']);
+  assert.ok(html.find('.card').eq(0).hasClass('qdl-col-card'), 'коллекция первая');
+});
+
+test('грид: без activity — фолбэк на added (старый сервер)', () => {
+  const { html } = mount({}, {
+    list: [{ ...F1, added: 100 }, { ...F3, added: 300 }],
+    collections: [],
+  });
+  assert.deepStrictEqual(cardTitles(html), ['Риддик', 'Дюна']);
+});
+
+test('itemActivity: мусор и отрицательное → фолбэк added, NaN не протекает', () => {
+  const { qdl } = mount({}, {});
+  assert.strictEqual(qdl.itemActivity({ activity: 'garbage', added: 42 }), 42);
+  assert.strictEqual(qdl.itemActivity({ activity: -5, added: 42 }), 42);
+  assert.strictEqual(qdl.itemActivity({ activity: 100, added: 42 }), 100);
+  assert.strictEqual(qdl.itemActivity({ added: 42 }), 42);
+  assert.strictEqual(qdl.itemActivity({}), 0);
+  assert.strictEqual(qdl.itemActivity(null), 0);
+});
+
+test('грид: activity == added (финализированный транскод) порядок не меняет', () => {
+  // страховка клиентской стороны §AG: сервер отдаёт activity=added у маркеров без событий
+  const { html } = mount({}, {
+    list: [{ ...F1, added: 100, activity: 100 }, { ...F3, added: 300, activity: 300 }],
+    collections: [],
+  });
+  assert.deepStrictEqual(cardTitles(html), ['Риддик', 'Дюна']);
+});
+
 test('грид: пусто → сообщение-подсказка, карточек нет', () => {
   const { html } = mount({}, { list: [], collections: [] });
   assert.strictEqual(html.find('.card').length, 0);
