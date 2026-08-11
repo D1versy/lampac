@@ -176,7 +176,7 @@ test('UI: DMCA + скачано → [Смотреть][Скачать], «Про
     'на заблокированном скачанном сериале «Продолжить» обязана оставаться видимой');
 });
 
-test('rescueFocus: авто-фокус на приоритетном клоне переезжает на первую кнопку ряда', () => {
+test('fixFocus: авто-фокус на приоритетном клоне переезжает на первую кнопку ряда', () => {
   const focused = [];
   const lampa = H.makeLampa({ Controller: { collectionFocus: (t) => focused.push(t) } });
   const { w, qdl } = H.loadQdlDom({ lampa });
@@ -189,13 +189,70 @@ test('rescueFocus: авто-фокус на приоритетном клоне 
   assert.ok(focused[0].classList.contains('qdl-download'), 'фокус на первой кнопке, а не у правого края');
 });
 
-test('rescueFocus: ручной фокус на обычной кнопке при реордере не трогаем', () => {
+test('fixFocus: ручной фокус на обычной кнопке при реордере не трогаем', () => {
   const focused = [];
   const lampa = H.makeLampa({ Controller: { collectionFocus: (t) => focused.push(t) } });
   const { w, qdl } = H.loadQdlDom({ lampa });
   const cont = buildRow(w, ['button--play', 'qdl-download focus', 'button--book']);
   qdl.orderButtons(cont);
   assert.deepStrictEqual(focused, [], 'пользователь сам выбрал кнопку — фокус его');
+});
+
+// ───────── async-кнопки: коллекция навигатора и фокус на главном действии ─────────
+// 🔥 Коллекция SpatialNavigator статична: Navigator.focus(el) возвращает false для элемента,
+// которого в ней нет, move() его не видит. Наши кнопки приезжают ПОСЛЕ collectionSet — без
+// collectionAppend пультом до «Смотреть» было не дойти. А фокус Lampa ставит ещё раньше, когда
+// в ряду одна «Скачать» (жалоба владельца с ТВ: «фокус на Скачать, а должен быть на первой»).
+
+function rigAsyncList() {
+  const focused = [], appended = [];
+  let listCb = null;
+  const lampa = H.makeLampa({
+    Activity: { active: () => ({ method: 'movie', source: 'cub' }) },
+    Reguest: function () {
+      this.timeout = () => {}; this.clear = () => {};
+      this.silent = (url, ok) => { if (String(url).indexOf('/qdl/list') !== -1) listCb = ok; };   // держим колбэк
+    },
+    Controller: { collectionFocus: (t) => focused.push(t), collectionAppend: (b) => appended.push(b) },
+  });
+  return { lampa, focused, appended, reply: () => listCb([{ hash: 'x9', name: 'Дюна 2021 WEB-DL',
+    meta: { id: 438631, media_type: 'movie', title: 'Дюна' } }]) };
+}
+
+test('async «Смотреть»: регистрируется в коллекции навигатора и перетягивает фокус со «Скачать»', () => {
+  const rig = rigAsyncList();
+  const { w, doc } = H.loadQdlDom({ bodyHtml: PAGE, lampa: rig.lampa });
+  fireAddButton(w, { id: 438631, title: 'Дюна', original_title: 'Dune' });
+
+  // Lampa фокусирует первый .selector на activity.toggle() — тогда в ряду только «Скачать»
+  doc.querySelector('.qdl-download').classList.add('focus');
+  rig.reply();
+
+  assert.strictEqual(rig.appended.length, 1, 'кнопка добавлена в коллекцию навигатора');
+  assert.ok(rig.appended[0][0].classList.contains('qdl-watch-btn'), 'именно приехавшая «Смотреть»');
+  assert.strictEqual(rig.focused.length, 1, 'фокус переведён один раз');
+  assert.ok(rig.focused[0].classList.contains('qdl-watch-btn'), 'фокус на «Смотреть», а не на «Скачать»');
+});
+
+test('async «Смотреть»: если пользователь уже нажал кнопку пульта — фокус не забираем', () => {
+  const rig = rigAsyncList();
+  const { w, doc } = H.loadQdlDom({ bodyHtml: PAGE, lampa: rig.lampa });
+  fireAddButton(w, { id: 438631, title: 'Дюна', original_title: 'Dune' });
+
+  doc.querySelector('.qdl-download').classList.add('focus');
+  w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowRight' }));   // пользователь пошёл по ряду
+  rig.reply();
+
+  assert.strictEqual(rig.appended.length, 1, 'в коллекцию добавляем всегда — иначе кнопка недостижима');
+  assert.deepStrictEqual(rig.focused, [], 'фокус остаётся там, куда его увёл пользователь');
+});
+
+test('navAppend: карточку успели закрыть — коллекцию активного экрана не пачкаем', () => {
+  const rig = rigAsyncList();
+  const { w, doc } = H.loadQdlDom({ bodyHtml: '<div class="activity--active"></div>' + PAGE, lampa: rig.lampa });
+  fireAddButton(w, { id: 438631, title: 'Дюна', original_title: 'Dune' });
+  rig.reply();   // ряд кнопок лежит ВНЕ активной активности — значит это уже другая карточка
+  assert.deepStrictEqual(rig.appended, [], 'чужая кнопка в коллекции ловила бы фокус на другом экране');
 });
 
 // ─────────────────────────────── orderButtons: юниты ───────────────────────────────

@@ -2146,24 +2146,57 @@
                 .map(function (x) { return x.n; });
             var same = true;
             for (var i = 0; i < kids.length; i++) if (kids[i] !== sorted[i]) { same = false; break; }
-            if (same) return;   // порядок уже верен → ни одной мутации (иначе observer зациклится)
-            qdlOrdering = true;
-            for (var j = 0; j < sorted.length; j++) box.appendChild(sorted[j]);   // appendChild ПЕРЕМЕЩАЕТ узел, слушатели живы
-            qdlOrdering = false;
-            rescueFocus(box);
+            if (!same) {   // порядок верен → НИ ОДНОЙ мутации, иначе observer зациклится
+                qdlOrdering = true;
+                for (var j = 0; j < sorted.length; j++) box.appendChild(sorted[j]);   // appendChild ПЕРЕМЕЩАЕТ узел, слушатели живы
+                qdlOrdering = false;
+            }
+            // фокус правим и без перемещений: кнопка могла приехать сразу в нужное место
+            // (prepend «Смотреть» в ряд, где из наших только «Скачать»), а фокус остался на ней
+            fixFocus(box);
         } catch (e) { qdlOrdering = false; }
     }
 
-    // Пин источника: onGroupButtons СИНХРОННО делает prepend клона .button--priority и тут же
-    // collectionFocus(last||false) — при пустом last фокус садится на клон, потому что в этот миг
-    // он первый в ряду. Мы увозим клон в конец (микротаском позже) — без этого фокус уезжал бы
-    // к правому краю ряда на каждом входе в карточку. Возвращаем его на первую кнопку.
-    function rescueFocus(box) {
+    // 🔥 Коллекция SpatialNavigator СТАТИЧНА: Navigator.focus(el) возвращает false, если элемента
+    // в ней нет, а move() его не видит. Наши кнопки приезжают на ответ /qdl/list и /qdl/episodes —
+    // то есть ПОСЛЕ collectionSet (он один раз на входе в контроллер full_start), поэтому пультом
+    // до «Смотреть»/«Продолжить» было не дойти до следующего входа в карточку. collectionAppend —
+    // штатный механизм добора (им же цепляются доскроленные карточки каталога).
+    function navAppend(cont, btn) {
         try {
-            var foc = box.querySelector('.full-start__button.focus');
-            if (!foc || !foc.classList.contains('button--priority')) return;   // ручной фокус не трогаем
+            var act = document.querySelector('.activity--active');
+            if (act && !act.contains(cont[0])) return;   // карточку уже закрыли — коллекцию не пачкаем
+            Lampa.Controller.collectionAppend(btn);
+        } catch (e) {}
+    }
+
+    // Пока пользователь не нажал ни одной клавиши, фокус наш: слушатели глобальные и вешаются один раз
+    var focusFree = false;
+    function inputSeen() { focusFree = false; }
+    function armFocus() {
+        if (!armFocus.bound) {
+            armFocus.bound = 1;
+            var evs = ['keydown', 'mousedown', 'touchstart', 'wheel'];
+            for (var i = 0; i < evs.length; i++)
+                try { window.addEventListener(evs[i], inputSeen, true); } catch (e) {}
+        }
+        focusFree = true;
+    }
+
+    // Фокус — на главном действии. Lampa фокусирует первый .selector в момент activity.toggle(),
+    // когда в ряду есть только «Скачать»; «Смотреть»/«Продолжить» приезжают асинхронно и встают
+    // перед ней — переводим фокус на новую первую кнопку (жалоба владельца: на ТВ фокус садился
+    // на «Скачать»). Отдельный случай — артефакт пина источника: onGroupButtons СИНХРОННО делает
+    // prepend клона .button--priority и фокусирует его, а мы увозим клон в конец ряда; это не выбор
+    // пользователя, поэтому лечится даже после нажатий.
+    function fixFocus(box) {
+        try {
             var first = box.children[0];
-            if (first && first !== foc) Lampa.Controller.collectionFocus(first, box);
+            var foc = box.querySelector('.full-start__button.focus');
+            if (!first || !foc || foc === first) return;
+            if (!focusFree && !foc.classList.contains('button--priority')) return;   // кнопку выбрали руками
+            if (buttonRank(first) >= buttonRank(foc)) return;   // новая первая не «важнее» — не трогаем
+            Lampa.Controller.collectionFocus(first, box);
         } catch (e) {}
     }
 
@@ -2215,6 +2248,7 @@
                 confirmPartial(gateItem, function () { chooseEpisode(hash, name, true); });
             });
             cont.prepend(b);
+            navAppend(cont, b);   // приехала async → в коллекции навигатора её ещё нет
             orderButtons(cont);
         });
     }
@@ -2235,6 +2269,7 @@
             injectCss();
             ensureOnlineButton(cont);
             ensureOrderObserver(cont);
+            armFocus();   // до первого нажатия фокус наш: async-кнопки перетянут его на себя
 
             // тип/источник берём С ОТКРЫТОЙ КАРТОЧКИ (method/source активности), а не угадываем —
             // у TMDB id в movie и tv это РАЗНЫЕ объекты, ошибка типа = другой фильм
@@ -2299,6 +2334,7 @@
                     var play = $('<div class="full-start__button selector qdl-watch-btn">' + WATCH_ICON + '<span>Смотреть</span></div>');
                     play.on('hover:enter', function () { watch(hit); });
                     cont.prepend(play);
+                    navAppend(cont, play);   // приехала async → в коллекции навигатора её ещё нет
                     orderButtons(cont);
                     addContinueButton(render, cont, hit.hash, (hit.meta && hit.meta.title) || hit.name, hit);
                 });
