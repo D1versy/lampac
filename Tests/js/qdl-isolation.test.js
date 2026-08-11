@@ -266,3 +266,117 @@ test('М1.5: 90-секундный опрос оставлен фолбэком 
   assert.ok(/setInterval\(pollNotifications,\s*90000\)/.test(H.qdlSource()),
     'резервный интервал опроса пропал — при мёртвом WS уведомления перестанут приходить вовсе');
 });
+
+// ═══════════════════ 2.35: корзины уведомлений — «скачана» по белому списку ═══════════════════
+// 🔥 Раньше «скачана» была ветвью ПО ОСТАТКУ: туда падали и «вышла новая серия» (kind=null),
+// и SEASON, и DIAG. Пользователь читал «скачана» про серию, которой на диске нет — а в режиме
+// «только уведомления» её там не будет никогда.
+
+test('2.35: NEW — своя корзина, без «скачана»', () => {
+  const noty = [];
+  const { lampa, pending } = pollRig(noty);
+  const { qdl } = H.loadQdl({ lampa });
+  lampa.Storage.set('qdl_noti_lastid', 5);
+
+  qdl.pollNotifications();
+  pending[0].cb({ unread: 1, items: [{ id: 6, kind: 'NEW', title: 'Игра лжецов', label: 'jut.su · сезон 1 · серия 19 — вышла' }] });
+
+  assert.strictEqual(noty.length, 1);
+  assert.ok(noty[0].indexOf('скачана') === -1, 'NEW не означает, что файл готов: ' + noty[0]);
+  assert.ok(noty[0].indexOf('🆕') === 0, 'своя иконка: ' + noty[0]);
+  assert.ok(noty[0].indexOf('вышла') !== -1);
+});
+
+test('2.35: SEASON и NOSPACE — свои корзины, тоже без «скачана»', () => {
+  const noty = [];
+  const { lampa, pending } = pollRig(noty);
+  const { qdl } = H.loadQdl({ lampa });
+  lampa.Storage.set('qdl_noti_lastid', 5);
+
+  qdl.pollNotifications();
+  pending[0].cb({ unread: 2, items: [
+    { id: 6, kind: 'SEASON', title: 'Тайтл', label: 'jut.su · вышел сезон 3 — слежу за ним' },
+    { id: 7, kind: 'NOSPACE', title: 'Тайтл', label: 'Новые серии (2) не скачаны — мало места' },
+  ] });
+
+  assert.strictEqual(noty.length, 2);
+  assert.ok(noty.every((m) => m.indexOf('скачана') === -1), noty.join(' | '));
+  assert.ok(noty.some((m) => m.indexOf('🗓') === 0));
+  assert.ok(noty.some((m) => m.indexOf('⚠️') === 0 && m.indexOf('мало места') !== -1));
+});
+
+test('2.35: незнакомый вид уведомления не притворяется скачанным', () => {
+  // Барьер против класса регрессий: новый серверный kind не должен молча стать «скачана»
+  const noty = [];
+  const { lampa, pending } = pollRig(noty);
+  const { qdl } = H.loadQdl({ lampa });
+  lampa.Storage.set('qdl_noti_lastid', 5);
+
+  qdl.pollNotifications();
+  pending[0].cb({ unread: 1, items: [{ id: 6, kind: 'ЧТО_ТО_НОВОЕ', title: 'А', label: 'текст' }] });
+
+  assert.strictEqual(noty.length, 1);
+  assert.ok(noty[0].indexOf('скачана') === -1, noty[0]);
+  assert.ok(noty[0].indexOf('🔔') === 0, noty[0]);
+});
+
+test('2.35: торренты не сломаны — kind=null и OVA по-прежнему «скачана»', () => {
+  const { qdl } = H.loadQdl({ lampa: H.makeLampa() });
+  assert.strictEqual(qdl.notiBucket({ title: 'A' }), 'done');
+  assert.strictEqual(qdl.notiBucket({ kind: null }), 'done');
+  assert.strictEqual(qdl.notiBucket({ kind: 'OVA' }), 'done');
+  assert.strictEqual(qdl.notiBucket({ kind: 'RANGE' }), 'done');
+  assert.strictEqual(qdl.notiBucket({ kind: 'START' }), 'started');
+  assert.strictEqual(qdl.notiBucket({ kind: 'SWITCH' }), 'special');
+  assert.strictEqual(qdl.notiBucket({ kind: 'INFO' }), 'special');
+  assert.strictEqual(qdl.notiBucket({ kind: 'NEW' }), 'new');
+  assert.strictEqual(qdl.notiBucket({ kind: 'SEASON' }), 'season');
+  assert.strictEqual(qdl.notiBucket({ kind: 'NOSPACE' }), 'warn');
+});
+
+test('2.35: смешанная пачка раскладывается по независимым корзинам', () => {
+  const noty = [];
+  const { lampa, pending } = pollRig(noty);
+  const { qdl } = H.loadQdl({ lampa });
+  lampa.Storage.set('qdl_noti_lastid', 5);
+
+  qdl.pollNotifications();
+  pending[0].cb({ unread: 7, items: [
+    { id: 6,  kind: 'SWITCH', title: 'А', label: 'полнее' },
+    { id: 7,  kind: 'START',  title: 'Б', label: 'E1' },
+    { id: 8,                  title: 'В', label: 'E2' },
+    { id: 9,                  title: 'Г', label: 'E3' },
+    { id: 10, kind: 'NEW',    title: 'Д', label: 'серия 5 — вышла' },
+    { id: 11, kind: 'NEW',    title: 'Е', label: 'серия 6 — вышла' },
+    { id: 12, kind: 'SEASON', title: 'Ж', label: 'вышел сезон 2' },
+  ] });
+
+  assert.strictEqual(noty.length, 5, 'пять корзин: special / START / скачанные / NEW / SEASON — ' + noty.join(' | '));
+  assert.ok(noty[0].indexOf('полнее') !== -1);
+  assert.ok(noty[1].indexOf('качается') !== -1);
+  assert.strictEqual(noty[2], '📺 Скачано новых серий: 2');
+  assert.strictEqual(noty[3], '🆕 Вышли новые серии: 2');
+  assert.ok(noty[4].indexOf('🗓') === 0);
+  assert.strictEqual(lampa.Storage.get('qdl_noti_lastid'), 12);
+});
+
+test('2.35: все серверные kind обработаны клиентом', () => {
+  // Читаем литералы kind из модуля и требуем, чтобы каждый был явно разобран в qdl.js.
+  const fs = require('fs');
+  const path = require('path');
+  const dir = path.join(H.REPO, 'Modules', 'QbitDownload');
+  const kinds = new Set();
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.cs'))) {
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    for (const m of src.matchAll(/kind\s*=\s*"([A-Z][A-Z\-]*)"/g)) kinds.add(m[1]);
+  }
+  assert.ok(kinds.size >= 5, 'литералы kind не найдены — проверка выродилась');
+
+  const client = H.qdlSource();
+  const known = ['NEW', 'SEASON', 'START', 'NOSPACE', 'SWITCH', 'INFO'];
+  for (const k of kinds) {
+    // границы слова обязательны: иначе "SP" находился бы внутри "SPECIAL"
+    const handled = known.includes(k) || new RegExp('\\b' + k + '\\b').test(client);
+    assert.ok(handled, 'серверный kind "' + k + '" клиент не разбирает — уедет в нейтральную корзину молча');
+  }
+});

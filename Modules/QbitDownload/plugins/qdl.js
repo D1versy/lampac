@@ -410,6 +410,15 @@
         return !!(t && t.jut && t.jut.slug);
     }
 
+    // Режим слежения jut-карточки: 'off' | 'notify' (только уведомления) | 'grab' (ещё и качаем).
+    // Фолбэк на t.watched — старый сервер режим не отдаёт, а трактовать подписку как
+    // «только уведомления» нельзя: у неё автоскачивание уже работало.
+    function jutMode(t) {
+        var m = t && t.jut && t.jut.watch;
+        if (m === 'off' || m === 'notify' || m === 'grab') return m;
+        return (t && t.watched) ? 'grab' : 'off';
+    }
+
     // поллинг прогресса транскода: «в очереди (N)» один раз, тост каждые ~10%, финал по done/error.
     // ⚠ ветка queued обязана продолжать поллинг, иначе полл тихо умрёт на стоящей в очереди задаче
     var tcPolls = {};
@@ -1577,6 +1586,24 @@
         } catch (e) {}
     }
 
+    // Виды уведомлений, означающие «файл лёг на диск» (JutNotifyDone и торрентный сканер серий).
+    // 🔥 БЕЛЫЙ список, а не «всё остальное»: раньше «скачана» была ветвью по остатку, и туда
+    // проваливались и «вышла новая серия» (kind=null), и SEASON, и DIAG — пользователь читал
+    // «скачана» про серию, которой на диске нет. Любой НОВЫЙ серверный вид теперь попадает
+    // в нейтральную корзину, а не врёт про скачивание.
+    var NOTI_DONE_KINDS = { OVA: 1, ONA: 1, OAD: 1, SP: 1, SPECIAL: 1, FILM: 1, GAMEOVA: 1, 'GAME-OVA': 1, RANGE: 1 };
+
+    function notiBucket(n) {
+        var k = (n && n.kind) ? String(n.kind).toUpperCase() : '';
+        if (!k || NOTI_DONE_KINDS[k]) return 'done';       // серия лежит на диске
+        if (k === 'NEW') return 'new';                     // вышла на сайте (слежение jut.su)
+        if (k === 'SEASON') return 'season';
+        if (k === 'START') return 'started';
+        if (k === 'NOSPACE') return 'warn';
+        if (k === 'SWITCH' || k === 'INFO') return 'special';
+        return 'other';
+    }
+
     // опрос ленты: бейдж непрочитанных + тост для появившихся с прошлого опроса.
     // In-flight флаг обязателен: вызывается из 4 точек (старт, вставка иконки/меню, interval) —
     // без него два параллельных ответа читали один qdl_noti_lastid и дублировали тосты/бейдж
@@ -1602,17 +1629,31 @@
             if (lastId > 0) {
                 // SWITCH (предложение сменить раздачу) / INFO — это НЕ «скачанная серия»: свой тост без «скачана»;
                 // при пачке событий — один агрегированный тост (детали в центре «Уведомления»), как у скачанных серий.
-                // START (qdl 2.19) — «началась загрузка серии»: третья корзина со своим текстом и своей агрегацией,
+                // START (qdl 2.19) — «началась загрузка серии»: своя корзина со своим текстом и своей агрегацией,
                 // чтобы не слиться со «скачана» (иначе пользователь решит, что серия уже готова к просмотру).
-                var special = fresh.filter(function (x) { return x.kind === 'SWITCH' || x.kind === 'INFO'; });
-                var started = fresh.filter(function (x) { return x.kind === 'START'; });
-                var dl = fresh.filter(function (x) { return x.kind !== 'SWITCH' && x.kind !== 'INFO' && x.kind !== 'START'; });
+                // NEW (qdl 2.35) — «вышла новая серия» у подписки jut.su; в режиме «только уведомления»
+                // файла не будет вовсе. SEASON — вышел новый сезон. NOSPACE — не хватило места.
+                var special = fresh.filter(function (x) { return notiBucket(x) === 'special'; });
+                var started = fresh.filter(function (x) { return notiBucket(x) === 'started'; });
+                var dl = fresh.filter(function (x) { return notiBucket(x) === 'done'; });
+                var came = fresh.filter(function (x) { return notiBucket(x) === 'new'; });
+                var season = fresh.filter(function (x) { return notiBucket(x) === 'season'; });
+                var warn = fresh.filter(function (x) { return notiBucket(x) === 'warn'; });
+                var other = fresh.filter(function (x) { return notiBucket(x) === 'other'; });
                 if (special.length === 1) Lampa.Noty.show((special[0].kind === 'SWITCH' ? '🔀 ' : '📺 ') + esc(special[0].title) + ' — ' + esc(special[0].label));
                 else if (special.length > 1) Lampa.Noty.show('🔔 Новых уведомлений: ' + special.length);
                 if (started.length === 1) Lampa.Noty.show('⏬ ' + esc(started[0].title) + ' — ' + esc(started[0].label) + ' качается');
                 else if (started.length > 1) Lampa.Noty.show('⏬ Начата загрузка серий: ' + started.length);
                 if (dl.length === 1) Lampa.Noty.show('📺 ' + esc(dl[0].title) + ' — ' + esc(dl[0].label) + ' скачана');
                 else if (dl.length > 1) Lampa.Noty.show('📺 Скачано новых серий: ' + dl.length);
+                if (came.length === 1) Lampa.Noty.show('🆕 ' + esc(came[0].title) + ' — ' + esc(came[0].label));
+                else if (came.length > 1) Lampa.Noty.show('🆕 Вышли новые серии: ' + came.length);
+                if (season.length === 1) Lampa.Noty.show('🗓 ' + esc(season[0].title) + ' — ' + esc(season[0].label));
+                else if (season.length > 1) Lampa.Noty.show('🗓 Новых сезонов: ' + season.length);
+                if (warn.length === 1) Lampa.Noty.show('⚠️ ' + esc(warn[0].title) + ' — ' + esc(warn[0].label));
+                else if (warn.length > 1) Lampa.Noty.show('⚠️ Новые серии не скачаны: ' + warn.length);
+                if (other.length === 1) Lampa.Noty.show('🔔 ' + esc(other[0].title) + ' — ' + esc(other[0].label));
+                else if (other.length > 1) Lampa.Noty.show('🔔 Новых уведомлений: ' + other.length);
             }
         }, function () { notiPollBusy = false; });
     }
@@ -1655,12 +1696,23 @@
             });
             return;
         }
-        req(API + '/qdl/list', function (list) {
-            var it = (list || []).filter(function (x) { return x.hash === n.hash; })[0];
-            if (it) openDownload(it);
+        // jut-уведомление: сервер отдаёт slug (только для своих ключей). В режиме «только
+        // уведомления» карточки в «Загрузках» НЕТ вовсе — открываем экран тайтла (там
+        // «Смотреть» онлайн и «Скачать»), а не плеер по мёртвому /qdl/stream-URL.
+        var fallback = function () {
+            if (n.slug) openJutTitle(n.slug, n.title);
             else if (n.hash) watchByHash(n.hash, n.title);
             else Lampa.Noty.show('Загрузка не найдена');
-        }, function () { if (n.hash) watchByHash(n.hash, n.title); });
+        };
+        req(API + '/qdl/list', function (list) {
+            var it = (list || []).filter(function (x) { return x.hash === n.hash; })[0];
+            if (it) openDownload(it);   // скачанное открываем как раньше — оффлайн-серии там
+            else fallback();
+        }, fallback);
+    }
+
+    function openJutTitle(slug, title) {
+        Lampa.Activity.push({ url: '', title: title || 'jut.su', component: 'jut_title', jut_slug: slug });
     }
 
     // Центр уведомлений (история): постер · сериал · серия · время
@@ -1684,7 +1736,7 @@
 
         this.build = function (items) {
             if (!items.length)
-                body.append($('<div style="padding:2em;font-size:1.4em;opacity:.7">Пока нет уведомлений. Включи «🔔 Следить за новыми сериями» в «Загрузках».</div>'));
+                body.append($('<div style="padding:2em;font-size:1.4em;opacity:.7">Пока нет уведомлений. «🔔 Следить» в карточке тайтла jut.su — буду сообщать о новых сериях; то же в «Загрузках» — буду ещё и качать их.</div>'));
 
             items.forEach(function (n) { comp.append(n); });
 
@@ -1979,8 +2031,17 @@
         // Слежение: у торрентов — по infohash, у jut.su — по slug в своём контуре.
         // ⚠️ Торрентная ветка гейтится по !local (ей нужен живой торрент и links/<hash>.json),
         // а jut-карточка ВСЕГДА local — из-за этого пункт был не виден вообще (жалоба владельца).
-        if (isJut(t))
-            items.push({ title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'jutwatch' });
+        // ⚠️ У jut.su «Следить» ЗДЕСЬ означает «качать новые серии» (решение владельца):
+        // карточка тайтла включает только уведомления, «Загрузки» — скачивание.
+        if (isJut(t)) {
+            var jm = jutMode(t);
+            items.push({
+                title: jm === 'grab' ? '🔔 Не следить за новыми сериями'
+                     : jm === 'notify' ? '🔔 Слежу: только уведомления…'
+                     : '🔔 Следить: качать новые серии',
+                act: 'jutwatch'
+            });
+        }
         else if (!t.local && t.state !== 'local')
             items.push({ title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'watch' });
         // в под-гриде коллекции — «Убрать», в общем гриде/карточке — «Добавить»
@@ -2007,21 +2068,31 @@
                     });
                 }
                 else if (b.act === 'jutwatch') {
+                    // «Загрузки» — ЕДИНСТВЕННАЯ точка, где включается автоскачивание.
+                    // Понижение до «только уведомления» живёт на экране карточки тайтла.
                     var jslug = t.jut.slug;
-                    if (t.watched)
-                        req(API + '/qdl/jut/watch/remove?slug=' + encodeURIComponent(jslug), function () {
-                            t.watched = false; Lampa.Noty.show('Слежение выключено');
-                        }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
-                    else
-                        req(API + '/qdl/jut/watch?slug=' + encodeURIComponent(jslug), function (r) {
-                            if (r && r.ok) {
-                                t.watched = true;
-                                // сервер сам выбирает последний сезон и сообщает baseline:
-                                // «Следить» качает только БУДУЩИЕ серии, уже вышедшие — кнопкой «Скачать сезон»
-                                Lampa.Noty.show(r.message || ('✓ Слежу за сезоном ' + (r.season || '')));
-                            }
-                            else Lampa.Noty.show('Не вышло: ' + ((r && r.error) || 'jut.su недоступен'));
-                        }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
+                    var applyJm = function (now) {
+                        t.jut.watch = now;
+                        t.watched = now !== 'off';   // отметка в гриде — поле, общее с торрентами
+                    };
+                    var jmNow = jutMode(t);
+                    if (jmNow === 'off') jutWatchSet(jslug, 'off', 'grab', applyJm);
+                    else if (jmNow === 'grab') jutWatchSet(jslug, 'grab', 'off', applyJm);
+                    else Lampa.Select.show({
+                        // подписка сделана с карточки тайтла (только уведомления) — из «Загрузок»
+                        // её можно поднять до скачивания или снять совсем
+                        title: 'Новые серии — jut.su',
+                        items: [
+                            { title: '⬇ Качать новые серии', subtitle: 'сейчас только уведомления', want: 'grab' },
+                            { title: '🔕 Не следить', want: 'off' },
+                            { title: 'Отмена' }
+                        ],
+                        onSelect: function (a) {
+                            if (a.want) jutWatchSet(jslug, 'notify', a.want, applyJm);
+                            else Lampa.Controller.toggle('content');
+                        },
+                        onBack: function () { Lampa.Controller.toggle('content'); }
+                    });
                 }
                 else if (b.act === 'watch') {
                     if (t.watched)
@@ -3374,15 +3445,66 @@
         });
     }
 
-    function jutWatchToggle(slug, season, on, done) {
-        var u = on ? (API + '/qdl/jut/watch/remove?slug=' + encodeURIComponent(slug))
-                   : (API + '/qdl/jut/watch?slug=' + encodeURIComponent(slug) + '&season=' + (season || 1));
+    // Подписи кнопки слежения по режиму — карточка тайтла обязана честно показывать
+    // текущий режим: подписку могли поднять до «качаю» из «Загрузок».
+    var JUT_MODE_LABEL = { off: '🔔 Следить', notify: '🔔 Слежу · уведомления', grab: '🔔 Слежу · качаю' };
+
+    // Смена состояния подписки. from — текущий режим, want — желаемый ('off'|'notify'|'grab').
+    //
+    // ⚠️ Существующей подписке режим меняем через /qdl/jut/watch/mode, а НЕ повторной
+    // подпиской: /qdl/jut/watch сбрасывает baseline на текущее состояние сайта, и серия,
+    // вышедшая между тиком и нажатием, ушла бы в baseline — в режиме «качаю» её уже никто
+    // не скачает. Плюс /watch/mode не ходит в сеть и работает, когда jut.su лежит.
+    //
+    // ⚠️ season НЕ передаём: сервер берёт ПОСЛЕДНИЙ вышедший сезон. Раньше карточка слала
+    // сезон первой серии списка и у многосезонного тайтла подписывала сезон 1, где новых
+    // серий не будет никогда.
+    function jutWatchSet(slug, from, want, done) {
+        var q = encodeURIComponent(slug);
+        var grabFlag = want === 'grab' ? 1 : 0;
+        var u = want === 'off' ? (API + '/qdl/jut/watch/remove?slug=' + q)
+              : from === 'off' ? (API + '/qdl/jut/watch?slug=' + q + '&autoGrab=' + grabFlag)
+              : (API + '/qdl/jut/watch/mode?slug=' + q + '&autoGrab=' + grabFlag);
+        var viaMode = u.indexOf('/watch/mode') !== -1;
+        // старый сервер про /watch/mode не знает, а подписки могло уже не быть (NOT_WATCHED) —
+        // добираем полной подпиской, режим всё равно проставится
+        var repair = function () { jutWatchSet(slug, 'off', want, done); };
+
         req(u, function (r) {
-            if (!r || !r.ok) { Lampa.Noty.show(jutErrText(r)); return; }
-            Lampa.Noty.show(on ? 'Слежение снято'
-                               : 'Слежу за сезоном: новые серии будут скачиваться сами');
-            if (done) done(!on);
-        }, function () { Lampa.Noty.show('Не удалось изменить слежение'); });
+            if (want !== 'off' && !(r && r.ok)) {
+                if (viaMode) { repair(); return; }
+                Lampa.Noty.show(jutErrText(r));
+                return;
+            }
+            Lampa.Noty.show(want === 'off' ? 'Слежение снято'
+                          : (r && r.message) ? r.message
+                          : want === 'grab' ? '⬇ Новые серии буду качать сам'
+                          : '🔔 Сообщу о новых сериях, качать не буду');
+            if (done) done(want);
+        }, function () {
+            if (viaMode) repair();
+            else Lampa.Noty.show('Не удалось изменить слежение');
+        });
+    }
+
+    // Меню слежения на КАРТОЧКЕ ТАЙТЛА. Пункта «качать новые серии» здесь нет и быть
+    // не должно: автоскачивание включается только из «Загрузок» (решение владельца).
+    // Меню, а не мгновенное снятие: случайное нажатие не должно молча убивать подписку.
+    function jutWatchMenuCard(slug, mode, done) {
+        var items = [];
+        if (mode === 'grab')
+            items.push({ title: '🔔 Только уведомлять', subtitle: 'новые серии перестанут качаться', want: 'notify' });
+        items.push({ title: '🔕 Не следить', want: 'off' });
+        items.push({ title: 'Отмена' });
+        Lampa.Select.show({
+            title: mode === 'grab' ? 'Новые серии — сейчас качаю' : 'Новые серии — только уведомления',
+            items: items,
+            onSelect: function (a) {
+                if (a.want) jutWatchSet(slug, mode, a.want, done);
+                else Lampa.Controller.toggle('content');
+            },
+            onBack: function () { Lampa.Controller.toggle('content'); }
+        });
     }
 
     // ───────── Каталог jut.su (витрина order-by-add) ─────────
@@ -3532,7 +3654,16 @@
         var body = $('<div class="qdl-jut-page"></div>');   // поля по краям: без них контент лежал впритык
         var last;
         var slug = object.jut_slug;
-        var data = null, watching = false;
+        // mode: 'off' | 'notify' | 'grab' | null — null значит «не знаю» (список подписок
+        // не ответил). Разница принципиальна: слать autoGrab=0 при неизвестном режиме нельзя,
+        // это молча понизило бы уже качающую подписку и сбросило её baseline.
+        var data = null, mode = 'off';
+
+        function readMode(w) {
+            var rec = ((w && w.items) || []).filter(function (x) { return x.slug === slug; })[0];
+            if (!rec) return 'off';
+            return rec.mode || (rec.autoGrab === false ? 'notify' : 'grab');   // фолбэк на старый сервер
+        }
 
         this.create = function () {
             injectCss();   // фокус-стили кнопок: не полагаемся, что другой экран уже инъецировал
@@ -3544,11 +3675,9 @@
                 if (!r || !r.ok) { comp.fail(jutErrText(r)); return; }
                 data = r;
                 req(API + '/qdl/jut/watch/list', function (w) {
-                    try {
-                        watching = !!(w && w.items || []).filter(function (x) { return x.slug === slug; }).length;
-                    } catch (e) {}
+                    try { mode = readMode(w); } catch (e) { mode = null; }
                     comp.build();
-                }, function () { comp.build(); });
+                }, function () { mode = null; comp.build(); });
             }, function () { comp.fail('jut.su недоступен'); });
             return this.render();
         };
@@ -3619,11 +3748,28 @@
                                       component: 'jut_episodes', jut_slug: slug, jut_data: data });
             });
             mkBtn('Скачать', function () { jutDownloadMenu(slug, ep0, ep0 ? ep0.season : 1); }, { icon: ICON });
-            var wb = mkBtn(watching ? '🔔 Слежу' : '🔔 Следить', function (b) {
-                jutWatchToggle(slug, ep0 ? ep0.season : 1, watching, function (now) {
-                    watching = now;
-                    b.children('span').text(now ? '🔔 Слежу' : '🔔 Следить');
-                });
+            // «Следить» ЗДЕСЬ = только уведомления: серий на диске может не быть вовсе.
+            // Автоскачивание включается исключительно из «Загрузок» (решение владельца),
+            // поэтому ни одна ветка этой кнопки не отправляет autoGrab=1.
+            mkBtn(JUT_MODE_LABEL[mode] || JUT_MODE_LABEL.off, function (b) {
+                var apply = function (now) {
+                    mode = now;
+                    b.children('span').text(JUT_MODE_LABEL[mode]);
+                };
+                // Режим неизвестен (список подписок не ответил) — переспрашиваем. Слепая
+                // подписка здесь понизила бы режим «качаю» до «уведомлений» и сбросила baseline.
+                if (mode === null) {
+                    req(API + '/qdl/jut/watch/list', function (w) {
+                        try { mode = readMode(w); } catch (e) { mode = null; }
+                        if (mode === null) { Lampa.Noty.show('Не удалось узнать состояние слежения'); return; }
+                        b.children('span').text(JUT_MODE_LABEL[mode]);
+                        if (mode === 'off') jutWatchSet(slug, 'off', 'notify', apply);
+                        else jutWatchMenuCard(slug, mode, apply);
+                    }, function () { Lampa.Noty.show('Не удалось узнать состояние слежения'); });
+                    return;
+                }
+                if (mode === 'off') jutWatchSet(slug, 'off', 'notify', apply);
+                else jutWatchMenuCard(slug, mode, apply);
             });
             info.append(btns);
 

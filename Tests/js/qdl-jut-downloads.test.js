@@ -56,7 +56,9 @@ const acts = (calls) => last(calls.selects).items.map((i) => i.act);
 test('jut-карточка в «Загрузках»: пункт «Следить» ЕСТЬ (регресс 2.28)', () => {
   const { qdl, calls } = rig();
   qdl.quickMenu(JUT());
-  assert.ok(titles(calls).some((t) => t.indexOf('Следить за новыми сериями') !== -1),
+  // 2.35: здесь «Следить» означает «качать новые серии» — в «Загрузках» это единственный
+  // смысл подписки (уведомления без скачивания включаются с карточки тайтла)
+  assert.ok(titles(calls).some((t) => t.indexOf('Следить') !== -1 && t.indexOf('качать') !== -1),
     'пункт слежения не показан для карточки jut.su — ровно тот баг, что чинили в 2.28');
   assert.ok(acts(calls).includes('jutwatch'), 'должен быть jut-контур (act=jutwatch), не торрентный');
 });
@@ -65,6 +67,101 @@ test('jut-карточка под слежением: пункт переклю�
   const { qdl, calls } = rig();
   qdl.quickMenu(JUT({ watched: true }));
   assert.ok(titles(calls).some((t) => t.indexOf('Не следить за новыми сериями') !== -1));
+});
+
+// ─────────────────────── два режима (2.35) ───────────────────────
+
+test('старый сервер без jut.watch: watched:true читается как «качаю», а не как уведомления', () => {
+  // Иначе у уже отслеживаемого скачанного аниме автоскачивание выглядело бы выключенным
+  const { qdl } = rig();
+  assert.strictEqual(qdl.jutMode({ jut: { slug: 'x' }, watched: true }), 'grab');
+  assert.strictEqual(qdl.jutMode({ jut: { slug: 'x' }, watched: false }), 'off');
+  assert.strictEqual(qdl.jutMode({ jut: { slug: 'x', watch: 'notify' }, watched: true }), 'notify');
+  assert.strictEqual(qdl.jutMode({ jut: { slug: 'x', watch: 'мусор' }, watched: true }), 'grab');
+});
+
+test('подписка из «Загрузок» шлёт autoGrab=1 и НЕ шлёт season', () => {
+  const { qdl, calls } = rig({ respond: () => ({ ok: true, season: 3, mode: 'grab', message: 'ок' }) });
+  const card = JUT();
+  qdl.quickMenu(card);
+  last(calls.selects).onSelect(last(calls.selects).items.filter((i) => i.act === 'jutwatch')[0]);
+
+  const url = last(calls.reqs);
+  assert.ok(url.indexOf('autoGrab=1') !== -1, 'из «Загрузок» обязан включаться режим «качаю»: ' + url);
+  assert.ok(url.indexOf('season=') === -1, 'сезон выбирает сервер (последний вышедший), клиент его не навязывает');
+  assert.strictEqual(card.jut.watch, 'grab');
+  assert.strictEqual(card.watched, true);
+});
+
+test('notify-подписка в «Загрузках»: подменю поднимает до «качаю» через /watch/mode', () => {
+  // /watch/mode не сбрасывает baseline — иначе серия, вышедшая между тиком и нажатием, теряется
+  const { qdl, calls } = rig({ respond: (u) => (u.indexOf('/watch/mode') !== -1 ? { ok: true, mode: 'grab' } : undefined) });
+  const card = JUT({ watched: true, jut: { slug: 'liar-game', watch: 'notify' } });
+  qdl.quickMenu(card);
+  last(calls.selects).onSelect(last(calls.selects).items.filter((i) => i.act === 'jutwatch')[0]);
+
+  const menu = last(calls.selects);
+  // строкой, а не deepStrictEqual: массив приходит из vm-песочницы (чужой realm)
+  assert.strictEqual(menu.items.map((i) => String(i.want)).join(','), 'grab,off,undefined');
+  menu.onSelect(menu.items[0]);
+
+  const url = last(calls.reqs);
+  assert.ok(url.indexOf('/qdl/jut/watch/mode?slug=liar-game') !== -1, 'ушло не туда: ' + url);
+  assert.ok(url.indexOf('autoGrab=1') !== -1);
+  assert.strictEqual(card.jut.watch, 'grab');
+});
+
+test('notify-подписка в «Загрузках»: «Не следить» снимает подписку целиком', () => {
+  const { qdl, calls } = rig({ respond: () => ({ ok: true }) });
+  const card = JUT({ watched: true, jut: { slug: 'liar-game', watch: 'notify' } });
+  qdl.quickMenu(card);
+  last(calls.selects).onSelect(last(calls.selects).items.filter((i) => i.act === 'jutwatch')[0]);
+
+  const menu = last(calls.selects);
+  menu.onSelect(menu.items[1]);
+  assert.ok(last(calls.reqs).indexOf('/qdl/jut/watch/remove?slug=liar-game') !== -1);
+  assert.strictEqual(card.jut.watch, 'off');
+  assert.strictEqual(card.watched, false);
+});
+
+test('в «Загрузках» нет пункта понижения до «только уведомления»', () => {
+  // Решение владельца: «Загрузки» = качаем или не следим; понижение живёт на карточке тайтла
+  const { qdl, calls } = rig({ respond: () => ({ ok: true }) });
+  qdl.quickMenu(JUT({ watched: true }));            // grab
+  const item = last(calls.selects).items.filter((i) => i.act === 'jutwatch')[0];
+  assert.ok(item.title.indexOf('Не следить') !== -1);
+  last(calls.selects).onSelect(item);
+  // один тап = снятие подписки, без подменю режимов
+  assert.ok(last(calls.reqs).indexOf('/qdl/jut/watch/remove') !== -1);
+});
+
+test('отказ /watch/mode добирается полной подпиской (старый сервер отвечает 404)', () => {
+  const seen = [];
+  const { qdl, calls } = rig({
+    respond: (u) => {
+      seen.push(u);
+      if (u.indexOf('/watch/mode') !== -1) return { ok: false, error: 'NOT_WATCHED' };
+      return { ok: true, mode: 'grab', message: 'ок' };
+    },
+  });
+  const card = JUT({ watched: true, jut: { slug: 'liar-game', watch: 'notify' } });
+  qdl.quickMenu(card);
+  last(calls.selects).onSelect(last(calls.selects).items.filter((i) => i.act === 'jutwatch')[0]);
+  const menu = last(calls.selects);
+  menu.onSelect(menu.items[0]);
+
+  assert.ok(seen.some((u) => u.indexOf('/watch/mode') !== -1));
+  assert.ok(seen.some((u) => u.indexOf('/qdl/jut/watch?slug=liar-game&autoGrab=1') !== -1),
+    'после отказа /watch/mode обязан быть добор полной подпиской: ' + seen.join(' | '));
+  assert.strictEqual(card.jut.watch, 'grab');
+  assert.ok(!calls.noty.some((m) => m.indexOf('NOT_WATCHED') !== -1), 'внутренний код ошибки пользователю не показываем');
+});
+
+test('торрентная карточка не получает ни одного jut-URL', () => {
+  const { qdl, calls } = rig({ respond: () => ({ success: true }) });
+  qdl.quickMenu(TORRENT());
+  last(calls.selects).onSelect(last(calls.selects).items.filter((i) => i.act === 'watch')[0]);
+  assert.ok(!calls.reqs.some((u) => u.indexOf('/qdl/jut/') !== -1), 'пояс изоляции в UI пробит: ' + calls.reqs.join(' | '));
 });
 
 test('торрент остаётся на СВОЁМ контуре (act=watch), jut-ветка его не перехватывает', () => {

@@ -243,3 +243,57 @@ test('shortDate: дд.мм.гг; битые даты → пусто', () => {
   assert.strictEqual(qdl.shortDate('not a date'), '');
   assert.strictEqual(qdl.shortDate('1970-01-01T00:00:00Z'), '');
 });
+
+// ─────────── 2.35: уведомление jut без карточки в «Загрузках» ───────────
+// В режиме «только уведомления» мы ничего не качаем → local/<hash>.json не существует,
+// а hash необратим (sha1("jutsu:"+slug)). Сервер отдаёт slug, и тап обязан открывать
+// экран тайтла, а не плеер по мёртвому /qdl/stream-URL.
+
+test('openNotification NEW со slug: карточки нет → открывается экран тайтла jut, плеер не запускается', () => {
+  const r = rig({ respond: (u) => (u.indexOf('/qdl/list') !== -1 ? [] : undefined) });
+  r.qdl.openNotification({ kind: 'NEW', hash: 'f'.repeat(40), slug: 'liar-game', title: 'Игра лжецов' });
+
+  assert.strictEqual(r.calls.pushes.length, 1, 'экран тайтла не открыт');
+  assert.strictEqual(r.calls.pushes[0].component, 'jut_title');
+  assert.strictEqual(r.calls.pushes[0].jut_slug, 'liar-game');
+  assert.strictEqual(r.calls.plays.length, 0, 'плеер по мёртвому URL — ровно тот баг, что чинили');
+});
+
+test('openNotification: /qdl/list не ответил → всё равно открывается экран тайтла по slug', () => {
+  const r = rig({ respond: (u) => (u.indexOf('/qdl/list') !== -1 ? '__ERR__' : undefined) });
+  r.qdl.openNotification({ kind: 'NEW', hash: 'f'.repeat(40), slug: 'liar-game', title: 'Игра лжецов' });
+  assert.strictEqual(r.calls.pushes.length, 1);
+  assert.strictEqual(r.calls.pushes[0].jut_slug, 'liar-game');
+});
+
+test('openNotification: скачанная серия jut по-прежнему открывает карточку «Загрузок», а не тайтл', () => {
+  const hash = 'f'.repeat(40);
+  const r = rig({ respond: (u) => (u.indexOf('/qdl/list') !== -1
+    ? [{ hash: hash, local: true, state: 'local', jut: { slug: 'liar-game' }, meta: { id: 0, media_type: 'tv' } }]
+    : undefined) });
+  r.qdl.openNotification({ hash: hash, slug: 'liar-game', title: 'Игра лжецов' });
+
+  assert.strictEqual(r.calls.pushes.length, 1);
+  assert.notStrictEqual(r.calls.pushes[0].component, 'jut_title',
+    'оффлайн-серии живут в карточке «Загрузок» — её и открываем');
+});
+
+test('openNotification: торрентное уведомление без slug падает в старую ветку (плеер по hash)', () => {
+  const r = rig({
+    respond: (u) => {
+      if (u.indexOf('/qdl/list') !== -1) return [];
+      if (u.indexOf('/qdl/episodes') !== -1 || u.indexOf('/qdl/files') !== -1) return [];
+      return undefined;
+    },
+  });
+  r.qdl.openNotification({ hash: 'a'.repeat(40), title: 'Silo' });
+  assert.strictEqual(r.calls.pushes.length, 0, 'торрент не должен уезжать на экран jut');
+});
+
+test('openNotification SWITCH со slug: остаётся подтверждением, /qdl/list не дёргается', () => {
+  const r = rig({ respond: () => undefined });
+  r.qdl.openNotification({ kind: 'SWITCH', hash: 'mmmm', slug: 'liar-game', title: 'Сериал', label: 'полнее' });
+  assert.ok(last(r.calls.selects), 'SWITCH обязан спрашивать подтверждение');
+  assert.strictEqual(r.calls.reqs.filter((u) => u.indexOf('/qdl/list') !== -1).length, 0);
+  assert.strictEqual(r.calls.pushes.length, 0);
+});

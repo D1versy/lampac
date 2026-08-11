@@ -273,6 +273,9 @@ public class ModuleConf : ModuleBaseConf
     // см. JutSuWatch.cs и claude/jut/02-architecture.md §9).
     public int jutWatchIntervalHours { get; set; } = 24;   // кламп ≥1
     public int jutWatchTitlesPerTick { get; set; } = 30;   // бюджет ПОЛНЫХ опросов страниц тайтлов
+    // Дефолт ТОЛЬКО для подписок без явного режима (curl, старый закешированный клиент):
+    // UI передаёт режим сам — карточка тайтла autoGrab=0, «Загрузки» autoGrab=1.
+    // Уже созданные подписки этот флаг НЕ переопределяет (см. JutAutoGrabFor).
     public bool jutWatchAutoGrab { get; set; } = true;     // новая серия сезона → сразу в очередь скачивания
     public bool jutWatchSeasonSwitch { get; set; } = true; // вышел новый сезон → переключить слежение на него
 }

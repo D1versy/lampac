@@ -24,6 +24,19 @@ namespace QbitDownload;
 //  Пояс 3. Тесты JutIsolationTests.
 //
 // Единица слежения — (тайтл, СЕЗОН), тик раз в сутки (решение владельца).
+//
+// ДВА РЕЖИМА подписки (решение владельца), режим живёт в поле autoGrab записи:
+//   "notify" (autoGrab:false) — включается ТОЛЬКО с экрана карточки тайтла: уведомляем
+//        о новых сериях и не качаем ничего. Смысл: следить за онгоингом, которого нет на диске.
+//   "grab"   (autoGrab:true)  — включается ТОЛЬКО из «Загрузок» (то есть на уже скачанном):
+//        уведомляем И качаем новые серии сами.
+// Режим гейтит ИСКЛЮЧИТЕЛЬНО постановку в очередь: уведомления и продвижение baseline
+// одинаковы в обоих режимах.
+//
+// ⚠️ Запись без поля autoGrab = "grab". Такие подписки создавались, когда автоскачивание
+// было единственным поведением; трактовать их как "notify" значило бы молча выключить
+// скачивание у живых подписок — без единой строки в логе.
+//
 // Устройство: E:\Media-server\claude\jut\02-architecture.md §9
 // ─────────────────────────────────────────────────────────────────────────────
 public partial class QbitController
@@ -47,21 +60,70 @@ public partial class QbitController
     }
 
     /// <summary>
-    /// Множество слагов под подпиской — для отметки карточек в /qdl/list.
+    /// slug → режим подписки ("grab" | "notify") для отметки карточек в /qdl/list.
     /// Читается ОДИН раз на запрос списка (не на карточку): файл маленький, но список
     /// «Загрузок» перебирает десятки маркеров, и чтение на каждый было бы лишним IO.
-    /// Ошибка чтения → пустое множество: «не знаю» здесь честнее, чем «не следим»,
+    /// Ошибка чтения → пустая карта: «не знаю» здесь честнее, чем «не следим»,
     /// но обе трактовки безопасны — статус только рисует пункт меню.
     /// </summary>
-    internal static HashSet<string> JutWatchedSlugs()
+    internal static Dictionary<string, string> JutWatchModes()
     {
-        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var x in JutLoadWatch().OfType<JObject>())
         {
             string s = x.Value<string>("slug");
-            if (!string.IsNullOrEmpty(s)) set.Add(s);
+            if (!string.IsNullOrEmpty(s)) map[s] = JutModeOf(x);
         }
-        return set;
+        return map;
+    }
+
+    /// <summary>
+    /// Режим подписки: "grab" — новые серии качаем сами, "notify" — только уведомляем.
+    /// Поля нет → "grab" (см. шапку файла: молча выключать скачивание у живых подписок нельзя).
+    /// Конфиг здесь НЕ участвует осознанно: правка jutWatchAutoGrab не должна
+    /// переопределять уже выбранный пользователем режим.
+    /// </summary>
+    internal static string JutModeOf(JObject rec)
+        => (rec?.Value<bool?>("autoGrab") ?? true) ? "grab" : "notify";
+
+    /// <summary>
+    /// Режим для записи: явный параметр UI > уже сохранённый режим > дефолт конфига.
+    /// Чистая функция отдельно от роута, потому что JutWatchAdd сетевой (JutLoadTitle),
+    /// а ломалась именно эта развилка: повторный вызов без параметра затирал режим
+    /// дефолтом конфига, то есть молча включал автоскачивание.
+    /// </summary>
+    internal static bool JutAutoGrabFor(bool? prev, int autoGrab)
+        => autoGrab >= 0 ? autoGrab == 1 : (prev ?? (ModInit.conf?.jutWatchAutoGrab ?? true));
+
+    /// <summary>
+    /// Отметка jut-карточки в /qdl/list: slug + режим подписки.
+    /// Вынесено из Controller.List, чтобы контракт проверялся тестом (сам экшен требует
+    /// живого qBittorrent и HttpContext).
+    /// Режим кладём ВНУТРЬ jut, а не в корень: корневые поля общие с торрентной ветвью,
+    /// там «watch» читалось бы как торрентное слежение. watched остаётся bool — на нём
+    /// держатся отметка в гриде и уже закешированный старый клиент.
+    /// </summary>
+    internal static void JutDecorateListItem(JObject item, JObject loc, IReadOnlyDictionary<string, string> modes)
+    {
+        string jslug = (loc?["jut"] as JObject)?.Value<string>("slug");
+        if (string.IsNullOrEmpty(jslug)) return;
+        string jmode = modes != null && modes.TryGetValue(jslug, out string m) ? m : "off";
+        item["jut"] = new JObject { ["slug"] = jslug, ["watch"] = jmode };
+        item["watched"] = jmode != "off";
+    }
+
+    /// <summary>
+    /// slug из ключа серии jut ("j" + slug). Нужен /qdl/notifications: в режиме «только
+    /// уведомления» карточки в «Загрузках» нет вовсе, а hash необратим (sha1("jutsu:"+slug)),
+    /// поэтому клиенту нужен явный slug — иначе тап по уведомлению уходил в торрентную
+    /// ветку и открывал плеер по мёртвому URL.
+    /// Торрентные ключи (t&lt;tmdbId&gt;, l&lt;fnv&gt;) наружу не отдаём: гейт по 'j' + IsValidSlug.
+    /// </summary>
+    internal static string JutSlugFromSeriesKey(string seriesKey)
+    {
+        if (string.IsNullOrEmpty(seriesKey) || seriesKey.Length < 2 || seriesKey[0] != 'j') return null;
+        string slug = seriesKey.Substring(1);
+        return JutSuParse.IsValidSlug(slug) ? slug : null;
     }
 
     static void JutSaveWatch(JArray arr)
@@ -82,16 +144,24 @@ public partial class QbitController
 
     #region роуты слежения
 
-    [HttpGet, HttpPost, AllowAnonymous]
-    [Route("qdl/jut/watch")]
-    async public Task<ActionResult> JutWatchAdd(string slug, int season = 0, int autoGrab = -1)
+    /// <summary>Итог подписки — чтобы роут остался тонким, а логика проверялась без сети.</summary>
+    internal sealed class JutWatchUpsertResult
     {
-        if (!JutOn) return JutErr("DISABLED");
-        if (!JutSuParse.IsValidSlug(slug)) return JutErr("BAD_SLUG");
+        public int season;
+        public int baseline;    // сколько серий сезона уже вышло — их НЕ качаем
+        public string mode;     // "grab" | "notify"
+        public bool created;
+    }
 
-        var (t, err) = await JutLoadTitle(slug, false);
-        if (t == null) return JutErr(err ?? "SITE_DOWN");
-
+    /// <summary>
+    /// Создать или обновить подписку.
+    /// ⚠️ Сбрасывает baseline (known) на ТЕКУЩЕЕ состояние сайта, поэтому для смены режима
+    /// существующей подписки НЕ годится — для этого JutWatchSetModeOnDisk: иначе серия,
+    /// вышедшая между тиком и нажатием, уходит в baseline, и в режиме «качаю» её никто
+    /// уже не скачает.
+    /// </summary>
+    internal static JutWatchUpsertResult JutWatchUpsert(string slug, JutTitle t, int season, int autoGrab)
+    {
         var eps = t.items.Where(e => e.kind == JutEpKind.Episode).ToList();
         int s = season > 0 ? season : (eps.Count > 0 ? eps.Max(e => e.season) : 1);
         var inSeason = eps.Where(e => e.season == s).ToList();
@@ -100,12 +170,14 @@ public partial class QbitController
         {
             var arr = JutLoadWatch();
             var rec = JutFindWatch(arr, slug);
-            if (rec == null) { rec = new JObject { ["slug"] = slug }; arr.Add(rec); }
+            bool? prevAuto = rec?.Value<bool?>("autoGrab");   // снять ДО создания записи
+            bool created = rec == null;
+            if (created) { rec = new JObject { ["slug"] = slug }; arr.Add(rec); }
 
             rec["season"] = s;
             rec["titleRu"] = t.titleRu ?? slug;
             rec["ongoing"] = t.ongoing;
-            rec["autoGrab"] = autoGrab >= 0 ? autoGrab == 1 : (ModInit.conf?.jutWatchAutoGrab ?? true);
+            rec["autoGrab"] = JutAutoGrabFor(prevAuto, autoGrab);
             // Baseline: «Следить» качает только БУДУЩИЕ серии. Уже вышедшее — кнопкой «Скачать сезон».
             rec["known"] = new JObject
             {
@@ -116,13 +188,82 @@ public partial class QbitController
             rec["lastChange"] = DateTime.UtcNow;
             rec["fails"] = 0;
             JutSaveWatch(arr);
+
+            return new JutWatchUpsertResult
+            {
+                season = s, baseline = inSeason.Count,
+                mode = JutModeOf(rec), created = created
+            };
         }
+    }
+
+    /// <summary>
+    /// Подписка. autoGrab: 1 — качать новые серии («Загрузки»), 0 — только уведомлять
+    /// (карточка тайтла), -1 — не указано (сохранить режим существующей записи).
+    /// </summary>
+    [HttpGet, HttpPost, AllowAnonymous]
+    [Route("qdl/jut/watch")]
+    async public Task<ActionResult> JutWatchAdd(string slug, int season = 0, int autoGrab = -1)
+    {
+        if (!JutOn) return JutErr("DISABLED");
+        if (!JutSuParse.IsValidSlug(slug)) return JutErr("BAD_SLUG");
+
+        var (t, err) = await JutLoadTitle(slug, false);
+        if (t == null) return JutErr(err ?? "SITE_DOWN");
+
+        var r = JutWatchUpsert(slug, t, season, autoGrab);
 
         return JutJson(new JObject
         {
-            ["ok"] = true, ["slug"] = slug, ["season"] = s,
-            ["baseline"] = inSeason.Count,
-            ["message"] = $"Слежу за сезоном {s}. Уже вышедшие {inSeason.Count} серий не качаю — для них кнопка «Скачать сезон»."
+            ["ok"] = true, ["slug"] = slug, ["season"] = r.season,
+            ["baseline"] = r.baseline,
+            ["mode"] = r.mode, ["autoGrab"] = r.mode == "grab",
+            ["message"] = r.mode == "grab"
+                ? $"Слежу за сезоном {r.season}: новые серии буду качать сам. Уже вышедшие {r.baseline} не качаю — для них кнопка «Скачать»."
+                : $"Слежу за сезоном {r.season}: сообщу о новых сериях, качать не буду. Скачивание включается в «Загрузках»."
+        });
+    }
+
+    /// <summary>
+    /// Сменить режим существующей подписки. Отдельный роут, а не повторный /qdl/jut/watch,
+    /// по двум причинам: (1) не трогает baseline — иначе серия, вышедшая между тиком и
+    /// нажатием, была бы проглочена; (2) не ходит в сеть — «выключить качание» обязано
+    /// работать, когда jut.su лежит (JutWatchAdd отваливается на SITE_DOWN до записи).
+    /// </summary>
+    internal static bool JutWatchSetModeOnDisk(string slug, bool auto, out string mode, out int season)
+    {
+        mode = null; season = 0;
+        lock (_jutWatchLock)
+        {
+            var arr = JutLoadWatch();
+            var rec = JutFindWatch(arr, slug);
+            if (rec == null) return false;
+            rec["autoGrab"] = auto;
+            rec["lastChange"] = DateTime.UtcNow;
+            mode = JutModeOf(rec);
+            season = rec.Value<int?>("season") ?? 1;
+            JutSaveWatch(arr);
+        }
+        Console.WriteLine("[QbitDownload] jut/watch: режим " + slug + " → " + mode);
+        return true;
+    }
+
+    [HttpGet, HttpPost, AllowAnonymous]
+    [Route("qdl/jut/watch/mode")]
+    public ActionResult JutWatchMode(string slug, int autoGrab = -1)
+    {
+        if (!JutSuParse.IsValidSlug(slug)) return JutErr("BAD_SLUG");
+        if (autoGrab != 0 && autoGrab != 1) return JutErr("BAD_MODE");
+        if (!JutWatchSetModeOnDisk(slug, autoGrab == 1, out string mode, out int season))
+            return JutErr("NOT_WATCHED");
+
+        return JutJson(new JObject
+        {
+            ["ok"] = true, ["slug"] = slug, ["season"] = season,
+            ["mode"] = mode, ["autoGrab"] = mode == "grab",
+            ["message"] = mode == "grab"
+                ? "Новые серии буду качать сам. Уже вышедшие — кнопкой «Скачать»."
+                : "Только уведомления: новые серии больше не качаются."
         });
     }
 
@@ -154,7 +295,9 @@ public partial class QbitController
                 ["season"] = x.Value<int?>("season") ?? 1,
                 ["titleRu"] = x.Value<string>("titleRu"),
                 ["ongoing"] = x.Value<bool?>("ongoing") ?? false,
+                // autoGrab оставлен для диагностики и старого клиента; режим — в mode
                 ["autoGrab"] = x.Value<bool?>("autoGrab") ?? true,
+                ["mode"] = JutModeOf(x),
                 ["known"] = x.Value<JObject>("known")?.Value<int?>("count") ?? 0,
                 ["lastRun"] = x.Value<string>("lastRun"),
                 ["lastChange"] = x.Value<string>("lastChange")
@@ -218,9 +361,19 @@ public partial class QbitController
     /// Гейт СВОЙ (_jutGate), не общий _watchGate: jut-контур не трогает ни watch.json торрентов,
     /// ни qBittorrent — конкурировать не с чем, а на общем гейте четырёхчасовая торрентная охота
     /// глушила бы суточный тик (skip-if-busy → тик пропадает на сутки).
+    ///
+    /// loadOngoing/loadTitle — точки подмены сети (null = реальные запросы). Нужны тестам:
+    /// у JutNet своя фабрика HttpClient без места под HttpMessageHandler, поэтому иначе тик
+    /// не прогнать вообще, а именно в нём живут оба режима и защита от бэклога.
     /// </summary>
-    internal static async Task<JObject> JutWatchTick(bool manual = false)
+    internal static async Task<JObject> JutWatchTick(
+        bool manual = false,
+        Func<Task<(bool ok, Dictionary<string, int> counts)>> loadOngoing = null,
+        Func<string, Task<(JutTitle title, string error)>> loadTitle = null)
     {
+        loadOngoing ??= JutLoadOngoingStatic;
+        loadTitle ??= JutLoadTitleStatic;
+
         var res = new JObject { ["ok"] = true };
         if (ModInit.conf?.jutEnable != true) { res["skipped"] = "disabled"; return res; }
 
@@ -237,13 +390,7 @@ public partial class QbitController
             if (recs.Count == 0) { res["watched"] = 0; return res; }
 
             // 1) один запрос: slug → число серий
-            var ongoing = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            var resp = await JutNet.PostForm(JutNet.Host + "/anime/ongoing/",
-                "ajax_load=yes&start_from_page=1&show_search=&anime_of_user=", JutSuParse.ReachedCatalog);
-            bool ongoingOk = resp != null && resp.reached;
-            if (ongoingOk)
-                foreach (var c in JutSuParse.ParseCatalog(resp.body).items)
-                    if (!string.IsNullOrEmpty(c.slug)) ongoing[c.slug] = c.episodes;
+            var (ongoingOk, ongoing) = await loadOngoing();
 
             int budget = Math.Max(1, ModInit.conf?.jutWatchTitlesPerTick ?? 30);
             int probed = 0, changed = 0, queued = 0, failed = 0;
@@ -263,7 +410,7 @@ public partial class QbitController
                 if (probed >= budget) break;
                 probed++;
 
-                var (t, err) = await JutLoadTitleStatic(slug);
+                var (t, err) = await loadTitle(slug);
                 if (t == null)
                 {
                     failed++;
@@ -315,15 +462,36 @@ public partial class QbitController
                 {
                     changed++;
                     rec["lastChange"] = DateTime.UtcNow;
-                    foreach (var e in fresh) JutNotifyNewEpisode(slug, t.titleRu, e);
 
-                    bool auto = rec.Value<bool?>("autoGrab") ?? (ModInit.conf?.jutWatchAutoGrab ?? true);
+                    // Режим гейтит ТОЛЬКО скачивание: уведомления уходят в обоих режимах,
+                    // «только уведомления» — это и есть весь смысл подписки с карточки тайтла.
+                    bool auto = JutModeOf(rec) == "grab";
+                    // «качаю» в тексте — только про серии, которые ДЕЙСТВИТЕЛЬНО поедут в очередь:
+                    // серия, уже лежащая на диске, в toGrab не попадает, и обещать по ней
+                    // скачивание было бы врать.
+                    var grabKeys = new HashSet<string>(toGrab.Select(x => x.epkey), StringComparer.Ordinal);
+                    foreach (var e in fresh)
+                        JutNotifyNewEpisode(slug, t.titleRu, e, auto && grabKeys.Contains(e.epkey));
+
+                    bool baselineHold = false;
                     if (auto && toGrab.Count > 0)
                     {
                         string space = JutCheckSpace(toGrab.Count);
-                        if (space != null) JutNet.Log("watch", slug + ": автоскачивание отменено — " + space);
+                        if (space != null)
+                        {
+                            JutNet.Log("watch", slug + ": автоскачивание отменено — " + space);
+                            // 🔥 Baseline НЕ двигаем: toGrab исключает known.keys, и сдвинутый
+                            // baseline вычёркивал бы серию из скачивания НАВСЕГДА (доберёт разве что
+                            // JutReconcile, и только если остался .part). Плюс молчаливый отказ
+                            // в режиме «качаю» недопустим — тревога в колокольчик.
+                            JutNotifyNoSpace(slug, t.titleRu, toGrab.Count, space);
+                            baselineHold = true;
+                        }
                         else
                         {
+                            // счётчик ЭТОГО тайтла: общий queued растёт по всем, и на нём мета
+                            // писалась бы соседнему тайтлу, ничего не поставившему в очередь
+                            int q = 0;
                             foreach (var e in toGrab)
                             {
                                 lock (_jutEnqLock)
@@ -335,18 +503,20 @@ public partial class QbitController
                                     slug = slug, season = e.season, ep = e.num,
                                     kind = JutKindParam(e.kind), epkey = e.epkey, titleRu = t.titleRu
                                 });
-                                queued++;
+                                q++;
                             }
-                            if (queued > 0) { await JutEnsureMeta(slug, t); JutKickWorker(); }
+                            queued += q;
+                            if (q > 0) { await JutEnsureMeta(slug, t); JutKickWorker(); }
                         }
                     }
 
-                    rec["known"] = new JObject
-                    {
-                        ["count"] = inSeason.Count,
-                        ["max"] = inSeason.Count > 0 ? inSeason.Max(e => e.num) : 0,
-                        ["keys"] = new JArray(inSeason.Select(e => e.epkey))
-                    };
+                    if (!baselineHold)
+                        rec["known"] = new JObject
+                        {
+                            ["count"] = inSeason.Count,
+                            ["max"] = inSeason.Count > 0 ? inSeason.Max(e => e.num) : 0,
+                            ["keys"] = new JArray(inSeason.Select(e => e.epkey))
+                        };
                 }
                 else if (inSeason.Count != knownCount)
                 {
@@ -384,6 +554,22 @@ public partial class QbitController
         finally { _jutGate.Release(); }
     }
 
+    /// <summary>
+    /// Дешёвый общий опрос: ОДИН запрос отвечает, у кого вырос счётчик серий.
+    /// Вынесено из тика ради точки подмены сети (см. параметры JutWatchTick).
+    /// </summary>
+    static async Task<(bool ok, Dictionary<string, int> counts)> JutLoadOngoingStatic()
+    {
+        var ongoing = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var resp = await JutNet.PostForm(JutNet.Host + "/anime/ongoing/",
+            "ajax_load=yes&start_from_page=1&show_search=&anime_of_user=", JutSuParse.ReachedCatalog);
+        bool ok = resp != null && resp.reached;
+        if (ok)
+            foreach (var c in JutSuParse.ParseCatalog(resp.body).items)
+                if (!string.IsNullOrEmpty(c.slug)) ongoing[c.slug] = c.episodes;
+        return (ok, ongoing);
+    }
+
     // Статический доступ к загрузке тайтла из фонового тика (там нет экземпляра контроллера).
     static async Task<(JutTitle, string)> JutLoadTitleStatic(string slug)
     {
@@ -413,7 +599,16 @@ public partial class QbitController
 
     #region уведомления
 
-    static void JutNotifyNewEpisode(string slug, string title, JutEp e)
+    /// <summary>
+    /// «Вышла новая серия».
+    /// 🔥 kind = "NEW" обязателен и для film/ova тоже: клиент печатает все ЗНАКОМЫЕ виды
+    /// (null, OVA, FILM, …) как «скачана», и с прежним kind уведомление врало про серию,
+    /// которой на диске нет — а в режиме «только уведомления» её там не будет никогда.
+    /// Вид серии остаётся в label.
+    /// ⚠️ epkey = "new-" + epkey НЕ менять: совпадение с epkey из JutNotifyDone схлопнет
+    /// «вышла» и «скачана» в одну запись по UNIQUE noti(seriesKey, epkey).
+    /// </summary>
+    static void JutNotifyNewEpisode(string slug, string title, JutEp e, bool auto)
     {
         try
         {
@@ -427,11 +622,38 @@ public partial class QbitController
                 title = title ?? slug,
                 season = e.kind == JutEpKind.Episode ? e.season : -1,
                 episode = e.num,
-                kind = e.kind == JutEpKind.Episode ? null : e.kind.ToString().ToUpperInvariant(),
+                kind = "NEW",
                 epkey = key,
-                label = e.kind == JutEpKind.Episode
-                    ? $"jut.su · сезон {e.season} · серия {e.num}"
-                    : $"jut.su · {e.kind} {e.num}",
+                label = (e.kind == JutEpKind.Episode
+                    ? $"jut.su · сезон {e.season} · серия {e.num} — вышла"
+                    : $"jut.su · {e.kind} {e.num} — вышла") + (auto ? ", качаю" : ""),
+                created = DateTime.UtcNow, read = false
+            });
+            db.SaveChanges();
+            PushNotiSignal(1);
+        }
+        catch (Exception ex) { JutNet.Log("watch", "noti: " + ex.Message); }
+    }
+
+    /// <summary>
+    /// Нехватка места в режиме «качаю». Раньше это была ОДНА строка в лог: владелец ждал
+    /// серию, которой не будет, и узнать об этом было негде.
+    /// Дедуп по ДНЮ: /qdl/jut/watch/check дёргается руками сколько угодно раз.
+    /// </summary>
+    static void JutNotifyNoSpace(string slug, string title, int files, string reason)
+    {
+        try
+        {
+            using var db = new SqlContext();
+            string sk = "j" + slug;
+            string key = "nospace-" + DateTime.UtcNow.ToString("yyyyMMdd");
+            if (db.noti.Any(x => x.seriesKey == sk && x.epkey == key)) return;
+            db.noti.Add(new NotiModel
+            {
+                seriesKey = sk, seriesId = 0, hash = JutNet.Hash(slug),
+                title = title ?? slug, season = -1, episode = -1,
+                kind = "NOSPACE", epkey = key,
+                label = $"Новые серии ({files}) не скачаны — {reason}",
                 created = DateTime.UtcNow, read = false
             });
             db.SaveChanges();

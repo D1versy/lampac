@@ -69,6 +69,49 @@ public class JutSuIsolationTests
     }
 
     [Fact]
+    public void Уведомление_о_новой_серии_не_притворяется_скачанной()
+    {
+        // Клиент печатает ЗНАКОМЫЕ виды (null, OVA, FILM, …) как «скачана». Уведомление
+        // «вышла новая серия» обязано иметь свой вид, иначе в режиме «только уведомления»
+        // пользователь читает «скачана» про серию, которой на диске не будет никогда.
+        string src = File.ReadAllText(ModuleFile("JutSuWatch.cs"));
+        Assert.Contains("kind = \"NEW\"", src);
+        // ⚠️ ключ дедупа обязан отличаться от epkey у «скачана» (JutNotifyDone),
+        // иначе UNIQUE noti(seriesKey, epkey) схлопнет два разных события в одно
+        Assert.Contains("\"new-\" + e.epkey", src);
+    }
+
+    [Fact]
+    public void Отказ_по_месту_не_молчит_и_не_двигает_baseline()
+    {
+        // Раньше нехватка места писала ОДНУ строку в лог: владелец ждал серию, которой
+        // не будет. Плюс сдвинутый baseline вычёркивал её из скачивания навсегда.
+        string src = File.ReadAllText(ModuleFile("JutSuWatch.cs"));
+        int i = src.IndexOf("JutCheckSpace", StringComparison.Ordinal);
+        Assert.True(i > 0, "гард свободного места не найден");
+        string block = src.Substring(i, Math.Min(1200, src.Length - i));
+
+        Assert.Contains("JutNotifyNoSpace", block);
+        Assert.Contains("baselineHold", block);
+    }
+
+    [Fact]
+    public void Режим_подписки_читается_одной_функцией()
+    {
+        // Развилка «качаем или только уведомляем» обязана быть в ОДНОМ месте: пока она
+        // размазана по коду, любая новая точка чтения снова начнёт брать дефолт конфига
+        // и молча включать автоскачивание существующим подпискам.
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuWatch.cs")));
+        Assert.Contains("JutModeOf", src);
+        // Легальных прямых чтений ровно три: JutModeOf (сама развилка), JutWatchUpsert
+        // (prevAuto — сохранить выбранный режим) и /qdl/jut/watch/list (диагностика).
+        // Всё остальное обязано спрашивать JutModeOf, иначе новая точка чтения опять
+        // начнёт брать дефолт конфига и молча включать автоскачивание живым подпискам.
+        int reads = src.Split("Value<bool?>(\"autoGrab\")").Length - 1;
+        Assert.True(reads <= 3, "прямых чтений autoGrab стало " + reads + " — режим снова размазан");
+    }
+
+    [Fact]
     public void Ключи_seen_не_пересекаются_с_торрентными()
     {
         // Торрентные seriesKey: t<tmdbId> и l<fnv>. Наш префикс — j<slug>.

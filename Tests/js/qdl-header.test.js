@@ -182,10 +182,12 @@ test('single SWITCH keeps the detailed toast; downloaded episodes keep their own
   lampa.Storage.set('qdl_noti_lastid', 5);
 
   qdl.pollNotifications();
+  // ⚠️ 2.35: у «серия скачана» kind ОТСУТСТВУЕТ (сервер пишет null) — выдуманного 'DL' в базе
+  // не бывает, а корзина «скачана» теперь белый список, а не ветвь по остатку.
   pending[0].cb({ unread: 3, items: [
     { id: 6, kind: 'SWITCH', title: 'Сериал А', label: 'S01E05' },
-    { id: 7, kind: 'DL', title: 'Сериал Б', label: 'S02E01' },
-    { id: 8, kind: 'DL', title: 'Сериал В', label: 'S03E02' },
+    { id: 7, kind: null, title: 'Сериал Б', label: 'S02E01' },
+    { id: 8, kind: null, title: 'Сериал В', label: 'S03E02' },
   ] });
 
   assert.strictEqual(noty.length, 2);

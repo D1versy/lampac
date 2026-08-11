@@ -710,7 +710,7 @@ public partial class QbitController : BaseController
                     var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var it in result) seen.Add(it.Value<string>("hash") ?? "");
                     // подписки jut.su — один раз на весь список, не на карточку
-                    var jutWatched = JutWatchedSlugs();
+                    var jutModes = JutWatchModes();
                     foreach (var lf in Directory.GetFiles(localDir, "*.json"))
                     {
                         string h = Path.GetFileNameWithoutExtension(lf);
@@ -742,12 +742,9 @@ public partial class QbitController : BaseController
                         // Сезон намеренно НЕ пробрасываем: маркер один на весь тайтл, а серии
                         // в нём могут быть из разных сезонов — какой сезон «следить» решает
                         // сервер (берёт последний вышедший) при вызове /qdl/jut/watch.
-                        string jslug = (loc["jut"] as JObject)?.Value<string>("slug");
-                        if (!string.IsNullOrEmpty(jslug))
-                        {
-                            item["jut"] = new JObject { ["slug"] = jslug };
-                            item["watched"] = jutWatched.Contains(jslug);
-                        }
+                        // Режим подписки — в JutDecorateListItem (JutSuWatch.cs): вынесен туда,
+                        // чтобы контракт проверялся тестом, этот экшен в тестах не собрать.
+                        JutDecorateListItem(item, loc, jutModes);
                         // без Touch activity == added → финализированный транскод позицию не меняет (§AG)
                         item["activity"] = Math.Max(item.Value<long?>("added") ?? 0, ActivityStored(act, h));
                         if (System.IO.File.Exists(MetaPath(h)))
@@ -3528,6 +3525,11 @@ public partial class QbitController : BaseController
                 {
                     ["id"] = n.Id, ["seriesId"] = n.seriesId, ["hash"] = n.hash, ["title"] = n.title,
                     ["season"] = n.season, ["episode"] = n.episode, ["kind"] = n.kind, ["label"] = n.label,
+                    // slug только для jut-уведомлений (seriesKey = "j" + slug): в режиме «только
+                    // уведомления» карточки в «Загрузках» нет, а hash необратим — без slug тап
+                    // уходил в торрентную ветку и открывал плеер по мёртвому URL.
+                    // Торрентные seriesKey наружу не идут (гейт внутри JutSlugFromSeriesKey).
+                    ["slug"] = JutSlugFromSeriesKey(n.seriesKey),
                     ["created"] = DateTime.SpecifyKind(n.created, DateTimeKind.Utc).ToString("o"), ["read"] = n.read   // помечаем UTC → корректный парсинг на фронте
                 });
             return ContentTo(new JObject { ["items"] = arr, ["unread"] = unread }.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
