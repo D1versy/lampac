@@ -124,6 +124,21 @@ test('экран тайтла даёт все четыре точки входа
   assert.ok(fn.includes('📄 Серии'));
 });
 
+// Жалоба владельца (2.32): на экране тайтла постер и текст лежали ВПРИТЫК к краям экрана —
+// у экранов jut.su не было горизонтальных полей вообще (замер: left=0, описание во всю ширину).
+test('экраны тайтла и серий: контент в контейнере с полями, описание с капом длины строки', () => {
+  const src = H.qdlSource();
+  for (const name of ['ComponentJutTitle', 'ComponentJutEpisodes']) {
+    const i = src.indexOf('function ' + name);
+    assert.ok(src.slice(i, i + 900).includes('class="qdl-jut-page"'),
+      name + ': контейнер без класса с полями — контент прилипнет к краю');
+  }
+  const css = src.slice(src.indexOf('function injectCss'), src.indexOf('document.head.appendChild'));
+  assert.ok(/\.qdl-jut-page\{padding:0 [0-9.]+em/.test(css), 'поля .qdl-jut-page не заданы');
+  assert.ok(/\.qdl-jut-descr\{[^}]*max-width/.test(css), 'строка описания через весь ТВ не читается — нужен кап');
+  assert.ok(/@media[^}]*max-width:580px/.test(css), 'на телефоне поля обязаны срезаться (рут-em там клампится)');
+});
+
 test('края пульта уводят в меню и шапку из каждого компонента', () => {
   const src = H.qdlSource();
   for (const name of ['ComponentJutCatalog', 'ComponentJutTitle', 'ComponentJutEpisodes']) {

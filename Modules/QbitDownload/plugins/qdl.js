@@ -106,6 +106,20 @@
             // svg-иконки в наших плоских кнопках (jut.su и т.п.) и в строках экрана серий
             '.qdl-btn-focus svg,.qdl-btn-green svg{width:1.15em;height:1.15em;flex:none}' +
             '.qdl-ep-play svg{display:block;width:1.5em;height:1.5em}' +
+            // 2.32: экраны jut.su жили БЕЗ горизонтальных полей — постер и текст лежали впритык
+            // к краю (замер: left=0, описание во всю ширину экрана; штатные экраны Lampa держат
+            // отступ). Поля em-ные: рут-em Lampa пропорционален ширине окна, т.е. процент от
+            // экрана одинаков на ТВ и мониторе; на телефоне рут-em клампится (шире в долях
+            // экрана) — там поля срезаются медиазапросом.
+            '.qdl-jut-page{padding:0 3em 2.5em}' +
+            '.qdl-jut-head{display:flex;flex-wrap:wrap;gap:2em;padding:1.6em 0 1.4em;align-items:flex-start}' +
+            '.qdl-jut-poster{width:14em;border-radius:.8em;flex:0 0 auto;background:#222;box-shadow:0 1em 3em rgba(0,0,0,.5)}' +
+            '.qdl-jut-info{flex:1 1 20em;min-width:0}' +
+            '.qdl-jut-title{font-size:2em;font-weight:600;line-height:1.15}' +
+            // строка во всю ширину ТВ не читается — кап по длине строки, как в карточке загрузки
+            '.qdl-jut-descr{opacity:.85;font-size:1.15em;line-height:1.55;max-width:52em}' +
+            '@media screen and (max-width:580px){.qdl-jut-page{padding:0 1.2em 1.5em}' +
+            '.qdl-jut-head{gap:1.2em;padding:1em 0}.qdl-jut-poster{width:9.5em}}' +
             // бейдж непрочитанных на нашей иконке уведомлений в хедере (красный кружок с числом)
             '.qdl-noti-head{position:relative}' +
             '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}';
@@ -3477,7 +3491,7 @@
         var comp = this;
         var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
         var html = $('<div></div>');
-        var body = $('<div></div>');
+        var body = $('<div class="qdl-jut-page"></div>');   // поля по краям: без них контент лежал впритык
         var last;
         var slug = object.jut_slug;
         var data = null, watching = false;
@@ -3513,8 +3527,8 @@
         }
 
         this.build = function () {
-            var head = $('<div style="display:flex;gap:1.5em;padding:1.5em 0"></div>');
-            var poster = $('<img style="width:12em;border-radius:.6em;flex:0 0 auto" src="' + jutPosterUrl(slug, data.pv) + '">');
+            var head = $('<div class="qdl-jut-head"></div>');
+            var poster = $('<img class="qdl-jut-poster" src="' + jutPosterUrl(slug, data.pv) + '">');
             poster.on('error', function () { this.src = './img/img_broken.svg'; });
             head.append(poster);
 
@@ -3524,8 +3538,8 @@
                 try { Lampa.Background.change(jutBackdropUrl(slug)); } catch (e) {}
             }
 
-            var info = $('<div style="flex:1 1 auto"></div>');
-            info.append('<div style="font-size:1.9em;font-weight:600">' + esc(data.title || slug) + '</div>');
+            var info = $('<div class="qdl-jut-info"></div>');
+            info.append('<div class="qdl-jut-title">' + esc(data.title || slug) + '</div>');
             if (data.original) info.append('<div style="opacity:.6;font-size:1.15em;margin-top:.2em">' + esc(data.original) + '</div>');
 
             var facts = [];
@@ -3543,7 +3557,9 @@
             head.append(info);
             body.append(head);
 
-            var btns = $('<div style="display:flex;flex-wrap:wrap;gap:.7em;padding-bottom:1.2em"></div>');
+            // кнопки — под метаданными, рядом с названием (как в родной карточке Lampa):
+            // главные действия у заголовка, а не отдельным блоком под постером
+            var btns = $('<div style="display:flex;flex-wrap:wrap;gap:.7em;margin-top:1.4em"></div>');
             function mkBtn(label, onEnter, opts) {
                 opts = opts || {};
                 // qdl-btn-focus/qdl-btn-green обязательны: Lampa вешает класс .focus, но генерического
@@ -3571,10 +3587,10 @@
                     b.children('span').text(now ? '🔔 Слежу' : '🔔 Следить');
                 });
             });
-            body.append(btns);
+            info.append(btns);
 
             if (data.descr)
-                body.append($('<div style="opacity:.85;font-size:1.15em;line-height:1.5;padding-bottom:2em">' + esc(data.descr) + '</div>'));
+                body.append($('<div class="qdl-jut-descr">' + esc(data.descr) + '</div>'));
 
             this.activity.loader(false);
             this.activity.toggle();
@@ -3607,7 +3623,7 @@
         var comp = this;
         var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
         var html = $('<div></div>');
-        var body = $('<div></div>');
+        var body = $('<div class="qdl-jut-page"></div>');   // тот же контейнер с полями, что у экрана тайтла
         var last;
         var rows = [];        // отметки обновляются на месте — DOM не перестраивается, фокус жив
         var slug = object.jut_slug;
