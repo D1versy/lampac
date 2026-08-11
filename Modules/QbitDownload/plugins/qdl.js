@@ -1331,10 +1331,13 @@
                       '<div style="margin:1.1em 0 .5em">' + badges + '</div>' +
                       (meta1 ? '<div style="opacity:.7;font-size:1.15em;margin-bottom:.3em">' + esc(meta1) + '</div>' : '') +
                       (genres ? '<div style="opacity:.7;font-size:1.15em;margin-bottom:1em">' + esc(genres) + '</div>' : '') +
-                      '<div style="font-size:1.2em;line-height:1.55;opacity:.92;max-width:46em;margin-bottom:1.7em">' + esc(m.overview || 'Нет описания.') + '</div>' +
-                      '<div class="qdl-card-btns" style="display:flex;flex-wrap:wrap;gap:.7em;align-items:center">' +
+                      // 2.34: кнопки ВЫШЕ описания. Пока экран был мёртвым, этого никто не видел;
+                      // как только он открылся (2.33), «Смотреть» оказалась под простынёй текста —
+                      // на ТВ до неё приходилось доскроливать (жалоба владельца)
+                      '<div class="qdl-card-btns" style="display:flex;flex-wrap:wrap;gap:.7em;align-items:center;margin-bottom:1.6em">' +
                         '<div class="qdl-watch selector" style="display:inline-flex;align-items:center;gap:.55em;padding:.75em 2em;border-radius:.6em;font-size:1.4em">' + WATCH_ICON + '<span>Смотреть</span></div>' +
                       '</div>' +
+                      '<div class="qdl-card-descr" style="font-size:1.2em;line-height:1.55;opacity:.92;max-width:46em">' + esc(m.overview || 'Нет описания.') + '</div>' +
                     '</div>' +
                   '</div>' +
                 '</div>'
