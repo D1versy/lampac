@@ -2,7 +2,7 @@
 // Тесты DMCA-фолбека (см. claude/06 Media-server): CUB отдаёт {"blocked":true} на карточки
 // из своего DMCA-списка → Lampa рисует «Контент заблокирован» без кнопок. Наш обход:
 //  1) rewriteCubUrl + XHR-патч — детали карточек идут через свой TMDB-прокси (/tmdb/api);
-//  2) DMCA-список (tmdb.<cub>/blocked) → режим .qdl-dmca (только «Скачать» / «Смотреть (загружено)»).
+//  2) DMCA-список (tmdb.<cub>/blocked) → режим .qdl-dmca (только «Скачать» / зелёная «Смотреть»).
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -262,18 +262,18 @@ test('UI: DMCA-карточка → класс qdl-dmca, «Скачать» пе
   const css = doc.getElementById('qdl-css');
   assert.ok(css && css.textContent.indexOf('.qdl-dmca') !== -1, 'CSS-правило qdl-dmca заинжекчено');
   assert.ok(css.textContent.indexOf(':not(.qdl-download):not(.qdl-watch-btn)') !== -1,
-    'прячем всё, кроме «Скачать» и «Смотреть (загружено)»');
+    'прячем всё, кроме «Скачать» и зелёной «Смотреть»');
 });
 
-test('UI: обычная карточка → без qdl-dmca, порядок кнопок не меняется', () => {
+test('UI: обычная карточка → без qdl-dmca, «Скачать» первая (детерминированный порядок 2.30)', () => {
   const { w, doc, qdl } = H.loadQdlDom({ bodyHtml: PAGE, lampa: lampaFor('movie') });
   qdl.setDmcaList([{ id: 1084736, cat: 'movie', kpid: 0 }]);
   fireAddButton(w, { id: 693134, title: 'Дюна 2' });
 
   assert.strictEqual(doc.body.classList.contains('qdl-dmca'), false);
   const btns = doc.querySelectorAll('.full-start__buttons .full-start__button');
-  assert.ok(btns[0].classList.contains('view--online'), 'чужая кнопка осталась первой');
-  assert.ok(btns[btns.length - 1].classList.contains('qdl-download'), '«Скачать» добавлена в конец');
+  assert.ok(btns[0].classList.contains('qdl-download'), '«Скачать» первая — кнопок просмотра из загрузок нет');
+  assert.ok(btns[btns.length - 1].classList.contains('view--online'), 'чужая кнопка после наших');
 });
 
 test('UI: id в списке, но другой cat (tv vs movie) → фолбек не включается', () => {

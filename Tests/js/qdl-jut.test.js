@@ -118,8 +118,8 @@ test('экран тайтла даёт все четыре точки входа
   const src = H.qdlSource();
   const i = src.indexOf('function ComponentJutTitle');
   const fn = src.slice(i, src.indexOf('function ComponentJutEpisodes'));
-  assert.ok(fn.includes('▶ Смотреть'));
-  assert.ok(fn.includes('⬇ Скачать'));
+  assert.ok(fn.includes("mkBtn('Смотреть'"));
+  assert.ok(fn.includes("mkBtn('Скачать'"));
   assert.ok(fn.includes('Следить'));
   assert.ok(fn.includes('📄 Серии'));
 });

@@ -8,6 +8,10 @@
 
     var API = '{localhost}';
     var ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 19h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    // 2.30: у каждой кнопки карточки СВОЯ иконка — одна стрелка на всех читалась как три «Скачать» разных цветов
+    var WATCH_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.2"/><path d="M10 8.7l5.4 3.3-5.4 3.3V8.7z" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>';
+    var CONTINUE_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M21.5 4.5v5h-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 14.8A8.5 8.5 0 1 1 18 6l3.5 3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.2 9.2l4.4 2.8-4.4 2.8V9.2z" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>';
+    var BOX_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M21 16.5v-9L12 3 3 7.5v9L12 21l9-4.5z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M3.3 7.6L12 12l8.7-4.4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 12v9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
     var BELL = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 8a6 6 0 1112 0c0 7 3 9 3 9H3s3-2 3-9z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.3 21a1.94 1.94 0 003.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     var CAM = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.8 7.4l14.4-3.3 1.3 5.6L4.1 13 2.8 7.4z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M6.5 12.2V15a3 3 0 003 3h1.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="18.5" cy="18" r="2.6" stroke="currentColor" stroke-width="2"/><path d="M18 9.9l3.2 1.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
     var REC = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/></svg>';
@@ -46,7 +50,10 @@
         var st = document.createElement('style');
         st.id = 'qdl-css';
         st.textContent =
-            '.qdl-watch.focus{background:#fff !important;color:#000 !important;transform:scale(1.03)}' +
+            // зелёная «Смотреть» карточки загрузки без TMDB — та же семантика, что у .qdl-watch-btn
+            '.qdl-watch{background:rgba(20,160,40,.92);color:#fff}' +
+            '.qdl-watch.focus{background:#19b531 !important;color:#fff !important;transform:scale(1.03)}' +
+            '.qdl-watch svg{width:1.15em;height:1.15em;flex:none}' +
             '.qdl-watch-btn{background:rgba(20,160,40,.92) !important;color:#fff !important}' +
             '.qdl-watch-btn.focus{background:#19b531 !important;color:#fff !important}' +
             '.qdl-watch-btn span{color:#fff !important}' +
@@ -57,9 +64,23 @@
             '.qdl-continue-btn{background:rgba(25,100,210,.92) !important;color:#fff !important}' +
             '.qdl-continue-btn.focus{background:#2b7de9 !important;color:#fff !important}' +
             '.qdl-continue-btn span{color:#fff !important}' +
-            // DMCA-карточка (CUB блокирует): остаются только «Скачать» и «Смотреть (загружено)»
-            '.qdl-dmca .full-start__buttons .full-start__button:not(.qdl-download):not(.qdl-watch-btn),' +
-            '.qdl-dmca .full-start-new__buttons .full-start__button:not(.qdl-download):not(.qdl-watch-btn){display:none !important}' +
+            // 2.30: подписи наших кнопок видны ВСЕГДА — Lampa прячет span у кнопок без .focus,
+            // а на touch класс .focus не ставится вовсе (иконки без текста и вызвали путаницу).
+            // Кап ширины: epShort на непарсящемся имени отдаёт до 24 символов — без него одна
+            // кнопка «Продолжить» съедала пол-ряда.
+            '.full-start__buttons .qdl-continue-btn span,.full-start__buttons .qdl-watch-btn span,.full-start__buttons .qdl-download span,' +
+            '.full-start-new__buttons .qdl-continue-btn span,.full-start-new__buttons .qdl-watch-btn span,.full-start-new__buttons .qdl-download span' +
+            '{display:inline !important;max-width:13em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+            // ⚠️ Постоянные подписи ломают допущение upstream «ряд всегда влезает» (он прятал текст
+            // у несфокусированных именно для этого). ПЕРЕНОС, а не overflow: ряд НИКТО не скроллит
+            // (это не Lampa.Scroll, фокус-движок не зовёт scrollIntoView), и обрезанный хвост
+            // означал бы фокус на невидимой кнопке — «пульт не работает» (та же грабля, что §AK.3).
+            '.full-start__buttons,.full-start-new__buttons{flex-wrap:wrap;row-gap:.5em}' +
+            // DMCA-карточка (CUB блокирует): остаются только наши кнопки — «Скачать», зелёная
+            // «Смотреть» и «Продолжить» (2.30: до этого правило прятало и «Продолжить»,
+            // т.е. на скачанном заблокированном сериале первоклассная кнопка исчезала)
+            '.qdl-dmca .full-start__buttons .full-start__button:not(.qdl-download):not(.qdl-watch-btn):not(.qdl-continue-btn),' +
+            '.qdl-dmca .full-start-new__buttons .full-start__button:not(.qdl-download):not(.qdl-watch-btn):not(.qdl-continue-btn){display:none !important}' +
             // своя кнопка фуллскрина в плеере (НЕ класс player-panel__fullscreen — иначе Lampa её прячет на моб.)
             '.qdl-fs{display:inline-flex !important;align-items:center;justify-content:center;padding:.6em;margin:0 .2em;cursor:pointer;opacity:.85;vertical-align:middle}' +
             '.qdl-fs.focus{opacity:1;transform:scale(1.12)}' +
@@ -82,6 +103,9 @@
             '.qdl-ep--cur{background:rgba(25,100,210,.22) !important}' +
             '.qdl-btn-focus.focus{background:#fff !important;color:#000 !important;opacity:1 !important}' +
             '.qdl-btn-green.focus{background:#19b531 !important;box-shadow:0 0 0 .15em #fff}' +
+            // svg-иконки в наших плоских кнопках (jut.su и т.п.) и в строках экрана серий
+            '.qdl-btn-focus svg,.qdl-btn-green svg{width:1.15em;height:1.15em;flex:none}' +
+            '.qdl-ep-play svg{display:block;width:1.5em;height:1.5em}' +
             // бейдж непрочитанных на нашей иконке уведомлений в хедере (красный кружок с числом)
             '.qdl-noti-head{position:relative}' +
             '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}';
@@ -1140,7 +1164,7 @@
                     '<div style="font-size:1.5em;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="qdl-ep-mark"></span><span class="qdl-ep-name"></span></div>' +
                     (meta ? '<div style="opacity:.65;font-size:1.15em;margin-top:.25em">' + esc(meta) + '</div>' : '') +
                   '</div>' +
-                  '<div style="opacity:.45;font-size:1.5em;padding-right:.3em">▶</div>' +
+                  '<div class="qdl-ep-play" style="opacity:.45;padding-right:.3em">' + WATCH_ICON + '</div>' +
                 '</div>'
             );
             el.find('.qdl-ep-name').text(baseName(f.name) + (f.source === 'donor' ? ' · врем.' : ''));
@@ -1280,7 +1304,7 @@
                       (meta1 ? '<div style="opacity:.7;font-size:1.15em;margin-bottom:.3em">' + esc(meta1) + '</div>' : '') +
                       (genres ? '<div style="opacity:.7;font-size:1.15em;margin-bottom:1em">' + esc(genres) + '</div>' : '') +
                       '<div style="font-size:1.2em;line-height:1.55;opacity:.92;max-width:46em;margin-bottom:1.7em">' + esc(m.overview || 'Нет описания.') + '</div>' +
-                      '<div class="qdl-watch selector" style="display:inline-flex;align-items:center;gap:.4em;padding:.75em 2em;background:rgba(255,255,255,.16);border-radius:.6em;font-size:1.4em">▶&nbsp;Смотреть</div>' +
+                      '<div class="qdl-watch selector" style="display:inline-flex;align-items:center;gap:.55em;padding:.75em 2em;border-radius:.6em;font-size:1.4em">' + WATCH_ICON + '<span>Смотреть</span></div>' +
                     '</div>' +
                   '</div>' +
                 '</div>'
@@ -2087,13 +2111,96 @@
         }, function () { Lampa.Noty.show('Ошибка поиска раздач'); });
     }
 
+    // ───────── Порядок кнопок полной карточки (2.30) ─────────
+    // [Продолжить][Смотреть][Скачать] … родные (закладки/«…», в исходном отн. порядке) … [priority][Онлайн].
+    // Вставки идут вразнобой (complite синхронно, /qdl/list и /qdl/episodes асинхронно), а Lampa на каждом
+    // входе в контроллер full_start может prepend'ить клон .button--priority (onGroupButtons) — поэтому
+    // порядок держит идемпотентная сортировка + observer, а не место вставки.
+    // Флаг лишь метит собственные мутации; от зацикливания реально защищает ранний выход
+    // «порядок уже верен → ни одной мутации» (колбэк observer — микротаск, флаг к тому
+    // моменту всегда сброшен, так что полагаться на него нельзя).
+    var qdlOrdering = false;
+
+    function buttonRank(el) {
+        var c = el.classList;
+        if (!c) return 3;
+        if (c.contains('qdl-continue-btn')) return 0;
+        if (c.contains('qdl-watch-btn')) return 1;
+        if (c.contains('qdl-download')) return 2;
+        if (c.contains('button--play')) return 5;      // «Онлайн» — всегда последняя (просьба владельца)
+        if (c.contains('button--priority')) return 4;  // пин-клон источника — рядом с «Онлайн»
+        return 3;
+    }
+
+    function orderButtons(cont) {
+        try {
+            if (!cont || !cont.length) return;
+            var box = cont[0];
+            var kids = [].filter.call(box.children, function (n) {
+                return n.classList && n.classList.contains('full-start__button');
+            });
+            if (kids.length < 2) return;
+            // составной ключ rank*100+index: стабильность сортировки не зависит от движка (старые ТВ)
+            var sorted = kids.map(function (n, i) { return { n: n, k: buttonRank(n) * 100 + i }; })
+                .sort(function (a, b) { return a.k - b.k; })
+                .map(function (x) { return x.n; });
+            var same = true;
+            for (var i = 0; i < kids.length; i++) if (kids[i] !== sorted[i]) { same = false; break; }
+            if (same) return;   // порядок уже верен → ни одной мутации (иначе observer зациклится)
+            qdlOrdering = true;
+            for (var j = 0; j < sorted.length; j++) box.appendChild(sorted[j]);   // appendChild ПЕРЕМЕЩАЕТ узел, слушатели живы
+            qdlOrdering = false;
+            rescueFocus(box);
+        } catch (e) { qdlOrdering = false; }
+    }
+
+    // Пин источника: onGroupButtons СИНХРОННО делает prepend клона .button--priority и тут же
+    // collectionFocus(last||false) — при пустом last фокус садится на клон, потому что в этот миг
+    // он первый в ряду. Мы увозим клон в конец (микротаском позже) — без этого фокус уезжал бы
+    // к правому краю ряда на каждом входе в карточку. Возвращаем его на первую кнопку.
+    function rescueFocus(box) {
+        try {
+            var foc = box.querySelector('.full-start__button.focus');
+            if (!foc || !foc.classList.contains('button--priority')) return;   // ручной фокус не трогаем
+            var first = box.children[0];
+            if (first && first !== foc) Lampa.Controller.collectionFocus(first, box);
+        } catch (e) {}
+    }
+
+    function ensureOrderObserver(cont) {
+        try {
+            if (!cont.length || cont.data('qdl-order-obs')) return;   // маркер пер-контейнерный: back-навигация
+            cont.data('qdl-order-obs', 1);                            // возвращает СТАРУЮ активность без 'complite'
+            new MutationObserver(function () {
+                if (qdlOrdering) return;
+                orderButtons(cont);
+            }).observe(cont[0], { childList: true });
+        } catch (e) {}   // нет MutationObserver (старый Tizen) → остаются явные вызовы в точках вставки
+    }
+
+    // .button--play не играет сам — открывает меню источников (горячие торренты / серверы CUB / трейлер):
+    // честное имя «Онлайн» + иконка-коробка, play-треугольник теперь у зелёной «Смотреть».
+    // Трогаем ТОЛЬКО детей (svg/span): onGroupButtons делает play.unbind().on(...) на самом узле,
+    // а хэш full_btn_priority считается по кнопкам пула .buttons--container — обе механики целы.
+    function ensureOnlineButton(cont) {
+        try {
+            var play = cont.find('.button--play');
+            if (!play.length || play.hasClass('qdl-online-btn')) return;
+            play.addClass('qdl-online-btn');
+            var sv = play.children('svg');   // и <use xlink:href="#sprite-play">, и инлайн-SVG от cardify
+            if (sv.length) sv.first().replaceWith(BOX_ICON); else play.prepend(BOX_ICON);
+            var sp = play.children('span');
+            if (sp.length) sp.first().text('Онлайн'); else play.append('<span>Онлайн</span>');
+        } catch (e) {}
+    }
+
     // «▶ Продолжить: Серия N» на карточке сериала — только когда есть что продолжать
     // (недосмотренная серия или следующая после досмотренных). Прогресс — Lampa.Timeline (это устройство).
     function addContinueButton(render, cont, hash, name, gateItem) {
         fetchEpisodes(hash, function (files) {
             var vids = mergedVideoFiles(files);
             if (!vids.length) return;
-            // прогрев и здесь: покрывает восстановленную активность и «Смотреть (загружено)»
+            // прогрев и здесь: покрывает восстановленную активность и зелёную «Смотреть»
             // на обычной карточке — пути, где openDownload/prewarmForCard не звались.
             // Дубль с prewarmForCard безвреден: сервер дедупит и очередь, и «уже прогрет».
             if (vids.length === 1) { warmup(srcHash(vids[0], hash), vids[0].index); return; }   // фильм/один файл
@@ -2102,12 +2209,13 @@
             warmup(srcHash(warm, hash), warm.index);
             if (!target || $('.qdl-continue-btn', render).length) return;
             var label = 'Продолжить · ' + epShort(target.name);
-            var b = $('<div class="full-start__button selector qdl-continue-btn">' + ICON + '<span>' + esc(label) + '</span></div>');
+            var b = $('<div class="full-start__button selector qdl-continue-btn">' + CONTINUE_ICON + '<span>' + esc(label) + '</span></div>');
             b.on('hover:enter', function () {
                 // через экран серий с автоплеем: «назад» из плеера вернёт в список серий
                 confirmPartial(gateItem, function () { chooseEpisode(hash, name, true); });
             });
             cont.prepend(b);
+            orderButtons(cont);
         });
     }
 
@@ -2122,6 +2230,12 @@
             if (!cont.length) cont = $('.full-start-new__buttons', render);
             if (!cont.length) return;
 
+            // 2.30: на ЛЮБОЙ карточке — наш CSS (постоянные подписи), ребрендинг родной
+            // кнопки-агрегатора в «Онлайн» (коробка) и страж порядка кнопок
+            injectCss();
+            ensureOnlineButton(cont);
+            ensureOrderObserver(cont);
+
             // тип/источник берём С ОТКРЫТОЙ КАРТОЧКИ (method/source активности), а не угадываем —
             // у TMDB id в movie и tv это РАЗНЫЕ объекты, ошибка типа = другой фильм
             var active = (function () { try { return Lampa.Activity.active() || {}; } catch (e) { return {}; } })();
@@ -2132,10 +2246,9 @@
 
             // открыто из «Загрузок» (полная карточка, режим одной кнопки)
             if (active.qdl_hash) {
-                injectCss();
                 render.addClass('qdl-only');                 // CSS прячет все прочие кнопки
                 if (!$('.qdl-watch-btn', render).length) {
-                    var w = $('<div class="full-start__button selector qdl-watch-btn">' + ICON + '<span>Смотреть</span></div>');
+                    var w = $('<div class="full-start__button selector qdl-watch-btn">' + WATCH_ICON + '<span>Смотреть</span></div>');
                     w.on('hover:enter', function () {
                         // progress прокинут из openDownload; нет поля (восстановленная активность) → fail-open
                         confirmPartial({ hash: active.qdl_hash, progress: (typeof active.qdl_progress === 'number' ? active.qdl_progress : 1) },
@@ -2149,6 +2262,7 @@
                         }, function () { quickMenu({ hash: active.qdl_hash, meta: movie }); });
                     });
                     cont.prepend(w);
+                    orderButtons(cont);
                 }
                 // сериал с прогрессом просмотра → вторая кнопка «Продолжить: Серия N»
                 addContinueButton(render, cont, active.qdl_hash, movie.title || movie.name,
@@ -2160,22 +2274,21 @@
                 var btn = $('<div class="full-start__button selector qdl-download">' + ICON + '<span>Скачать</span></div>');
                 btn.on('hover:enter', function () { chooseAndDownload(movie); });
                 cont.append(btn);
+                orderButtons(cont);   // без наших кнопок просмотра «Скачать» встаёт первой
             }
 
-            // DMCA-карточка → режим «только Скачать»: прячем онлайн и прочие кнопки (.qdl-dmca),
-            // нашу кнопку — в начало ряда. Список грузится лениво, класс навешивается по готовности.
+            // DMCA-карточка → режим «только Скачать»: прячем онлайн и прочие кнопки (.qdl-dmca).
+            // Список грузится лениво, класс навешивается по готовности.
             if (movie && movie.id) {
                 var cat = movie.media_type || (movie.first_air_date || movie.name ? 'tv' : 'movie');
                 whenDmca(function () {
                     if (!isDmca(cat, movie.id)) return;
-                    injectCss();
                     render.addClass('qdl-dmca');
-                    var dl = $('.qdl-download', render);
-                    if (dl.length) cont.prepend(dl);
+                    orderButtons(cont);
                 });
             }
 
-            // фильм уже скачан → ЗЕЛЁНАЯ «Смотреть (загружено)» + привязка метаданных.
+            // фильм уже скачан → ЗЕЛЁНАЯ «Смотреть» + привязка метаданных.
             // Матчинг строгий — findDownload (id+media_type; имя — только для раздач без меты)
             if (movie && movie.id && !$('.qdl-watch-btn', render).length) {
                 req(API + '/qdl/list', function (list) {
@@ -2183,10 +2296,10 @@
                     if (hit && !hit.meta) saveMeta(hit.hash, movie);   // back-link карточка → безымянная загрузка
                     if (!hit || $('.qdl-watch-btn', render).length) return;
 
-                    injectCss();
-                    var play = $('<div class="full-start__button selector qdl-watch-btn">' + ICON + '<span>Смотреть (загружено)</span></div>');
+                    var play = $('<div class="full-start__button selector qdl-watch-btn">' + WATCH_ICON + '<span>Смотреть</span></div>');
                     play.on('hover:enter', function () { watch(hit); });
                     cont.prepend(play);
+                    orderButtons(cont);
                     addContinueButton(render, cont, hit.hash, (hit.meta && hit.meta.title) || hit.name, hit);
                 });
             }
@@ -3395,11 +3508,13 @@
             body.append(head);
 
             var btns = $('<div style="display:flex;flex-wrap:wrap;gap:.7em;padding-bottom:1.2em"></div>');
-            function mkBtn(label, onEnter) {
-                // qdl-btn-focus обязателен: Lampa вешает класс .focus, но генерического
+            function mkBtn(label, onEnter, opts) {
+                opts = opts || {};
+                // qdl-btn-focus/qdl-btn-green обязательны: Lampa вешает класс .focus, но генерического
                 // .selector.focus в её CSS НЕТ — без своего правила фокус на ТВ невидим,
                 // и это читается как «пульт не работает» (та же грабля, что была в Rec, §AK.3)
-                var b = $('<div class="selector qdl-btn-focus" style="background:rgba(255,255,255,.12);padding:.8em 1.3em;border-radius:.5em;font-size:1.2em">' + esc(label) + '</div>');
+                var b = $('<div class="selector ' + (opts.green ? 'qdl-btn-green' : 'qdl-btn-focus') + '" style="display:inline-flex;align-items:center;gap:.5em;background:' + (opts.green ? 'rgba(20,160,40,.85)' : 'rgba(255,255,255,.12)') + ';padding:.8em 1.3em;border-radius:.5em;font-size:1.2em">' + (opts.icon || '') + '<span></span></div>');
+                b.children('span').text(label);
                 b.on('hover:focus', function () { last = b[0]; scroll.update(b, true); });
                 b.on('hover:enter', function () { onEnter(b); });
                 btns.append(b);
@@ -3407,16 +3522,17 @@
             }
 
             var ep0 = firstPlayable();
-            if (ep0) mkBtn('▶ Смотреть', function () { jutPlay(slug, ep0, data.title, data.items); });
+            // 2.30: единый язык кнопок — зелёная «Смотреть» с play-иконкой, «Скачать» со стрелкой
+            if (ep0) mkBtn('Смотреть', function () { jutPlay(slug, ep0, data.title, data.items); }, { icon: WATCH_ICON, green: true });
             mkBtn('📄 Серии', function () {
                 Lampa.Activity.push({ url: '', title: 'Серии — ' + (data.title || slug),
                                       component: 'jut_episodes', jut_slug: slug, jut_data: data });
             });
-            mkBtn('⬇ Скачать', function () { jutDownloadMenu(slug, ep0, ep0 ? ep0.season : 1); });
+            mkBtn('Скачать', function () { jutDownloadMenu(slug, ep0, ep0 ? ep0.season : 1); }, { icon: ICON });
             var wb = mkBtn(watching ? '🔔 Слежу' : '🔔 Следить', function (b) {
                 jutWatchToggle(slug, ep0 ? ep0.season : 1, watching, function (now) {
                     watching = now;
-                    b.text(now ? '🔔 Слежу' : '🔔 Следить');
+                    b.children('span').text(now ? '🔔 Слежу' : '🔔 Следить');
                 });
             });
             body.append(btns);
