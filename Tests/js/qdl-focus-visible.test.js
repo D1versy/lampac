@@ -22,7 +22,8 @@ const SRC = fs.readFileSync(
   path.join(__dirname, '..', '..', 'Modules', 'QbitDownload', 'plugins', 'qdl.js'), 'utf8');
 
 // Классы, у которых focus-правило есть: наши (в injectCss) и штатные Lampa.
-const OUR_FOCUS = ['qdl-row-focus', 'qdl-btn-focus', 'qdl-btn-green', 'qdl-watch-tile', 'qdl-watch', 'qdl-fs'];
+const OUR_FOCUS = ['qdl-row-focus', 'qdl-btn-focus', 'qdl-btn-green', 'qdl-watch-tile', 'qdl-watch',
+                   'qdl-continue', 'qdl-fs'];
 const LAMPA_STYLED = ['full-start__button', 'card', 'menu__item', 'settings-param',
                       'selectbox-item', 'player-panel', 'head__action', 'simple-button'];
 
@@ -74,7 +75,7 @@ test('jut.su: каждый наш .selector несёт focus-класс', () => 
 
 test('injectCss объявляет правила для всех наших focus-классов', () => {
   const css = SRC.slice(SRC.indexOf('function injectCss'), SRC.indexOf('document.head.appendChild'));
-  for (const c of ['qdl-row-focus', 'qdl-btn-focus', 'qdl-btn-green']) {
+  for (const c of ['qdl-row-focus', 'qdl-btn-focus', 'qdl-btn-green', 'qdl-continue']) {
     assert.ok(css.includes('.' + c + '.focus'),
       `в injectCss нет правила .${c}.focus — класс вешается, но ничего не подсвечивает`);
   }

@@ -54,6 +54,10 @@
             '.qdl-watch{background:rgba(20,160,40,.92);color:#fff}' +
             '.qdl-watch.focus{background:#19b531 !important;color:#fff !important;transform:scale(1.03)}' +
             '.qdl-watch svg{width:1.15em;height:1.15em;flex:none}' +
+            // «Продолжить» на том же экране — синяя, как на полной карточке (.qdl-continue-btn)
+            '.qdl-continue{background:rgba(25,100,210,.92);color:#fff}' +
+            '.qdl-continue.focus{background:#2b7de9 !important;color:#fff !important;transform:scale(1.03)}' +
+            '.qdl-continue svg{width:1.15em;height:1.15em;flex:none}' +
             '.qdl-watch-btn{background:rgba(20,160,40,.92) !important;color:#fff !important}' +
             '.qdl-watch-btn.focus{background:#19b531 !important;color:#fff !important}' +
             '.qdl-watch-btn span{color:#fff !important}' +
@@ -983,7 +987,11 @@
     function openDownload(item) {
         prewarmForCard(item.hash);   // прогрев стартует сразу, не дожидаясь TMDB/CUB-запросов полной карточки
         var m = item.meta || {};
-        if (m.id) {
+        // ⚠️ id === 0 у сервера означает «TMDB id нет» (так помечены jut-маркеры: у аниме с jut.su
+        // его и не может быть). Проверка на truthy отправляла такие карточки в ветку «просто играем»,
+        // и вход из «Загрузок» сразу открывал плеер вместо экрана — с позиции, сохранённой при
+        // онлайн-просмотре, т.е. выглядело как «продолжается онлайн» (жалоба владельца, 2.33)
+        if (m.id > 0) {
             Lampa.Activity.push({
                 url: '', component: 'full', id: m.id,
                 method: m.media_type === 'tv' ? 'tv' : 'movie',
@@ -992,7 +1000,13 @@
                 qdl_progress: (typeof item.progress === 'number' ? item.progress : 1)   // для гейта недокачанного на карточке
             });
         } else {
-            confirmPartial(item, function () { watchByHash(item.hash, item.name); });   // нет метаданных → просто играем
+            // нет TMDB id (jut.su, безымянные раздачи) → свой экран карточки: постер, описание,
+            // прогресс загрузки, «Продолжить»/«Смотреть». Он всегда был написан и зарегистрирован
+            // как qdl_card, но его никто не открывал — путь был мёртвым
+            Lampa.Activity.push({
+                url: '', component: 'qdl_card', qdl: item,
+                title: m.title || item.name || 'Загрузка'
+            });
         }
     }
 
@@ -1318,7 +1332,9 @@
                       (meta1 ? '<div style="opacity:.7;font-size:1.15em;margin-bottom:.3em">' + esc(meta1) + '</div>' : '') +
                       (genres ? '<div style="opacity:.7;font-size:1.15em;margin-bottom:1em">' + esc(genres) + '</div>' : '') +
                       '<div style="font-size:1.2em;line-height:1.55;opacity:.92;max-width:46em;margin-bottom:1.7em">' + esc(m.overview || 'Нет описания.') + '</div>' +
-                      '<div class="qdl-watch selector" style="display:inline-flex;align-items:center;gap:.55em;padding:.75em 2em;border-radius:.6em;font-size:1.4em">' + WATCH_ICON + '<span>Смотреть</span></div>' +
+                      '<div class="qdl-card-btns" style="display:flex;flex-wrap:wrap;gap:.7em;align-items:center">' +
+                        '<div class="qdl-watch selector" style="display:inline-flex;align-items:center;gap:.55em;padding:.75em 2em;border-radius:.6em;font-size:1.4em">' + WATCH_ICON + '<span>Смотреть</span></div>' +
+                      '</div>' +
                     '</div>' +
                   '</div>' +
                 '</div>'
@@ -1332,6 +1348,25 @@
 
             // если метаданных нет — дотянем и перерисуем карточку (с защитой от replace после ухода)
             var self = this;
+
+            // «Продолжить · S1 · Серия N» — та же логика, что на полной карточке (chooseContinue).
+            // Приезжает async: без collectionAppend кнопка была бы недостижима пультом (см. 06 §BE)
+            fetchEpisodes(item.hash, function (files) {
+                if (self.destroyed) return;
+                var vids = mergedVideoFiles(files);
+                if (vids.length < 2) return;   // фильм/одна серия — продолжать нечего, хватит «Смотреть»
+                var target = chooseContinue(vids, function (f) { return pickTimeline(item.hash, f); });
+                var bar = body.find('.qdl-card-btns');
+                if (!target || !bar.length || bar.find('.qdl-continue').length) return;
+                var b = $('<div class="qdl-continue selector" style="display:inline-flex;align-items:center;gap:.55em;padding:.75em 2em;border-radius:.6em;font-size:1.4em">' + CONTINUE_ICON + '<span></span></div>');
+                b.children('span').text('Продолжить · ' + epShort(target.name));
+                b.on('hover:enter', function () {
+                    confirmPartial(item, function () { chooseEpisode(item.hash, (m.title || item.name), true); });
+                });
+                b.on('hover:focus', function (e) { scroll.update($(e.target), true); });
+                bar.prepend(b);
+                navAppend(bar, b);
+            });
             if (!item.meta) {
                 enrich(item.name, function (card) {
                     if (!card || self.destroyed) return;

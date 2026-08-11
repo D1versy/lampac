@@ -85,16 +85,40 @@ test('watch: недокачанный item → гейт; скачанный → 
   assert.strictEqual(calls.reqs.filter((u) => u.indexOf('/qdl/episodes?hash=b2') !== -1).length, 1);
 });
 
-test('openDownload: с метой → Activity.push содержит qdl_progress; без меты и progress<1 → гейт', () => {
+test('openDownload: с TMDB-метой → полная карточка с qdl_hash/qdl_progress', () => {
   const { qdl, calls } = rig();
   qdl.openDownload({ hash: 'a1', progress: 0.7, meta: { id: 5, media_type: 'movie' } });
   assert.strictEqual(calls.pushes.length, 1);
+  assert.strictEqual(calls.pushes[0].component, 'full');
   assert.strictEqual(calls.pushes[0].qdl_hash, 'a1');
   assert.strictEqual(calls.pushes[0].qdl_progress, 0.7);
+});
 
+// 🔥 Жалоба владельца (2.33): вход из «Загрузок» в скачанный тайтл jut.su сразу запускал плеер
+// с позиции, оставшейся от онлайн-просмотра, вместо экрана карточки. Сервер помечает jut-маркеры
+// meta.id = 0 («TMDB id у аниме с jut.su нет»), а проверка была на truthy — 0 уводил в ветку
+// «просто играем». Экран qdl_card был написан и зарегистрирован, но его никто не открывал.
+test('openDownload: jut-загрузка (meta.id = 0) → экран карточки qdl_card, а НЕ плеер', () => {
+  const { qdl, calls } = rig();
+  qdl.openDownload({
+    hash: 'j1', progress: 1, local: true, name: 'guimi-zhi-zhu',
+    jut: { slug: 'guimi-zhi-zhu' },
+    meta: { id: 0, media_type: 'tv', title: 'Повелитель тайн' },
+  });
+  assert.strictEqual(calls.pushes.length, 1, 'экран обязан открыться');
+  assert.strictEqual(calls.pushes[0].component, 'qdl_card');
+  assert.strictEqual(calls.pushes[0].title, 'Повелитель тайн');
+  assert.strictEqual(calls.pushes[0].qdl.hash, 'j1');
+  assert.strictEqual(calls.selects.length, 0, 'ни гейта, ни выбора серии — просто карточка');
+});
+
+test('openDownload: безымянная раздача без меты → тот же экран qdl_card (гейт не показываем)', () => {
+  const { qdl, calls } = rig();
   qdl.openDownload({ hash: 'c3', progress: 0.2, name: 'NoMeta' });
-  assert.strictEqual(calls.pushes.length, 1, 'карточка не открывается без меты');
-  assert.strictEqual(calls.selects.length, 1, 'гейт для прямого воспроизведения');
+  assert.strictEqual(calls.pushes.length, 1);
+  assert.strictEqual(calls.pushes[0].component, 'qdl_card');
+  assert.strictEqual(calls.pushes[0].title, 'NoMeta');
+  assert.strictEqual(calls.selects.length, 0, 'гейт недокачанного покажется уже по «Смотреть»');
 });
 
 // ─────────────────────────────── quickMenu: подтверждение удаления ───────────────────────────────
