@@ -222,6 +222,19 @@ public partial class QbitController
     /// Ручной пересбор снапшот-индекса витрины. Прогон фоновый (десятки запросов с паузой),
     /// поэтому отвечаем сразу — состояние смотреть в /qdl/jut/diag → catalogIndex.
     /// </summary>
+    /// <summary>
+    /// Ручной прогон тика каталога (сид или голова — по состоянию индекса). Ждать 6 часов,
+    /// чтобы увидеть, подхватились ли новинки, невозможно; аналог /qdl/jut/watch/check.
+    /// ⚠️ Ответа ждём: голова — это один запрос, а сид и так гоняется по своему курсору.
+    /// </summary>
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/jut/catalog/tick")]
+    async public Task<ActionResult> JutCatalogTickNow()
+    {
+        if (!JutOn) return JutErr("DISABLED");
+        return JutJson(await JutCatalogTick());
+    }
+
     [HttpGet, AllowAnonymous]
     [Route("qdl/jut/catalog/reseed")]
     public ActionResult JutCatalogReseed()
