@@ -240,26 +240,29 @@ test('lampainit: appload injects <style id="qdl-hide-extras"> into document.head
 
 // qdl 2.39: вход в настройки Lampa скрыт у ВСЕХ клиентов, открывает кука qdl_unlock=1
 // (владелец сетит её скриптом в консоли браузера). Платформенных веток тут нет.
-test('lampainit: без куки qdl_unlock прячет шестерёнку и пункт меню «Настройки»', () => {
+test('lampainit: без куки qdl_unlock прячет шестерёнку и пункты меню «Настройки»/«Консоль»', () => {
   const doc = H.makeDocument();
   const { mod } = H.loadLampaInit({ document: doc });
   mod.appload();
   const css = doc.getElementById('qdl-hide-extras').textContent;
   assert.match(css, /\.head__action\.open--settings\{display:none!important\}/);
-  assert.match(css, /\.menu__item\[data-action="settings"\]\{display:none!important\}/);
+  assert.match(css, /\.menu__item\[data-action="settings"\]/);
+  assert.match(css, /\.menu__item\[data-action="console"\]/);
   assert.match(css, /feed-head__info/, 'остальные правила на месте');
 });
 
-test('lampainit: с кукой qdl_unlock=1 настройки видны, прочие скрытия не трогаются', () => {
+test('lampainit: с кукой qdl_unlock=1 настройки и консоль видны, прочие скрытия не трогаются', () => {
   const doc = H.makeDocument();
   doc.cookie = 'a=1; qdl_unlock=1; b=2';
   const { mod } = H.loadLampaInit({ document: doc });
   mod.appload();
   const css = doc.getElementById('qdl-hide-extras').textContent;
   assert.ok(css.indexOf('open--settings') === -1, 'шестерёнка остаётся видимой');
-  assert.ok(css.indexOf('[data-action="settings"]') === -1, 'пункт меню остаётся видимым');
+  assert.ok(css.indexOf('[data-action="settings"]') === -1, 'пункт настроек остаётся видимым');
+  assert.ok(css.indexOf('[data-action="console"]') === -1, 'пункт консоли остаётся видимым');
   assert.match(css, /feed-head__info/);
   assert.match(css, /\.head__action\.open--profile/, 'безусловные скрытия CUB не зависят от куки');
+  assert.match(css, /\.menu__item\[data-action="about"\]/, '«О проекте» скрыт безусловно, кука ни при чём');
 });
 
 test('lampainit: похожая кука не разблокирует настройки', () => {
