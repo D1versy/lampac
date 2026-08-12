@@ -2703,6 +2703,12 @@ public partial class QbitController : BaseController
             return "ffmpeg exit=" + ff.ExitCode;
         }
         System.IO.File.Move(f.part, f.final, true);
+        // 🔥 mp4 появился на диске МИМО JsonStore (его пишет ffmpeg), а снимок каталога бессрочный:
+        // без сброса FileInDir в /qdl/list продолжает отвечать «файла нет», маркер остаётся без
+        // единого живого файла и карточка МОЛЧА выпадает из «Загрузок» до рестарта (§BM).
+        // Точка одна на всё: фильм, серии и авто-оверлей докачавшихся серий идут через неё.
+        // Для сериала это папка transcoded/<name>.<hash8> — её могло не быть на момент снимка вовсе.
+        JsonStore.ForgetDir(Path.GetDirectoryName(f.final));
         return null;
     }
 
@@ -4017,7 +4023,14 @@ public partial class QbitController : BaseController
     /// </summary>
     static void SaveLocal(string hash, JObject marker)
     {
-        JsonStore.Write(LocalPath(hash), marker);
+        string p = LocalPath(hash);
+        // 🔥 ПЕРВУЮ запись маркера доводим до диска сразу (§BM). Список локальных карточек строится
+        // ПЕРЕЧИСЛЕНИЕМ каталога, а не чтением РАМ: пока write-behind не доехал (дебаунс 200 мс),
+        // новой карточки в листинге нет — и если ровно в этом окне кто-то открыл карточку, снимок
+        // каталога закешируется БЕЗ неё, а сбрасывать его уже некому. Карточка пропала бы до рестарта.
+        // Правки существующего маркера (серия за серией) остаются коалесящимися — инвариант 4 стора.
+        if (System.IO.File.Exists(p)) JsonStore.Write(p, marker);
+        else JsonStore.WriteNow(p, marker);
         JsonStore.ForgetDir(Path.Combine(ModInit.conf.cachePath, "local"));
         DropListCache();
     }
@@ -4051,6 +4064,8 @@ public partial class QbitController : BaseController
     /// Файл существует? Через кешированный листинг его каталога.
     /// ⚠️ Именно листинг, а не File.Exists: у сериала маркер содержит десятки путей в ОДНОМ
     /// каталоге, и один листинг заменяет десятки syscall'ов.
+    /// ⚠️ Промах ОБЯЗАН перепроверяться (§BM): снимок бессрочный, а файлы появляются и мимо нас
+    /// (ffmpeg, docker cp). Молчаливая цена ошибки — пропавшая карточка в «Загрузках».
     /// </summary>
     static bool FileInDir(string path)
     {
@@ -4060,7 +4075,13 @@ public partial class QbitController : BaseController
             if (string.IsNullOrEmpty(dir)) return System.IO.File.Exists(path);
             foreach (string f in JsonStore.List(dir, "*"))
                 if (string.Equals(f, path, StringComparison.OrdinalIgnoreCase)) return true;
-            return false;
+            // Промах — единственный случай, когда снимок мог устареть: файл создан мимо JsonStore
+            // либо ровно во время сборки списка (List кеширует ПОСЛЕ чтения каталога, поэтому
+            // сборка, начатая до ForgetDir, вернула бы протухший снимок обратно). Цена — один
+            // File.Exists на промах; при живых файлах промахов нет вовсе и горячий путь не дорожает.
+            if (!System.IO.File.Exists(path)) return false;
+            JsonStore.ForgetDir(dir);   // снимок протух — дальше опять работает кеш
+            return true;
         }
         catch { return System.IO.File.Exists(path); }
     }
