@@ -8,6 +8,7 @@
     "ModuleConf.cs",
     "ModInit.cs",
     "SqlContext.cs",
+    "JsonStore.cs",
     "Bitmagnet.cs",
     "FfWorker.cs",
     "TorrentScoring.cs",

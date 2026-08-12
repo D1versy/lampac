@@ -167,6 +167,21 @@ public class ModInit : IModuleLoaded
         // Недокачанные .part после рестарта — добрать в очередь (очередь живёт в памяти).
         System.Threading.Tasks.Task.Run(async () =>
         {
+            // Горячий слой JSON — сразу: иначе первое открытие карточки после рестарта платит
+            // полный обход meta/ и local/ (замер до слоя: 0.58-1.03 с). Прогрев фоновый,
+            // запросы до его конца просто идут прежним путём и сами наполняют РАМ.
+            try
+            {
+                string cache = conf?.cachePath;
+                if (!string.IsNullOrEmpty(cache))
+                {
+                    int n = JsonStore.Warm(System.IO.Path.Combine(cache, "meta"))
+                          + JsonStore.Warm(System.IO.Path.Combine(cache, "local"));
+                    System.Console.WriteLine("[QbitDownload] jsonstore: прогрето файлов — " + n);
+                }
+            }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jsonstore warm: " + ex); }
+
             try { await QbitController.JutReconcile(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut reconcile: " + ex); }
 
@@ -214,11 +229,23 @@ public class ModInit : IModuleLoaded
     void updateConf()
     {
         string prevUa = JutNet.Ua;
+        string prevCache = conf?.cachePath;
 
         conf = ModuleInvoke.Init("QbitDownload", new ModuleConf());
         // период мониторинга правится в init.conf на лету — иначе включение требовало бы рестарта
         try { _diagTimer?.Change(DiagPeriod(), DiagPeriod()); } catch { }
         try { _crawlTimer?.Change(CrawlPeriod(), CrawlPeriod()); } catch { }
+
+        // ── горячий слой JSON ──
+        // Смена cachePath обесценивает весь РАМ-кеш (ключ = путь к файлу). Сбрасываем и кеш
+        // собранного ответа /qdl/list. ⚠️ ResetForConfigReload сначала доводит грязное до диска.
+        try
+        {
+            if (!string.Equals(prevCache, conf?.cachePath, System.StringComparison.Ordinal))
+                JsonStore.ResetForConfigReload();
+            QbitController.DropListCache();
+        }
+        catch { }
 
         // ── jut.su ──
         // Вердикты прокси-фолбэка живут в статике (conf пересоздаётся целиком), иначе

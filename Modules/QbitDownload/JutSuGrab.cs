@@ -39,6 +39,7 @@ public partial class QbitController
         public string epkey;
         public string titleRu;
         public volatile bool cancel;
+        public int gen;                            // поколение отмены на момент постановки (см. JutStale)
     }
 
     sealed class JutGrabJob
@@ -46,17 +47,68 @@ public partial class QbitController
         public volatile string state = "queued";   // queued | running | done | error | canceled
         public volatile string file;
         public volatile string error;
+        public volatile bool canceled;             // взведён отменой; гасит запись state до новой пачки
         public long done, total;
         public int fileDone, filesTotal;
+        public DateTime touched = DateTime.UtcNow; // для уборки терминальных job (иначе словарь пухнет)
     }
 
     static readonly ConcurrentQueue<JutGrabItem> _jutQueue = new();
     static readonly HashSet<string> _jutQueued = new(StringComparer.Ordinal);
     static readonly object _jutEnqLock = new();
     static readonly ConcurrentDictionary<string, JutGrabJob> _jutJobs = new();   // slug → job
+    static readonly ConcurrentDictionary<string, int> _jutGen = new();           // slug → поколение отмены
     static int _jutWorker = 0;
 
     static string JutQueueKey(string slug, string epkey) => slug + ":" + epkey;
+
+    static int JutGenOf(string slug) => _jutGen.TryGetValue(slug, out int g) ? g : 0;
+
+    /// <summary>
+    /// «Элемент устарел»: отменён явно или пережил отмену своего тайтла.
+    /// 🔥 Поколение нужно именно потому, что отмена НЕ вынимает элементы из ConcurrentQueue —
+    /// она может только пометить их. Без поколения последовательность «отменил → сразу добавил
+    /// заново» ломалась: старый элемент доходил до воркера и его JutForget снимал ключ,
+    /// только что поставленный НОВЫМ запросом, после чего серия молча не скачивалась.
+    /// </summary>
+    static bool JutStale(JutGrabItem it) => it.cancel || it.gen != JutGenOf(it.slug);
+
+    /// <summary>Сколько серий этого тайтла ещё висит в очереди (включая текущую в работе).</summary>
+    static int JutPendingFor(string slug)
+    {
+        string p = slug + ":";
+        lock (_jutEnqLock)
+        {
+            int n = 0;
+            foreach (string k in _jutQueued)
+                if (k.StartsWith(p, StringComparison.Ordinal)) n++;
+            return n;
+        }
+    }
+
+    /// <summary>
+    /// Запись состояния job. ⚠️ Молчит, пока взведён canceled: иначе серия, которая была уже
+    /// в работе в момент отмены (её нет в очереди — она из неё вынута, и пометить её
+    /// JutDownloadCancel не мог), доигрывала до конца и затирала "canceled" на "done".
+    /// </summary>
+    static void JutSetState(JutGrabJob job, string state)
+    {
+        job.touched = DateTime.UtcNow;
+        if (job.canceled && state != "canceled") return;
+        job.state = state;
+    }
+
+    /// <summary>Уборка терминальных job: словарь живёт всё время процесса и иначе только растёт.</summary>
+    static void JutPruneJobs()
+    {
+        var edge = DateTime.UtcNow.AddHours(-6);
+        foreach (var kv in _jutJobs)
+        {
+            if (kv.Value.touched > edge) continue;
+            if (kv.Value.state is "done" or "error" or "canceled")
+                _jutJobs.TryRemove(kv.Key, out _);
+        }
+    }
 
     #endregion
 
@@ -156,27 +208,37 @@ public partial class QbitController
         string freeErr = JutCheckSpace(want.Count);
         if (freeErr != null) return JutErr("NO_SPACE", freeErr);
 
-        int queued = 0, already = 0;
+        // «Новая пачка» = этого тайтла в очереди сейчас ничего нет. Только в этот момент можно
+        // обнулять счётчики: иначе прогресс складывался бы с прошлым прогоном и врал (>100%).
+        bool freshBatch = JutPendingFor(slug) == 0;
+
+        int queued = 0, already = 0, duplicate = 0;
+        int gen = JutGenOf(slug);
         var job = _jutJobs.GetOrAdd(slug, _ => new JutGrabJob());
         foreach (var e in want)
         {
             if (JutHaveFile(slug, e)) { already++; continue; }
             lock (_jutEnqLock)
             {
-                if (!_jutQueued.Add(JutQueueKey(slug, e.epkey))) continue;
+                if (!_jutQueued.Add(JutQueueKey(slug, e.epkey))) { duplicate++; continue; }
             }
             _jutQueue.Enqueue(new JutGrabItem
             {
                 slug = slug, season = e.season, ep = e.num, kind = JutKindParam(e.kind),
-                epkey = e.epkey, titleRu = t.titleRu
+                epkey = e.epkey, titleRu = t.titleRu, gen = gen
             });
             queued++;
         }
 
-        job.filesTotal += queued;
         if (queued > 0)
         {
-            job.state = "queued";
+            if (freshBatch)
+            {
+                job.fileDone = 0; job.filesTotal = 0; job.done = 0; job.total = 0;
+                job.error = null; job.canceled = false;
+            }
+            job.filesTotal += queued;
+            JutSetState(job, "queued");
             // Мета/постер пишем СРАЗУ: иначе первые минуты скачивания выглядят как «ничего не происходит»
             await JutEnsureMeta(slug, t);
             JutNotifyStart(slug, t.titleRu, queued);
@@ -186,8 +248,29 @@ public partial class QbitController
         return JutJson(new JObject
         {
             ["ok"] = true, ["queued"] = queued, ["already"] = already,
-            ["hash"] = JutNet.Hash(slug), ["scope"] = scope
+            ["duplicate"] = duplicate, ["pending"] = JutPendingFor(slug),
+            ["hash"] = JutNet.Hash(slug), ["scope"] = scope,
+            ["message"] = JutQueueMessage(queued, already, duplicate, JutPendingFor(slug))
         });
+    }
+
+    /// <summary>
+    /// 🔥 Три исхода, которые раньше были неотличимы: «поставлено», «уже на диске», «уже в очереди».
+    /// Все три давали queued=0 и клиентский тост «В очереди на скачивание: 0» (qdl.js), из-за чего
+    /// повторное добавление выглядело как «ничего не произошло».
+    /// </summary>
+    static string JutQueueMessage(int queued, int already, int duplicate, int pending)
+    {
+        if (queued > 0)
+        {
+            string s = "Поставлено в очередь: " + queued;
+            if (already > 0) s += " · уже на диске: " + already;
+            if (duplicate > 0) s += " · уже в очереди: " + duplicate;
+            return s;
+        }
+        if (duplicate > 0) return "Уже в очереди (" + duplicate + ") — качается, осталось " + pending;
+        if (already > 0) return "Всё уже скачано (" + already + ")";
+        return "Нечего скачивать";
     }
 
     static string JutCheckSpace(int files)
@@ -212,10 +295,11 @@ public partial class QbitController
     [Route("qdl/jut/download/status")]
     public ActionResult JutDownloadStatus(string slug = null)
     {
+        JutPruneJobs();
         if (!string.IsNullOrEmpty(slug))
         {
             if (!_jutJobs.TryGetValue(slug, out var j))
-                return JutJson(new JObject { ["ok"] = true, ["state"] = "idle" });
+                return JutJson(new JObject { ["ok"] = true, ["state"] = "idle", ["pending"] = 0 });
             return JutJson(JutJobJson(slug, j));
         }
         var arr = new JArray(_jutJobs.Select(kv => JutJobJson(kv.Key, kv.Value)));
@@ -233,6 +317,10 @@ public partial class QbitController
         ["done"] = j.done,
         ["total"] = j.total,
         ["progress"] = j.total > 0 ? Math.Round((double)j.done / j.total, 3) : 0,
+        // Осталось серий у ЭТОГО тайтла и место в общей очереди — без них «второй тайтл ждёт
+        // первого» неотличимо от «ничего не добавилось».
+        ["pending"] = JutPendingFor(slug),
+        ["queueTotal"] = _jutQueue.Count,
         ["error"] = j.error
     };
 
@@ -243,11 +331,15 @@ public partial class QbitController
         if (!JutSuParse.IsValidSlug(slug)) return JutErr("BAD_SLUG");
         lock (_jutEnqLock)
         {
+            // Поколение вперёд — всё поставленное ДО этой секунды становится устаревшим (JutStale),
+            // включая серию, которая прямо сейчас в работе: её из очереди уже вынули и пометить
+            // обходом ниже невозможно.
+            _jutGen[slug] = JutGenOf(slug) + 1;
             foreach (string k in _jutQueued.Where(x => x.StartsWith(slug + ":", StringComparison.Ordinal)).ToList())
                 _jutQueued.Remove(k);
         }
         foreach (var it in _jutQueue) if (it.slug == slug) it.cancel = true;
-        if (_jutJobs.TryGetValue(slug, out var j)) { j.state = "canceled"; }
+        if (_jutJobs.TryGetValue(slug, out var j)) { j.canceled = true; j.state = "canceled"; j.touched = DateTime.UtcNow; }
         return JutJson(new JObject { ["ok"] = true });
     }
 
@@ -263,16 +355,23 @@ public partial class QbitController
         {
             try
             {
-                while (_jutQueue.TryDequeue(out var it))
+                // ⚠️ Выключатель проверяется ДО TryDequeue, а не после. Раньше элемент успевали
+                // вынуть и выйти по break, не сняв ключ в _jutQueued: ключ протекал навсегда,
+                // а finally тут же перезапускал воркер — тот выхватывал следующий элемент и
+                // снова ломался о break. Получался busy-loop, молча сливавший всю очередь,
+                // после которого те же серии нельзя было поставить заново до рестарта.
+                while (JutOn && _jutQueue.TryDequeue(out var it))
                 {
-                    // Выключатель обязан работать как откат: проверяем МЕЖДУ файлами
-                    if (ModInit.conf?.jutEnable != true) break;
-                    if (it.cancel) { JutForget(it); continue; }
+                    if (JutStale(it)) { JutForget(it); continue; }
                     try { await JutGrabOne(it); }
                     catch (Exception ex)
                     {
                         JutNet.Log("grab", it.slug + " " + it.epkey + ": " + ex.Message);
-                        if (_jutJobs.TryGetValue(it.slug, out var j)) { j.state = "error"; j.error = ex.Message; }
+                        if (_jutJobs.TryGetValue(it.slug, out var j))
+                        {
+                            j.error = ex.Message;
+                            JutSetState(j, "error");
+                        }
                     }
                     finally { JutForget(it); }
                 }
@@ -280,21 +379,30 @@ public partial class QbitController
             finally
             {
                 Interlocked.Exchange(ref _jutWorker, 0);
-                // Добор при гонке: пока сбрасывали флаг, могли поставить новый элемент
-                if (!_jutQueue.IsEmpty) JutKickWorker();
+                // Добор при гонке: пока сбрасывали флаг, могли поставить новый элемент.
+                // Гейт по JutOn обязателен — без него это тот самый busy-loop.
+                if (JutOn && !_jutQueue.IsEmpty) JutKickWorker();
+                else JutPruneJobs();
             }
         });
     }
 
     static void JutForget(JutGrabItem it)
     {
-        lock (_jutEnqLock) _jutQueued.Remove(JutQueueKey(it.slug, it.epkey));
+        lock (_jutEnqLock)
+        {
+            // ⚠️ Ключ снимает только АКТУАЛЬНЫЙ элемент. У устаревшего (пережившего отмену)
+            // тот же ключ мог быть заново поставлен новым запросом — сняв его, мы бы выкинули
+            // из дедупа чужую живую серию, и она бы не скачалась.
+            if (it.gen == JutGenOf(it.slug))
+                _jutQueued.Remove(JutQueueKey(it.slug, it.epkey));
+        }
     }
 
     static async Task JutGrabOne(JutGrabItem it)
     {
         var job = _jutJobs.GetOrAdd(it.slug, _ => new JutGrabJob());
-        job.state = "running";
+        JutSetState(job, "running");
         job.error = null;
 
         string dir = JutTitleDir(it.slug);
@@ -304,8 +412,8 @@ public partial class QbitController
         var link = await JutNet.EnsureLink(token, force: false);
         if (link == null || link.error != null)
         {
-            job.state = "error";
             job.error = link?.error ?? "NOT_FOUND";
+            JutSetState(job, "error");
             JutNet.Log("grab", it.slug + " " + it.epkey + " → " + job.error);
             return;
         }
@@ -346,7 +454,7 @@ public partial class QbitController
 
         for (int attempt = 0; attempt < retries; attempt++)
         {
-            if (ModInit.conf?.jutEnable != true || it.cancel) { job.state = "canceled"; return; }
+            if (!JutOn || JutStale(it)) { JutSetState(job, "canceled"); return; }
             try
             {
                 using var req = new HttpRequestMessage(HttpMethod.Get, link.url);
@@ -360,7 +468,7 @@ public partial class QbitController
                 {
                     // Токен протух посреди 489-МиБ файла — перевыпуск ТЕМ ЖЕ выходом, качаем дальше
                     link = await JutNet.EnsureLink(token, force: true);
-                    if (link == null || link.error != null) { job.state = "error"; job.error = "403"; return; }
+                    if (link == null || link.error != null) { job.error = "403"; JutSetState(job, "error"); return; }
                     JutNet.Log("grab", "перевыпуск ссылки на " + have + " Б: " + it.slug + " " + it.epkey);
                     continue;
                 }
@@ -420,17 +528,21 @@ public partial class QbitController
                 try { System.IO.File.Delete(side); } catch { }
 
                 job.fileDone++;
-                job.state = _jutQueue.IsEmpty ? "done" : "running";
+                // ⚠️ Смотрим на очередь ЭТОГО тайтла, а не на глобальную: раньше при двух
+                // тайтлах подряд полностью докачанный первый навсегда оставался "running",
+                // пока качался второй. Текущая серия ещё числится в _jutQueued (JutForget
+                // зовётся позже, в finally воркера), поэтому порог — 1, а не 0.
+                JutSetState(job, JutPendingFor(it.slug) <= 1 ? "done" : "running");
                 await JutFinishFile(it, dst, link.quality);
                 return;
             }
             catch (Exception ex)
             {
-                if (it.cancel) { job.state = "canceled"; return; }
+                if (JutStale(it)) { JutSetState(job, "canceled"); return; }
                 job.error = ex.Message;
                 if (attempt >= retries - 1)
                 {
-                    job.state = "error";
+                    JutSetState(job, "error");
                     // .part остаётся — следующий запуск докачает с места
                     JutNet.Log("grab", "сдаюсь после " + retries + " попыток: " + it.slug + " " + it.epkey + " — " + ex.Message);
                     return;
@@ -455,8 +567,10 @@ public partial class QbitController
             int n;
             while ((n = await src.ReadAsync(buf, 0, buf.Length)) > 0)
             {
-                // Выключатель проверяется и ВНУТРИ файла: иначе «откат» ещё часы качал бы 12 ГБ
-                if (it.cancel || ModInit.conf?.jutEnable != true) break;
+                // Выключатель проверяется и ВНУТРИ файла: иначе «откат» ещё часы качал бы 12 ГБ.
+                // JutStale, а не it.cancel: отмена тайтла, пришедшая пока серия уже качалась,
+                // видна только через поколение — из очереди этот элемент давно вынут.
+                if (JutStale(it) || !JutOn) break;
                 await fs.WriteAsync(buf, 0, n);
                 done += n;
                 job.done = done;
@@ -494,7 +608,7 @@ public partial class QbitController
                     ["media_type"] = "tv",
                     ["overview"] = t.descr
                 };
-                await System.IO.File.WriteAllTextAsync(MetaPath(hash), meta.ToString(Newtonsoft.Json.Formatting.None));
+                SaveMeta(hash, meta);
             }
         }
         catch { }
@@ -530,19 +644,38 @@ public partial class QbitController
         string hash = JutNet.Hash(it.slug);
         try
         {
+            // 🔥 Инкрементально. Раньше здесь на КАЖДУЮ докачанную серию заново перечислялся
+            // весь каталог тайтла + new FileInfo по всем N файлам — O(N²) за прогон, и это же
+            // раздувало вход для /qdl/list. Теперь известный список правим одной записью,
+            // а полный обход остаётся только фолбэком (первая серия, рестарт).
+            var prev = LoadLocal(hash);
+            var known = new SortedDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            if (prev?["files"] is JArray parr)
+            {
+                foreach (var f in parr)
+                {
+                    string p = f.Value<string>("path");
+                    if (!string.IsNullOrEmpty(p)) known[p] = f.Value<long?>("size") ?? 0;
+                }
+            }
+            else
+            {
+                foreach (string f in Directory.EnumerateFiles(JutTitleDir(it.slug), "*.mp4"))
+                    try { known[f.Replace('\\', '/')] = new FileInfo(f).Length; } catch { }
+            }
+            try { known[dst.Replace('\\', '/')] = new FileInfo(dst).Length; } catch { }
+
             var files = new JArray();
             long size = 0;
             int idx = 0;
-            foreach (string f in Directory.EnumerateFiles(JutTitleDir(it.slug), "*.mp4")
-                                          .OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+            foreach (var kv in known)
             {
-                var fi = new FileInfo(f);
                 files.Add(new JObject
                 {
-                    ["index"] = idx++, ["name"] = fi.Name,
-                    ["path"] = f.Replace('\\', '/'), ["size"] = fi.Length
+                    ["index"] = idx++, ["name"] = Path.GetFileName(kv.Key),
+                    ["path"] = kv.Key, ["size"] = kv.Value
                 });
-                size += fi.Length;
+                size += kv.Value;
             }
 
             var marker = new JObject
@@ -563,9 +696,8 @@ public partial class QbitController
                     ["quality"] = quality
                 }
             };
-            Directory.CreateDirectory(Path.GetDirectoryName(LocalPath(hash)));
-            await System.IO.File.WriteAllTextAsync(LocalPath(hash),
-                marker.ToString(Newtonsoft.Json.Formatting.None));
+            SaveLocal(hash, marker);
+            JsonStore.ForgetDir(JutTitleDir(it.slug));   // в каталоге тайтла появился новый mp4
         }
         catch (Exception ex) { JutNet.Log("grab", "маркер: " + ex.Message); }
 
@@ -665,16 +797,19 @@ public partial class QbitController
                     _jutQueue.Enqueue(new JutGrabItem
                     {
                         slug = slug, season = e.season, ep = e.num,
-                        kind = JutKindParam(e.kind), epkey = e.epkey, titleRu = slug
+                        kind = JutKindParam(e.kind), epkey = e.epkey, titleRu = slug,
+                        gen = JutGenOf(slug)
                     });
                     added++;
                 }
             }
             if (added > 0)
-            {
                 Console.WriteLine("[QbitDownload] jut/reconcile: добрано недокачанных файлов — " + added);
-                JutKickWorker();
-            }
+
+            // ⚠️ Кик безусловный, а не только при added > 0. Реконсиляция вызывается и на перечит
+            // init.conf, то есть это единственная точка, где очередь оживает после включения
+            // jutEnable обратно: воркер выходит по !JutOn и сам себя больше не перезапускает.
+            if (!_jutQueue.IsEmpty) JutKickWorker();
         }
         catch (Exception ex) { JutNet.Log("reconcile", ex.Message); }
         await Task.CompletedTask;

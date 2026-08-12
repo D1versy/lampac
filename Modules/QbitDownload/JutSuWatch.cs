@@ -321,9 +321,12 @@ public partial class QbitController
                 var rec = JutFindWatch(arr, slug);
                 if (rec != null) { rec.Remove(); JutSaveWatch(arr); }
             }
-            // Отменяем то, что ещё стоит в очереди на этот тайтл
+            // Отменяем то, что ещё стоит в очереди на этот тайтл.
+            // Поколение вперёд — как в JutDownloadCancel: элементы из ConcurrentQueue не вынуть,
+            // а серия, уже качающаяся в этот момент, вообще не видна обходом ниже.
             lock (_jutEnqLock)
             {
+                _jutGen[slug] = JutGenOf(slug) + 1;
                 foreach (string k in _jutQueued.Where(x => x.StartsWith(slug + ":", StringComparison.Ordinal)).ToList())
                     _jutQueued.Remove(k);
             }
@@ -501,7 +504,8 @@ public partial class QbitController
                                 _jutQueue.Enqueue(new JutGrabItem
                                 {
                                     slug = slug, season = e.season, ep = e.num,
-                                    kind = JutKindParam(e.kind), epkey = e.epkey, titleRu = t.titleRu
+                                    kind = JutKindParam(e.kind), epkey = e.epkey, titleRu = t.titleRu,
+                                    gen = JutGenOf(slug)
                                 });
                                 q++;
                             }

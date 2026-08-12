@@ -44,6 +44,19 @@ public class ModuleConf : ModuleBaseConf
     // Локальный кэш метаданных/постеров загрузок (том на SSD, rw). Только картинки+JSON, не видео.
     public string cachePath { get; set; } = "/qdl-data";
 
+    // Зеркало горячего JSON-слоя на диск E: (bind ./.qdl-cache/hot → /qdl-hot).
+    // Решение владельца: «на диск E пишется как место, откуда тянуть кеш».
+    // 🔴 Это ЗЕРКАЛО, не хранилище: meta/local — единственная запись о том, что скачано,
+    // и держать её authoritative на drvfs означало бы поставить состав «Загрузок»
+    // в зависимость от файловых локов bind-маунта. Источник истины — том на ext4.
+    // null/пусто = зеркало выключено (киллсвитч на лету).
+    public string hotMirrorPath { get; set; } = "/qdl-hot";
+
+    // Кеш собранного ответа /qdl/list. Ручка зовётся на КАЖДОЕ открытие любой карточки,
+    // и до кеша стоила 0.58-1.03 с (вчетвером — 1.2 с). 0 = выключить (киллсвитч на лету).
+    // Отставание прогресса на TTL согласовано с владельцем: «несколько минут — не страшно».
+    public int listCacheSeconds { get; set; } = 30;
+
     // HLS-транскод для браузеров (звук EAC3/AC3/DTS → AAC, видео copy). Кэш на HDD (дублирует видео).
     public string hlsPath { get; set; } = "/qdl-hls";
     public string ffmpeg { get; set; } = "/lampac/data/ffmpeg";
@@ -245,7 +258,9 @@ public class ModuleConf : ModuleBaseConf
 
     // Скачивание. ⚠️ /downloads смонтирован :ro — нужен отдельный rw-бинд на /downloads/jutsu.
     public string jutDownloadsPath { get; set; } = "/downloads/jutsu";
-    public int jutDownloadConcurrency { get; set; } = 1;   // один файл за раз: щадим и CDN, и шпиндель
+    // ⚠️ Ключа jutDownloadConcurrency здесь НЕТ намеренно: он существовал, но никогда не читался —
+    // «один файл за раз» зашито флагом _jutWorker в JutKickWorker (щадим и CDN, и шпиндель).
+    // Мёртвая ручка в конфиге хуже её отсутствия: её крутят и ждут эффекта.
     public int jutGrabRetries { get; set; } = 5;
     public int jutGrabPaceMs { get; set; } = 0;            // мягкий кап скорости (>0 = пауза между чанками)
     public int jutMinFreeGb { get; set; } = 20;            // серия 1080p ≈ 489 МиБ, сезон ≈ 12 ГБ

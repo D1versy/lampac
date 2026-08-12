@@ -34,6 +34,11 @@ public static class TestEnv
             string dir = Path.Combine(Path.GetTempPath(), "qdl-tests", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dir);
             ModInit.conf.cachePath = dir;
+            // ⚠️ Горячий слой JSON и кеш ответа /qdl/list статические и переживают тест.
+            // Без сброса следующий тест читал бы РАМ и готовый ответ предыдущего.
+            // В проде это делает updateConf при смене cachePath.
+            JsonStore.ResetForConfigReload();
+            QbitController.DropListCache();
             return dir;
         }
     }

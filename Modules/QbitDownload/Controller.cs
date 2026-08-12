@@ -655,6 +655,19 @@ public partial class QbitController : BaseController
     [Route("qdl/list")]
     async public Task<ActionResult> List()
     {
+        // Горячий путь КАЖДОГО открытия карточки. Отдаём готовый ответ, пока он свежий:
+        // иначе листание карточек подряд и несколько устройств разом платят полную пересборку
+        // (замер до кеша: 0.58-1.03 с в одиночку, 1.2 с вчетвером).
+        int ttl = ListCacheSec;
+        if (ttl > 0)
+        {
+            lock (_listCacheLock)
+            {
+                if (_listCache != null && (DateTime.UtcNow - _listCacheAt).TotalSeconds < ttl)
+                    return ContentTo(_listCache, "application/json; charset=utf-8");
+            }
+        }
+
         try
         {
             using var c = await Qbit();
@@ -689,15 +702,13 @@ public partial class QbitController : BaseController
                     ["size"] = t.Value<long?>("size") ?? 0,
                     ["save_path"] = t.Value<string>("save_path"),
                     ["content_path"] = t.Value<string>("content_path"),
-                    ["has_poster"] = ValidHash(h) && System.IO.File.Exists(PosterPath(h)),
+                    ["has_poster"] = ValidHash(h) && HasPoster(h),
                     ["watched"] = watched.Contains(h),
                     ["added"] = addedOn,
                     ["activity"] = CardActivity(addedOn, t.Value<long?>("completion_on") ?? 0, prog, ActivityStored(act, h), nowUnix)
                 };
-                if (ValidHash(h) && System.IO.File.Exists(MetaPath(h)))
-                {
-                    try { item["meta"] = JObject.Parse(System.IO.File.ReadAllText(MetaPath(h))); } catch { }
-                }
+                var meta = LoadMeta(h);
+                if (meta != null) item["meta"] = meta;
                 result.Add(item);
             }
 
@@ -705,19 +716,21 @@ public partial class QbitController : BaseController
             try
             {
                 string localDir = Path.Combine(ModInit.conf.cachePath, "local");
-                if (Directory.Exists(localDir))
                 {
                     var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var it in result) seen.Add(it.Value<string>("hash") ?? "");
                     // подписки jut.su — один раз на весь список, не на карточку
                     var jutModes = JutWatchModes();
-                    foreach (var lf in Directory.GetFiles(localDir, "*.json"))
+                    foreach (var lf in JsonStore.List(localDir, "*.json"))
                     {
                         string h = Path.GetFileNameWithoutExtension(lf);
                         if (!ValidHash(h) || seen.Contains(h)) continue;   // оверлей при живом торренте сюда не попадёт (hash уже в списке)
                         JObject loc = LoadLocal(h);
                         var lfs = LocalFiles(loc);
-                        lfs.RemoveAll(f => !System.IO.File.Exists(f.path));
+                        // 🔥 Было File.Exists на КАЖДЫЙ файл КАЖДОГО маркера: у скачанного аниме
+                        // это десятки серий, и каждая скачанная серия делала открытие ЛЮБОЙ
+                        // карточки медленнее. Теперь — один кешированный листинг каталога на маркер.
+                        lfs.RemoveAll(f => !FileInDir(f.path));
                         if (lfs.Count == 0) continue;
                         long lsize = 0; foreach (var f in lfs) lsize += f.size;
                         string cpath = loc.Value<string>("dir") ?? lfs[0].path;
@@ -731,7 +744,7 @@ public partial class QbitController : BaseController
                             ["size"] = loc.Value<long?>("size") ?? lsize,
                             ["save_path"] = lfs.Count == 1 ? Path.GetDirectoryName(lfs[0].path) : loc.Value<string>("dir"),
                             ["content_path"] = cpath,
-                            ["has_poster"] = System.IO.File.Exists(PosterPath(h)),
+                            ["has_poster"] = HasPoster(h),
                             ["watched"] = false,
                             ["added"] = loc.Value<long?>("added") ?? MarkerFallbackAdded(lf)
                         };
@@ -747,8 +760,8 @@ public partial class QbitController : BaseController
                         JutDecorateListItem(item, loc, jutModes);
                         // без Touch activity == added → финализированный транскод позицию не меняет (§AG)
                         item["activity"] = Math.Max(item.Value<long?>("added") ?? 0, ActivityStored(act, h));
-                        if (System.IO.File.Exists(MetaPath(h)))
-                            try { item["meta"] = JObject.Parse(System.IO.File.ReadAllText(MetaPath(h))); } catch { }
+                        var lmeta = LoadMeta(h);
+                        if (lmeta != null) item["meta"] = lmeta;
                         result.Add(item);
                     }
                 }
@@ -769,10 +782,17 @@ public partial class QbitController : BaseController
             var ordered = new JArray(result
                 .OrderByDescending(x => x.Value<long?>("activity") ?? x.Value<long?>("added") ?? 0)
                 .ThenByDescending(x => x.Value<long?>("added") ?? 0));
-            return ContentTo(ordered.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+
+            string body = ordered.ToString(Newtonsoft.Json.Formatting.None);
+            if (ttl > 0)
+                lock (_listCacheLock) { _listCache = body; _listCacheAt = DateTime.UtcNow; }
+            return ContentTo(body, "application/json; charset=utf-8");
         }
         catch (Exception ex)
         {
+            // ⚠️ Кеш здесь НЕ трогаем и НЕ заполняем: сюда попадает и падение qBittorrent,
+            // а закешировать "internal error" на TTL значило бы погасить «Загрузки» целиком
+            // (инвариант деградации до локальных карточек — claude/jut/02 §2).
             Console.WriteLine("[QbitDownload] list: " + ex);
             return Json(new { error = "internal error" });
         }
@@ -1191,7 +1211,7 @@ public partial class QbitController : BaseController
                 try
                 {
                     var j = JObject.Parse(card);
-                    System.IO.File.WriteAllText(MetaPath(hash), j.ToString(Newtonsoft.Json.Formatting.None));
+                    SaveMeta(hash, j);
                 }
                 catch { }
             }
@@ -2764,7 +2784,7 @@ public partial class QbitController : BaseController
                     ["size"] = new FileInfo(final).Length,
                     ["added"] = addedOn ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds()
                 };
-                System.IO.File.WriteAllText(LocalPath(it.hash), loc.ToString(Newtonsoft.Json.Formatting.None));
+                SaveLocal(it.hash, loc);
             }
             else
             {
@@ -2796,7 +2816,7 @@ public partial class QbitController : BaseController
                     ["overlay"] = !it.finalize,
                     ["files"] = farr
                 };
-                System.IO.File.WriteAllText(LocalPath(it.hash), loc.ToString(Newtonsoft.Json.Formatting.None));
+                SaveLocal(it.hash, loc);
             }
 
             if (it.finalize)
@@ -3856,15 +3876,14 @@ public partial class QbitController : BaseController
     static string ActivityFile => Path.Combine(ModInit.conf.cachePath, "activity.json");
     static readonly object _activityLock = new();
 
-    static JObject ActivityLoad()
-    {
-        try { if (System.IO.File.Exists(ActivityFile)) return JObject.Parse(System.IO.File.ReadAllText(ActivityFile)); } catch { }
-        return new JObject();
-    }
-    static void ActivitySave(JObject a)
-    {
-        try { Directory.CreateDirectory(ModInit.conf.cachePath); System.IO.File.WriteAllText(ActivityFile, a.ToString(Newtonsoft.Json.Formatting.None)); } catch { }
-    }
+    // ⚠️ Оба метода ходят в JsonStore, а НЕ в файл. Раньше здесь были File.ReadAllText
+    // и File.WriteAllText прямо под _activityLock, а сам лок брался ДВАЖДЫ за каждый
+    // /qdl/list (загрузка + ActivityPrune) — то есть параллельные открытия карточек
+    // с разных устройств сериализовались на дисковом I/O (замер: 0.6 с в одиночку,
+    // 1.2 с вчетвером). Теперь под локом только правка JObject в памяти.
+    static JObject ActivityLoad() => JsonStore.ReadObject(ActivityFile) ?? new JObject();
+
+    static void ActivitySave(JObject a) => JsonStore.Write(ActivityFile, a);
 
     // ts <= 0 → сейчас. Монотонный: запоздавший Touch не откатывает более свежий.
     // Один метод с default-параметром, НЕ перегрузки (тестовый Access.Call матчит по числу аргументов).
@@ -3880,6 +3899,8 @@ public partial class QbitController : BaseController
             a[hash] = ts;
             ActivitySave(a);
         }
+        // Порядок карточек в «Загрузках» задаёт именно activity — кеш ответа устарел
+        DropListCache();
     }
 
     static long ActivityStored(JObject snapshot, string hash)
@@ -3959,11 +3980,79 @@ public partial class QbitController : BaseController
     {
         try
         {
-            if (ValidHash(hash) && System.IO.File.Exists(LocalPath(hash)))
-                return JObject.Parse(System.IO.File.ReadAllText(LocalPath(hash)));
+            if (ValidHash(hash)) return JsonStore.ReadObject(LocalPath(hash));
         }
         catch { }
         return null;
+    }
+
+    /// <summary>
+    /// Маркер на диск + инвалидация горячего слоя. Единая точка записи: раньше маркер писали
+    /// File.WriteAllText из трёх мест, и /qdl/list продолжал отдавать старый список файлов.
+    /// </summary>
+    static void SaveLocal(string hash, JObject marker)
+    {
+        JsonStore.Write(LocalPath(hash), marker);
+        JsonStore.ForgetDir(Path.Combine(ModInit.conf.cachePath, "local"));
+        DropListCache();
+    }
+
+    /// <summary>
+    /// Мета карточки. 62 ReadAllText + JObject.Parse на каждое открытие карточки —
+    /// теперь из РАМ.
+    /// </summary>
+    static JObject LoadMeta(string hash)
+        => ValidHash(hash) ? JsonStore.ReadObject(MetaPath(hash)) : null;
+
+    /// <summary>Мета на диск + инвалидация горячего слоя (карточка в «Загрузках» несёт meta).</summary>
+    static void SaveMeta(string hash, JObject meta)
+    {
+        JsonStore.WriteNow(MetaPath(hash), meta);
+        JsonStore.ForgetDir(Path.Combine(ModInit.conf.cachePath, "meta"));
+        DropListCache();
+    }
+
+    /// <summary>Постер существует? Через кешированный листинг img/, а не File.Exists на карточку.</summary>
+    static bool HasPoster(string hash)
+    {
+        if (!ValidHash(hash)) return false;
+        string p = PosterPath(hash);
+        foreach (string f in JsonStore.List(Path.GetDirectoryName(p), "*.jpg"))
+            if (string.Equals(f, p, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Файл существует? Через кешированный листинг его каталога.
+    /// ⚠️ Именно листинг, а не File.Exists: у сериала маркер содержит десятки путей в ОДНОМ
+    /// каталоге, и один листинг заменяет десятки syscall'ов.
+    /// </summary>
+    static bool FileInDir(string path)
+    {
+        try
+        {
+            string dir = Path.GetDirectoryName(path);
+            if (string.IsNullOrEmpty(dir)) return System.IO.File.Exists(path);
+            foreach (string f in JsonStore.List(dir, "*"))
+                if (string.Equals(f, path, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+        catch { return System.IO.File.Exists(path); }
+    }
+
+    // ── кеш собранного ответа /qdl/list ───────────────────────────────────
+    // Ручка зовётся на КАЖДОЕ открытие любой карточки (qdl.js подписан на 'full').
+    // TTL короткий, но покрывает и листание карточек подряд, и несколько устройств разом.
+    // Владелец про отставание прогресса: «если вопрос в нескольких минутах — совсем не страшно».
+    static string _listCache;
+    static DateTime _listCacheAt;
+    static readonly object _listCacheLock = new();
+
+    static int ListCacheSec => Math.Max(0, ModInit.conf?.listCacheSeconds ?? 30);
+
+    internal static void DropListCache()
+    {
+        lock (_listCacheLock) _listCache = null;
     }
 
     // один файл локального маркера (после транскода)
@@ -4109,6 +4198,13 @@ public partial class QbitController : BaseController
             // 5) файловые артефакты — в последнюю очередь
             foreach (var p in new[] { MetaPath(hash), PosterPath(hash), LinkPath(hash), LocalPath(hash) })
                 try { if (System.IO.File.Exists(p)) System.IO.File.Delete(p); } catch { }
+
+            // 6) горячий слой: без этого удалённая карточка продолжала бы жить в РАМ и в кеше
+            //    ответа /qdl/list до истечения TTL
+            foreach (var p in new[] { MetaPath(hash), LinkPath(hash), LocalPath(hash) }) JsonStore.Forget(p);
+            foreach (var d in new[] { "meta", "img", "links", "local" })
+                JsonStore.ForgetDir(Path.Combine(ModInit.conf.cachePath, d));
+            DropListCache();
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] purge: " + ex.Message); }
     }
