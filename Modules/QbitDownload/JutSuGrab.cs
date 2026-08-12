@@ -154,27 +154,123 @@ public partial class QbitController
     /// слежения. Иначе рестарт между постановкой в очередь и завершением файла терял бы серию
     /// навсегда: суточный тик больше не считал бы её новой.
     /// </summary>
-    static bool JutHaveFile(string slug, JutEp e)
+    /// <remarks>
+    /// Канонический ключ серии = имя файла БЕЗ качества (1080p/720p у одной серии могут
+    /// отличаться). Ключ с диска получаем тем же <see cref="JutEpFromFileName"/>, которым
+    /// разбираем имена в реконсиляции — то есть сравнение симметрично по построению.
+    /// </remarks>
+    static string JutEpKey(string slug, JutEp e) => JutFileName(slug, e, 0);
+
+    // Снимок ключей на диске, один на тайтл.
+    sealed class JutDiskSnap { public DateTime at; public HashSet<string> keys; }
+    static readonly ConcurrentDictionary<string, JutDiskSnap> _jutDisk =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 🔥 Один снимок каталога на весь запрос вместо Directory.EnumerateFiles НА КАЖДУЮ СЕРИЮ.
+    /// Было O(N×M) обращений к ФС: «скачать весь тайтл» на 500 серий при 500 файлах на диске
+    /// давало четверть миллиона syscall'ов внутри HTTP-запроса, на bind-маунте через drvfs.
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ Снимок обязан быть С TTL, а не бессрочным. Достаточно схлопнуть обращения внутри
+    /// одного запроса/тика, а файлы появляются не только через JutFinishFile (реконсиляция,
+    /// docker cp, ручное копирование) — бессрочный снимок в таких случаях залипал бы
+    /// на «ничего не скачано» и заново качал уже лежащее.
+    /// </remarks>
+    static HashSet<string> JutDiskKeys(string slug)
     {
+        if (_jutDisk.TryGetValue(slug, out var hit)
+            && (DateTime.UtcNow - hit.at).TotalSeconds < 10)
+            return hit.keys;
+
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             string dir = JutTitleDir(slug);
-            if (!Directory.Exists(dir)) return false;
-            // Качество в имени может отличаться (1080p/720p) — сверяем по префиксу без качества
-            string prefix = JutFileName(slug, e, 0).Replace(".mp4", "");
-            foreach (string f in Directory.EnumerateFiles(dir, "*.mp4"))
+            if (Directory.Exists(dir))
             {
-                string n = Path.GetFileNameWithoutExtension(f);
-                if (n.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
+                foreach (string f in Directory.EnumerateFiles(dir, "*.mp4"))
+                {
+                    var e = JutEpFromFileName(Path.GetFileNameWithoutExtension(f));
+                    if (e != null) keys.Add(JutEpKey(slug, e));
+                }
             }
         }
         catch { }
-        return false;
+        _jutDisk[slug] = new JutDiskSnap { at = DateTime.UtcNow, keys = keys };
+        return keys;
     }
+
+    static void JutDropDiskKeys(string slug) => _jutDisk.TryRemove(slug, out _);
+
+    internal static void JutDropAllDiskKeys() => _jutDisk.Clear();
+
+    /// <summary>
+    /// ⚠️ Сравнение ТОЧНОЕ, а не по префиксу. Прежний StartsWith врал на трёхзначных номерах:
+    /// имя строится как s{season:00}e{num:00}, поэтому «s01e100».StartsWith("s01e10") == true —
+    /// проверка серии 10 видела файл серии 100 и отвечала «уже скачано». На длинных тайтлах
+    /// часть серий молча не вставала в очередь и не скачивалась никогда. То же было
+    /// у film1/film10 и ova1/ova10.
+    /// </summary>
+    static bool JutHaveFile(string slug, JutEp e) => JutDiskKeys(slug).Contains(JutEpKey(slug, e));
 
     #endregion
 
     #region постановка в очередь
+
+    static JutEpKind JutKindFromString(string s) => (s ?? "").ToLowerInvariant() switch
+    {
+        "film" => JutEpKind.Film,
+        "ova" => JutEpKind.Ova,
+        "gameova" or "game-ova" => JutEpKind.GameOva,
+        "special" => JutEpKind.Special,
+        _ => JutEpKind.Episode
+    };
+
+    /// <summary>
+    /// Восстановить тайтл из кеша (<c>title/&lt;slug&gt;.json</c>), не ходя в сеть.
+    /// 🔥 Ради этого и живёт весь метод: /qdl/jut/download раньше звал JutLoadTitle напрямую,
+    /// МИМО кеша, а для хаб-тайтла (Наруто и прочие длинные франшизы) это 1 + до 24
+    /// ПОСЛЕДОВАТЕЛЬНЫХ запросов на jut.su через гейт из 3 слотов. Живой замер одного запроса
+    /// к сайту — 1142 мс (/qdl/jut/diag), то есть до ~25 с блокирующей работы внутри HTTP-запроса
+    /// при клиентском таймауте 45 с. Отсюда «сервер подлагивает, когда добавляю всё аниме».
+    /// ⚠️ TTL берём бесконечный: просроченный список серий для СКАЧИВАНИЯ годится — недостающее
+    /// доберут суточный тик слежения и реконсиляция. Свежесть тут не стоит 25 секунд ожидания.
+    /// </summary>
+    static JutTitle JutTitleFromCache(string slug)
+    {
+        try
+        {
+            var jo = JutCacheRead("title", slug, TimeSpan.MaxValue, out _);
+            if (jo?["items"] is not JArray arr || arr.Count == 0) return null;
+
+            var t = new JutTitle
+            {
+                slug = slug,
+                titleRu = jo.Value<string>("title"),
+                titleOrig = jo.Value<string>("original"),
+                poster = jo.Value<string>("poster"),
+                descr = jo.Value<string>("descr"),
+                ongoing = jo.Value<bool?>("ongoing") ?? false
+            };
+            if (jo["years"] is JArray ys)
+                foreach (var y in ys) { int v = y.Value<int?>() ?? 0; if (v > 0) t.years.Add(v); }
+
+            foreach (var e in arr)
+            {
+                t.items.Add(new JutEp
+                {
+                    kind = JutKindFromString(e.Value<string>("kind")),
+                    season = e.Value<int?>("season") ?? 1,
+                    num = e.Value<int?>("ep") ?? 0,
+                    url = e.Value<string>("url"),
+                    name = e.Value<string>("name")
+                });
+            }
+            return t.items.Count > 0 ? t : null;
+        }
+        catch { return null; }
+    }
 
     [HttpGet, HttpPost, AllowAnonymous]
     [Route("qdl/jut/download")]
@@ -184,8 +280,17 @@ public partial class QbitController
         if (!JutOn) return JutErr("DISABLED");
         if (!JutSuParse.IsValidSlug(slug)) return JutErr("BAD_SLUG");
 
-        var (t, err) = await JutLoadTitle(slug, false);
-        if (t == null) return JutErr(err ?? "SITE_DOWN");
+        // Сначала кеш — он покрывает подавляющее большинство случаев: пользователь жмёт
+        // «Скачать» с уже открытой карточки, а её открытие кеш и заполнило.
+        var t = JutTitleFromCache(slug);
+        if (t == null)
+        {
+            var (loaded, err) = await JutLoadTitle(slug, false);
+            if (loaded == null) return JutErr(err ?? "SITE_DOWN");
+            t = loaded;
+            // положим в кеш, чтобы следующее «Скачать» уже не платило за сеть
+            try { JutCacheWrite("title", slug, JutTitleJson(t)); } catch { }
+        }
 
         var want = new List<JutEp>();
         if (scope == "one")
@@ -203,21 +308,33 @@ public partial class QbitController
         }
         else want.AddRange(t.items);
 
-        // Гард свободного места. Важно не ради экономии: на D: живут торренты qBittorrent
-        // и записи регистратора — забитый под ноль диск ломает их, а не только нас.
-        string freeErr = JutCheckSpace(want.Count);
-        if (freeErr != null) return JutErr("NO_SPACE", freeErr);
-
         // «Новая пачка» = этого тайтла в очереди сейчас ничего нет. Только в этот момент можно
         // обнулять счётчики: иначе прогресс складывался бы с прошлым прогоном и врал (>100%).
         bool freshBatch = JutPendingFor(slug) == 0;
 
-        int queued = 0, already = 0, duplicate = 0;
-        int gen = JutGenOf(slug);
-        var job = _jutJobs.GetOrAdd(slug, _ => new JutGrabJob());
+        // ⚠️ Отсев ДО гарда места. Раньше JutCheckSpace считался по want.Count, то есть по всему
+        // тайтлу: 500 серий требовали 250 ГБ + резерв, даже если 499 уже лежали на диске, —
+        // и запрос отбивался целиком, ничего не поставив. Теперь считаем только то, что реально
+        // качать, и учитываем уже стоящее в очереди.
+        var disk = JutDiskKeys(slug);
+        int already = 0, duplicate = 0;
+        var toGrab = new List<JutEp>();
         foreach (var e in want)
         {
-            if (JutHaveFile(slug, e)) { already++; continue; }
+            if (disk.Contains(JutEpKey(slug, e))) { already++; continue; }
+            toGrab.Add(e);
+        }
+
+        // Гард свободного места. Важно не ради экономии: на D: живут торренты qBittorrent
+        // и записи регистратора — забитый под ноль диск ломает их, а не только нас.
+        string freeErr = JutCheckSpace(toGrab.Count + _jutQueue.Count, slug);
+        if (freeErr != null) return JutErr("NO_SPACE", freeErr);
+
+        int queued = 0;
+        int gen = JutGenOf(slug);
+        var job = _jutJobs.GetOrAdd(slug, _ => new JutGrabJob());
+        foreach (var e in toGrab)
+        {
             lock (_jutEnqLock)
             {
                 if (!_jutQueued.Add(JutQueueKey(slug, e.epkey))) { duplicate++; continue; }
@@ -273,8 +390,14 @@ public partial class QbitController
         return "Нечего скачивать";
     }
 
-    static string JutCheckSpace(int files)
+    /// <summary>
+    /// Гард свободного места. <paramref name="files"/> — сколько РЕАЛЬНО качать (после отсева
+    /// уже скачанного) плюс то, что стоит в очереди по другим тайтлам: раньше гард не знал
+    /// про очередь вовсе и два больших тайтла подряд проходили оба.
+    /// </summary>
+    static string JutCheckSpace(int files, string slug = null)
     {
+        if (files <= 0) return null;
         try
         {
             string root = JutDownloadRoot();
@@ -282,13 +405,44 @@ public partial class QbitController
             var di = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(root)) ?? "/");
             long freeGb = di.AvailableFreeSpace / (1024L * 1024 * 1024);
             int min = Math.Max(1, ModInit.conf?.jutMinFreeGb ?? 20);
-            // серия 1080p ≈ 0.5 ГБ
-            long needGb = Math.Max(1, files / 2);
+            double perFile = JutAvgFileGb(slug);
+            long needGb = Math.Max(1, (long)Math.Ceiling(files * perFile));
             if (freeGb - needGb < min)
                 return $"мало места: свободно {freeGb} ГБ, нужно ~{needGb} ГБ + резерв {min} ГБ";
         }
         catch { }
         return null;
+    }
+
+    /// <summary>
+    /// Средний размер серии ЭТОГО тайтла по уже скачанному — оценка точнее константы
+    /// «0.5 ГБ на серию»: у 720p-тайтла она завышена вдвое, у длинных фильмов занижена.
+    /// Фолбэк 0.5 ГБ, пока на диске ничего нет.
+    /// </summary>
+    static double JutAvgFileGb(string slug)
+    {
+        const double fallback = 0.5;
+        if (string.IsNullOrEmpty(slug)) return fallback;
+        try
+        {
+            var loc = LoadLocal(JutNet.Hash(slug));
+            if (loc?["files"] is JArray arr && arr.Count > 0)
+            {
+                long size = 0, n = 0;
+                foreach (var f in arr)
+                {
+                    long s = f.Value<long?>("size") ?? 0;
+                    if (s > 0) { size += s; n++; }
+                }
+                if (n > 0)
+                {
+                    double gb = size / (double)n / (1024 * 1024 * 1024);
+                    if (gb > 0.01) return gb;
+                }
+            }
+        }
+        catch { }
+        return fallback;
     }
 
     [HttpGet, AllowAnonymous]
@@ -698,6 +852,7 @@ public partial class QbitController
             };
             SaveLocal(hash, marker);
             JsonStore.ForgetDir(JutTitleDir(it.slug));   // в каталоге тайтла появился новый mp4
+            JutDropDiskKeys(it.slug);                    // и снимок «что уже скачано» устарел
         }
         catch (Exception ex) { JutNet.Log("grab", "маркер: " + ex.Message); }
 

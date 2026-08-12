@@ -459,7 +459,13 @@ public partial class QbitController
                 // 🔥 Что качать — это diff(сайт, ДИСК), а не diff с known: рестарт между
                 // постановкой в очередь и завершением файла иначе терял бы серию навсегда.
                 var fresh = inSeason.Where(e => !knownKeys.Contains(e.epkey)).ToList();
-                var toGrab = inSeason.Where(e => !JutHaveFile(slug, e) && !knownKeys.Contains(e.epkey)).ToList();
+                // ⚠️ Снимок диска берём ОДИН раз на тайтл: JutHaveFile внутри Where давал
+                // Directory.EnumerateFiles на каждую серию — O(N×M) на каждом тике, и так
+                // для каждого из 30 тайтлов бюджета.
+                var diskKeys = JutDiskKeys(slug);
+                var toGrab = inSeason
+                    .Where(e => !diskKeys.Contains(JutEpKey(slug, e)) && !knownKeys.Contains(e.epkey))
+                    .ToList();
 
                 if (fresh.Count > 0)
                 {
@@ -479,7 +485,7 @@ public partial class QbitController
                     bool baselineHold = false;
                     if (auto && toGrab.Count > 0)
                     {
-                        string space = JutCheckSpace(toGrab.Count);
+                        string space = JutCheckSpace(toGrab.Count + _jutQueue.Count, slug);
                         if (space != null)
                         {
                             JutNet.Log("watch", slug + ": автоскачивание отменено — " + space);

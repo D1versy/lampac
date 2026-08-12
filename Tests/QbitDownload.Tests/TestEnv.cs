@@ -39,6 +39,9 @@ public static class TestEnv
             // В проде это делает updateConf при смене cachePath.
             JsonStore.ResetForConfigReload();
             QbitController.DropListCache();
+            // Снимок «что уже скачано» держится 10 с, а тесты меняют каталог загрузок
+            // быстрее — без сброса следующий тест читал бы снимок предыдущего.
+            QbitController.JutDropAllDiskKeys();
             return dir;
         }
     }

@@ -254,6 +254,129 @@ public class JutSuGrabQueueTests
         Assert.Contains("_jutGen[slug] = JutGenOf(slug) + 1;", src);
     }
 
+    // ── снимок диска: точность и цена ─────────────────────────────────────
+
+    [Theory]
+    [InlineData(10, 100)]      // s01e100 начинается с s01e10
+    [InlineData(1, 10)]        // s01e10  начинается с s01e01? нет — но проверим симметрию
+    [InlineData(20, 200)]
+    public void Серия_не_считается_скачанной_из_за_трёхзначной(int want, int onDisk)
+    {
+        // 🔥 Имя строится как s{season:00}e{num:00}, а прежняя проверка шла по StartsWith:
+        // «spy.s01e100».StartsWith("spy.s01e10") == true → серия 10 считалась скачанной,
+        // молча не вставала в очередь и не скачивалась НИКОГДА. Находка 12.08.2026.
+        var (_, downloads) = JutWatchAccess.Env();
+        QbitController.JutDropAllDiskKeys();
+
+        string slug = "spy-family";
+        string dir = Path.Combine(downloads, slug);
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, $"{slug}.s01e{onDisk:00}.1080p.mp4"), "x");
+
+        Assert.True(HaveFile(slug, 1, onDisk), $"серия {onDisk} лежит на диске — обязана считаться скачанной");
+        if (want != onDisk)
+            Assert.False(HaveFile(slug, 1, want), $"серия {want} НЕ скачана, а файл есть только у {onDisk}");
+    }
+
+    [Fact]
+    public void Film1_не_путается_с_Film10()
+    {
+        var (_, downloads) = JutWatchAccess.Env();
+        QbitController.JutDropAllDiskKeys();
+
+        string slug = "oneepiece";
+        string dir = Path.Combine(downloads, slug);
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, $"{slug}.film10.1080p.mp4"), "x");
+
+        Assert.True(HaveKind(slug, "film", 10));
+        Assert.False(HaveKind(slug, "film", 1), "фильм 1 не скачан — на диске только фильм 10");
+    }
+
+    [Fact]
+    public void Качество_в_имени_не_мешает_опознать_серию()
+    {
+        // Одна серия могла лечь как 1080p, другая как 720p — ключ обязан быть без качества.
+        var (_, downloads) = JutWatchAccess.Env();
+        QbitController.JutDropAllDiskKeys();
+
+        string slug = "naruuto";
+        string dir = Path.Combine(downloads, slug);
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, $"{slug}.s01e07.720p.mp4"), "x");
+
+        Assert.True(HaveFile(slug, 1, 7));
+    }
+
+    [Fact]
+    public void Снимок_каталога_не_перечисляет_ФС_на_каждую_серию()
+    {
+        // Было Directory.EnumerateFiles НА КАЖДУЮ серию: «весь тайтл» на 500 серий при
+        // 500 файлах = четверть миллиона syscall'ов внутри HTTP-запроса, на drvfs.
+        var (_, downloads) = JutWatchAccess.Env();
+        QbitController.JutDropAllDiskKeys();
+
+        string slug = "bleach";
+        string dir = Path.Combine(downloads, slug);
+        Directory.CreateDirectory(dir);
+        for (int i = 1; i <= 50; i++)
+            File.WriteAllText(Path.Combine(dir, $"{slug}.s01e{i:00}.1080p.mp4"), "x");
+
+        var keys = (System.Collections.Generic.HashSet<string>)Access.Call("JutDiskKeys", slug);
+        Assert.Equal(50, keys.Count);
+        // повторный вызов отдаёт ТОТ ЖЕ экземпляр — значит ФС не перечитывалась
+        var again = (System.Collections.Generic.HashSet<string>)Access.Call("JutDiskKeys", slug);
+        Assert.Same(keys, again);
+    }
+
+    [Fact]
+    public void Снимок_диска_имеет_TTL_а_не_бессрочен()
+    {
+        // ⚠️ Файлы появляются не только через JutFinishFile (реконсиляция, docker cp).
+        // Бессрочный снимок залипал бы на «ничего не скачано» и качал уже лежащее.
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
+        Assert.Contains("_jutDisk.TryGetValue", src);
+        Assert.Contains("TotalSeconds < 10", src);
+    }
+
+    static bool HaveFile(string slug, int season, int ep)
+    {
+        var e = new JutEp { kind = JutEpKind.Episode, season = season, num = ep };
+        return (bool)Access.Call("JutHaveFile", slug, e);
+    }
+
+    static bool HaveKind(string slug, string kind, int num)
+    {
+        var e = new JutEp
+        {
+            kind = kind == "film" ? JutEpKind.Film : JutEpKind.Ova,
+            season = 1, num = num
+        };
+        return (bool)Access.Call("JutHaveFile", slug, e);
+    }
+
+    // ── гард свободного места ─────────────────────────────────────────────
+
+    [Fact]
+    public void Место_считается_после_отсева_уже_скачанного()
+    {
+        // 🔥 Было: JutCheckSpace(want.Count) — 500 серий требовали 250 ГБ + резерв, даже если
+        // 499 уже на диске, и запрос отбивался целиком, не поставив ничего.
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
+        int gate = src.IndexOf("JutCheckSpace(toGrab.Count", StringComparison.Ordinal);
+        int filter = src.IndexOf("disk.Contains(JutEpKey(slug, e))", StringComparison.Ordinal);
+        Assert.True(filter > 0, "отсев уже скачанного не найден");
+        Assert.True(gate > filter, "гард места обязан считаться ПОСЛЕ отсева");
+        // и очередь по другим тайтлам учитывается
+        Assert.Contains("JutCheckSpace(toGrab.Count + _jutQueue.Count", src);
+    }
+
+    [Fact]
+    public void Пустой_список_не_трогает_гард_места()
+    {
+        Assert.Null(Access.Call("JutCheckSpace", 0, null));
+    }
+
     // ── 6. мёртвый конфиг ─────────────────────────────────────────────────
 
     [Fact]
