@@ -29,6 +29,7 @@
     "JutSuStream.cs",
     "JutSuGrab.cs",
     "JutSuWatch.cs",
+    "JutSuCatalogIndex.cs",
     "Controller.cs"
   ]
 }

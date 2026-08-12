@@ -334,6 +334,38 @@ test('2.35: торренты не сломаны — kind=null и OVA по-пр�
   assert.strictEqual(qdl.notiBucket({ kind: 'NOSPACE' }), 'warn');
 });
 
+test('2.38: TITLE — своя корзина, а не «серия скачана»', () => {
+  // Пачка тайтла приходит одной строкой с готовым текстом «Скачано серий: N».
+  // Попади она в 'done', клиент дописал бы «скачана» и получилось бы про серию.
+  const { qdl } = H.loadQdl({ lampa: H.makeLampa() });
+  assert.strictEqual(qdl.notiBucket({ kind: 'TITLE' }), 'title');
+  assert.notStrictEqual(qdl.notiBucket({ kind: 'TITLE' }), 'done');
+});
+
+test('2.38: пачка тайтлов даёт один тост, одиночный — с названием', () => {
+  const noty = [];
+  const { lampa, pending } = pollRig(noty);
+  const { qdl } = H.loadQdl({ lampa });
+  lampa.Storage.set('qdl_noti_lastid', 1);
+
+  qdl.pollNotifications();
+  pending[0].cb({ unread: 1, items: [
+    { id: 2, kind: 'TITLE', title: 'Семья шпиона', label: 'Скачано серий: 25' },
+  ] });
+  assert.strictEqual(noty.length, 1);
+  assert.ok(noty[0].includes('Семья шпиона') && noty[0].includes('Скачано серий: 25'), noty[0]);
+  assert.ok(!noty[0].includes('скачана'), 'у тайтла свой текст, «скачана» — про серию');
+
+  noty.length = 0;
+  qdl.pollNotifications();
+  pending[1].cb({ unread: 2, items: [
+    { id: 3, kind: 'TITLE', title: 'А', label: 'Скачано серий: 3' },
+    { id: 4, kind: 'TITLE', title: 'Б', label: 'Скачано серий: 7' },
+  ] });
+  assert.strictEqual(noty.length, 1);
+  assert.ok(noty[0].includes('Скачано тайтлов: 2'), noty[0]);
+});
+
 test('2.35: смешанная пачка раскладывается по независимым корзинам', () => {
   const noty = [];
   const { lampa, pending } = pollRig(noty);

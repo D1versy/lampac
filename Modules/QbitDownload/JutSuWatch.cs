@@ -339,8 +339,31 @@ public partial class QbitController
             var seen = db.seen.Where(x => x.seriesKey == sk).ToList();
             if (seen.Count > 0) { db.seen.RemoveRange(seen); db.SaveChanges(); }
             Console.WriteLine("[QbitDownload] jut/watch: слежение снято при удалении — " + slug);
+            JutPurgePartials(slug);
         }
         catch (Exception ex) { JutNet.Log("watch", "forget: " + ex.Message); }
+    }
+
+    /// <summary>
+    /// 🔥 Недокачанные .part при удалении карточки. Маркер о них не знает (он перечисляет только
+    /// готовые файлы), поэтому DeleteLocalFiles их не трогал — а JutReconcile на следующем старте
+    /// добирает ИМЕННО .part и молча воскрешал удалённый тайтл вместе с карточкой.
+    /// Поймано на боевом прогоне 12.08.2026 (отмена на середине сезона → удаление карточки).
+    /// Пустой каталог тайтла убираем следом; непустой (лежит что-то чужое) не трогаем.
+    /// </summary>
+    internal static void JutPurgePartials(string slug)
+    {
+        try
+        {
+            string dir = JutTitleDir(slug);
+            if (!Directory.Exists(dir)) return;
+            foreach (string f in Directory.EnumerateFiles(dir, "*.part*"))
+                try { System.IO.File.Delete(f); } catch { }
+            if (!Directory.EnumerateFileSystemEntries(dir).Any())
+                try { Directory.Delete(dir); } catch { }
+            JsonStore.ForgetDir(dir);
+        }
+        catch (Exception ex) { JutNet.Log("watch", "уборка .part: " + ex.Message); }
     }
 
     /// <summary>Ручной прогон: суточный такт ждать невозможно.</summary>
@@ -397,6 +420,11 @@ public partial class QbitController
 
             // 1) один запрос: slug → число серий
             var (ongoingOk, ongoing) = await loadOngoing();
+
+            // Пиггибек: счётчик серий у онгоингов в снапшоте каталога обновляем этим же ответом —
+            // ноль дополнительных запросов к сайту (иначе витрина показывала бы «12 серий»
+            // у тайтла, где их уже 15, до следующего полного пересбора).
+            if (ongoingOk) { try { JutCatalogOngoingUpdate(ongoing); } catch { } }
 
             int budget = Math.Max(1, ModInit.conf?.jutWatchTitlesPerTick ?? 30);
             int probed = 0, changed = 0, queued = 0, failed = 0;
@@ -503,6 +531,7 @@ public partial class QbitController
                         {
                             // счётчик ЭТОГО тайтла: общий queued растёт по всем, и на нём мета
                             // писалась бы соседнему тайтлу, ничего не поставившему в очередь
+                            bool freshBatch = JutPendingFor(slug) == 0;
                             int q = 0;
                             foreach (var e in toGrab)
                             {
@@ -519,7 +548,10 @@ public partial class QbitController
                                 q++;
                             }
                             queued += q;
-                            if (q > 0) { await JutEnsureMeta(slug, t); JutKickWorker(); }
+                            // Job у автокачки раньше не заводился вовсе — /qdl/jut/download/status
+                            // показывал «fileDone/0». Заодно это задаёт режим уведомлений пачки:
+                            // одна вышедшая серия уведомит как серия, догон нескольких — одной строкой.
+                            if (q > 0) { JutJobForBatch(slug, freshBatch, q); await JutEnsureMeta(slug, t); JutKickWorker(); }
                         }
                     }
 

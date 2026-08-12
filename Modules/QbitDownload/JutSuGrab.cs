@@ -50,7 +50,40 @@ public partial class QbitController
         public volatile bool canceled;             // взведён отменой; гасит запись state до новой пачки
         public long done, total;
         public int fileDone, filesTotal;
+        // Режим уведомлений пачки: agg=true → строки на серию НЕ пишем, по осушению очереди
+        // тайтла пишем ОДНУ строку «скачано серий: N» (жалоба владельца: 60 серий = 60 строк).
+        public volatile bool agg;
+        public volatile bool aggFlushed;           // строка агрегата уже записана (флаш идемпотентен)
         public DateTime touched = DateTime.UtcNow; // для уборки терминальных job (иначе словарь пухнет)
+    }
+
+    /// <summary>
+    /// Уведомлять пачку одной строкой или каждой серией отдельно.
+    /// Добор к уже качающейся пачке (<paramref name="freshBatch"/>=false) тоже агрегируется:
+    /// счётчики job общие, и разделить два уведомления по одному набору файлов нечем.
+    /// </summary>
+    internal static bool JutAggFor(bool freshBatch, int queued) => queued > 1 || !freshBatch;
+
+    /// <summary>
+    /// Общая инициализация job при постановке пачки: ручное «Скачать», суточный тик слежения
+    /// и реконсиляция .part раньше делали это по-разному (тик не создавал job вовсе, из-за чего
+    /// /qdl/jut/download/status показывал «fileDone/0» на автокачке).
+    /// </summary>
+    static JutGrabJob JutJobForBatch(string slug, bool freshBatch, int queued)
+    {
+        var job = _jutJobs.GetOrAdd(slug, _ => new JutGrabJob());
+        if (freshBatch)
+        {
+            job.fileDone = 0; job.filesTotal = 0; job.done = 0; job.total = 0;
+            job.error = null; job.canceled = false;
+            job.agg = false; job.aggFlushed = false;
+        }
+        job.filesTotal += queued;
+        // Ручка читается ОДИН раз на пачку (латч): выключение на лету действует на новые пачки,
+        // а начатая продолжает жить по своему режиму — иначе часть серий уведомит, часть нет.
+        if ((ModInit.conf?.jutNotifyAggregate ?? true) && JutAggFor(freshBatch, queued)) job.agg = true;
+        JutSetState(job, "queued");
+        return job;
     }
 
     static readonly ConcurrentQueue<JutGrabItem> _jutQueue = new();
@@ -352,14 +385,7 @@ public partial class QbitController
 
         if (queued > 0)
         {
-            job = _jutJobs.GetOrAdd(slug, _ => new JutGrabJob());
-            if (freshBatch)
-            {
-                job.fileDone = 0; job.filesTotal = 0; job.done = 0; job.total = 0;
-                job.error = null; job.canceled = false;
-            }
-            job.filesTotal += queued;
-            JutSetState(job, "queued");
+            job = JutJobForBatch(slug, freshBatch, queued);
             // Мета/постер пишем СРАЗУ: иначе первые минуты скачивания выглядят как «ничего не происходит»
             await JutEnsureMeta(slug, t);
             JutNotifyStart(slug, t.titleRu, queued);
@@ -524,7 +550,7 @@ public partial class QbitController
                 // после которого те же серии нельзя было поставить заново до рестарта.
                 while (JutOn && _jutQueue.TryDequeue(out var it))
                 {
-                    if (JutStale(it)) { JutForget(it); continue; }
+                    if (JutStale(it)) { JutDoneWith(it); continue; }
                     try { await JutGrabOne(it); }
                     catch (Exception ex)
                     {
@@ -535,7 +561,7 @@ public partial class QbitController
                             JutSetState(j, "error");
                         }
                     }
-                    finally { JutForget(it); }
+                    finally { JutDoneWith(it); }
                 }
             }
             finally
@@ -547,6 +573,19 @@ public partial class QbitController
                 else JutPruneJobs();
             }
         });
+    }
+
+    /// <summary>
+    /// Элемент отработан: снять ключ и, если очередь тайтла осушена, закрыть пачку одним
+    /// уведомлением. 🔥 Единственная точка флаша агрегата — через неё проходят ВСЕ исходы
+    /// (успех, ошибка после ретраев, отмена, устаревший элемент), поэтому дедуп между путями
+    /// не нужен. Воркер один, значит и гонки нет.
+    /// </summary>
+    static void JutDoneWith(JutGrabItem it)
+    {
+        JutForget(it);
+        if (JutPendingFor(it.slug) == 0 && _jutJobs.TryGetValue(it.slug, out var job))
+            JutNotifyTitleDone(it, job);
     }
 
     static void JutForget(JutGrabItem it)
@@ -917,6 +956,13 @@ public partial class QbitController
     {
         try
         {
+            // 🔥 В режиме агрегата строки на серию НЕ пишутся: тайтл на 60 серий давал 60 записей
+            // в ленте и 60 тостов. Одна строка «скачано серий: N» пишется по осушению очереди
+            // тайтла (JutNotifyTitleDone). Дедуп seen ведём ВСЕГДА — он про «уже уведомляли»
+            // и на нём же держится «уже скачано».
+            _jutJobs.TryGetValue(it.slug, out var job);
+            bool agg = job?.agg == true;
+
             using var db = new SqlContext();
             string sk = "j" + it.slug;
             // Дедуп в существующей таблице seen; префикс j<slug> не пересекается
@@ -924,7 +970,7 @@ public partial class QbitController
             if (!db.seen.Any(x => x.seriesKey == sk && x.epkey == it.epkey))
                 db.seen.Add(new SeenModel { seriesKey = sk, epkey = it.epkey });
 
-            if (!db.noti.Any(x => x.seriesKey == sk && x.epkey == it.epkey))
+            if (!agg && !db.noti.Any(x => x.seriesKey == sk && x.epkey == it.epkey))
             {
                 db.noti.Add(new NotiModel
                 {
@@ -941,10 +987,51 @@ public partial class QbitController
                 });
             }
             db.SaveChanges();
-            JutPushDone(it.slug);
+            // Пуш только когда есть что показать: в агрегате промежуточные серии строк не создают,
+            // и сигнал заставил бы каждого клиента впустую выгрузить ленту.
+            if (!agg) JutPushDone(it.slug);
             Console.WriteLine("[QbitDownload] jut/grab: скачано " + it.slug + " " + it.epkey);
         }
         catch (Exception ex) { JutNet.Log("grab", "noti: " + ex.Message); }
+    }
+
+    /// <summary>
+    /// Одна строка на всю пачку — «тайтл скачался». Зовётся из finally воркера, когда очередь
+    /// этого тайтла осушена (успехом, ошибкой или отменой), поэтому путь ровно один и дедуп
+    /// между путями не нужен; идемпотентность — флагом aggFlushed.
+    /// ⚠️ epkey батча не должен пересечься с ключами серий (s1e7) и с ключами слежения
+    /// (new-*, season-*, nospace-*, start-*): UNIQUE noti(seriesKey, epkey) схлопнул бы записи.
+    /// </summary>
+    static void JutNotifyTitleDone(JutGrabItem it, JutGrabJob job)
+    {
+        if (job == null) return;
+        lock (job)
+        {
+            // fileDone == 0 — качать было нечего или всё упало: «скачано 0» это шум, а не новость
+            if (!job.agg || job.aggFlushed || job.fileDone <= 0) return;
+            job.aggFlushed = true;
+        }
+
+        try
+        {
+            int done = job.fileDone, total = job.filesTotal;
+            using var db = new SqlContext();
+            db.noti.Add(new NotiModel
+            {
+                seriesKey = "j" + it.slug, seriesId = 0, hash = JutNet.Hash(it.slug),
+                title = it.titleRu ?? it.slug,
+                season = -1, episode = -1,
+                kind = "TITLE",
+                epkey = "batch-" + DateTime.UtcNow.Ticks,
+                // Недокачанное честно видно: отмена и «сдался после ретраев» дают N < M
+                label = done < total ? $"Скачано серий: {done} из {total}" : $"Скачано серий: {done}",
+                created = DateTime.UtcNow, read = false
+            });
+            db.SaveChanges();
+            PushNotiSignal(1);
+            Console.WriteLine("[QbitDownload] jut/grab: тайтл " + it.slug + " — скачано " + done + "/" + total);
+        }
+        catch (Exception ex) { JutNet.Log("grab", "noti тайтла: " + ex.Message); }
     }
 
     static DateTime _jutLastPush = DateTime.MinValue;
@@ -1099,6 +1186,8 @@ public partial class QbitController
                 string slug = Path.GetFileName(dir);
                 if (!JutSuParse.IsValidSlug(slug)) continue;
 
+                bool freshBatch = JutPendingFor(slug) == 0;
+                int q = 0;
                 foreach (string part in Directory.EnumerateFiles(dir, "*.part"))
                 {
                     var e = JutEpFromFileName(Path.GetFileNameWithoutExtension(part));
@@ -1113,8 +1202,12 @@ public partial class QbitController
                         kind = JutKindParam(e.kind), epkey = e.epkey, titleRu = slug,
                         gen = JutGenOf(slug)
                     });
-                    added++;
+                    q++;
                 }
+                // Один .part (обычный случай — качался ровно один файл) уведомит как серия,
+                // несколько — одной строкой на тайтл. Без job у добора не было бы и статуса.
+                if (q > 0) JutJobForBatch(slug, freshBatch, q);
+                added += q;
             }
             if (added > 0)
                 Console.WriteLine("[QbitDownload] jut/reconcile: добрано недокачанных файлов — " + added);

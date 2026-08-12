@@ -48,6 +48,15 @@ static class JutGrabAccess
 
     public static string JobState(object job) => (string)JobT.GetField("state", IF).GetValue(job);
     public static void JobCanceled(object job, bool v) => JobT.GetField("canceled", IF).SetValue(job, v);
+    public static void JobAgg(object job, bool v) => JobT.GetField("agg", IF).SetValue(job, v);
+
+    public static void JobCounters(object job, int done, int total)
+    {
+        JobT.GetField("fileDone", IF).SetValue(job, done);
+        JobT.GetField("filesTotal", IF).SetValue(job, total);
+    }
+
+    public static void NotifyTitleDone(object it, object job) => Access.Call("JutNotifyTitleDone", it, job);
     public static void JobTouched(object job, DateTime v) => JobT.GetField("touched", IF).SetValue(job, v);
     public static void JobState(object job, string v) => JobT.GetField("state", IF).SetValue(job, v);
 
@@ -129,17 +138,26 @@ public class JutSuGrabQueueTests
     {
         // filesTotal только рос: два добавления подряд давали fileDone/filesTotal вроде 3/40,
         // где 40 — сумма двух пачек. Сброс возможен только когда очередь этого тайтла пуста.
+        // ⚠️ Инициализация пачки живёт в общем JutJobForBatch (её делят ручное «Скачать»,
+        // суточный тик слежения и реконсиляция) — проверяем инвариант там, а вызов — на месте.
         string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
         Assert.Contains("bool freshBatch = JutPendingFor(slug) == 0;", src);
-        Assert.Contains("job.fileDone = 0; job.filesTotal = 0;", src);
 
-        // filesTotal обязан прибавляться ВНУТРИ ветки queued > 0 и ПОСЛЕ сброса:
-        // иначе пустое добавление (всё уже скачано) всё равно раздувало бы знаменатель.
+        int hi = src.IndexOf("static JutGrabJob JutJobForBatch", StringComparison.Ordinal);
+        Assert.True(hi > 0, "JutJobForBatch не найдена");
+        string helper = src.Substring(hi, Math.Min(1200, src.Length - hi));
+        Assert.Contains("if (freshBatch)", helper);
+        Assert.Contains("job.fileDone = 0; job.filesTotal = 0;", helper);
+        // filesTotal обязан прибавляться ПОСЛЕ сброса, а не до
+        Assert.True(helper.IndexOf("job.filesTotal += queued;", StringComparison.Ordinal)
+                    > helper.IndexOf("job.fileDone = 0;", StringComparison.Ordinal),
+                    "filesTotal обязан прибавляться после сброса, а не до");
+
+        // и зовётся он ВНУТРИ ветки queued > 0: иначе пустое добавление (всё уже скачано)
+        // раздувало бы знаменатель и создавало job-фантом
         int gate = src.IndexOf("if (queued > 0)", StringComparison.Ordinal);
-        int reset = src.IndexOf("job.fileDone = 0;", StringComparison.Ordinal);
-        int add = src.IndexOf("job.filesTotal += queued;", StringComparison.Ordinal);
-        Assert.True(gate > 0 && reset > gate, "сброс счётчиков обязан быть внутри ветки queued > 0");
-        Assert.True(add > reset, "filesTotal обязан прибавляться после сброса, а не до");
+        int call = src.IndexOf("job = JutJobForBatch(slug, freshBatch, queued);", StringComparison.Ordinal);
+        Assert.True(gate > 0 && call > gate, "инициализация пачки обязана быть внутри ветки queued > 0");
     }
 
     // ── 3. отмена не перебивается ─────────────────────────────────────────
@@ -380,22 +398,116 @@ public class JutSuGrabQueueTests
     // ── дебаунс пуша уведомлений ──────────────────────────────────────────
 
     [Fact]
-    public void Строки_noti_создаются_на_каждую_серию_несмотря_на_дебаунс()
+    public void Seen_на_каждую_серию_а_noti_только_вне_агрегата()
     {
-        // 🔴 Дебаунс касается ТОЛЬКО WS-сигнала. Строки в noti/seen обязаны писаться на каждую
-        // серию: на них держится дедуп (epkey + UNIQUE noti(seriesKey,epkey)), бейдж и центр
-        // уведомлений. Тронешь — центр начнёт врать, а §BH/§AZ-инварианты посыплются.
+        // 🔴 seen пишется ВСЕГДА: на нём держится дедуп «уже уведомляли» и «уже скачано».
+        // 🔴 noti на серию — только вне агрегата (qdl 2.38): при скачивании тайтла на 60 серий
+        // лента получала 60 записей, вместо этого пишется одна строка на пачку.
+        // Сигнал по-прежнему уходит через коалесер, а не напрямую.
         string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
         int i = src.IndexOf("static void JutNotifyDone", StringComparison.Ordinal);
         Assert.True(i > 0, "JutNotifyDone не найдена");
-        string block = src.Substring(i, Math.Min(1600, src.Length - i));
+        string block = src.Substring(i, Math.Min(2200, src.Length - i));
 
         Assert.Contains("db.seen.Add", block);
-        Assert.Contains("db.noti.Add", block);
         Assert.Contains("db.SaveChanges()", block);
-        // и сигнал уходит через коалесер, а не напрямую
-        Assert.Contains("JutPushDone(it.slug)", block);
+        // строка серии — под гардом агрегата, пуш тоже
+        Assert.Contains("if (!agg && !db.noti.Any", block);
+        Assert.Contains("if (!agg) JutPushDone(it.slug);", block);
         Assert.DoesNotContain("PushNotiSignal(1);", block);
+    }
+
+    [Fact]
+    public void Агрегат_включается_на_пачке_и_на_доборе_к_живой()
+    {
+        // Одна серия «с нуля» (в т.ч. вышедшая новая у подписки) уведомляет как серия —
+        // иначе владелец получил бы «скачано серий: 1» вместо имени серии.
+        Assert.False(QbitController.JutAggFor(true, 1));
+        Assert.True(QbitController.JutAggFor(true, 2));
+        // Добор к качающейся пачке: счётчики job общие, разделить два уведомления нечем
+        Assert.True(QbitController.JutAggFor(false, 1));
+        Assert.NotNull(typeof(ModuleConf).GetProperty("jutNotifyAggregate"));
+        Assert.True(new ModuleConf().jutNotifyAggregate);
+    }
+
+    [Fact]
+    public void Флаш_агрегата_идемпотентен_и_молчит_при_нуле()
+    {
+        // Единственная точка флаша — finally воркера, но она срабатывает и на устаревших
+        // элементах отменённой пачки: повторный вызов обязан быть безвредным.
+        TestEnv.FreshCache();
+        using (var seed = new SqlContext()) seed.Database.EnsureCreated();
+        JutGrabAccess.Reset();
+
+        object job = JutGrabAccess.NewJob();
+        JutGrabAccess.JobAgg(job, true);
+        JutGrabAccess.JobCounters(job, done: 3, total: 3);
+        object it = JutGrabAccess.NewItem("spy-family", "s1e3", gen: 0);
+
+        JutGrabAccess.NotifyTitleDone(it, job);
+        JutGrabAccess.NotifyTitleDone(it, job);
+
+        using (var db = new SqlContext())
+        {
+            var rows = db.noti.Where(x => x.seriesKey == "jspy-family" && x.kind == "TITLE").ToList();
+            Assert.Single(rows);
+            Assert.Equal("Скачано серий: 3", rows[0].label);
+            Assert.StartsWith("batch-", rows[0].epkey);
+        }
+
+        // Пачка, где не докачалось НИЧЕГО, — не новость, а шум
+        object empty = JutGrabAccess.NewJob();
+        JutGrabAccess.JobAgg(empty, true);
+        JutGrabAccess.JobCounters(empty, done: 0, total: 5);
+        JutGrabAccess.NotifyTitleDone(JutGrabAccess.NewItem("naruuto", "s1e1", 0), empty);
+        using (var db = new SqlContext())
+            Assert.Empty(db.noti.Where(x => x.seriesKey == "jnaruuto").ToList());
+    }
+
+    [Fact]
+    public void Недокачанная_пачка_показывает_сколько_из_скольких()
+    {
+        // Отмена на середине и «сдался после ретраев» обязаны быть видны, а не выглядеть
+        // как успешно скачанный тайтл.
+        TestEnv.FreshCache();
+        using (var seed = new SqlContext()) seed.Database.EnsureCreated();
+        JutGrabAccess.Reset();
+
+        object job = JutGrabAccess.NewJob();
+        JutGrabAccess.JobAgg(job, true);
+        JutGrabAccess.JobCounters(job, done: 2, total: 5);
+        JutGrabAccess.NotifyTitleDone(JutGrabAccess.NewItem("oneepiece", "s1e2", 0), job);
+
+        using var db2 = new SqlContext();
+        Assert.Equal("Скачано серий: 2 из 5", db2.noti.Single(x => x.seriesKey == "joneepiece").label);
+    }
+
+    [Fact]
+    public void Ключ_батча_не_пересекается_с_ключами_серий_и_слежения()
+    {
+        // UNIQUE noti(seriesKey, epkey): совпадение ключей схлопнуло бы разные события в одно.
+        var rx = new System.Text.RegularExpressions.Regex(@"^(s\d+e\d+|film\d+|ova\d+|new-|season-|nospace-|start-)");
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
+        Assert.Contains("epkey = \"batch-\" + DateTime.UtcNow.Ticks", src);
+        Assert.DoesNotMatch(rx, "batch-638000000000000000");
+    }
+
+    [Fact]
+    public void Осушение_очереди_тайтла_закрывает_пачку_одной_строкой()
+    {
+        // Флаш обязан висеть на ЕДИНСТВЕННОЙ точке — снятии ключа: через неё проходят все
+        // исходы (успех, ошибка после ретраев, отмена, устаревший элемент). Два пути записи
+        // потребовали бы дедупа между собой.
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
+        int i = src.IndexOf("static void JutDoneWith", StringComparison.Ordinal);
+        Assert.True(i > 0, "JutDoneWith не найдена");
+        string block = src.Substring(i, Math.Min(600, src.Length - i));
+        Assert.Contains("JutForget(it);", block);
+        Assert.Contains("JutPendingFor(it.slug) == 0", block);
+        Assert.Contains("JutNotifyTitleDone(it, job)", block);
+        // и воркер зовёт именно её на обоих путях выхода
+        Assert.Contains("if (JutStale(it)) { JutDoneWith(it); continue; }", src);
+        Assert.Contains("finally { JutDoneWith(it); }", src);
     }
 
     [Fact]
@@ -419,6 +531,34 @@ public class JutSuGrabQueueTests
         // Киллсвитч на лету: правка init.conf вместо пересборки образа.
         Assert.NotNull(typeof(ModuleConf).GetProperty("jutNotifyCoalesceSec"));
         Assert.Equal(300, new ModuleConf().jutNotifyCoalesceSec);
+    }
+
+    [Fact]
+    public void Удаление_карточки_уносит_недокачанные_part()
+    {
+        // 🔥 Боевой прогон 12.08.2026: отменил сезон на середине, удалил карточку —
+        // .part остался, и JutReconcile на следующем старте добрал бы его в очередь,
+        // молча воскресив удалённый тайтл. Маркер про .part не знает по определению.
+        TestEnv.FreshCache();
+        string root = Path.Combine(ModInit.conf.cachePath, "dl");
+        ModInit.conf.jutDownloadsPath = root;
+        string dir = Path.Combine(root, "uzumaki");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "uzumaki.s01e03.1080p.mp4.part"), "x");
+        File.WriteAllText(Path.Combine(dir, "uzumaki.s01e03.1080p.mp4.part.json"), "{}");
+
+        QbitController.JutPurgePartials("uzumaki");
+
+        Assert.False(Directory.Exists(dir), "пустой каталог тайтла тоже убирается");
+
+        // а чужие файлы рядом не трогаем: каталог с готовым mp4 остаётся жить
+        Directory.CreateDirectory(dir);
+        string keep = Path.Combine(dir, "uzumaki.s01e01.1080p.mp4");
+        File.WriteAllText(keep, "x");
+        File.WriteAllText(Path.Combine(dir, "uzumaki.s01e02.1080p.mp4.part"), "x");
+        QbitController.JutPurgePartials("uzumaki");
+        Assert.True(File.Exists(keep));
+        Assert.Empty(Directory.GetFiles(dir, "*.part*"));
     }
 
     // ── фоновый гейт и idle-таймаут ───────────────────────────────────────
@@ -569,12 +709,26 @@ public class JutSuGrabQueueTests
     {
         // 🔥 Найдено при проверке на боевом: GetOrAdd до цикла оставлял у тайтла,
         // где всё уже скачано, запись state="queued" с filesTotal=0 — статус врал
-        // про работу, которой нет.
+        // про работу, которой нет. Теперь job создаёт ТОЛЬКО JutJobForBatch, и все
+        // три вызова (роут, тик слежения, реконсиляция) стоят под «поставили > 0».
         string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
-        int gate = src.IndexOf("if (queued > 0)", StringComparison.Ordinal);
-        int add = src.IndexOf("_jutJobs.GetOrAdd(slug", StringComparison.Ordinal);
-        Assert.True(gate > 0 && add > gate, "job обязан создаваться ВНУТРИ ветки queued > 0");
         Assert.Contains("JutGrabJob job = null;", src);
+        int gate = src.IndexOf("if (queued > 0)", StringComparison.Ordinal);
+        int call = src.IndexOf("job = JutJobForBatch(slug, freshBatch, queued);", StringComparison.Ordinal);
+        Assert.True(gate > 0 && call > gate, "job обязан создаваться ВНУТРИ ветки queued > 0");
+
+        // В постановке в очередь job заводит ТОЛЬКО хелпер: прямых GetOrAdd там нет.
+        // (Второй GetOrAdd живёт в JutGrabOne — это уже работа над вынутым элементом,
+        //  у которого пачка заведомо создана.)
+        int dl = src.IndexOf("public Task<ActionResult> JutDownload", StringComparison.Ordinal);
+        if (dl < 0) dl = src.IndexOf("JutDownload(string slug", StringComparison.Ordinal);
+        int one = src.IndexOf("static async Task JutGrabOne", StringComparison.Ordinal);
+        Assert.True(dl > 0 && one > dl);
+        Assert.DoesNotContain("_jutJobs.GetOrAdd(", src.Substring(dl, one - dl));
+
+        Assert.Contains("if (q > 0) JutJobForBatch(slug, freshBatch, q);", src);          // реконсиляция
+        string watch = Strip(File.ReadAllText(ModuleFile("JutSuWatch.cs")));
+        Assert.Contains("if (q > 0) { JutJobForBatch(slug, freshBatch, q);", watch);      // тик слежения
     }
 
     // ── 6. мёртвый конфиг ─────────────────────────────────────────────────

@@ -18,6 +18,7 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _pruneTimer;
     static System.Threading.Timer _jutTimer;      // jut.su: слежение за сезоном (раз в сутки)
     static System.Threading.Timer _jutWarmTimer;  // jut.su: прогрев кеша тайтлов (2 раза в сутки)
+    static System.Threading.Timer _jutCatTimer;   // jut.su: снапшот-индекс каталога (сид/голова/ресид)
     static System.TimeSpan _huntPeriod = System.TimeSpan.FromHours(4);
 
     // Ранний повтор охоты (EpisodeHunter): индексатор не дал кандидатов → следующий тик раньше срока.
@@ -43,6 +44,9 @@ public class ModInit : IModuleLoaded
             using var db = new SqlContext();
             db.Database.EnsureCreated();
             try { db.Database.ExecuteSqlRaw("PRAGMA journal_mode = WAL;"); } catch { }
+            // Ретенция ленты уведомлений: таблица noti росла вечно (единственным удалением был
+            // ручной /clear), а каждая скачанная серия добавляла строку.
+            try { QbitController.NotiPrune(conf?.notiKeepRows ?? 500); } catch { }
         }
         catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] db init: " + ex); }
 
@@ -141,6 +145,8 @@ public class ModInit : IModuleLoaded
         {
             try { await QbitController.IndexPrune(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] index prune: " + ex); }
+            try { QbitController.NotiPrune(conf?.notiKeepRows ?? 500); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] noti prune: " + ex); }
         }, null, System.TimeSpan.FromHours(1), System.TimeSpan.FromHours(24));
 
         // ── jut.su: слежение за сезоном, раз в сутки (решение владельца) ──
@@ -184,6 +190,27 @@ public class ModInit : IModuleLoaded
                 }
                 catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut warm timer: " + ex); }
             }, null, System.TimeSpan.FromMinutes(45), System.TimeSpan.FromHours(System.Math.Max(1, warmHours)));
+        }
+
+        // ── jut.su: снапшот-индекс каталога (qdl 2.38) ──
+        // Первый прогон на 50-й минуте — последним из jut-контуров (watch@35 / warm@45):
+        // все трое делят ФОНОВЫЙ гейт в один слот, и разведённые старты не дают им
+        // толкаться. Первый прогон после чистого тома — это сид всех ~46 страниц с паузой,
+        // дальше тик стоит один запрос (страница 1).
+        int catHours = conf?.jutCatalogHeadHours ?? 6;
+        _jutCatTimer?.Dispose();
+        _jutCatTimer = null;
+        if (catHours > 0)
+        {
+            _jutCatTimer = new System.Threading.Timer(async _ =>
+            {
+                try
+                {
+                    if (conf?.jutEnable != true) return;   // выключатель — В НАЧАЛЕ прогона
+                    await QbitController.JutCatalogTick();
+                }
+                catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut catalog timer: " + ex); }
+            }, null, System.TimeSpan.FromMinutes(50), System.TimeSpan.FromHours(System.Math.Max(1, catHours)));
         }
 
         // Недокачанные .part после рестарта — добрать в очередь (очередь живёт в памяти).
@@ -248,6 +275,8 @@ public class ModInit : IModuleLoaded
         _jutTimer = null;
         _jutWarmTimer?.Dispose();
         _jutWarmTimer = null;
+        _jutCatTimer?.Dispose();
+        _jutCatTimer = null;
         // Грязное из горячего слоя обязано доехать до диска: иначе выгрузка модуля
         // теряет ещё не записанные маркер/activity (окно дебаунса — 200 мс).
         try { JsonStore.Flush(); } catch { }
@@ -269,7 +298,12 @@ public class ModInit : IModuleLoaded
         try
         {
             if (!string.Equals(prevCache, conf?.cachePath, System.StringComparison.Ordinal))
+            {
                 JsonStore.ResetForConfigReload();
+                // Снапшот каталога живёт файлом внутри cachePath — РАМ-копия относится
+                // к прежнему пути и обязана быть забыта (перечитается лениво с нового).
+                QbitController.JutIdxReset();
+            }
             QbitController.DropListCache();
         }
         catch { }

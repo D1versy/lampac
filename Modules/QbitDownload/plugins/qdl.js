@@ -1597,6 +1597,9 @@
         var k = (n && n.kind) ? String(n.kind).toUpperCase() : '';
         if (!k || NOTI_DONE_KINDS[k]) return 'done';       // серия лежит на диске
         if (k === 'NEW') return 'new';                     // вышла на сайте (слежение jut.su)
+        // TITLE — «пачка тайтла скачана» (qdl 2.38). Своя корзина, а не 'done': текст уже готовый
+        // («Скачано серий: 60»), и приписывать к нему «скачана» значило бы говорить про серию.
+        if (k === 'TITLE') return 'title';
         if (k === 'SEASON') return 'season';
         if (k === 'START') return 'started';
         if (k === 'NOSPACE') return 'warn';
@@ -1636,6 +1639,7 @@
                 var special = fresh.filter(function (x) { return notiBucket(x) === 'special'; });
                 var started = fresh.filter(function (x) { return notiBucket(x) === 'started'; });
                 var dl = fresh.filter(function (x) { return notiBucket(x) === 'done'; });
+                var titles = fresh.filter(function (x) { return notiBucket(x) === 'title'; });
                 var came = fresh.filter(function (x) { return notiBucket(x) === 'new'; });
                 var season = fresh.filter(function (x) { return notiBucket(x) === 'season'; });
                 var warn = fresh.filter(function (x) { return notiBucket(x) === 'warn'; });
@@ -1646,6 +1650,9 @@
                 else if (started.length > 1) Lampa.Noty.show('⏬ Начата загрузка серий: ' + started.length);
                 if (dl.length === 1) Lampa.Noty.show('📺 ' + esc(dl[0].title) + ' — ' + esc(dl[0].label) + ' скачана');
                 else if (dl.length > 1) Lampa.Noty.show('📺 Скачано новых серий: ' + dl.length);
+                // label уже несёт «Скачано серий: N» — дописывать нечего
+                if (titles.length === 1) Lampa.Noty.show('📦 ' + esc(titles[0].title) + ' — ' + esc(titles[0].label));
+                else if (titles.length > 1) Lampa.Noty.show('📦 Скачано тайтлов: ' + titles.length);
                 if (came.length === 1) Lampa.Noty.show('🆕 ' + esc(came[0].title) + ' — ' + esc(came[0].label));
                 else if (came.length > 1) Lampa.Noty.show('🆕 Вышли новые серии: ' + came.length);
                 if (season.length === 1) Lampa.Noty.show('🗓 ' + esc(season[0].title) + ' — ' + esc(season[0].label));
@@ -3559,7 +3566,12 @@
                 (r.items || []).forEach(comp.append);
                 total += (r.items || []).length;
                 if (p === 1 && total === 0) comp.empty(query ? 'Ничего не найдено' : 'Каталог пуст');
-                comp.activity.toggle();
+                // 🔥 toggle ТОЛЬКО на первой странице. На догрузке он через Activity.start →
+                // Controller.toggle('content') → collectionFocus(last || false) ставил фокус на
+                // первую карточку, а её hover:focus утаскивал скролл в самое начало ленты:
+                // быстро долистал до недогруженного дна — и тебя выбросило наверх. Upstream
+                // (InteractionCategory.next) при догрузке toggle тоже не зовёт.
+                if (p === 1) comp.activity.toggle();
             }, function () {
                 loading = false;
                 comp.activity.loader(false);
@@ -3580,6 +3592,17 @@
             if (i >= 0 && i >= kids.length - PREFETCH_AHEAD) comp.load(page + 1);
         };
 
+        // 🔥 На таче hover:focus не приходит ВООБЩЕ (палец не «фокусит»), поэтому last оставался
+        // пустым и любой collectionFocus(last || false) уводил на первую карточку. Штатные
+        // компоненты Lampa пишут last именно по hover:touch/hover:hover; Navigator.focused
+        // (в отличие от focus) только помечает элемент активным и скролл не двигает.
+        function markLast(el) {
+            return function () {
+                last = el[0];
+                try { Navigator.focused(el[0]); } catch (e) {}
+            };
+        }
+
         // ⚠️ width:100% — правило .cols--N > * даёт долю ширины ЛЮБОМУ прямому потомку,
         // иначе сообщение сожмётся до ширины одной карточки
         this.empty = function (txt) {
@@ -3596,6 +3619,7 @@
             var view = el.find('.card__view'); if (!view.length) view = el;
             view.append('<div style="position:absolute;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:3em">🔍</div>');
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:touch hover:hover', markLast(el));
             el.on('hover:enter', function () {
                 Lampa.Input.edit({ value: '', title: 'Поиск на jut.su', free: true }, function (q) {
                     q = (q || '').trim();
@@ -3606,7 +3630,15 @@
             try { Lampa.Controller.collectionAppend(el); } catch (e) {}
         };
 
+        var seenSlugs = {};
+
         this.append = function (c) {
+            // Дедуп: витрина отсортирована по дате добавления, и новинка, приехавшая между
+            // двумя подгрузками, сдвигает ленту — тот же тайтл прилетел бы второй карточкой.
+            if (c && c.slug) {
+                if (seenSlugs[c.slug]) return;
+                seenSlugs[c.slug] = 1;
+            }
             var el = Lampa.Template.get('card', {
                 title: c.title || c.slug,
                 release_year: (c.years && c.years.length ? c.years[c.years.length - 1] : '') + ''
@@ -3622,6 +3654,7 @@
                 view.append('<div style="position:absolute;right:.4em;top:.4em;background:rgba(0,0,0,.65);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">' + c.episodes + '</div>');
 
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); comp.prefetch(el); });
+            el.on('hover:touch hover:hover', markLast(el));
             el.on('hover:enter', function () {
                 Lampa.Activity.push({ url: '', title: c.title || c.slug, component: 'jut_title', jut_slug: c.slug, jut_card: c });
             });
@@ -3630,12 +3663,18 @@
             body.append(el);
             // ⚠️ Без регистрации в коллекции фокуса стрелки пульта не дойдут до 2-й страницы:
             // элементы в DOM есть, а навигатор о них не знает.
-            try { Lampa.Controller.collectionAppend(el); } catch (e) {}
+            // ⚠️ Только пока контроллер наш: ответ мог прийти, когда пользователь уже ушёл
+            // в меню или на карточку — тогда карточки уехали бы в ЧУЖУЮ коллекцию фокуса.
+            // При возврате toggle пересоберёт всё через collectionSet, ничего не теряется.
+            try { if (!Lampa.Controller.own || Lampa.Controller.own(comp)) Lampa.Controller.collectionAppend(el); } catch (e) {}
         };
 
         this.render = function () { return html; };
         this.start = function () {
             Lampa.Controller.add('content', {
+                // link обязателен: по нему Controller.own(comp) отличает «активны мы» от
+                // «активен кто-то другой» — на этом держится безопасная догрузка карточек
+                link: comp,
                 toggle: function () {
                     Lampa.Controller.collectionSet(scroll.render());
                     Lampa.Controller.collectionFocus(last || false, scroll.render());

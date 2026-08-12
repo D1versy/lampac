@@ -3530,6 +3530,26 @@ public partial class QbitController : BaseController
         catch (Exception ex) { Console.WriteLine("[QbitDownload] noti push: " + ex.Message); }
     }
 
+    /// <summary>
+    /// Ретенция таблицы noti: оставить последние <paramref name="keep"/> строк.
+    /// ⚠️ Таблицу seen НЕ трогает — на ней дедуп «уже уведомляли», её чистка дала бы залп
+    /// повторных уведомлений по всему, что когда-либо скачано.
+    /// </summary>
+    internal static int NotiPrune(int keep)
+    {
+        if (keep <= 0) return 0;
+        try
+        {
+            using var db = new SqlContext();
+            long cut = db.noti.OrderByDescending(x => x.Id).Skip(keep).Select(x => x.Id).FirstOrDefault();
+            if (cut <= 0) return 0;
+            int n = db.noti.Where(x => x.Id <= cut).ExecuteDelete();
+            if (n > 0) Console.WriteLine("[QbitDownload] noti prune: удалено строк — " + n);
+            return n;
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] noti prune: " + ex.Message); return 0; }
+    }
+
     [HttpGet, AllowAnonymous]
     [Route("qdl/notifications")]
     public ActionResult Notifications()
@@ -3537,7 +3557,12 @@ public partial class QbitController : BaseController
         try
         {
             using var db = new SqlContext();
-            var items = db.noti.OrderByDescending(x => x.Id).Take(200).ToList();
+            // Лента режется по notiFeedLimit: клиент рисует ВСЁ, что пришло (ComponentNotifications
+            // не пагинирует), и 200 строк с 200 постерами открывались заметно долго.
+            int limit = Math.Clamp(ModInit.conf?.notiFeedLimit ?? 50, 1, 500);
+            var items = db.noti.OrderByDescending(x => x.Id).Take(limit).ToList();
+            // unread считается по ВСЕЙ таблице, а не по срезу: открытие центра метит прочитанным
+            // всё сразу (qdl.js), поэтому бейдж и лента не разъезжаются.
             int unread = db.noti.Count(x => !x.read);
             var arr = new JArray();
             foreach (var n in items)

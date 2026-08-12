@@ -312,6 +312,62 @@ public class SqlContextTests
         Assert.Empty(db.seen);
     }
 
+    // ── ретенция ленты уведомлений (qdl 2.38) ─────────────────────────────
+
+    [Fact]
+    public void Прун_держит_последние_N_и_не_трогает_seen()
+    {
+        // Таблица noti росла вечно: единственным удалением был ручной /clear, а каждая
+        // скачанная серия добавляла строку. 🔴 seen прун НЕ трогает — на ней дедуп
+        // «уже уведомляли», её чистка дала бы залп повторных уведомлений по всему архиву.
+        TestEnv.FreshCache();
+        using (var db = new QbitDownload.SqlContext())
+        {
+            db.Database.EnsureCreated();
+            for (int i = 1; i <= 120; i++)
+                db.noti.Add(new NotiModel { seriesKey = "t1", epkey = "e" + i, title = "n" + i, created = DateTime.UtcNow });
+            for (int i = 1; i <= 5; i++)
+                db.seen.Add(new SeenModel { seriesKey = "t1", epkey = "s" + i });
+            db.SaveChanges();
+        }
+
+        int deleted = QbitController.NotiPrune(50);
+
+        using var check = new QbitDownload.SqlContext();
+        Assert.Equal(70, deleted);
+        Assert.Equal(50, check.noti.Count());
+        Assert.Equal("n120", check.noti.OrderByDescending(x => x.Id).First().title);   // новейшее живо
+        Assert.Equal("n71", check.noti.OrderBy(x => x.Id).First().title);
+        Assert.Equal(5, check.seen.Count());
+    }
+
+    [Fact]
+    public void Прун_нулём_выключен_и_на_коротком_списке_молчит()
+    {
+        TestEnv.FreshCache();
+        using (var db = new QbitDownload.SqlContext())
+        {
+            db.Database.EnsureCreated();
+            for (int i = 1; i <= 10; i++)
+                db.noti.Add(new NotiModel { seriesKey = "t1", epkey = "e" + i, title = "n" + i, created = DateTime.UtcNow });
+            db.SaveChanges();
+        }
+
+        Assert.Equal(0, QbitController.NotiPrune(0));    // киллсвитч
+        Assert.Equal(0, QbitController.NotiPrune(50));   // строк меньше, чем держим
+
+        using var check = new QbitDownload.SqlContext();
+        Assert.Equal(10, check.noti.Count());
+    }
+
+    [Fact]
+    public void Дефолты_ручек_ленты()
+    {
+        var c = new ModuleConf();
+        Assert.Equal(50, c.notiFeedLimit);
+        Assert.Equal(500, c.notiKeepRows);
+    }
+
     // ── persistence across contexts (same cache dir) ──────────────────────
 
     [Fact]

@@ -171,6 +171,14 @@ public partial class QbitController
         if (!string.IsNullOrEmpty(genres) && !_jutFilterRx.IsMatch(genres)) return JutErr("BAD_SLUG");
         if (!string.IsNullOrEmpty(years) && !_jutFilterRx.IsMatch(years)) return JutErr("BAD_SLUG");
 
+        // Снапшот-индекс дефолтной витрины (qdl 2.38): страница нарезается из готового
+        // упорядоченного списка, к jut.su не ходим вовсе. Работает только для того фильтра,
+        // который шлёт клиент; всё остальное (жанры/годы/другая сортировка/nocache) идёт
+        // прежним путём через пер-страничный кеш — он остаётся фолбэком.
+        if (nocache == 0 && order == "add" && string.IsNullOrEmpty(genres) && string.IsNullOrEmpty(years)
+            && JutIdxTryServe(page, out var fromIndex))
+            return JutJsonArt(fromIndex);
+
         string key = JutKeyHash(order + "|" + genres + "|" + years) + "-p" + page;
         var ttl = TimeSpan.FromMinutes(Math.Max(1, ModInit.conf?.jutCatalogTtlMin ?? 30));
 
@@ -208,6 +216,24 @@ public partial class QbitController
         };
         if (parsed.items.Count > 0) JutCacheWrite("catalog", key, payload);
         return JutJsonArt(payload);
+    }
+
+    /// <summary>
+    /// Ручной пересбор снапшот-индекса витрины. Прогон фоновый (десятки запросов с паузой),
+    /// поэтому отвечаем сразу — состояние смотреть в /qdl/jut/diag → catalogIndex.
+    /// </summary>
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/jut/catalog/reseed")]
+    public ActionResult JutCatalogReseed()
+    {
+        if (!JutOn) return JutErr("DISABLED");
+        JutIdxDropForReseed();
+        _ = Task.Run(async () =>
+        {
+            try { await JutCatalogTick(manual: true); }
+            catch (Exception ex) { JutNet.Log("catalog", "ручной пересид: " + ex.Message); }
+        });
+        return JutJson(new JObject { ["ok"] = true, ["message"] = "Пересбор каталога запущен — смотри /qdl/jut/diag" });
     }
 
     [HttpGet, AllowAnonymous]
@@ -549,7 +575,8 @@ public partial class QbitController
                 ["until"] = until
             },
             ["links"] = new JObject { ["cached"] = cached, ["oldestAgeSec"] = oldest },
-            ["posters"] = JutPosterStats()
+            ["posters"] = JutPosterStats(),
+            ["catalogIndex"] = JutIdxDiag()
         };
 
         if (!JutOn) { jo["probe"] = "skipped: jutEnable=false"; return JutJson(jo); }
