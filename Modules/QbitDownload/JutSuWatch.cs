@@ -386,6 +386,9 @@ public partial class QbitController
             return res;
         }
 
+        // Тик слежения — фоновая работа: свой гейт, чтобы полный опрос тайтлов (до 30 за проход,
+        // каждая страница ≈ 1.1 с) не отбирал слоты у карточек и плеера.
+        using var bg = JutNet.BackgroundScope();
         try
         {
             var arr = JutLoadWatch();

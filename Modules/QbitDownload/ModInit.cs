@@ -17,6 +17,7 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _crawlTimer;
     static System.Threading.Timer _pruneTimer;
     static System.Threading.Timer _jutTimer;      // jut.su: слежение за сезоном (раз в сутки)
+    static System.Threading.Timer _jutWarmTimer;  // jut.su: прогрев кеша тайтлов (2 раза в сутки)
     static System.TimeSpan _huntPeriod = System.TimeSpan.FromHours(4);
 
     // Ранний повтор охоты (EpisodeHunter): индексатор не дал кандидатов → следующий тик раньше срока.
@@ -164,6 +165,27 @@ public class ModInit : IModuleLoaded
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut watch timer: " + ex); }
         }, null, System.TimeSpan.FromMinutes(jutOverdue ? 6 : 35), System.TimeSpan.FromHours(jutHours));
 
+        // ── jut.su: прогрев кеша тайтлов (решение владельца — 2 раза в сутки) ──
+        // Промах TTL заставляет ПЕРВОГО открывшего карточку ждать полный обход: для хаб-тайтла
+        // это 1 + до 24 последовательных запроса к сайту по ~1.1 с (живой замер naruuto — 3.58 с).
+        // Первый прогон на 45-й минуте — ПОСЛЕ тика слежения (@35), чтобы не толкаться:
+        // оба контура ходят на jut.su и делят фоновый гейт.
+        int warmHours = conf?.jutWarmIntervalHours ?? 12;
+        _jutWarmTimer?.Dispose();
+        _jutWarmTimer = null;
+        if (warmHours > 0)
+        {
+            _jutWarmTimer = new System.Threading.Timer(async _ =>
+            {
+                try
+                {
+                    if (conf?.jutEnable != true) return;   // выключатель — В НАЧАЛЕ прогона
+                    await QbitController.JutWarmTitles();
+                }
+                catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut warm timer: " + ex); }
+            }, null, System.TimeSpan.FromMinutes(45), System.TimeSpan.FromHours(System.Math.Max(1, warmHours)));
+        }
+
         // Недокачанные .part после рестарта — добрать в очередь (очередь живёт в памяти).
         System.Threading.Tasks.Task.Run(async () =>
         {
@@ -224,6 +246,11 @@ public class ModInit : IModuleLoaded
         _pruneTimer = null;
         _jutTimer?.Dispose();
         _jutTimer = null;
+        _jutWarmTimer?.Dispose();
+        _jutWarmTimer = null;
+        // Грязное из горячего слоя обязано доехать до диска: иначе выгрузка модуля
+        // теряет ещё не записанные маркер/activity (окно дебаунса — 200 мс).
+        try { JsonStore.Flush(); } catch { }
     }
 
     void updateConf()

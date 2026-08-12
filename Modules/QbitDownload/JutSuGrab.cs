@@ -332,7 +332,10 @@ public partial class QbitController
 
         int queued = 0;
         int gen = JutGenOf(slug);
-        var job = _jutJobs.GetOrAdd(slug, _ => new JutGrabJob());
+        // ⚠️ Job НЕ создаём заранее. GetOrAdd до цикла оставлял фантом: у тайтла, где всё уже
+        // скачано, в /qdl/jut/download/status появлялась запись state="queued" с filesTotal=0,
+        // и статус врал про работу, которой нет.
+        JutGrabJob job = null;
         foreach (var e in toGrab)
         {
             lock (_jutEnqLock)
@@ -349,6 +352,7 @@ public partial class QbitController
 
         if (queued > 0)
         {
+            job = _jutJobs.GetOrAdd(slug, _ => new JutGrabJob());
             if (freshBatch)
             {
                 job.fileDone = 0; job.filesTotal = 0; job.done = 0; job.total = 0;
@@ -507,6 +511,10 @@ public partial class QbitController
         if (Interlocked.CompareExchange(ref _jutWorker, 1, 0) != 0) return;
         _ = Task.Run(async () =>
         {
+            // Все запросы к jut.su изнутри воркера идут через ФОНОВЫЙ гейт: иначе качалка
+            // отбирает слоты у карточек и плеера, и открытие карточки встаёт в очередь
+            // за скачиванием (один запрос к сайту ≈ 1.1 с).
+            using var bg = JutNet.BackgroundScope();
             try
             {
                 // ⚠️ Выключатель проверяется ДО TryDequeue, а не после. Раньше элемент успевали
@@ -615,8 +623,15 @@ public partial class QbitController
                 req.Headers.TryAddWithoutValidation("User-Agent", JutNet.Ua);   // 🔥 тот же UA
                 if (have > 0) req.Headers.TryAddWithoutValidation("Range", "bytes=" + have + "-");
 
+                // Idle-токен: перезаводится на КАЖДОМ прочитанном чанке (см. JutWriteStream).
+                // ⚠️ Именно idle, а не общий таймаут: у медиа-клиента Timeout.InfiniteTimeSpan
+                // обязателен (§AL грабля 4 — иначе 489-МиБ файл рвётся на 100-й секунде).
+                int idleSec = Math.Max(0, ModInit.conf?.jutGrabIdleSec ?? 60);
+                using var idle = new CancellationTokenSource();
+                if (idleSec > 0) idle.CancelAfter(TimeSpan.FromSeconds(idleSec));
+
                 using var resp = await JutNet.Media(link.exitId)
-                    .SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
+                    .SendAsync(req, HttpCompletionOption.ResponseHeadersRead, idle.Token);
 
                 if (resp.StatusCode == HttpStatusCode.Forbidden || resp.StatusCode == HttpStatusCode.Gone)
                 {
@@ -667,7 +682,7 @@ public partial class QbitController
                     catch { }
                 }
 
-                await JutWriteStream(resp, part, have, job, it);
+                await JutWriteStream(resp, part, have, job, it, idle, idleSec);
 
                 long got = new FileInfo(part).Length;
                 if (knownTotal > 0 && got < knownTotal)
@@ -692,13 +707,19 @@ public partial class QbitController
             }
             catch (Exception ex)
             {
-                if (JutStale(it)) { JutSetState(job, "canceled"); return; }
-                job.error = ex.Message;
+                // ⚠️ Отмену и idle-таймаут различать ОБЯЗАТЕЛЬНО: оба прилетают сюда
+                // как OperationCanceledException. Отмена окончательна, ретраить нельзя; idle-таймаут —
+                // штатный обрыв, .part остаётся и докачивается обычным бэкоффом.
+                if (JutStale(it) || !JutOn) { JutSetState(job, "canceled"); return; }
+                bool idleTimeout = ex is OperationCanceledException;
+                job.error = idleTimeout ? "нет данных от CDN — обрыв по idle-таймауту" : ex.Message;
+                if (idleTimeout)
+                    JutNet.Log("grab", "idle-таймаут на " + it.slug + " " + it.epkey + ", докачаем с места");
                 if (attempt >= retries - 1)
                 {
                     JutSetState(job, "error");
                     // .part остаётся — следующий запуск докачает с места
-                    JutNet.Log("grab", "сдаюсь после " + retries + " попыток: " + it.slug + " " + it.epkey + " — " + ex.Message);
+                    JutNet.Log("grab", "сдаюсь после " + retries + " попыток: " + it.slug + " " + it.epkey + " — " + job.error);
                     return;
                 }
                 try { have = System.IO.File.Exists(part) ? new FileInfo(part).Length : 0; } catch { }
@@ -708,30 +729,38 @@ public partial class QbitController
     }
 
     static async Task JutWriteStream(HttpResponseMessage resp, string part, long from,
-                                     JutGrabJob job, JutGrabItem it)
+                                     JutGrabJob job, JutGrabItem it,
+                                     CancellationTokenSource idle = null, int idleSec = 0)
     {
         int pace = Math.Max(0, ModInit.conf?.jutGrabPaceMs ?? 0);
         byte[] buf = ArrayPool<byte>.Shared.Rent(1024 * 1024);
+        var ct = idle?.Token ?? CancellationToken.None;
         try
         {
-            using var src = await resp.Content.ReadAsStreamAsync();
+            using var src = await resp.Content.ReadAsStreamAsync(ct);
             using var fs = new FileStream(part, from > 0 ? FileMode.Append : FileMode.Create,
                                           FileAccess.Write, FileShare.Read, 1 << 20, useAsync: true);
             long done = from;
             int n;
-            while ((n = await src.ReadAsync(buf, 0, buf.Length)) > 0)
+            while ((n = await src.ReadAsync(buf, 0, buf.Length, ct)) > 0)
             {
+                // 🔥 Таймер сдвигается на КАЖДОМ чанке — это и делает таймаут idle'овым,
+                // а не общим: здоровое медленное скачивание не рвётся, а зависшее
+                // соединение к CDN больше не держит ЕДИНСТВЕННЫЙ воркер бесконечно
+                // (раньше вся очередь вставала до рестарта контейнера).
+                if (idleSec > 0) idle.CancelAfter(TimeSpan.FromSeconds(idleSec));
+
                 // Выключатель проверяется и ВНУТРИ файла: иначе «откат» ещё часы качал бы 12 ГБ.
                 // JutStale, а не it.cancel: отмена тайтла, пришедшая пока серия уже качалась,
                 // видна только через поколение — из очереди этот элемент давно вынут.
                 if (JutStale(it) || !JutOn) break;
-                await fs.WriteAsync(buf, 0, n);
+                await fs.WriteAsync(buf, 0, n, ct);
                 done += n;
                 job.done = done;
                 // Мягкий кап: тот же шпиндель занят qBittorrent и записью регистратора
-                if (pace > 0) await Task.Delay(pace);
+                if (pace > 0) await Task.Delay(pace, ct);
             }
-            await fs.FlushAsync();
+            await fs.FlushAsync(CancellationToken.None);   // флашим ВСЕГДА: .part нужен для докачки
         }
         finally { ArrayPool<byte>.Shared.Return(buf); }
     }
@@ -912,10 +941,139 @@ public partial class QbitController
                 });
             }
             db.SaveChanges();
-            PushNotiSignal(1);
+            JutPushDone(it.slug);
             Console.WriteLine("[QbitDownload] jut/grab: скачано " + it.slug + " " + it.epkey);
         }
         catch (Exception ex) { JutNet.Log("grab", "noti: " + ex.Message); }
+    }
+
+    static DateTime _jutLastPush = DateTime.MinValue;
+    static readonly object _jutPushLock = new();
+
+    /// <summary>
+    /// Коалесер WS-пуша «серия скачана».
+    ///
+    /// 🔥 Строки в noti создаются на КАЖДУЮ серию (инвариант дедупа epkey + UNIQUE
+    /// noti(seriesKey,epkey)) — центр уведомлений и бейдж остаются точными. Троттлится только
+    /// СИГНАЛ клиентам: каждый PushNotiSignal рассылается по ВСЕМ WS-соединениям, и каждый
+    /// клиент в ответ полностью выгружает /qdl/notifications и печатает тост. При скачивании
+    /// целого аниме это 60 полных опросов ленты и 60 тостов на КАЖДОМ устройстве.
+    ///
+    /// 🔥 Клиент УЖЕ умеет агрегировать («Скачано новых серий: N», qdl.js) — просто в каждой
+    /// пачке приезжал ровно один элемент. Поэтому правка чисто серверная, клиент не меняется.
+    ///
+    /// ⚠️ Последняя серия пачки пушится НЕМЕДЛЕННО (владелец должен сразу увидеть «готово»),
+    /// и «пачка кончилась» определяется по очереди ЭТОГО тайтла, а не по глобальной _jutQueue:
+    /// иначе последняя серия первого тайтла молчала бы, пока качается второй.
+    /// </summary>
+    static void JutPushDone(string slug)
+    {
+        int coalesce = Math.Max(0, ModInit.conf?.jutNotifyCoalesceSec ?? 300);
+        bool last = JutPendingFor(slug) <= 1;
+
+        if (coalesce == 0 || last)
+        {
+            lock (_jutPushLock) _jutLastPush = DateTime.UtcNow;
+            PushNotiSignal(1);
+            return;
+        }
+
+        lock (_jutPushLock)
+        {
+            if ((DateTime.UtcNow - _jutLastPush).TotalSeconds < coalesce) return;
+            _jutLastPush = DateTime.UtcNow;
+        }
+        PushNotiSignal(1);
+    }
+
+    #endregion
+
+    #region прогрев кеша тайтлов (джоба 2 раза в сутки)
+
+    // Какие тайтлы открывали недавно — чтобы греть то, что реально смотрят.
+    static readonly ConcurrentDictionary<string, DateTime> _jutSeen =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Отметить открытие тайтла. Зовётся из роута карточки, стоит ноль.</summary>
+    internal static void JutTouchTitle(string slug)
+    {
+        if (!string.IsNullOrEmpty(slug)) _jutSeen[slug] = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Прогрев кеша тайтлов — решение владельца: «обновлять кеш поставь джобу, пусть
+    /// обновляется 2 раза в сутки», греем «скачанное + подписки + недавно открытое».
+    ///
+    /// 🔥 Зачем: промах TTL кеша тайтла заставляет ПЕРВОГО открывшего карточку ждать
+    /// полный обход — для хаб-тайтла это 1 + до 24 последовательных запроса к jut.su
+    /// по ~1.1 с (замер /qdl/jut/diag). Живой замер промаха на naruuto: 3.58 с.
+    /// После прогрева карточка всегда тёплая и открывается за единицы миллисекунд.
+    ///
+    /// ⚠️ Идёт под ФОНОВЫМ гейтом: прогрев не имеет права отбирать слоты у карточек,
+    /// которые открывает пользователь прямо сейчас.
+    /// </summary>
+    internal static async Task JutWarmTitles()
+    {
+        if (!JutOn) return;
+        using var bg = JutNet.BackgroundScope();
+
+        var slugs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 1) скачанное — этих тайтлов может не быть в каталоге годами
+        try
+        {
+            string root = JutDownloadRoot();
+            if (Directory.Exists(root))
+                foreach (string dir in Directory.EnumerateDirectories(root))
+                {
+                    string s = Path.GetFileName(dir);
+                    if (JutSuParse.IsValidSlug(s)) slugs.Add(s);
+                }
+        }
+        catch { }
+
+        // 2) подписки слежения
+        try
+        {
+            foreach (var rec in JutLoadWatch().OfType<JObject>())
+            {
+                string s = rec.Value<string>("slug");
+                if (!string.IsNullOrEmpty(s) && JutSuParse.IsValidSlug(s)) slugs.Add(s);
+            }
+        }
+        catch { }
+
+        // 3) недавно открытые
+        int days = Math.Max(1, ModInit.conf?.jutWarmRecentDays ?? 7);
+        var edge = DateTime.UtcNow.AddDays(-days);
+        foreach (var kv in _jutSeen)
+        {
+            if (kv.Value < edge) { _jutSeen.TryRemove(kv.Key, out _); continue; }
+            if (JutSuParse.IsValidSlug(kv.Key)) slugs.Add(kv.Key);
+        }
+
+        if (slugs.Count == 0) return;
+
+        int cap = Math.Max(1, ModInit.conf?.jutWarmTitlesPerRun ?? 40);
+        int pace = Math.Max(0, ModInit.conf?.jutWarmPaceMs ?? 1500);
+        int warmed = 0, failed = 0;
+
+        foreach (string slug in slugs.Take(cap))
+        {
+            if (!JutOn) break;
+            try
+            {
+                var (t, _) = await JutLoadTitleStatic(slug);
+                if (t == null) { failed++; continue; }
+                JutCacheWrite("title", slug, JutTitleJson(t));
+                warmed++;
+            }
+            catch { failed++; }
+            // Темп: щадим и сайт, и бюджет прокси-выходов (§BB.5 — он конечен)
+            if (pace > 0) await Task.Delay(pace);
+        }
+
+        Console.WriteLine($"[QbitDownload] jut/warm: прогрето {warmed}, не удалось {failed}, всего кандидатов {slugs.Count}");
     }
 
     #endregion

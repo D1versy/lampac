@@ -337,6 +337,10 @@ public partial class QbitController
         // ⚠️ slug идёт в пути на диске и в URL к сайту — гейт обязателен (прецеденты §L, §AX)
         if (!JutSuParse.IsValidSlug(slug)) return JutErr("BAD_SLUG");
 
+        // Тайтл открыли — джоба прогрева будет держать его кеш тёплым (JutWarmTitles).
+        // Стоит ноль: запись в ConcurrentDictionary.
+        JutTouchTitle(slug);
+
         // Онгоингу нужен более свежий список серий, чем завершённому тайтлу
         var cached = JutCacheRead("title", slug, TimeSpan.MaxValue, out _);
         bool ongoing = cached?["ongoing"]?.Value<bool>() ?? false;

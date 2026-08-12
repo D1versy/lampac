@@ -244,6 +244,9 @@ public partial class QbitController
 
         _ = Task.Run(async () =>
         {
+            // Апгрейд постеров — фоновая работа: свой гейт, чтобы не отбирать слоты
+            // у карточек и плеера (см. JutNet.Gate).
+            using var bg = JutNet.BackgroundScope();
             try
             {
                 do

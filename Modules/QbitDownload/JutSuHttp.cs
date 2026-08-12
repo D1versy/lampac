@@ -203,11 +203,52 @@ public static class JutNet
     static readonly ConcurrentDictionary<string, HttpClient> _noRedirect = new();
 
     static SemaphoreSlim _gate;
+    static SemaphoreSlim _bgGate;
     static readonly object _gateLock = new();
 
-    /// <summary>Гейт запросов к jut.su. Меняется рестартом (пересоздавать семафор на лету небезопасно).</summary>
+    /// <summary>
+    /// Признак «этот запрос — фоновая работа». AsyncLocal, а не параметр: EnsureLink зовётся
+    /// из воркера скачивания транзитивно через Resolve, и протаскивать флаг пришлось бы
+    /// через четыре сигнатуры. AsyncLocal течёт по продолжениям — ровно то, что нужно.
+    /// ⚠️ Никогда не ставить из контроллера: интерактивный запрос уедет в фоновый гейт.
+    /// </summary>
+    static readonly AsyncLocal<bool> _bg = new();
+
+    /// <summary>
+    /// Пометить текущий асинхронный поток фоновым. Оборачивать: воркер скачивания,
+    /// тик слежения, очередь постеров, прогрев кеша тайтлов.
+    /// </summary>
+    public static IDisposable BackgroundScope()
+    {
+        bool prev = _bg.Value;
+        _bg.Value = true;
+        return new BgScope(prev);
+    }
+
+    sealed class BgScope : IDisposable
+    {
+        readonly bool _prev;
+        public BgScope(bool prev) { _prev = prev; }
+        public void Dispose() { _bg.Value = _prev; }
+    }
+
+    /// <summary>
+    /// Гейт запросов к jut.su. Меняется рестартом (пересоздавать семафор на лету небезопасно).
+    ///
+    /// 🔥 Гейтов ДВА. Раньше один SemaphoreSlim(jutMaxConcurrent=3) обслуживал всё сразу:
+    /// каталог, карточку, resolve плеера, воркер скачивания, тик слежения и апгрейд постеров.
+    /// Значит фоновая качалка отбирала слоты у интерактивных запросов, и открытие карточки
+    /// jut.su вставало в очередь за скачиванием — ровно жалоба владельца «во время скачивания
+    /// приложение подлагивает». Один запрос к сайту стоит ~1.1 с (замер /qdl/jut/diag),
+    /// так что три занятых слота — это секунды ожидания на карточке.
+    /// </summary>
     static SemaphoreSlim Gate()
     {
+        if (_bg.Value)
+        {
+            if (_bgGate != null) return _bgGate;
+            lock (_gateLock) return _bgGate ??= new SemaphoreSlim(Math.Max(1, ModInit.conf?.jutBgConcurrent ?? 1));
+        }
         if (_gate != null) return _gate;
         lock (_gateLock) return _gate ??= new SemaphoreSlim(Math.Max(1, ModInit.conf?.jutMaxConcurrent ?? 3));
     }

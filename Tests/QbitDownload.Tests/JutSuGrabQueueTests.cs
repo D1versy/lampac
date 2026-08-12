@@ -377,6 +377,206 @@ public class JutSuGrabQueueTests
         Assert.Null(Access.Call("JutCheckSpace", 0, null));
     }
 
+    // ── дебаунс пуша уведомлений ──────────────────────────────────────────
+
+    [Fact]
+    public void Строки_noti_создаются_на_каждую_серию_несмотря_на_дебаунс()
+    {
+        // 🔴 Дебаунс касается ТОЛЬКО WS-сигнала. Строки в noti/seen обязаны писаться на каждую
+        // серию: на них держится дедуп (epkey + UNIQUE noti(seriesKey,epkey)), бейдж и центр
+        // уведомлений. Тронешь — центр начнёт врать, а §BH/§AZ-инварианты посыплются.
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
+        int i = src.IndexOf("static void JutNotifyDone", StringComparison.Ordinal);
+        Assert.True(i > 0, "JutNotifyDone не найдена");
+        string block = src.Substring(i, Math.Min(1600, src.Length - i));
+
+        Assert.Contains("db.seen.Add", block);
+        Assert.Contains("db.noti.Add", block);
+        Assert.Contains("db.SaveChanges()", block);
+        // и сигнал уходит через коалесер, а не напрямую
+        Assert.Contains("JutPushDone(it.slug)", block);
+        Assert.DoesNotContain("PushNotiSignal(1);", block);
+    }
+
+    [Fact]
+    public void Последняя_серия_пачки_пушит_немедленно()
+    {
+        // Владелец должен сразу увидеть «готово». «Пачка кончилась» — по очереди ЭТОГО тайтла,
+        // а не по глобальной: иначе последняя серия первого тайтла молчала бы, пока качается второй.
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
+        int i = src.IndexOf("static void JutPushDone", StringComparison.Ordinal);
+        Assert.True(i > 0, "коалесер не найден");
+        string block = src.Substring(i, Math.Min(900, src.Length - i));
+
+        Assert.Contains("JutPendingFor(slug) <= 1", block);
+        Assert.Contains("coalesce == 0 || last", block);
+        Assert.DoesNotContain("_jutQueue.IsEmpty", block);
+    }
+
+    [Fact]
+    public void Коалесинг_выключается_нулём()
+    {
+        // Киллсвитч на лету: правка init.conf вместо пересборки образа.
+        Assert.NotNull(typeof(ModuleConf).GetProperty("jutNotifyCoalesceSec"));
+        Assert.Equal(300, new ModuleConf().jutNotifyCoalesceSec);
+    }
+
+    // ── фоновый гейт и idle-таймаут ───────────────────────────────────────
+
+    [Fact]
+    public void Фоновая_работа_не_занимает_интерактивный_гейт()
+    {
+        // 🔥 Раньше один SemaphoreSlim(jutMaxConcurrent=3) обслуживал ВСЁ: каталог, карточку,
+        // resolve плеера, воркер скачивания, тик слежения, постеры. Качалка отбирала слоты,
+        // и открытие карточки вставало в очередь за скачиванием (один запрос к сайту ≈ 1.1 с) —
+        // ровно жалоба «во время скачивания приложение подлагивает».
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuHttp.cs")));
+        Assert.Contains("static SemaphoreSlim _bgGate;", src);
+        Assert.Contains("jutBgConcurrent", src);
+        Assert.Contains("if (_bg.Value)", src);
+
+        // и все три фоновых контура помечены
+        Assert.Contains("JutNet.BackgroundScope()", Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs"))));
+        Assert.Contains("JutNet.BackgroundScope()", Strip(File.ReadAllText(ModuleFile("JutSuWatch.cs"))));
+        Assert.Contains("JutNet.BackgroundScope()", Strip(File.ReadAllText(ModuleFile("JutSuPoster.cs"))));
+    }
+
+    [Fact]
+    public void Область_фона_восстанавливает_предыдущее_значение()
+    {
+        // AsyncLocal-флаг обязан быть вложенным-безопасным, иначе вложенный scope
+        // при выходе «разфонит» внешний.
+        const BindingFlags SF = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static;
+        var gate = typeof(JutNet).GetMethod("Gate", SF);
+        Assert.NotNull(gate);
+        object Current() => gate.Invoke(null, null);
+
+        object interactive = Current();
+
+        using (JutNet.BackgroundScope())
+        {
+            object bg = Current();
+            Assert.NotSame(interactive, bg);           // фоновый гейт — другой семафор
+
+            using (JutNet.BackgroundScope()) { Assert.Same(bg, Current()); }
+
+            // 🔥 После выхода из ВЛОЖЕННОГО scope внешний обязан остаться фоновым:
+            // иначе вложенный вызов «разфонил» бы внешний, и остаток фоновой работы
+            // поехал бы по интерактивному гейту, снова отбирая слоты у карточек.
+            Assert.Same(bg, Current());
+        }
+
+        Assert.Same(interactive, Current());           // и по выходу вернулись в интерактив
+    }
+
+    [Fact]
+    public void Idle_таймаут_перезаводится_на_каждом_чанке()
+    {
+        // ⚠️ Именно idle, а не общий: у медиа-клиента Timeout.InfiniteTimeSpan обязателен
+        // (§AL грабля 4 — иначе 489-МиБ файл рвётся на 100-й секунде). Без сдвига таймера
+        // на каждом чанке это превратилось бы в общий таймаут и рубило здоровые закачки.
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
+        int i = src.IndexOf("static async Task JutWriteStream", StringComparison.Ordinal);
+        Assert.True(i > 0);
+        string block = src.Substring(i, Math.Min(1600, src.Length - i));
+        Assert.Contains("idle.CancelAfter(TimeSpan.FromSeconds(idleSec))", block);
+        // токен доходит до чтения тела
+        Assert.Contains("src.ReadAsync(buf, 0, buf.Length, ct)", block);
+    }
+
+    [Fact]
+    public void Медиа_клиент_остаётся_с_бесконечным_таймаутом()
+    {
+        // Регресс инварианта §AL: общий таймаут HttpClient режет чтение ТЕЛА,
+        // ResponseHeadersRead от этого не спасает.
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuHttp.cs")));
+        int i = src.IndexOf("public static HttpClient Media", StringComparison.Ordinal);
+        Assert.True(i > 0, "медиа-клиент не найден");
+        string block = src.Substring(i, Math.Min(400, src.Length - i));
+        Assert.Contains("total: null", block);
+    }
+
+    [Fact]
+    public void Idle_таймаут_отличается_от_отмены()
+    {
+        // Оба прилетают как OperationCanceledException. Отмена окончательна;
+        // idle-таймаут — штатный обрыв, .part докачивается бэкоффом.
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
+        Assert.Contains("bool idleTimeout = ex is OperationCanceledException;", src);
+        int stale = src.IndexOf("if (JutStale(it) || !JutOn) { JutSetState(job, \"canceled\"); return; }",
+                                StringComparison.Ordinal);
+        int idle = src.IndexOf("bool idleTimeout", StringComparison.Ordinal);
+        Assert.True(stale > 0 && idle > stale, "проверка отмены обязана идти ПЕРЕД разбором idle");
+    }
+
+    // ── джоба прогрева кеша тайтлов ───────────────────────────────────────
+
+    [Fact]
+    public void Прогрев_греет_скачанное_подписки_и_недавно_открытое()
+    {
+        // Решение владельца: «джоба, пусть обновляется 2 раза в сутки», греем
+        // «скачанное + подписки + недавно открытое».
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
+        int i = src.IndexOf("internal static async Task JutWarmTitles", StringComparison.Ordinal);
+        Assert.True(i > 0, "джоба прогрева не найдена");
+        string block = src.Substring(i, Math.Min(2600, src.Length - i));
+
+        Assert.Contains("JutDownloadRoot()", block);       // скачанное
+        Assert.Contains("JutLoadWatch()", block);          // подписки
+        Assert.Contains("_jutSeen", block);                // недавно открытое
+        Assert.Contains("JutCacheWrite(\"title\"", block); // результат ложится в кеш
+    }
+
+    [Fact]
+    public void Прогрев_идёт_под_фоновым_гейтом_и_с_темпом()
+    {
+        // ⚠️ Прогрев не имеет права отбирать слоты у карточек, которые пользователь
+        // открывает прямо сейчас, и обязан щадить конечный бюджет прокси-выходов (§BB.5).
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
+        int i = src.IndexOf("internal static async Task JutWarmTitles", StringComparison.Ordinal);
+        string block = src.Substring(i, Math.Min(2600, src.Length - i));
+
+        Assert.Contains("JutNet.BackgroundScope()", block);
+        Assert.Contains("jutWarmPaceMs", block);
+        Assert.Contains("jutWarmTitlesPerRun", block);
+        // выключатель проверяется в начале и в цикле
+        Assert.Contains("if (!JutOn) return;", block);
+        Assert.Contains("if (!JutOn) break;", block);
+    }
+
+    [Fact]
+    public void Прогрев_выключается_нулём_часов()
+    {
+        // Киллсвитч правкой init.conf, без пересборки образа.
+        Assert.Equal(12, new ModuleConf().jutWarmIntervalHours);
+        string src = Strip(File.ReadAllText(ModuleFile("ModInit.cs")));
+        Assert.Contains("if (warmHours > 0)", src);
+    }
+
+    [Fact]
+    public void Выгрузка_модуля_доводит_кеш_до_диска()
+    {
+        // Окно дебаунса writer'а — 200 мс. Без Flush в Dispose выгрузка модуля теряла бы
+        // ещё не записанные маркер и activity.
+        string src = Strip(File.ReadAllText(ModuleFile("ModInit.cs")));
+        int i = src.IndexOf("public void Dispose", StringComparison.Ordinal);
+        Assert.True(i > 0);
+        Assert.Contains("JsonStore.Flush()", src.Substring(i));
+    }
+
+    [Fact]
+    public void Пустое_добавление_не_создаёт_фантомный_job()
+    {
+        // 🔥 Найдено при проверке на боевом: GetOrAdd до цикла оставлял у тайтла,
+        // где всё уже скачано, запись state="queued" с filesTotal=0 — статус врал
+        // про работу, которой нет.
+        string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
+        int gate = src.IndexOf("if (queued > 0)", StringComparison.Ordinal);
+        int add = src.IndexOf("_jutJobs.GetOrAdd(slug", StringComparison.Ordinal);
+        Assert.True(gate > 0 && add > gate, "job обязан создаваться ВНУТРИ ветки queued > 0");
+        Assert.Contains("JutGrabJob job = null;", src);
+    }
+
     // ── 6. мёртвый конфиг ─────────────────────────────────────────────────
 
     [Fact]
