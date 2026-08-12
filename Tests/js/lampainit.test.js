@@ -238,6 +238,38 @@ test('lampainit: appload injects <style id="qdl-hide-extras"> into document.head
   assert.match(st.textContent, /feed-head__info/);
 });
 
+// qdl 2.39: вход в настройки Lampa скрыт у ВСЕХ клиентов, открывает кука qdl_unlock=1
+// (владелец сетит её скриптом в консоли браузера). Платформенных веток тут нет.
+test('lampainit: без куки qdl_unlock прячет шестерёнку и пункт меню «Настройки»', () => {
+  const doc = H.makeDocument();
+  const { mod } = H.loadLampaInit({ document: doc });
+  mod.appload();
+  const css = doc.getElementById('qdl-hide-extras').textContent;
+  assert.match(css, /\.head__action\.open--settings\{display:none!important\}/);
+  assert.match(css, /\.menu__item\[data-action="settings"\]\{display:none!important\}/);
+  assert.match(css, /feed-head__info/, 'остальные правила на месте');
+});
+
+test('lampainit: с кукой qdl_unlock=1 настройки видны, прочие скрытия не трогаются', () => {
+  const doc = H.makeDocument();
+  doc.cookie = 'a=1; qdl_unlock=1; b=2';
+  const { mod } = H.loadLampaInit({ document: doc });
+  mod.appload();
+  const css = doc.getElementById('qdl-hide-extras').textContent;
+  assert.ok(css.indexOf('open--settings') === -1, 'шестерёнка остаётся видимой');
+  assert.ok(css.indexOf('[data-action="settings"]') === -1, 'пункт меню остаётся видимым');
+  assert.match(css, /feed-head__info/);
+  assert.match(css, /\.head__action\.open--profile/, 'безусловные скрытия CUB не зависят от куки');
+});
+
+test('lampainit: похожая кука не разблокирует настройки', () => {
+  const doc = H.makeDocument();
+  doc.cookie = 'xqdl_unlock=1; qdl_unlock=0';
+  const { mod } = H.loadLampaInit({ document: doc });
+  mod.appload();
+  assert.match(doc.getElementById('qdl-hide-extras').textContent, /open--settings/);
+});
+
 test('lampainit: appload does not re-inject style when one already exists', () => {
   const doc = H.makeDocument();
   // pre-seed an existing style with that id

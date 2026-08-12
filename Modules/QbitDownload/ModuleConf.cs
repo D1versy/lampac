@@ -156,6 +156,16 @@ public class ModuleConf : ModuleBaseConf
     // ДОПОЛНЯЕТ заполненную коллекцию → дубли. Дефолт живёт в SearchMonitor._defaultCanaries.
     public List<string> searchMonitorTitles { get; set; }
 
+    // ── Хелс-чеки внешних сервисов (Health.cs, экран «Хелс-чеки» в настройках) ──
+    // Пустая строка = сервис показывается как «выключен» (⏸), а не как сбой.
+    // Адреса FlareSolverr и JacRed webapi ЗАДУБЛИРОВАНЫ здесь намеренно: их конфиг живёт
+    // в модуле JacRed, а модули компилируются Roslyn'ом в отдельные сборки и не видят друг
+    // друга. Дефолты совпадают с боевыми (docker-compose + JacRed/ModInit) — если поменяете
+    // адрес там, поправьте и здесь, иначе хелс-чек будет врать про живой сервис.
+    public int healthCacheSeconds { get; set; } = 30;      // общий кеш ответа /qdl/health
+    public string healthFlaresolverrUrl { get; set; } = "http://flaresolverr:8191";
+    public string healthJacredWebApi { get; set; } = "http://ns3bg91xvuqfvq9h.cfhttp.top";
+
     // ── bitmagnet: локальный индекс DHT-краулера (Postgres на хосте) ──
     // Ищем ТОЛЬКО по TMDB id карточки, а не по названию: совпадение точное, поэтому чужой фильм
     // притащить нельзя в принципе. Свободный текстовый поиск сознательно не делаем — в базе

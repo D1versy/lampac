@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.38';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
+window.qdl_fork_version = '2.39';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
 // Лампа готова для использования
@@ -60,7 +60,7 @@ lampainit_invc.appload = function appload() {
     if (!document.getElementById('qdl-hide-extras')) {
       var st = document.createElement('style');
       st.id = 'qdl-hide-extras';
-      st.textContent = '.feed-head__info{display:none!important}'
+      var css = '.feed-head__info{display:none!important}'
         + '.head__action.open--profile{display:none!important}'
         + '[data-component="account"]{display:none!important}'
         + '.menu__item[data-action="about"]{display:none!important}'
@@ -72,6 +72,15 @@ lampainit_invc.appload = function appload() {
         // тогда CSS прячет уцелевший upstream-колокольчик и пункты меню Релизы/Расписание/Подписки
         + '.head__action.notice--icon{display:none!important}'
         + '.menu__item[data-action="relise"],.menu__item[data-action="timetable"],.menu__item[data-action="subscribes"]{display:none!important}';
+      // qdl 2.39: вход в настройки Lampa скрыт У ВСЕХ (и в вебе тоже) — открывает кука qdl_unlock=1,
+      // владелец сетит её скриптом в консоли браузера (рецепт: медиасервер claude/04-operations.md).
+      // Приложения куку не имеют → у них настроек нет. Платформенных веток здесь сознательно НЕТ.
+      // display:none безопасен для пульта: navigator Lampa пропускает скрытые элементы.
+      // Тот же однострочник продублирован в qdl.js (qdlUnlocked) — общего кода между файлами нет.
+      if (!/(?:^|;\s*)qdl_unlock=1/.test(document.cookie || ''))
+        css += '.head__action.open--settings{display:none!important}'
+             + '.menu__item[data-action="settings"]{display:none!important}';
+      st.textContent = css;
       document.head.appendChild(st);
     }
 

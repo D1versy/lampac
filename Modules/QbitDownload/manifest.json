@@ -19,6 +19,7 @@
     "CubExtensions.cs",
     "AppReplace.cs",
     "SearchMonitor.cs",
+    "Health.cs",
     "LocalIndex.cs",
     "IndexCrawler.cs",
     "JutSuParse.cs",

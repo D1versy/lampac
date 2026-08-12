@@ -870,6 +870,14 @@
         if (mode === 'always') return true;
         return window.d1vision_platform === 'ios' && window.d1vision_network === 'cellular';
     }
+    // Скрытый функционал (настройки Lampa, транскод/удаление в карточке, экран «Хелс-чеки»)
+    // виден только при куке qdl_unlock=1 — владелец сетит её один раз скриптом в консоли
+    // браузера (рецепт: медиасервер claude/04-operations.md). Приложения куку не имеют →
+    // скрыто у всех по умолчанию, включая веб. Тот же однострочник продублирован
+    // в lampainit-invc.js (CSS-гейт шестерёнки/пункта меню) — общего кода между файлами нет.
+    function qdlUnlocked() {
+        try { return /(?:^|;\s*)qdl_unlock=1/.test(document.cookie || ''); } catch (e) { return false; }
+    }
     // audio: 'o' (ориг) | 'eN' (встроенная) | 'd<id>' (озвучка по студии). Внешняя → ВСЕГДА HLS (домешиваем).
     function streamUrl(hash, index, audio) {
         var ext = audio && (audio.charAt(0) === 'f' || audio.charAt(0) === 'd');
@@ -2034,7 +2042,7 @@
             { title: '▶ Смотреть (оффлайн)', act: 'play' },
             { title: '🔊 Озвучка', act: 'audio' }
         ];
-        if (canTranscode(t)) items.push({ title: '🎬 Транскодировать в MP4 (для браузера)', act: 'mp4' });
+        if (canTranscode(t) && qdlUnlocked()) items.push({ title: '🎬 Транскодировать в MP4 (для браузера)', act: 'mp4' });
         // Слежение: у торрентов — по infohash, у jut.su — по slug в своём контуре.
         // ⚠️ Торрентная ветка гейтится по !local (ей нужен живой торрент и links/<hash>.json),
         // а jut-карточка ВСЕГДА local — из-за этого пункт был не виден вообще (жалоба владельца).
@@ -2054,7 +2062,7 @@
         // в под-гриде коллекции — «Убрать», в общем гриде/карточке — «Добавить»
         if (ctx && ctx.collection) items.push({ title: '📁 Убрать из коллекции', act: 'uncol' });
         else items.push({ title: '📁 Добавить в коллекцию', act: 'addcol' });
-        items.push({ title: '🗑 Удалить (с файлами)', act: 'del' });
+        if (qdlUnlocked()) items.push({ title: '🗑 Удалить (с файлами)', act: 'del' });
 
         Lampa.Select.show({
             title: (t.meta && t.meta.title) || t.name,
@@ -2218,7 +2226,7 @@
                 }),
                 onSelect: function (a) {
                     Lampa.Controller.toggle('content');
-                    if (a.t.codec === 'hevc' || a.t.codec === 'av1')
+                    if (qdlUnlocked() && (a.t.codec === 'hevc' || a.t.codec === 'av1'))
                         Lampa.Noty.show(a.t.codec.toUpperCase() + ': в браузере без транскода не заиграет (после загрузки — долгое нажатие → «Транскодировать в MP4»)');
                     var q = a.t.magnet
                         ? ('magnet=' + encodeURIComponent(a.t.magnet))
@@ -3943,6 +3951,58 @@
         this.destroy = function () { scroll.destroy(); html.remove(); };
     }
 
+    // ── Экран «Хелс-чеки» в настройках (qdl 2.39). Виден только при куке qdl_unlock=1:
+    // без неё компонент вообще не регистрируется (плитку раздела иначе не скрыть).
+    // Данные — GET /qdl/health (сервер кеширует ответ ~30 с, поллинга нет: перезапрос
+    // при каждом открытии экрана + строка «Обновить»).
+    var HEALTH_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 12h4l2.5-6 4 12 2.5-6h5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    function healthRow(s) {
+        var mark = s.status === 'ok' ? '✅' : s.status === 'off' ? '⏸' : '❌';
+        return '<div class="settings-param selector" data-static="true">'
+            + '<div class="settings-param__name">' + mark + ' ' + esc(s.name || s.id)
+            + (s.ms ? ' <span style="opacity:.55;font-size:.85em">' + (+s.ms || 0) + ' мс</span>' : '') + '</div>'
+            + (s.detail ? '<div class="settings-param__descr">' + esc(String(s.detail)) + '</div>' : '')
+            + '</div>';
+    }
+    function renderHealth(body) {
+        var list = body.find('.qdl-health-list');
+        var bindRefresh = function () {
+            try { list.find('.qdl-health-refresh').on('hover:enter click', function () { renderHealth(body); }); } catch (e) {}
+            try { Lampa.Params.listener.send('update_scroll'); } catch (e) {}   // после динамической вставки (образец parental_control)
+        };
+        list.html('<div class="settings-param"><div class="settings-param__name">Проверяю…</div></div>');
+        req(API + '/qdl/health', function (r) {
+            var groups = {}, order = [];
+            ((r && r.services) || []).forEach(function (s) {
+                var g = s.group || 'Прочее';
+                if (!groups[g]) { groups[g] = []; order.push(g); }
+                groups[g].push(s);
+            });
+            var html = '<div class="settings-param selector qdl-health-refresh"><div class="settings-param__name">↻ Обновить</div></div>';
+            order.forEach(function (g) {
+                html += '<div class="settings-param-title"><span>' + esc(g) + '</span></div>';
+                groups[g].forEach(function (s) { html += healthRow(s); });
+            });
+            if (!order.length) html += '<div class="settings-param"><div class="settings-param__name">Пусто</div></div>';
+            list.html(html);
+            bindRefresh();
+        }, function () {
+            list.html('<div class="settings-param selector qdl-health-refresh"><div class="settings-param__name">❌ /qdl/health недоступен — повторить</div></div>');
+            bindRefresh();
+        });
+    }
+    function registerHealthSettings() {
+        if (window.qdl_health_settings || !qdlUnlocked()) return;   // гард от двойной регистрации (паттерн Transcoding/backup)
+        if (!window.Lampa || !Lampa.SettingsApi || !Lampa.SettingsApi.addComponent) return;
+        window.qdl_health_settings = true;
+        Lampa.SettingsApi.addComponent({ component: 'qdl_health', icon: HEALTH_ICON, name: 'Хелс-чеки' });
+        // ⚠️ строго ПОСЛЕ addComponent: он сам ставит пустой шаблон settings_qdl_health и перетёр бы наш
+        Lampa.Template.add('settings_qdl_health', '<div><div class="qdl-health-list"></div></div>');
+        Lampa.Settings.listener.follow('open', function (e) {
+            if (e && e.name === 'qdl_health') renderHealth(e.body);
+        });
+    }
+
     function start() {
         Lampa.Component.add('qdl_downloads', ComponentDownloads);
         Lampa.Component.add('qdl_episodes', ComponentEpisodes);
@@ -3958,6 +4018,7 @@
         startMenuWatcher();
         startHeaderNotiWatcher();
         startPlayerFsWatcher();
+        try { registerHealthSettings(); } catch (e) {}   // «Хелс-чеки» в настройках (только при куке qdl_unlock)
         pollNotifications();
         try { initSelectFix(); } catch (e) {}            // фикс скролла селектбоксов (upstream mheight-баг)
         try { initTimelineMirror(); } catch (e) {}       // аварийный фолбэк зеркала (режим 'auto', см. qdl 2.18)

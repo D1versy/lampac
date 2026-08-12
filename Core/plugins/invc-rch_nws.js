@@ -33,7 +33,9 @@ window.rch_nws[hostkey].typeInvoke = function rchtypeInvoke(host, call) {
       call();
     };
 
-    if (Lampa.Platform.is('android') || Lampa.Platform.is('tizen')) check(true);
+    // qdl 2.39: вердикт без сети (проба CORS на github.com в браузере падала всегда — тот же 'web').
+    // ⚠️ if (true) не убирать: без него else ниже повисает = SyntaxError. Тест: Tests/js/rch-cors.test.js
+    if (true) check(Lampa.Platform.is('android') || Lampa.Platform.is('tizen'));/*qdl-cut:rch-cors*/
     else {
       var net = new Lampa.Reguest();
       net.silent('{localhost}'.indexOf(location.host) >= 0 ? 'https://github.com/' : host + '/cors/check', function() {
