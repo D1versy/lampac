@@ -61,7 +61,12 @@ function rig(files, percents) {
   const comp = new qdl.ComponentCard({ qdl: ITEM });
   comp.activity = { loader() {}, toggle() {} };
   w.$('body').append(comp.create());
-  return { w, doc, calls, comp };
+  return { w, doc, calls, comp, lampa };
+}
+
+// прогресс просмотра серии — как после возврата из плеера
+function watched(lampa, tl, pct) {
+  lampa.Timeline._store['hqdltl:' + tl] = { percent: pct, time: 0, duration: 0, handler() {} };
 }
 
 test('сериал с прогрессом → [Продолжить · S1 · Серия 2][Смотреть], обе кнопки в ряду', () => {
@@ -98,6 +103,59 @@ test('ничего не смотрели → «Продолжить» нет, о
 test('фильм (один файл) → «Продолжить» не появляется даже с прогрессом', () => {
   const { doc } = rig([EPISODES[0]], [42]);
   assert.strictEqual(doc.querySelectorAll('.qdl-continue').length, 0, 'продолжать нечего — хватит «Смотреть»');
+});
+
+// 🔥 Жалоба владельца 14.08.2026: посмотрел серию — подпись всё равно ведёт на первую.
+// Экран карточки создаётся ОДИН раз, а возврат из плеера/списка серий его только показывает,
+// поэтому кнопка обязана пересчитываться в start().
+test('возврат на карточку после просмотра → подпись переезжает на следующую серию', () => {
+  const { doc, comp, lampa, calls } = rig(EPISODES, [100, 42]);
+  const before = doc.querySelector('.qdl-continue');
+  assert.strictEqual(before.textContent.trim(), 'Продолжить · S1 · Серия 2');
+
+  watched(lampa, 'jut:show:s1e2', 100);   // досмотрели вторую и вышли
+  comp.start();
+
+  const after = doc.querySelector('.qdl-continue');
+  assert.strictEqual(after.textContent.trim(), 'Продолжить · S1 · Серия 3', 'подпись свежая');
+  assert.strictEqual(after, before, 'узел тот же — фокус пульта на месте');
+  assert.strictEqual(calls.appended.length, 1, 'в коллекцию навигатора кнопка добавлена один раз');
+  assert.strictEqual(doc.querySelectorAll('.qdl-continue').length, 1, 'дубля кнопки нет');
+});
+
+test('старый надкус первой серии не перетягивает подпись на себя', () => {
+  const { doc } = rig(EPISODES, [12, 100]);   // 1-ю когда-то потыкали, 2-ю досмотрели
+  assert.strictEqual(doc.querySelector('.qdl-continue').textContent.trim(), 'Продолжить · S1 · Серия 3');
+});
+
+test('досмотрели всё → «Продолжить» уходит с карточки при возврате', () => {
+  const { doc, comp, lampa } = rig(EPISODES, [100, 42]);
+  assert.ok(doc.querySelector('.qdl-continue'), 'кнопка была');
+
+  watched(lampa, 'jut:show:s1e2', 100);
+  watched(lampa, 'jut:show:s1e3', 100);
+  comp.start();
+
+  assert.strictEqual(doc.querySelectorAll('.qdl-continue').length, 0, 'продолжать больше нечего');
+  assert.strictEqual(doc.querySelectorAll('.qdl-watch').length, 1, '«Смотреть» осталась');
+});
+
+test('кнопка появляется при возврате, даже если при первом открытии её не было', () => {
+  const { doc, comp, lampa, calls } = rig(EPISODES, []);
+  assert.strictEqual(doc.querySelectorAll('.qdl-continue').length, 0);
+
+  watched(lampa, 'jut:show:s1e1', 100);
+  comp.start();
+
+  assert.strictEqual(doc.querySelector('.qdl-continue').textContent.trim(), 'Продолжить · S1 · Серия 2');
+  assert.strictEqual(calls.appended.length, 1, 'новая кнопка зарегистрирована в навигаторе');
+});
+
+test('destroy помечает экран мёртвым — async-колбэки не трогают чужой DOM', () => {
+  const { comp } = rig(EPISODES, [100, 42]);
+  assert.ok(!comp.destroyed);
+  comp.destroy();
+  assert.strictEqual(comp.destroyed, true, 'гарды self.destroyed в create() наконец работают');
 });
 
 // Жалоба владельца (2.34): «кнопка на аниме „Смотреть“ теперь под текстом описания». Пока экран

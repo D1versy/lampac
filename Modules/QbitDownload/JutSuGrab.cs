@@ -169,7 +169,7 @@ public partial class QbitController
         };
     }
 
-    static string JutKindParam(JutEpKind k) => k switch
+    internal static string JutKindParam(JutEpKind k) => k switch
     {
         JutEpKind.Film => "film",
         JutEpKind.Ova => "ova",
@@ -177,6 +177,45 @@ public partial class QbitController
         JutEpKind.Special => "special",
         _ => "episode"
     };
+
+    // Обратный разбор НАШЕГО имени файла — точная инверсия JutFileName. Якорь на КОНЕЦ базы
+    // имени обязателен: у слага вида «film-noir-…» иначе сработает разбор экстры.
+    static readonly Regex _jutNameEpRx =
+        new Regex(@"\.s(\d+)e(\d+)(?:\.\d{3,4}p)?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    static readonly Regex _jutNameKindRx =
+        new Regex(@"\.(film|ova|gameova|sp)(\d+)(?:\.\d{3,4}p)?$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Имя файла jut → (вид, сезон, номер). Общий ParseEp тут не годится и врёт:
+    /// «&lt;slug&gt;.film1.1080p» он читает как СЕРИЮ 1 (фильм получал ключ таймлайна первой
+    /// серии и её отметку просмотра), «ova2» — как kind=OVA, то есть без ключа вовсе,
+    /// а серии ≥1000 не берёт совсем из-за \d{1,3}.
+    /// Разбор наших же имён точен по построению — гадать не нужно.
+    /// </summary>
+    internal static bool TryParseJutFileName(string baseNoExt, out JutEpKind kind, out int season, out int num)
+    {
+        kind = JutEpKind.Episode; season = 1; num = -1;
+        string s = baseNoExt ?? "";
+
+        var m = _jutNameEpRx.Match(s);
+        if (m.Success)
+        {
+            if (!int.TryParse(m.Groups[1].Value, out season) || !int.TryParse(m.Groups[2].Value, out num)) return false;
+            if (season <= 0) season = 1;
+            return num >= 0;
+        }
+
+        m = _jutNameKindRx.Match(s);
+        if (!m.Success || !int.TryParse(m.Groups[2].Value, out num)) return false;
+        kind = m.Groups[1].Value.ToLowerInvariant() switch
+        {
+            "film" => JutEpKind.Film,
+            "ova" => JutEpKind.Ova,
+            "gameova" => JutEpKind.GameOva,
+            _ => JutEpKind.Special
+        };
+        return true;
+    }
 
     #endregion
 

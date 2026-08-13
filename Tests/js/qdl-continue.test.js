@@ -69,6 +69,56 @@ test('chooseContinue: <5% не считается прогрессом (случ
   assert.strictEqual(qdl.chooseContinue(vidsOf([3, 0, 0]), viewOf), null);
 });
 
+// 🔥 Жалоба владельца (14.08.2026): «посмотрел серию с jut.su, отметилась, а „Продолжить“
+// ведёт на первую». Причина — старый надкус 1-й серии (открыл на пару минут месяц назад)
+// выигрывал у свежего досмотра, потому что «последняя на паузе» искалась по ВСЕМУ списку.
+// Правило: серия на паузе ЛЕВЕЕ последней досмотренной — это брошенный хвост, а не «продолжить».
+test('chooseContinue: старый надкус ДО последней досмотренной не перебивает её (баг 14.08.2026)', () => {
+  const v = vidsOf([12, 0, 0, 0, 100, 0, 0]);
+  assert.strictEqual(qdl.chooseContinue(v, viewOf), v[5], 'ждём серию после досмотренной, а не первую');
+});
+
+test('chooseContinue: пауза ПОСЛЕ последней досмотренной по-прежнему выигрывает', () => {
+  const v = vidsOf([12, 0, 100, 40, 0]);
+  assert.strictEqual(qdl.chooseContinue(v, viewOf), v[3]);
+});
+
+// Порядок массива не должен решать: локальная (jut) ветка /qdl/episodes отдавала файлы
+// в лексикографическом порядке по пути — s1e100 между s1e10 и s1e11, film/ova в начале.
+test('chooseContinue: порядок массива не важен — считаем по номерам серий', () => {
+  const mk = (epkey, p) => ({ name: 'show.' + epkey + '.mp4', epkey: epkey, _p: p });
+  const shuffled = [mk('s1e10', 0), mk('s1e2', 100), mk('s1e1', 100), mk('s1e11', 0), mk('s1e3', 0)];
+  const cur = qdl.chooseContinue(shuffled, viewOf);
+  assert.strictEqual(cur.epkey, 's1e3', 'после s1e2 идёт s1e3, хотя в массиве он последний');
+});
+
+test('chooseContinue: экстры (film/ova) не предлагаются как «следующая серия»', () => {
+  const mk = (epkey, p) => ({ name: 'show.' + epkey + '.mp4', epkey: epkey, _p: p });
+  const v = [mk('film1', 0), mk('s1e1', 100), mk('s1e2', 100)];
+  assert.strictEqual(qdl.chooseContinue(v, viewOf), null, 'сезон досмотрен — фильм сам себя не предлагает');
+});
+
+test('chooseContinue: начатая экстра всё-таки продолжается', () => {
+  const mk = (epkey, p) => ({ name: 'show.' + epkey + '.mp4', epkey: epkey, _p: p });
+  const v = [mk('ova1', 45), mk('s1e1', 100), mk('s1e2', 100)];
+  assert.strictEqual(qdl.chooseContinue(v, viewOf).epkey, 'ova1');
+});
+
+test('chooseContinue: следующий сезон, а не следующий индекс', () => {
+  const mk = (s, e, p) => ({ name: 'show.s' + s + 'e' + e + '.mp4', epkey: 's' + s + 'e' + e, season: s, _p: p });
+  const v = [mk(2, 1, 0), mk(1, 1, 100), mk(1, 2, 100)];
+  assert.strictEqual(qdl.chooseContinue(v, viewOf).epkey, 's2e1');
+});
+
+test('sortEpisodes: не мутирует вход и возвращает ТЕ ЖЕ объекты (indexOf/=== в вызывающих)', () => {
+  const v = vidsOf([0, 0, 0]);
+  const copy = v.slice();
+  const sorted = qdl.sortEpisodes(v);
+  assert.deepStrictEqual(v, copy, 'исходный массив на месте');
+  assert.notStrictEqual(sorted, v, 'вернулась копия');
+  sorted.forEach((f) => assert.ok(v.indexOf(f) !== -1, 'элементы — те же ссылки'));
+});
+
 // ─────────────────────────────── epShort ───────────────────────────────
 
 test('epShort: SxxExx, «серия N», голый номер, длинный фолбэк', () => {

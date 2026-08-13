@@ -491,14 +491,16 @@
             .sort(function (a, b) { return String(a.name).localeCompare(String(b.name), undefined, { numeric: true }); });
     }
 
-    // объединённый список /qdl/episodes уже отсортирован сервером (season, ep) — имена донора и
-    // основной вперемешку сортируются НЕПРАВИЛЬНО, поэтому при наличии epkey порядок не трогаем
+    // Сортировать по ИМЕНИ можно только когда номеров серий нет: имена донора и основной
+    // вперемешку сортируются неправильно. Есть epkey — раскладываем по (вид, сезон, номер):
+    // локальная (jut) ветка /qdl/episodes отдаёт файлы лексикографически по пути, да и
+    // 45-секундный _epCache может держать ответ старого сервера.
     function mergedVideoFiles(files) {
         files = files || [];
         var hasEp = false;
         for (var i = 0; i < files.length; i++) if (files[i] && files[i].epkey) { hasEp = true; break; }
         if (!hasEp) return videoFiles(files);
-        return files.filter(function (f) { return /\.(mkv|mp4|avi|ts|m4v|webm|mov)$/i.test((f && f.name) || ''); });
+        return sortEpisodes(files.filter(function (f) { return /\.(mkv|mp4|avi|ts|m4v|webm|mov)$/i.test((f && f.name) || ''); }));
     }
 
     // серия может лежать в раздаче-доноре (охота) — стрим/аудио строим от её hash
@@ -605,9 +607,11 @@
     }
 
     // номер серии для бейджа на экране серий: epkey сервера (s1e4) → 4, иначе парс имени
-    // (та же цепочка, что epShort), иначе null (вызывающий подставит порядковый)
+    // (та же цепочка, что epShort), иначе null (вызывающий подставит порядковый).
+    // Хвостовые цифры, а не «e(\d+)»: epkey бывает и у экстр (film1/ova2/sp3) — им тоже нужен
+    // номер, иначе экстры сортируются как «без номера» и валятся в конец кучей.
     function epNumber(f) {
-        var m = /e(\d+)$/i.exec(String((f && f.epkey) || ''));
+        var m = /(\d+)$/.exec(String((f && f.epkey) || ''));
         if (m) return parseInt(m[1], 10);
         var b = stripExt(baseName((f && f.name) || ''));
         m = /S(\d+)[\s._-]*E(\d+)/i.exec(b);
@@ -619,23 +623,75 @@
         return null;
     }
 
-    // Что продолжать: (1) ПОСЛЕДНЯЯ серия на паузе (5–90%) — досмотреть её;
-    // (2) иначе серия после последней досмотренной (≥90%), которая ещё не досмотрена;
-    // (3) прогресса нет / всё досмотрено → null (кнопка не показывается)
-    function chooseContinue(vids, viewFn) {
-        var i, p;
-        for (i = vids.length - 1; i >= 0; i--) {
-            p = (viewFn(vids[i]) || {}).percent || 0;
-            if (p >= 5 && p < 90) return vids[i];
+    // Вид серии: обычные идут первыми, экстры (фильм/OVA/спецвыпуск) — после них.
+    // Источник — epkey сервера (s1e7 / film1 / ova2 / gameova1 / sp3). Файлы без epkey
+    // (торренты, старый сервер) считаем обычными сериями — порядок и поведение как раньше.
+    function epKindRank(f) {
+        var k = String((f && f.epkey) || '');
+        if (!k || /^s\d+e\d+$/i.test(k)) return 0;
+        if (/^film\d*$/i.test(k)) return 1;
+        if (/^ova\d*$/i.test(k)) return 2;
+        if (/^gameova\d*$/i.test(k)) return 3;
+        return 4;
+    }
+
+    // Сезон серии: поле сервера → epkey → имя файла → 1 (односезонные аниме сезон не пишут)
+    function epSeason(f) {
+        if (f && f.season > 0) return f.season;
+        var m = /^s(\d+)e\d+$/i.exec(String((f && f.epkey) || ''));
+        if (m) return parseInt(m[1], 10);
+        m = /S(\d+)[\s._-]*E\d+/i.exec(stripExt(baseName((f && f.name) || '')));
+        return m ? parseInt(m[1], 10) : 1;
+    }
+
+    // 🔥 Порядок массива ≠ порядок серий. Локальная (jut) ветка /qdl/episodes отдаёт файлы
+    // лексикографически по пути: s1e100 попадает между s1e10 и s1e11, а film/ova встают В НАЧАЛО.
+    // «Продолжить» же считалась по ИНДЕКСАМ — отсюда промахи на длинных тайтлах и на тайтлах
+    // с экстрами. Сортируем копию, но ТЕМИ ЖЕ ссылками: vids.indexOf(cur) и r.f === cur
+    // у вызывающих обязаны продолжать работать.
+    // ⚠️ Исходный индекс — часть ключа сортировки: стабильность Array.prototype.sort старые
+    // движки ТВ не гарантируют (тот же приём в orderButtons).
+    var EP_NO_NUM = 1e9;   // серии без номера (экстры без цифры, RANGE) — в конец своей группы
+    function sortEpisodes(list) {
+        var keyed = (list || []).map(function (f, i) {
+            var n = epNumber(f);
+            return { f: f, i: i, k: epKindRank(f), s: epSeason(f), n: n === null ? EP_NO_NUM : n };
+        });
+        keyed.sort(function (a, b) { return (a.k - b.k) || (a.s - b.s) || (a.n - b.n) || (a.i - b.i); });
+        return keyed.map(function (x) { return x.f; });
+    }
+
+    // Что продолжать (список ОБЯЗАН быть отсортирован — см. sortEpisodes):
+    // (1) ПОСЛЕДНЯЯ серия на паузе (5–90%), но НЕ РАНЬШЕ последней досмотренной;
+    // (2) иначе первая недосмотренная ОБЫЧНАЯ серия после последней досмотренной;
+    // (3) прогресса нет / всё досмотрено → null (кнопка не показывается).
+    // 🔥 Ограничение «не раньше последней досмотренной» — фикс жалобы 14.08.2026: старый надкус
+    // первой серии (открыл на пару минут месяц назад, 12%) навсегда перебивал свежий досмотр,
+    // и «Продолжить» на аниме с jut.su вечно вела на 1-ю серию. Брошенный хвост слева — это
+    // не «продолжить», это «когда-то начинал».
+    // Экстры в (2) не предлагаем: после финала сезона «Продолжить · 1 фильм» — не то, чего ждут;
+    // но НАЧАТУЮ экстру (1) вернёт, она попадает в общий скан справа.
+    function pickContinue(sorted, viewFn) {
+        var i, p, last = -1;
+        for (i = sorted.length - 1; i >= 0; i--)
+            if (((viewFn(sorted[i]) || {}).percent || 0) >= 90) { last = i; break; }
+        for (i = sorted.length - 1; i > last; i--) {
+            p = (viewFn(sorted[i]) || {}).percent || 0;
+            if (p >= 5 && p < 90) return sorted[i];
         }
-        var last = -1;
-        for (i = vids.length - 1; i >= 0; i--) {
-            if (((viewFn(vids[i]) || {}).percent || 0) >= 90) { last = i; break; }
-        }
-        if (last >= 0) {
-            for (i = last + 1; i < vids.length; i++)
-                if (((viewFn(vids[i]) || {}).percent || 0) < 90) return vids[i];
-        }
+        if (last >= 0)
+            for (i = last + 1; i < sorted.length; i++)
+                if (epKindRank(sorted[i]) === 0 && ((viewFn(sorted[i]) || {}).percent || 0) < 90) return sorted[i];
+        return null;
+    }
+
+    function chooseContinue(vids, viewFn) { return pickContinue(sortEpisodes(vids), viewFn); }
+
+    // Первая непросмотренная (для автоплея, когда продолжать нечего) — тоже по номерам, не по индексу
+    function firstUnwatched(vids, viewFn) {
+        var sorted = sortEpisodes(vids);
+        for (var i = 0; i < sorted.length; i++)
+            if (epKindRank(sorted[i]) === 0 && ((viewFn(sorted[i]) || {}).percent || 0) < 90) return sorted[i];
         return null;
     }
 
@@ -1047,13 +1103,22 @@
     // и re-grab, как и сам ключ таймлайна qdltl:*), фолбэк — infohash раздачи.
     var activeEpisodesComp = null;   // текущий экран серий — для перерисовки по 'timecode_updated'
 
+    // ⚠️ Регулярка обязана резать ВСЕ виды epkey, а не только сериал: сервер выдаёт tl и экстрам
+    // (jut:<slug>:film1). Список отсортирован, но у тайтла из одних фильмов первым будет film1 —
+    // без film|ova|gameova|sp бакет стал бы 'qdl_jut:<slug>:film1', т.е. ВТОРЫМ ведром таймкодов
+    // на тот же тайтл, и прогресс разъехался бы молча.
     function tlBucket(vids, hash) {
         try {
             var f = (vids || []).filter(function (v) { return v && v.tl; })[0];
-            if (f) return 'qdl_' + String(f.tl).replace(/:s\d+e\d+$/i, '');
+            if (f) return 'qdl_' + String(f.tl).replace(/:(?:s\d+e\d+|film\d*|ova\d*|gameova\d*|sp\d*)$/i, '');
         } catch (e) {}
         return 'qdl_' + hash;
     }
+
+    // Тот же бакет со стороны онлайна: экраны jut.su не знают ни hash раздачи, ни f.tl,
+    // но ключ таймлайна у них тот же (qdltl:jut:<slug>:…), значит и ведро обязано совпасть —
+    // иначе онлайн и скачанное синкались бы в разные вёдра одного и того же тайтла.
+    function jutBucket(slug) { return 'qdl_jut:' + slug; }
 
     function setTlBucket(bucket) {
         window.qdl_timecode_card = bucket;
@@ -1262,8 +1327,17 @@
 
             if (object.qdl_autoplay && vids.length) {
                 object.qdl_autoplay = false;   // одноразово: возврат из плеера не перезапускает плей
-                var cur = chooseContinue(vids, function (f) { return pickTimeline(hash, f); });
-                comp.play(cur ? vids.indexOf(cur) : 0);
+                var vw = function (f) { return pickTimeline(hash, f); };
+                // 🔥 Было `comp.play(cur ? vids.indexOf(cur) : 0)`: когда продолжать нечего,
+                // «Продолжить» МОЛЧА запускала первый файл списка — ровно симптом жалобы
+                // 14.08.2026. Нечего продолжать → первая НЕпросмотренная (по номеру, не по
+                // индексу); досмотрено всё → начинаем сначала, но вслух.
+                var cur = chooseContinue(vids, vw) || firstUnwatched(vids, vw);
+                if (!cur) {
+                    cur = sortEpisodes(vids)[0];
+                    try { Lampa.Noty.show('Всё просмотрено — включаю с начала'); } catch (e) {}
+                }
+                comp.play(vids.indexOf(cur));
             }
         };
 
@@ -1310,6 +1384,7 @@
     }
 
     function ComponentCard(object) {
+        var comp = this;
         var item = object.qdl || {};
         var scroll = new Lampa.Scroll({ mask: true, over: true });
         var html = $('<div></div>');
@@ -1370,23 +1445,36 @@
             var self = this;
 
             // «Продолжить · S1 · Серия N» — та же логика, что на полной карточке (chooseContinue).
-            // Приезжает async: без collectionAppend кнопка была бы недостижима пультом (см. 06 §BE)
-            fetchEpisodes(item.hash, function (files) {
-                if (self.destroyed) return;
-                var vids = mergedVideoFiles(files);
-                if (vids.length < 2) return;   // фильм/одна серия — продолжать нечего, хватит «Смотреть»
-                var target = chooseContinue(vids, function (f) { return pickTimeline(item.hash, f); });
-                var bar = body.find('.qdl-card-btns');
-                if (!target || !bar.length || bar.find('.qdl-continue').length) return;
-                var b = $('<div class="qdl-continue selector" style="display:inline-flex;align-items:center;gap:.55em;padding:.75em 2em;border-radius:.6em;font-size:1.4em">' + CONTINUE_ICON + '<span></span></div>');
-                b.children('span').text('Продолжить · ' + epShort(target.name));
-                b.on('hover:enter', function () {
-                    confirmPartial(item, function () { chooseEpisode(item.hash, (m.title || item.name), true); });
+            // Приезжает async: без collectionAppend кнопка была бы недостижима пультом (см. 06 §BE).
+            // 🔥 Пересчёт живёт отдельным методом и зовётся ещё и из start(): экран создаётся ОДИН
+            // раз, а возврат из плеера/списка серий его только показывает. Без пересчёта подпись
+            // застывала на серии, с которой начинали (жалоба 14.08.2026 — «ведёт на первую»).
+            comp.refreshContinue = function () {
+                fetchEpisodes(item.hash, function (files) {
+                    if (comp.destroyed) return;
+                    var bar = body.find('.qdl-card-btns');
+                    if (!bar.length) return;
+                    var btn = bar.find('.qdl-continue');
+                    var vids = mergedVideoFiles(files);
+                    // фильм/одна серия — продолжать нечего, хватит «Смотреть»
+                    var target = vids.length < 2 ? null
+                        : chooseContinue(vids, function (f) { return pickTimeline(item.hash, f); });
+                    // Всё досмотрели → кнопка обязана уйти. Узел удаляем без починки навигатора:
+                    // toggle() этого экрана пересобирает коллекцию через collectionSet.
+                    if (!target) { if (btn.length) btn.remove(); return; }
+                    // Кнопка уже есть → правим ТОЛЬКО подпись: тот же DOM-узел = живой фокус пульта
+                    if (btn.length) { btn.children('span').text('Продолжить · ' + epShort(target.name)); return; }
+                    var b = $('<div class="qdl-continue selector" style="display:inline-flex;align-items:center;gap:.55em;padding:.75em 2em;border-radius:.6em;font-size:1.4em">' + CONTINUE_ICON + '<span></span></div>');
+                    b.children('span').text('Продолжить · ' + epShort(target.name));
+                    b.on('hover:enter', function () {
+                        confirmPartial(item, function () { chooseEpisode(item.hash, (m.title || item.name), true); });
+                    });
+                    b.on('hover:focus', function (e) { scroll.update($(e.target), true); });
+                    bar.prepend(b);
+                    navAppend(bar, b);
                 });
-                b.on('hover:focus', function (e) { scroll.update($(e.target), true); });
-                bar.prepend(b);
-                navAppend(bar, b);
-            });
+            };
+            comp.refreshContinue();
             if (!item.meta) {
                 enrich(item.name, function (card) {
                     if (!card || self.destroyed) return;
@@ -1404,6 +1492,9 @@
         this.render = function () { return html; };
         this.start = function () {
             injectCss();
+            // ДО Controller.add: toggle() пересобирает коллекцию навигатора из DOM, поэтому
+            // добавленная/удалённая здесь кнопка попадает в неё сама — navAppend не нужен
+            if (comp.refreshContinue) comp.refreshContinue();
             Lampa.Controller.add('content', {
                 toggle: function () {
                     Lampa.Controller.collectionSet(scroll.render());
@@ -1419,7 +1510,9 @@
         };
         this.pause = function () {};
         this.stop = function () {};
-        this.destroy = function () { scroll.destroy(); html.remove(); };
+        // destroyed — не косметика: на него смотрят три async-колбэка (кнопка «Продолжить»,
+        // enrich→saveMeta→Activity.replace). Флаг никогда не выставлялся, и гарды были мертвы.
+        this.destroy = function () { comp.destroyed = true; scroll.destroy(); html.remove(); };
     }
 
     // ───────── Грид «Загрузки» (вертикальные карточки-постеры) ─────────
@@ -2367,6 +2460,8 @@
 
     // «▶ Продолжить: Серия N» на карточке сериала — только когда есть что продолжать
     // (недосмотренная серия или следующая после досмотренных). Прогресс — Lampa.Timeline (это устройство).
+    // Кнопка живёт дольше одного захода на карточку, поэтому создание и ОБНОВЛЕНИЕ разведены:
+    // подпись обязана меняться после просмотра, а узел при этом обязан оставаться тем же.
     function addContinueButton(render, cont, hash, name, gateItem) {
         fetchEpisodes(hash, function (files) {
             var vids = mergedVideoFiles(files);
@@ -2378,7 +2473,9 @@
             var target = chooseContinue(vids, function (f) { return pickTimeline(hash, f); });
             var warm = target || vids[0];
             warmup(srcHash(warm, hash), warm.index);
-            if (!target || $('.qdl-continue-btn', render).length) return;
+            var exist = $('.qdl-continue-btn', render);
+            if (!target) { if (exist.length) { exist.remove(); orderButtons(cont); } return; }
+            if (exist.length) { exist.children('span').text('Продолжить · ' + epShort(target.name)); return; }
             var label = 'Продолжить · ' + epShort(target.name);
             var b = $('<div class="full-start__button selector qdl-continue-btn">' + CONTINUE_ICON + '<span>' + esc(label) + '</span></div>');
             b.on('hover:enter', function () {
@@ -2389,6 +2486,33 @@
             navAppend(cont, b);   // приехала async → в коллекции навигатора её ещё нет
             orderButtons(cont);
         });
+    }
+
+    // 🔥 Полная карточка строит кнопки по событию 'full' → 'complite', а Activity.backward()
+    // его НЕ шлёт: вернувшись из плеера/экрана серий, зритель видел подпись, посчитанную при
+    // первом открытии. Досматриваем серию — «Продолжить» обязана переехать на следующую.
+    // Ловим два момента возврата: старт восстановленной активности и закрытие плеера
+    // (плеер активность не меняет, поэтому одного 'activity' мало).
+    function initContinueRefresh() {
+        if (window.__qdl_continue_refresh) return;
+        window.__qdl_continue_refresh = true;
+        var sync = function () {
+            try {
+                var act = Lampa.Activity.active() || {};
+                var hash = act.qdl_hash;
+                if (!hash || !act.activity) return;
+                var render = act.activity.render();
+                if (!render) return;
+                var cont = $('.full-start__buttons', render);
+                if (!cont.length) cont = $('.full-start-new__buttons', render);
+                if (!cont.length) return;
+                var movie = act.card || {};
+                addContinueButton(render, cont, hash, movie.title || movie.name || '',
+                                  { progress: (typeof act.qdl_progress === 'number' ? act.qdl_progress : 1) });
+            } catch (e) {}
+        };
+        try { Lampa.Listener.follow('activity', function (e) { if (e && e.type === 'start') sync(); }); } catch (e) {}
+        try { Lampa.Player.listener.follow('destroy', function () { sync(); }); } catch (e) {}
     }
 
     function addButton(e) {
@@ -3396,6 +3520,15 @@
         catch (e) { return null; }
     }
 
+    // Правило «что продолжить» обязано быть ОДНО для онлайна и для скачанного: иначе карточка
+    // тайтла jut.su и карточка в «Загрузках» спорят между собой на одном и том же прогрессе.
+    // Онлайн-item приводим к виду, который понимают sortEpisodes/pickContinue (epkey = e.key).
+    function jutAsFile(e) { return { epkey: e.key, season: e.season, name: e.key, _jut: e }; }
+    function jutChooseContinue(items, viewFn) {
+        var cur = chooseContinue((items || []).map(jutAsFile), function (f) { return viewFn(f._jut) || {}; });
+        return cur ? cur._jut : null;
+    }
+
     function jutEpTitle(e, titleName) {
         var base = e.kind === 'film' ? (e.ep + ' фильм')
                  : e.kind === 'ova' ? ('OVA ' + e.ep)
@@ -3403,14 +3536,6 @@
                  : (e.ep + ' серия');
         if (e.name) base += ' — ' + e.name;
         return (titleName ? titleName + ' · ' : '') + base;
-    }
-
-    function jutPlaylist(slug, items, titleName) {
-        return items.map(function (e) {
-            var it = { title: jutEpTitle(e, titleName), url: API + '/qdl/jut/stream?t=' };
-            it.jut = e;
-            return it;
-        });
     }
 
     // Плеер запускается ТОЛЬКО после resolve: прямую ссылку на CDN отдавать нельзя —
@@ -3425,11 +3550,21 @@
                 var tl = jutTl(slug, e.key); if (tl) item.timeline = tl;
                 try {
                     Lampa.Player.play(item);
-                    // Плейлист сезона — чтобы работал автопереход к следующей серии
-                    var list = (siblings || [e]).filter(function (x) { return x.kind === e.kind && x.season === e.season; });
+                    // Плейлист сезона — чтобы работал автопереход к следующей серии.
+                    // 🔥 Токен обязателен: /qdl/jut/stream резолвит ссылку ПО НЕМУ, а раньше всем
+                    // элементам, кроме текущего, подставлялся пустой t= → автопереход упирался
+                    // в NotFound. Серия без tok (ответ старого сервера из кеша) в плейлист не
+                    // попадает вовсе: «нет автоперехода» честнее битой ссылки.
+                    // Порядок — общий (sortEpisodes): список сервера отсортирован, но плейлист
+                    // не должен зависеть от этого.
+                    var list = (siblings || [e]).filter(function (x) {
+                        return x.kind === e.kind && x.season === e.season && (x.key === e.key || x.tok);
+                    });
+                    list = sortEpisodes(list.map(jutAsFile)).map(function (f) { return f._jut; });
                     Lampa.Player.playlist(list.map(function (x) {
                         var pi = { title: jutEpTitle(x, titleName) };
-                        pi.url = (x.key === e.key) ? (API + r.url) : (API + '/qdl/jut/stream?t=');
+                        pi.url = (x.key === e.key) ? (API + r.url)
+                                                   : (API + '/qdl/jut/stream?t=' + encodeURIComponent(x.tok));
                         var t2 = jutTl(slug, x.key); if (t2) pi.timeline = t2;
                         return pi;
                     }));
@@ -3818,6 +3953,16 @@
             }
 
             var ep0 = firstPlayable();
+            // «Продолжить» ПЕРЕД «Смотреть» — как на карточке «Загрузок» (канон кнопок, 2.30).
+            // До 2.42 экран тайтла таймлайн не читал вовсе и всегда стартовал с первой серии,
+            // хотя claude/jut/05-client.md обещал обратное. Зелёная «Смотреть» остаётся
+            // «с начала» — это осознанно: два разных действия, а не одно с сюрпризом.
+            var curEp = jutChooseContinue(data.items, function (e) { return jutTl(slug, e.key); });
+            if (curEp) mkBtn('Продолжить · ' + jutEpTitle(curEp, ''), function () {
+                // через экран серий с автоплеем: «назад» из плеера вернёт в список, а не на тайтл
+                Lampa.Activity.push({ url: '', title: 'Серии — ' + (data.title || slug),
+                                      component: 'jut_episodes', jut_slug: slug, jut_data: data, jut_autoplay: true });
+            }, { icon: CONTINUE_ICON }).addClass('qdl-jut-continue');
             // 2.30: единый язык кнопок — зелёная «Смотреть» с play-иконкой, «Скачать» со стрелкой
             if (ep0) mkBtn('Смотреть', function () { jutPlay(slug, ep0, data.title, data.items); }, { icon: WATCH_ICON, green: true });
             mkBtn('📄 Серии', function () {
@@ -3857,8 +4002,24 @@
             this.activity.toggle();
         };
 
+        // Подпись «Продолжить» после возврата из плеера/списка серий: экран строится один раз,
+        // start() зовётся на каждом возврате. Нет цели — кнопку убираем (досмотрели всё).
+        this.refreshContinue = function () {
+            if (!data) return;
+            var cur = jutChooseContinue(data.items, function (e) { return jutTl(slug, e.key); });
+            var btn = body.find('.qdl-jut-continue');
+            if (!btn.length) return;                      // кнопки не было при build — не плодим её тут
+            if (!cur) { btn.remove(); return; }
+            btn.children('span').text('Продолжить · ' + jutEpTitle(cur, ''));
+        };
+
         this.render = function () { return html; };
         this.start = function () {
+            // Ведро серверных таймкодов тайтла. Без него онлайн-просмотры jut.su писались в ведро
+            // ПОСЛЕДНЕЙ открытой TMDB-карточки (в боевой БД так и лежит — 1275779_movie),
+            // а читать их оттуда никто никогда не приходил.
+            setTlBucket(jutBucket(slug));
+            comp.refreshContinue();
             Lampa.Controller.add('content', {
                 toggle: function () {
                     Lampa.Controller.collectionSet(scroll.render());
@@ -3874,7 +4035,7 @@
         };
         this.pause = function () {};
         this.stop = function () {};
-        this.destroy = function () { scroll.destroy(); html.remove(); };
+        this.destroy = function () { clearTlBucket(jutBucket(slug)); scroll.destroy(); html.remove(); };
     }
 
     // ───────── Экран серий jut.su ─────────
@@ -3907,6 +4068,7 @@
         function view(e) { return jutTl(slug, e.key); }
 
         this.build = function () {
+            rows = [];   // повторный build (перерисовка) иначе копил бы строки и обновлял мёртвые узлы
             if (!data || !(data.items || []).length) {
                 body.append($('<div style="width:100%;padding:2em;font-size:1.4em;opacity:.7">Серий не найдено</div>'));
                 this.activity.loader(false); this.activity.toggle(); return;
@@ -3939,23 +4101,45 @@
             this.activity.toggle();
         };
 
-        // Свежие ✓/►N% — зовётся из start() при каждом возврате, в том числе из плеера
+        // Свежие ✓/►N% — зовётся из start() при каждом возврате, в том числе из плеера.
+        // «Текущая» считается ОБЩИМ правилом (jutChooseContinue), а не местной эвристикой
+        // «первая на паузе сверху»: иначе экран серий подсвечивал одну серию, а кнопка
+        // «Продолжить» на тайтле и в «Загрузках» вела на другую.
         this.refreshMarks = function () {
             if (!rows.length) return;
-            var cur = null;
+            var cur = jutChooseContinue(data && data.items, view);
             rows.forEach(function (r) {
-                var v = view(r.e) || {};
-                var pct = v.percent || 0;
-                r.el.find('.qdl-ep-mark').text(epMark(pct));
-                if (!cur && pct >= 5 && pct < 90) cur = r;
+                r.el.find('.qdl-ep-mark').text(epMark((view(r.e) || {}).percent || 0));
+                r.el.toggleClass('qdl-ep--cur', !!cur && r.e === cur);
             });
             // Стартовый фокус на продолжаемой серии; явный выбор пользователя не перебиваем
-            if (cur && !last) last = cur.el[0];
+            if (cur && !last) {
+                var hit = rows.filter(function (r) { return r.e === cur; })[0];
+                if (hit) last = hit.el[0];
+            }
+        };
+
+        // Автоплей с кнопки «Продолжить» на карточке тайтла — та же семантика, что у qdl_autoplay
+        // на скачанном: одноразово, возврат из плеера сюда же и без перезапуска.
+        this.autoplay = function () {
+            if (!object.jut_autoplay || !data || !(data.items || []).length) return;
+            object.jut_autoplay = false;
+            var cur = jutChooseContinue(data.items, view);
+            if (!cur) {
+                var all = (data.items || []).map(jutAsFile);
+                var f = firstUnwatched(all, function (x) { return view(x._jut) || {}; });
+                cur = f ? f._jut : null;
+            }
+            if (cur) jutPlay(slug, cur, data.title, data.items);
         };
 
         this.render = function () { return html; };
         this.start = function () {
+            // одно ведро таймкодов на тайтл — общее с экраном тайтла и с «Загрузками»
+            setTlBucket(jutBucket(slug));
+            activeEpisodesComp = comp;   // мост 'timecode_updated' перерисует отметки после pull
             comp.refreshMarks();
+            comp.autoplay();
             Lampa.Controller.add('content', {
                 toggle: function () {
                     Lampa.Controller.collectionSet(scroll.render());
@@ -3971,7 +4155,11 @@
         };
         this.pause = function () {};
         this.stop = function () {};
-        this.destroy = function () { scroll.destroy(); html.remove(); };
+        this.destroy = function () {
+            if (activeEpisodesComp === comp) activeEpisodesComp = null;
+            clearTlBucket(jutBucket(slug));
+            scroll.destroy(); html.remove();
+        };
     }
 
     // ── Экран «Хелс-чеки» в настройках (qdl 2.39). Виден только при куке qdl_unlock=1:
@@ -4046,6 +4234,7 @@
         try { initSelectFix(); } catch (e) {}            // фикс скролла селектбоксов (upstream mheight-баг)
         try { initTimelineMirror(); } catch (e) {}       // аварийный фолбэк зеркала (режим 'auto', см. qdl 2.18)
         try { initTimecodeBridge(); } catch (e) {}       // перерисовка экрана серий по pull серверных таймкодов
+        try { initContinueRefresh(); } catch (e) {}      // «Продолжить» на полной карточке — свежая после возврата
         try { whenDmca(function () {}); } catch (e) {}   // прогрев DMCA-списка до первого открытия карточки
         try { setInterval(pollNotifications, 90000); } catch (e) {}   // фолбэк: основной путь — пуш по 'lwsEvent' (qdl 2.19)
     }

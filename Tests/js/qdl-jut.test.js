@@ -58,10 +58,16 @@ test('плеер запускается только после resolve (сер�
   const src = H.qdlSource();
   const i = src.indexOf('function jutPlay');
   assert.ok(i > 0);
-  const fn = src.slice(i, i + 1400);
+  // рамка — до следующей функции того же уровня, а не «i + N символов»:
+  // счётчик символов ломался от любой добавленной строки комментария
+  const fn = src.slice(i, src.indexOf('\n    function ', i + 10));
   assert.ok(fn.includes('/qdl/jut/resolve'), 'без resolve ссылки нет');
   assert.ok(fn.includes('Lampa.Player.play'), 'после resolve — запуск плеера');
   assert.ok(fn.includes('Lampa.Player.playlist'), 'плейлист сезона даёт автопереход');
+  // Автопереход N→N+1 онлайн: /qdl/jut/stream резолвит ссылку ПО ТОКЕНУ, и пустой t=
+  // у всех соседних элементов делал автопереход мёртвым (фикс 2.42)
+  assert.ok(fn.includes('encodeURIComponent(x.tok)'), 'у соседних серий — свой токен');
+  assert.ok(!/stream\?t='\s*\)/.test(fn), 'пустого t= в плейлисте быть не должно');
 });
 
 test('названия серий: фильмы и OVA не превращаются в «N серия»', () => {

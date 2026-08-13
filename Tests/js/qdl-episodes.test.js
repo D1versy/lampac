@@ -191,6 +191,34 @@ test('autoplay: играет продолжаемую серию и гаснет
   assert.strictEqual(m.obj.qdl_autoplay, false, 'флаг одноразовый');
 });
 
+// 🔥 Ровно симптом жалобы 14.08.2026: продолжать было нечего, и автоплей молча стартовал
+// vids[0] — «Продолжить» на аниме запускала ПЕРВУЮ серию.
+test('autoplay: продолжать нечего → первая НЕпросмотренная, а не первый файл списка', () => {
+  const m = mount({
+    obj: { qdl_autoplay: true },
+    before: (lampa) => {
+      lampa.Timeline.view(lampa.Utils.hash(HASH + ':Ep01')).percent = 100;
+      lampa.Timeline.view(lampa.Utils.hash(HASH + ':Ep02')).percent = 100;
+      lampa.Timeline.view(lampa.Utils.hash('dddd:Ep03')).percent = 100;   // 3-я лежит у донора → свой ключ
+    },
+  });
+  // всё досмотрено → начинаем сначала, но это осознанный фолбэк
+  assert.strictEqual(m.calls.plays.length, 1);
+  assert.strictEqual(m.calls.plays[0], m.calls.playlists[0][0], 'всё просмотрено → с начала');
+});
+
+test('autoplay: пропущенная в середине серия важнее первой', () => {
+  const m = mount({
+    obj: { qdl_autoplay: true },
+    before: (lampa) => {
+      lampa.Timeline.view(lampa.Utils.hash(HASH + ':Ep01')).percent = 100;
+      lampa.Timeline.view(lampa.Utils.hash(HASH + ':Ep03')).percent = 100;
+      // 2-ю не смотрели, при этом 3-я досмотрена → chooseContinue пуст, но 1-я НЕ вариант
+    },
+  });
+  assert.strictEqual(m.calls.plays[0], m.calls.playlists[0][1], 'играем пропущенную 2-ю');
+});
+
 // ─────────────────────────────── обновление отметок ───────────────────────────────
 
 test('refreshMarks: отметки и подсветка обновляются НА МЕСТЕ (DOM не перестраивается)', () => {

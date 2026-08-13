@@ -1862,19 +1862,52 @@ public partial class QbitController
                 // jut.su: свой префикс таймлайна, чтобы прогресс ОНЛАЙН-просмотра не потерялся
                 // после скачивания (клиент строит тот же ключ qdltl:jut:<slug>:s1e7).
                 string jutTl = (loc["jut"] as JObject)?.Value<string>("tlPrefix");
+                bool isJut = jutTl != null;
+                var rows = new List<(int kind, int season, int ep, string name, JObject o)>();
                 foreach (var f in LocalFiles(loc))
                 {
                     if (!System.IO.File.Exists(f.path)) continue;
                     var o = new JObject { ["hash"] = hash, ["index"] = f.index, ["name"] = f.name, ["size"] = f.size, ["progress"] = 1.0, ["source"] = "main" };
-                    var e = ParseEp(System.IO.Path.GetFileNameWithoutExtension(f.name ?? ""));
-                    if (e != null && e.any && e.kind == null && e.ep >= 0)
+                    string bn = System.IO.Path.GetFileNameWithoutExtension(f.name ?? "");
+                    int kindRank = 9, sn = -1, en = -1;   // sn/en, а не season/ep: имена заняты внешней областью
+                    string epkey = null;
+
+                    // Имена jut разбираем СВОИМ парсером (точная инверсия JutFileName): общий ParseEp
+                    // читает «film1» как серию 1 — фильм получал ключ таймлайна первой серии вместе
+                    // с её отметкой просмотра, — экстрам ключа не давал вовсе, а серии ≥1000 терял.
+                    if (isJut && TryParseJutFileName(bn, out var jk, out int js, out int jn))
                     {
-                        int ss = e.season > 0 ? e.season : 1;
-                        o["season"] = ss; o["episode"] = e.ep; o["epkey"] = "s" + ss + "e" + e.ep;
-                        o["tl"] = (jutTl ?? sk) + ":s" + ss + "e" + e.ep;
+                        var je = new JutEp { kind = jk, season = js, num = jn };
+                        epkey = je.epkey;
+                        kindRank = jk == JutEpKind.Episode ? 0 : jk == JutEpKind.Film ? 1
+                                 : jk == JutEpKind.Ova ? 2 : jk == JutEpKind.GameOva ? 3 : 4;
+                        sn = jk == JutEpKind.Episode ? js : 0;
+                        en = jn;
+                        if (jk == JutEpKind.Episode) { o["season"] = js; o["episode"] = jn; }
                     }
-                    arr0.Add(o);
+                    else
+                    {
+                        var e = ParseEp(bn);
+                        if (e != null && e.any && e.kind == null && e.ep >= 0)
+                        {
+                            int ss = e.season > 0 ? e.season : 1;
+                            o["season"] = ss; o["episode"] = e.ep; epkey = "s" + ss + "e" + e.ep;
+                            kindRank = 0; sn = ss; en = e.ep;
+                        }
+                    }
+
+                    if (epkey != null) { o["epkey"] = epkey; o["tl"] = (jutTl ?? sk) + ":" + epkey; }
+                    rows.Add((kindRank, sn, en, f.name ?? "", o));
                 }
+
+                // Порядок отдаём МЫ: файлы маркера лежат отсортированными по ПУТИ, то есть
+                // лексикографически — s1e100 попадал между s1e10 и s1e11, а film/ova вставали
+                // в начало списка. Клиент на этот порядок опирался («сервер уже отсортировал»),
+                // и «Продолжить» промахивалась мимо серии. Как в торрентной ветке выше:
+                // серии → экстры, внутри — по сезону и номеру; неразобранное в конец.
+                foreach (var r in rows.OrderBy(x => x.kind).ThenBy(x => x.season).ThenBy(x => x.ep)
+                                      .ThenBy(x => x.name, StringComparer.OrdinalIgnoreCase))
+                    arr0.Add(r.o);
                 return ContentTo(arr0.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
             }
 

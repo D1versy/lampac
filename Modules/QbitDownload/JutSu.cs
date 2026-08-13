@@ -331,7 +331,13 @@ public partial class QbitController
             ["name"] = e.name,
             ["arc"] = e.arcRu,
             ["watched"] = e.watched,
-            ["percent"] = e.percent
+            ["percent"] = e.percent,
+            // Токен потока на КАЖДУЮ серию: /qdl/jut/stream резолвит ссылку по нему сам, а плеер
+            // строит плейлист сезона заранее — до 2.42 у соседних серий стоял пустой t= и
+            // автопереход упирался в NotFound. Цена — один HMAC на серию, сети тут нет,
+            // подпись детерминирована и переживает рестарт (ключ персистентный), поэтому
+            // закешированный JSON тайтла остаётся валидным.
+            ["tok"] = JutNet.MakeToken(t.slug, e.season, e.num, JutKindParam(e.kind), 0)
         }))
     };
 
