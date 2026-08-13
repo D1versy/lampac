@@ -181,7 +181,9 @@ public partial class QbitController
         string slug = c["slug"]?.Value<string>();
         if (string.IsNullOrEmpty(slug)) return;
 
-        if (JutHasUpPoster(slug)) { c["pv"] = 1; return; }
+        // pv — ПОКОЛЕНИЕ кодировки, а не просто «апгрейд есть»: на ?v= стоит immutable на год,
+        // и без смены версии пережатый постер до уже показанной карточки не доедет никогда.
+        if (JutHasUpPoster(slug)) { c["pv"] = JutUpPosterGen(slug); return; }
         if (!JutPosterOn) return;
 
         var years = new List<int>();
@@ -520,6 +522,12 @@ public partial class QbitController
 
             int minW = Math.Max(1, ModInit.conf?.jutPosterMinWidth ?? 300);
             if (!JutSuMatch.ArtAcceptable(bytes, minW, out _, out _, out string ctype)) return false;
+
+            // Пережимаем ПОСЛЕ санити и только её пройдя: ArtAcceptable судит об ИСХОДНИКЕ
+            // («объективно ли это лучше квадрата 186×186»), и судить он должен именно о нём.
+            // null = не смогли или невыгодно → пишем оригинал, ровно как до этой правки.
+            byte[] enc = JutPosterEncode(bytes);
+            if (enc != null) { bytes = enc; ctype = JutSuMatch.SniffMime(enc) ?? ctype; }
 
             string path = JutUpPosterPath(slug);
             string tmp = path + ".part";

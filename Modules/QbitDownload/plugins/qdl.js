@@ -3573,6 +3573,13 @@
                 if (p === 1 && r.stale) Lampa.Noty.show('jut.su недоступен — показываю сохранённое');
                 (r.items || []).forEach(comp.append);
                 total += (r.items || []).length;
+                // 🔥 Обязательно и прокруткой НЕ заменяется: Scroll.startScroll при неизменившейся
+                // позиции уходит в ранний return и зовёт scrollEnded() только если !isFilled(),
+                // а 30 карточек экран заведомо заполняют. Без этого вызова первая страница не
+                // получит ни одного события visible и грид останется с заглушками img_load.svg.
+                // Это НЕ Controller.toggle и не activity.toggle — правило «toggle только при
+                // p === 1» ниже не затрагивается, вызов безопасен на любой странице.
+                try { Lampa.Layer.visible(scroll.render(true)); } catch (e) {}
                 if (p === 1 && total === 0) comp.empty(query ? 'Ничего не найдено' : 'Каталог пуст');
                 // 🔥 toggle ТОЛЬКО на первой странице. На догрузке он через Activity.start →
                 // Controller.toggle('content') → collectionFocus(last || false) ставил фокус на
@@ -3652,8 +3659,19 @@
                 release_year: (c.years && c.years.length ? c.years[c.years.length - 1] : '') + ''
             });
             var img = el.find('.card__img');
-            img.attr('src', jutPosterUrl(c.slug, c.pv));
             img.on('error', function () { this.src = './img/img_broken.svg'; });
+
+            // 🔥 Постер грузим ТОЛЬКО когда карточка показалась. Раньше src ставился прямо тут,
+            // и страница из 30 карточек заказывала 30 постеров разом — 6.1 МБ при лимите браузера
+            // в 6 соединений на origin. Свой lazy писать не нужно: шаблон 'card' уже несёт класс
+            // layer--visible, а Lampa.Scroll сам зовёт Layer.visible(html) в ветке else от
+            // onScroll — событие уже летит нашим карточкам, на него просто никто не подписывался.
+            // Порог Layer — ±2 экрана, то есть картинка приезжает заранее, а не в момент показа.
+            // ⚠️ Отсюда запрет: в этом компоненте НЕЛЬЗЯ задавать scroll.onScroll — это отключит
+            // ту самую ветку и убьёт ленивую загрузку молча.
+            var psrc = jutPosterUrl(c.slug, c.pv);
+            var loadPoster = function () { if (img.attr('src') !== psrc) img.attr('src', psrc); };
+            el.on('visible', loadPoster);
 
             var view = el.find('.card__view'); if (!view.length) view = el;
             if (c.ongoing)
@@ -3661,7 +3679,12 @@
             if (c.episodes)
                 view.append('<div style="position:absolute;right:.4em;top:.4em;background:rgba(0,0,0,.65);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">' + c.episodes + '</div>');
 
-            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); comp.prefetch(el); });
+            el.on('hover:focus', function () {
+                // Страховка к ленивой загрузке: сфокусированная карточка обязана быть с постером,
+                // даже если пульт обогнал Layer (зажатый ArrowDown) или событие не пришло вовсе.
+                loadPoster();
+                last = el[0]; scroll.update(el, true); comp.prefetch(el);
+            });
             el.on('hover:touch hover:hover', markLast(el));
             el.on('hover:enter', function () {
                 Lampa.Activity.push({ url: '', title: c.title || c.slug, component: 'jut_title', jut_slug: c.slug, jut_card: c });

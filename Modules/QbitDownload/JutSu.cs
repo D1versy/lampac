@@ -589,6 +589,7 @@ public partial class QbitController
             },
             ["links"] = new JObject { ["cached"] = cached, ["oldestAgeSec"] = oldest },
             ["posters"] = JutPosterStats(),
+            ["posterOptimize"] = JutPosterOptDiag(),
             ["catalogIndex"] = JutIdxDiag()
         };
 

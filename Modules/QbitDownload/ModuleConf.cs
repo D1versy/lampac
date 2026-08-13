@@ -348,6 +348,28 @@ public class ModuleConf : ModuleBaseConf
     public string jutAniListUrl { get; set; } = "https://graphql.anilist.co";
     public int jutAniListPaceMs { get; set; } = 900;       // ⚠️ лимит AniList 90/мин, в деградации 30 — темп обязателен
 
+    // ── Пережатие постеров (JutSuPosterOptimize.cs) ──
+    // AniList отдаёт обложку как есть, и часть из них — PNG: 460×650 в PNG весит 665 КБ, она же
+    // в WebP q92 — 123 КБ. На странице витрины 30 карточек, то есть 6.1 МБ против 0.72 МБ у CUB.
+    // 🔥 Качество не режем (решение владельца): разрешение родное, q92 — визуально без потерь.
+    // "none" — полный откат к побайтовому сохранению, на лету, без пересборки.
+    public string jutPosterFormat { get; set; } = "webp";  // webp|jpeg|none
+    public int jutPosterQuality { get; set; } = 92;        // кламп 40..100
+    // 0 = НЕ уменьшать (родное разрешение). >0 — кап ширины; апскейла не будет в любом случае.
+    public int jutPosterWidth { get; set; } = 0;
+    // Разовый фоновый проход по уже лежащим .up.jpg. Идемпотентен (WebP пропускается), поэтому
+    // зовётся на каждом старте и просто дорабатывает остаток.
+    public bool jutPosterReencode { get; set; } = true;
+    public int jutPosterReencodePaceMs { get; set; } = 150;
+
+    // ── Довод каталога до полноты (JutSuPosterOptimize.cs) ──
+    // Очередь апгрейда засевается только теми страницами, которые кто-то ОТКРЫЛ, поэтому из 1357
+    // тайтлов постер высокого качества был у 462. Джоба доводит остаток, переиспользуя обычный
+    // конвейер JutPosterEnqueue (дедуп, кап 500, один воркер, пейс, BackgroundScope).
+    // ⚠️ Сидер и голова каталога апгрейд по-прежнему НЕ зовут — это отдельная джоба (инвариант #3).
+    public bool jutPosterBackfill { get; set; } = true;
+    public int jutPosterBackfillBatch { get; set; } = 100;  // сколько держать в очереди, чтобы не упереться в кап 500
+
     // Слежение — ТОЛЬКО по jut.su. В торренты за этими сериями не ходим (три пояса изоляции,
     // см. JutSuWatch.cs и claude/jut/02-architecture.md §9).
     public int jutWatchIntervalHours { get; set; } = 24;   // кламп ≥1

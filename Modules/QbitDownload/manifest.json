@@ -26,6 +26,7 @@
     "JutSuMatch.cs",
     "JutSuHttp.cs",
     "JutSuPoster.cs",
+    "JutSuPosterOptimize.cs",
     "JutSu.cs",
     "JutSuStream.cs",
     "JutSuGrab.cs",

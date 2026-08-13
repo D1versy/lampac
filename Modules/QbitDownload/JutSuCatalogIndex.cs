@@ -413,8 +413,17 @@ public partial class QbitController
         }
 
         if (fresh.Count > 0)
+        {
             Console.WriteLine("[QbitDownload] jut/catalog: новинок " + fresh.Count
                               + ", обновлено карточек " + refreshed + ", всего " + st.items.Count);
+
+            // Новинке постер высокого качества нужен сразу, а не после ближайшего рестарта.
+            // ⚠️ Инвариант #3 цел: голова сама апгрейд НЕ зовёт — она зовёт отдельную джобу,
+            // у которой свой киллсвитч (jutPosterBackfill) и которая на холостом ходу
+            // отсеивает готовое по файлу и решению, без единого запроса наружу.
+            try { await JutPosterBackfillAll(); }
+            catch (Exception ex) { Console.WriteLine("[QbitDownload] jut poster backfill: " + ex.Message); }
+        }
 
         res["mode"] = "head";
         res["pages"] = pages;

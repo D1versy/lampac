@@ -238,6 +238,19 @@ public class ModInit : IModuleLoaded
             // а карточка в «Загрузках» иначе навсегда останется с квадратом 186×186.
             try { QbitController.JutPosterSeedDownloads(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut poster seed: " + ex); }
+
+            // ⚠️ Пережатие ПЕРЕД доводом каталога, хотя работа и низкоприоритетная: это быстрый
+            // разовый выигрыш (462 файла ≈ минута), а бэкфилл — длинный хвост на десятки минут,
+            // потому что ждёт живую очередь к Shikimori/AniList. Обратный порядок откладывал бы
+            // главный эффект до конца хвоста. Идемпотентно — зовётся на каждом старте.
+            try { await QbitController.JutPosterReencodeAll(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut poster reencode: " + ex); }
+
+            // Довод каталога до полноты: постер высокого качества должен быть у ВСЕХ тайтлов,
+            // а не только у тех страниц, которые кто-то открыл. Идемпотентно — готовые
+            // отсеиваются по файлу и решению, без единого запроса.
+            try { await QbitController.JutPosterBackfillAll(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut poster backfill: " + ex); }
         });
     }
 

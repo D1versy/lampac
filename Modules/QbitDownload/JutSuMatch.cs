@@ -254,7 +254,7 @@ public static class JutSuMatch
         return null;
     }
 
-    /// <summary>Размеры из ЗАГОЛОВКА файла (JPEG SOF / PNG IHDR / WebP VP8X). (0,0) — не разобрали.</summary>
+    /// <summary>Размеры из ЗАГОЛОВКА файла (JPEG SOF / PNG IHDR / WebP). (0,0) — не разобрали.</summary>
     public static (int w, int h) ImageSize(byte[] b)
     {
         string mime = SniffMime(b);
@@ -265,8 +265,31 @@ public static class JutSuMatch
             if (mime == "image/png")
                 return (ReadBe32(b, 16), ReadBe32(b, 20));      // IHDR: width, height
 
-            if (mime == "image/webp" && b[12] == 'V' && b[13] == 'P' && b[14] == '8' && b[15] == 'X')
-                return (ReadLe24(b, 24) + 1, ReadLe24(b, 27) + 1);
+            // 🔥 У WebP ТРИ формы, и знать только VP8X мало: libvips webpsave пишет простой
+            // "VP8 " для непрозрачной картинки, а VP8X появляется лишь при альфе/метаданных.
+            // Пока разбирался один VP8X, ArtAcceptable молча отказывал почти всем нашим
+            // пережатым постерам — то есть транскод выключался бы сам, без единой ошибки.
+            if (mime == "image/webp")
+            {
+                // Расширенный: VP8X, размеры лежат минус единица тремя байтами каждый
+                if (b[12] == 'V' && b[13] == 'P' && b[14] == '8' && b[15] == 'X')
+                    return (ReadLe24(b, 24) + 1, ReadLe24(b, 27) + 1);
+
+                // Простой lossy: "VP8 " + ключевой кадр со стартовым кодом 9D 01 2A,
+                // дальше по 14 бит на сторону (старшие два бита — масштаб, он нам не нужен)
+                if (b[12] == 'V' && b[13] == 'P' && b[14] == '8' && b[15] == ' ' &&
+                    b[23] == 0x9D && b[24] == 0x01 && b[25] == 0x2A)
+                    return (ReadLe16(b, 26) & 0x3FFF, ReadLe16(b, 28) & 0x3FFF);
+
+                // Простой lossless: "VP8L" + сигнатура 0x2F, затем 14+14 бит минус единица
+                if (b[12] == 'V' && b[13] == 'P' && b[14] == '8' && b[15] == 'L' && b[20] == 0x2F)
+                {
+                    int bits = ReadLe32(b, 21);
+                    return ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1);
+                }
+
+                return (0, 0);
+            }
 
             if (mime == "image/jpeg")
             {
@@ -305,5 +328,7 @@ public static class JutSuMatch
 
     static int ReadBe16(byte[] b, int o) => (b[o] << 8) | b[o + 1];
     static int ReadBe32(byte[] b, int o) => (b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3];
+    static int ReadLe16(byte[] b, int o) => b[o] | (b[o + 1] << 8);
     static int ReadLe24(byte[] b, int o) => b[o] | (b[o + 1] << 8) | (b[o + 2] << 16);
+    static int ReadLe32(byte[] b, int o) => b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24);
 }
