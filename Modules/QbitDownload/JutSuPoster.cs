@@ -412,11 +412,19 @@ public partial class QbitController
             // ⚠️ Не-200 (429 «слишком часто», 5xx) — это НЕ «не найдено»: возвращаем null,
             // решение не пишется, слаг попробуем в другой раз. Иначе лимит частоты тихо
             // превратился бы в вечный отказ.
-            if (!resp.IsSuccessStatusCode) return null;
+            if (!resp.IsSuccessStatusCode)
+            {
+                // 429 — наш темп, а не смерть сервиса: ⚠️, а не ❌
+                if ((int)resp.StatusCode == 429) HealthState.Degraded(HealthState.Ids.Shikimori, "лимит частоты запросов");
+                else HealthState.Fail(HealthState.Ids.Shikimori, "http " + (int)resp.StatusCode);
+                return null;
+            }
 
-            return JArray.Parse(await resp.Content.ReadAsStringAsync());
+            var arr = JArray.Parse(await resp.Content.ReadAsStringAsync());
+            HealthState.OkDirect(HealthState.Ids.Shikimori);
+            return arr;
         }
-        catch { return null; }
+        catch (Exception ex) { HealthState.Fail(HealthState.Ids.Shikimori, HealthState.ShortErr(ex)); return null; }
     }
 
     static string JutShikiImageUrl(string image)
@@ -477,9 +485,14 @@ public partial class QbitController
                     int.TryParse(ra.FirstOrDefault(), out int sec) && sec > 0) wait = Math.Min(sec, 600);
                 _jutAniCooldownUntil = DateTime.UtcNow.AddSeconds(wait);
                 Console.WriteLine($"[QbitDownload] jut poster: AniList 429, пауза {wait} с");
+                HealthState.Degraded(HealthState.Ids.AniList, $"лимит частоты, пауза {wait} с");
                 return (null, true);
             }
-            if (!resp.IsSuccessStatusCode) return (null, true);
+            if (!resp.IsSuccessStatusCode)
+            {
+                HealthState.Fail(HealthState.Ids.AniList, "http " + (int)resp.StatusCode);
+                return (null, true);
+            }
 
             var r = JObject.Parse(await resp.Content.ReadAsStringAsync());
 
@@ -487,16 +500,19 @@ public partial class QbitController
             if (r?["errors"] != null && r["data"]?["Media"] == null)
             {
                 _jutAniCooldownUntil = DateTime.UtcNow.AddSeconds(60);
+                HealthState.Fail(HealthState.Ids.AniList, "graphql errors");   // ровно тот случай, что 200 маскирует
                 return (null, true);
             }
 
             var img = r?["data"]?["Media"]?["coverImage"];
             string cover = img?["extraLarge"]?.Value<string>() ?? img?["large"]?.Value<string>();
 
-            // Ответ получен и он пустой — записи в AniList просто нет. Это уже НЕ transient.
+            // Ответ получен и он пустой — записи в AniList просто нет. Это уже НЕ transient
+            // и НЕ сбой сервиса: API отработал штатно, обложки для этого id просто нет.
+            HealthState.OkDirect(HealthState.Ids.AniList);
             return (cover, false);
         }
-        catch { return (null, true); }
+        catch (Exception ex) { HealthState.Fail(HealthState.Ids.AniList, HealthState.ShortErr(ex)); return (null, true); }
     }
 
     #endregion

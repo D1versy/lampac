@@ -4203,29 +4203,66 @@
     // Данные — GET /qdl/health (сервер кеширует ответ ~30 с, поллинга нет: перезапрос
     // при каждом открытии экрана + строка «Обновить»).
     var HEALTH_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 12h4l2.5-6 4 12 2.5-6h5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-    function healthRow(s) {
-        var mark = s.status === 'ok' ? '✅' : s.status === 'off' ? '⏸' : '❌';
+    // ⚠️ (warn) — «работает, но не своим путём или с ошибками»: сервер отдаёт его с 2.44.
+    // Неизвестный статус трактуем как ❌: лучше лишний раз позвать смотреть, чем показать зелень.
+    var HEALTH_MARK = { ok: '✅', warn: '⚠️', off: '⏸', fail: '❌' };
+    function healthRow(s, withGroup) {
+        var mark = HEALTH_MARK[s.status] || '❌';
         return '<div class="settings-param selector" data-static="true">'
             + '<div class="settings-param__name">' + mark + ' ' + esc(s.name || s.id)
+            + (withGroup ? ' <span style="opacity:.55;font-size:.85em">' + esc(s.group || '') + '</span>' : '')
             + (s.ms ? ' <span style="opacity:.55;font-size:.85em">' + (+s.ms || 0) + ' мс</span>' : '') + '</div>'
             + (s.detail ? '<div class="settings-param__descr">' + esc(String(s.detail)) + '</div>' : '')
             + '</div>';
     }
-    function renderHealth(body) {
+    function healthSummary(list) {
+        var n = { ok: 0, warn: 0, fail: 0, off: 0 };
+        (list || []).forEach(function (s) {
+            var k = HEALTH_MARK[s.status] ? s.status : 'fail';   // неизвестный статус — в сбои
+            n[k]++;
+        });
+        return n;
+    }
+    function healthSummaryRow(n) {
+        var parts = [];
+        if (n.fail) parts.push('❌ ' + n.fail + ' не ' + (n.fail === 1 ? 'работает' : 'работают'));
+        if (n.warn) parts.push('⚠️ ' + n.warn);
+        if (n.ok) parts.push('✅ ' + n.ok);
+        if (n.off) parts.push('⏸ ' + n.off);
+        if (!n.fail && !n.warn) parts.unshift('всё работает');
+        return '<div class="settings-param" data-static="true"><div class="settings-param__name">'
+            + esc(parts.join(' · ')) + '</div></div>';
+    }
+    function renderHealth(body, force) {
         var list = body.find('.qdl-health-list');
         var bindRefresh = function () {
-            try { list.find('.qdl-health-refresh').on('hover:enter click', function () { renderHealth(body); }); } catch (e) {}
+            try { list.find('.qdl-health-refresh').on('hover:enter click', function () { renderHealth(body, true); }); } catch (e) {}
             try { Lampa.Params.listener.send('update_scroll'); } catch (e) {}   // после динамической вставки (образец parental_control)
         };
         list.html('<div class="settings-param"><div class="settings-param__name">Проверяю…</div></div>');
-        req(API + '/qdl/health', function (r) {
+        // ?fresh=1 только по кнопке: сервер иначе отдаёт кеш до 30 с и «Обновить» обманывала бы
+        req(API + '/qdl/health' + (force ? '?fresh=1' : ''), function (r) {
+            var services = (r && r.services) || [];
             var groups = {}, order = [];
-            ((r && r.services) || []).forEach(function (s) {
+            services.forEach(function (s) {
                 var g = s.group || 'Прочее';
                 if (!groups[g]) { groups[g] = []; order.push(g); }
                 groups[g].push(s);
             });
             var html = '<div class="settings-param selector qdl-health-refresh"><div class="settings-param__name">↻ Обновить</div></div>';
+            html += healthSummaryRow(healthSummary(services));
+
+            // Сбои — первым блоком, копиями: 18 строк без порядка означали искать проблему глазами.
+            // quiet — производные строки (например, все канарейки при вставшем мониторинге):
+            // красятся на своём месте, но сводку не засоряют, иначе настоящая причина тонет.
+            var bad = services.filter(function (s) {
+                return (s.status === 'fail' || s.status === 'warn' || !HEALTH_MARK[s.status]) && !s.quiet;
+            });
+            if (bad.length) {
+                html += '<div class="settings-param-title"><span>Проблемы</span></div>';
+                bad.forEach(function (s) { html += healthRow(s, true); });
+            }
+
             order.forEach(function (g) {
                 html += '<div class="settings-param-title"><span>' + esc(g) + '</span></div>';
                 groups[g].forEach(function (s) { html += healthRow(s); });

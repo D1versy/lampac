@@ -8,24 +8,37 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace QbitDownload;
 
-// ── Хелс-чеки внешних сервисов: GET /qdl/health (qdl 2.39) ──
+// ── Хелс-чеки: GET /qdl/health (qdl 2.44) ───────────────────────────────────────
 // Питает экран «Хелс-чеки» в настройках Lampa (qdl.js, виден только при куке qdl_unlock=1).
-// Три принципа:
-//   1. «Выключено» ≠ «отвалилось». Пустая строка конфига у нас всюду означает киллсвитч —
-//      такой сервис отдаётся как off (⏸), а не как сбой.
-//   2. Секреты не светим. detail — это HTTP-код, версия или ИМЯ типа исключения; message
-//      исключения не берём никогда (там всплывают хосты, порты и куски строк подключения).
-//   3. Дёшево. Живые пробы идут параллельно с таймаутом 2-3 с, вердикты, которые модуль
-//      и так держит (ffworker, канарейки поиска, авторизация jut), берём из памяти/диска
-//      без сети. Ответ целиком кешируется на healthCacheSeconds, чтобы открытый экран
-//      не превращался в долбёжку внешних API.
-// Дорогая полная диагностика живёт отдельно и сюда не тащится: /qdl/jut/diag (реальные
-// запросы к jut.su и платные прокси-выходы) и /qdl/diag/search?dry=1 (прогон канареек 5-40 с).
+//
+// 🔥 Модель сменилась в 2.44. Было: на каждое открытие экрана дёргали корень каждого хоста и
+// считали успехом любой ответ <500 — 400/403/404 рисовались зелёным, и экран показывал ✅
+// у сервисов, которые не работают (владелец поймал это на «TMDB картинки: ✅ http 400»).
+// Проба «хост ответил» в принципе не может доказать, что сервис РАБОТАЕТ: у AniList боевой
+// путь POST, Shikimori требует свой User-Agent, картинка TMDB существует только по конкретному
+// пути. Стало:
+//
+//   • ВНЕШНЕЕ — пассивно. Никаких запросов ради экрана. Исход каждого реального обращения
+//     пишут боевые чокпоинты в HealthState (JutNet.Run, AuthAlarm, JutShikiSearch,
+//     JutAniListCover, CatalogWarmup.Fetch, FetchTmdbPoster, FetchIndexer, FfWorker.IsAlive).
+//     Отвалилось — красное; заработало — само зеленеет.
+//   • СВОЁ — живьём. Контейнеры в своей сети стоят единицы миллисекунд, и их проверка не
+//     является «походом наружу»: qBittorrent, TorrServer, Postgres, FlareSolverr, IPCamLive.
+//   • Четыре состояния: ok / warn / fail / off. warn — «работает, но не своим путём или с
+//     ошибками»; off — «не настроено» или «нет данных». Красное значит ровно «сломано».
+//
+// Принципы, которые остались прежними:
+//   1. «Выключено» ≠ «отвалилось»: пустая строка конфига — киллсвитч, такой сервис off (⏸).
+//   2. Секреты не светим: detail — HTTP-код, версия или ИМЯ типа исключения, никогда message
+//      (там всплывают хосты, порты и куски строк подключения).
+//
+// Дорогая полная диагностика живёт отдельно: /qdl/jut/diag и /qdl/diag/search?dry=1.
 //
 // Базовый тип объявлен в Controller.cs — в partial-классе он указывается один раз
 // (иначе CS0246, модуль молча не грузится и ВСЕ /qdl/* отдают 404).
@@ -42,9 +55,15 @@ public partial class QbitController
 
     [HttpGet, AllowAnonymous]
     [Route("qdl/health")]
-    async public Task<ActionResult> Health()
+    async public Task<ActionResult> Health(int fresh = 0)
     {
         int ttl = Math.Max(5, ModInit.conf?.healthCacheSeconds ?? 30);
+
+        // «↻ Обновить» обязана обходить кеш, иначе кнопка обманывает. Кламп 5 с обязателен:
+        // без него зажатая кнопка пульта = поток проб по локальной сети и POST во FlareSolverr.
+        if (fresh == 1 && (DateTime.UtcNow - _healthAt).TotalSeconds >= 5)
+            ttl = 0;
+
         if (!HealthFresh(ttl))
         {
             await _healthGate.WaitAsync();
@@ -69,41 +88,46 @@ public partial class QbitController
     #region сборка отчёта
     async static Task<JArray> BuildHealth()
     {
-        var conf = ModInit.conf;
-        string self = $"http://{CoreInit.conf.listen.localhost}:{CoreInit.conf.listen.port}";
-        string cubMirror = CoreInit.conf.cub?.mirror ?? "cub.rip";
-        string tmdbKey = CoreInit.conf.cub?.api_key ?? "";
+        var arr = new JArray();
+        var now = DateTime.UtcNow;
+        int flap = Math.Max(5, ModInit.conf?.healthFlapWindowMinutes ?? 60);
 
-        var tasks = new List<Task<JObject>>
+        try
         {
-            // ── Инфраструктура ──
-            ProbeQbit(),
-            // через СВОЙ прокси /ts: одной пробой проверяем и модуль TorrServer, и контейнер
-            ProbeHttp("torrserver", "TorrServer", GrpInfra, self + "/ts/echo", strict200: true),
-            Task.Run(ProbeFfWorker),
-            ProbeOptionalHttp("flaresolverr", "FlareSolverr", GrpInfra, conf?.healthFlaresolverrUrl),
-            ProbePg("pg-bitmagnet", "Postgres bitmagnet (DHT-индекс)", conf?.bitmagnetConnection),
-            ProbePg("pg-index", "Postgres свой индекс", conf?.localIndexConnection),
-            ProbeOptionalHttp("ipcam", "IPCamLive (регистратор)", GrpInfra, conf?.liveUrl),
+            string self = $"http://{CoreInit.conf.listen.localhost}:{CoreInit.conf.listen.port}";
 
-            // ── Метаданные ──
-            ProbeHttp("tmdb-api", "TMDB API", GrpMeta, "https://api.themoviedb.org/3/configuration?api_key=" + tmdbKey, strict200: true),
-            ProbeHttp("tmdb-img", "TMDB картинки", GrpMeta, "https://image.tmdb.org/t/p/w92/"),
-            ProbeHttp("cub", "CUB каталог (" + cubMirror + ")", GrpMeta, "https://tmdb." + cubMirror + "/3/movie/550?api_key=" + tmdbKey, strict200: true),
+            // ── Своё хозяйство: живые пробы (локальная сеть, единицы миллисекунд) ──
+            var tasks = new List<Task<JObject>>
+            {
+                Guard("qbit", "qBittorrent", GrpInfra, ProbeQbit),
+                // через СВОЙ прокси /ts: одной пробой проверяем и модуль TorrServer, и контейнер
+                Guard("torrserver", "TorrServer", GrpInfra,
+                      () => ProbeHttp("torrserver", "TorrServer", GrpInfra, self + "/ts/echo")),
+                Guard("ffworker", "ffmpeg-worker (NVENC)", GrpInfra, () => Task.Run(() => ProbeFfWorker(now, flap))),
+                Guard("flaresolverr", "FlareSolverr", GrpInfra, ProbeFlaresolverr),
+                Guard("pg-bitmagnet", "Postgres bitmagnet (DHT-индекс)", GrpInfra,
+                      () => ProbePg("pg-bitmagnet", "Postgres bitmagnet (DHT-индекс)", ModInit.conf?.bitmagnetConnection)),
+                Guard("pg-index", "Postgres свой индекс", GrpInfra,
+                      () => ProbePg("pg-index", "Postgres свой индекс", ModInit.conf?.localIndexConnection)),
+                Guard("ipcam", "IPCamLive (регистратор)", GrpInfra, ProbeIpcam)
+            };
 
-            // ── Поиск раздач ──
-            ProbeOptionalHttp("jacred-webapi", "JacRed webapi (чужой индекс)", GrpSearch, conf?.healthJacredWebApi),
+            foreach (var o in await Task.WhenAll(tasks))
+                if (o != null) arr.Add(o);
 
-            // ── jut.su ──
-            ProbeJutHost(),
-            ProbeOptionalHttp("shikimori", "Shikimori", GrpJut,
-                JutOn && !string.IsNullOrWhiteSpace(conf?.jutShikimoriHost) ? NoSlash(conf.jutShikimoriHost) + "/api/animes?limit=1" : null),
-            ProbeOptionalHttp("anilist", "AniList GraphQL", GrpJut, JutOn ? conf?.jutAniListUrl : null),
-        };
+            // ── Внешнее: только наблюдения, ноль сети ──
+            AddPassiveChecks(arr, now, flap);
+        }
+        catch (Exception ex)
+        {
+            // Отчёт обязан доехать хотя бы частично: раньше исключение здесь роняло весь
+            // /qdl/health в 500, и экран показывал «недоступен» вместо списка со сбоем.
+            arr.Add(Svc("health-self", "Сборка отчёта", GrpInfra, "fail", 0, ShortErr(ex)));
+        }
 
-        var arr = new JArray((await Task.WhenAll(tasks)).Where(x => x != null));
-        AddSearchChecks(arr);   // бесплатно: состояние канареек SearchMonitor
-        arr.Add(ProbeJutAuth());
+        try { AddSearchChecks(arr); }   // бесплатно: состояние канареек SearchMonitor
+        catch (Exception ex) { arr.Add(Svc("searchmon", "Мониторинг поиска", GrpSearch, "fail", 0, ShortErr(ex))); }
+
         return arr;
     }
 
@@ -115,8 +139,9 @@ public partial class QbitController
     // JutOn (вкладка jut.su включена) объявлен в JutSu.cs — тот же partial-класс
     static string NoSlash(string s) => (s ?? "").TrimEnd('/');
 
-    internal static JObject Svc(string id, string name, string group, string status, long ms, string detail)
-        => new JObject
+    internal static JObject Svc(string id, string name, string group, string status, long ms, string detail, bool quiet = false)
+    {
+        var o = new JObject
         {
             ["id"] = id,
             ["name"] = name,
@@ -125,18 +150,57 @@ public partial class QbitController
             ["ms"] = ms,
             ["detail"] = detail
         };
+        // quiet — «проблема производная»: строка красится, но в сводку «Проблемы» не тащится.
+        // Один протухший планировщик иначе даёт десяток одинаковых ⚠️ и топит настоящую причину.
+        if (quiet) o["quiet"] = true;
+        return o;
+    }
 
-    // Только имя типа: message исключений содержит хосты/порты, а у Npgsql — куски строки подключения
-    static string ShortErr(Exception ex) => (ex is OperationCanceledException or TaskCanceledException)
-        ? "таймаут" : ex.GetType().Name;
+    static string ShortErr(Exception ex) => HealthState.ShortErr(ex);
+
+    /// <summary>Одна упавшая проба не должна ронять весь отчёт.</summary>
+    async static Task<JObject> Guard(string id, string name, string group, Func<Task<JObject>> probe)
+    {
+        try { return await probe(); }
+        catch (Exception ex) { return Svc(id, name, group, "fail", 0, ShortErr(ex)); }
+    }
     #endregion
 
-    #region живые пробы
-    /// <summary>
-    /// Любой ответ &lt;500 = хост жив (пробы без ключей штатно ловят 401/403/404).
-    /// strict200 — там, где 200 достижим и означает «действительно работает».
-    /// </summary>
-    async static Task<JObject> ProbeHttp(string id, string name, string group, string url, int timeoutMs = 2500, bool strict200 = false)
+    #region внешние сервисы — пассивные наблюдения (ноль сети)
+    static void AddPassiveChecks(JArray arr, DateTime now, int flap)
+    {
+        string cubMirror = "cub.rip";
+        try { cubMirror = CoreInit.conf.cub?.mirror ?? "cub.rip"; } catch { }
+
+        // ── Метаданные ── наблюдаются прогревом каталога (CatalogWarmup.Fetch) и качалкой постеров
+        AddPassiveRow(arr, HealthState.Ids.TmdbApi, "TMDB API", GrpMeta, now, flap);
+        AddPassiveRow(arr, HealthState.Ids.TmdbImg, "TMDB картинки", GrpMeta, now, flap);
+        AddPassiveRow(arr, HealthState.Ids.Cub, "CUB каталог (" + cubMirror + ")", GrpMeta, now, flap);
+
+        // ── Поиск раздач ── живые поиски пользователя + канарейки идут через FetchIndexer
+        AddPassiveRow(arr, HealthState.Ids.Indexer, "Индексатор (живые поиски)", GrpSearch, now, flap);
+
+        // ── jut.su ── вкладка выключена = киллсвитч, а не сбой
+        string jutOff = JutOn ? null : "вкладка выключена";
+        AddPassiveRow(arr, HealthState.Ids.JutHost, "jut.su", GrpJut, now, flap, jutOff);
+        AddPassiveRow(arr, HealthState.Ids.JutAuth, "jut.su: авторизация", GrpJut, now, flap,
+            jutOff ?? (string.IsNullOrWhiteSpace(ModInit.conf?.jutUserId) ? "куки не заданы" : null));
+        AddPassiveRow(arr, HealthState.Ids.Shikimori, "Shikimori", GrpJut, now, flap, jutOff);
+        AddPassiveRow(arr, HealthState.Ids.AniList, "AniList", GrpJut, now, flap, jutOff);
+    }
+
+    static void AddPassiveRow(JArray arr, string id, string name, string group, DateTime now, int flap, string offReason = null)
+    {
+        if (offReason != null) { arr.Add(Svc(id, name, group, "off", 0, offReason)); return; }
+
+        var (status, detail) = HealthState.Verdict(HealthState.Get(id, now, flap), now, flap);
+        arr.Add(Svc(id, name, group, status, 0, detail));
+    }
+    #endregion
+
+    #region своё хозяйство — живые пробы
+    /// <summary>Строгая проба: успех — только 2xx. Мягкой ветки «любой код &lt;500» больше нет.</summary>
+    async static Task<JObject> ProbeHttp(string id, string name, string group, string url, int timeoutMs = 2500)
     {
         var sw = Stopwatch.StartNew();
         try
@@ -145,16 +209,10 @@ public partial class QbitController
             using var resp = await _healthHttp.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cts.Token);
             sw.Stop();
             int code = (int)resp.StatusCode;
-            bool ok = strict200 ? resp.IsSuccessStatusCode : code < 500;
-            return Svc(id, name, group, ok ? "ok" : "fail", sw.ElapsedMilliseconds, "http " + code);
+            return Svc(id, name, group, resp.IsSuccessStatusCode ? "ok" : "fail", sw.ElapsedMilliseconds, "http " + code);
         }
         catch (Exception ex) { return Svc(id, name, group, "fail", sw.ElapsedMilliseconds, ShortErr(ex)); }
     }
-
-    static Task<JObject> ProbeOptionalHttp(string id, string name, string group, string url)
-        => string.IsNullOrWhiteSpace(url)
-            ? Task.FromResult(Svc(id, name, group, "off", 0, "не настроено"))
-            : ProbeHttp(id, name, group, url);
 
     /// <summary>
     /// qBittorrent — настоящая проба через общий SID-стек (Qbit()). Кап 3 с поверх timeoutSeconds
@@ -194,44 +252,98 @@ public partial class QbitController
         catch (Exception ex) { return Svc(id, name, GrpInfra, "fail", sw.ElapsedMilliseconds, ShortErr(ex)); }
     }
 
-    /// <summary>ffmpeg-воркер: берём готовый вердикт IsAlive() (кеш alive 30с/dead 15с) — сеть только на промахе.</summary>
-    static JObject ProbeFfWorker()
+    /// <summary>
+    /// ffmpeg-воркер. IsAlive() сам пишет наблюдение в реестр (кеш alive 30 с / dead 15 с), поэтому
+    /// вердикт берём оттуда: строка учитывает и пробу с экрана, и реальные транскоды горячего пути.
+    /// </summary>
+    static JObject ProbeFfWorker(DateTime now, int flap)
     {
         if (!FfWorker.Enabled) return Svc("ffworker", "ffmpeg-worker (NVENC)", GrpInfra, "off", 0, "не настроено, транскод на CPU");
 
         var sw = Stopwatch.StartNew();
-        bool alive = FfWorker.IsAlive();
-        return Svc("ffworker", "ffmpeg-worker (NVENC)", GrpInfra, alive ? "ok" : "fail", sw.ElapsedMilliseconds,
-            alive ? "NVENC доступен" : "недоступен → CPU-фолбэк");
+        FfWorker.IsAlive();
+        sw.Stop();
+
+        var (status, detail) = HealthState.Verdict(HealthState.Get(HealthState.Ids.FfWorker, now, flap), now, flap);
+        return Svc("ffworker", "ffmpeg-worker (NVENC)", GrpInfra, status, sw.ElapsedMilliseconds,
+                   status == "ok" ? "NVENC доступен" : detail);   // при ok возраст не нужен: пробу только что сделали
     }
 
-    async static Task<JObject> ProbeJutHost()
+    /// <summary>
+    /// FlareSolverr. Боевой интерфейс — POST /v1, поэтому и проверяем его: GET на корень отдаёт
+    /// «FlareSolverr is ready» даже когда внутри мёртв Chrome — ровно тот ложный зелёный, от
+    /// которого уходим. sessions.list браузер не поднимает. Старые сборки команды не знают —
+    /// для них честный фолбэк с пометкой, что проверка неполная.
+    /// </summary>
+    async static Task<JObject> ProbeFlaresolverr()
     {
-        if (!JutOn) return Svc("jut-host", "jut.su", GrpJut, "off", 0, "вкладка выключена");
+        const string id = "flaresolverr", name = "FlareSolverr";
+        string url = ModInit.conf?.healthFlaresolverrUrl;
+        if (string.IsNullOrWhiteSpace(url)) return Svc(id, name, GrpInfra, "off", 0, "не настроено");
+        url = NoSlash(url);
 
-        var r = await ProbeHttp("jut-host", "jut.su", GrpJut, JutNet.Host);
+        var sw = Stopwatch.StartNew();
         try
         {
-            var (mode, _) = JutProxyFallback.State("jutsu");
-            if (!string.IsNullOrEmpty(mode) && mode != "none")
-                r["detail"] = (r.Value<string>("detail") ?? "") + ", прокси-фолбэк: " + mode;
+            using var cts = new CancellationTokenSource(2500);
+            using var content = new StringContent("{\"cmd\":\"sessions.list\"}", Encoding.UTF8, "application/json");
+            using var resp = await _healthHttp.PostAsync(url + "/v1", content, cts.Token);
+            string txt = await resp.Content.ReadAsStringAsync(cts.Token);
+            sw.Stop();
+
+            if (resp.IsSuccessStatusCode)
+            {
+                try
+                {
+                    var j = JObject.Parse(txt);
+                    if (j.Value<string>("status") == "ok")
+                        return Svc(id, name, GrpInfra, "ok", sw.ElapsedMilliseconds,
+                                   "сессий: " + ((j["sessions"] as JArray)?.Count ?? 0));
+                }
+                catch { }
+                return Svc(id, name, GrpInfra, "fail", sw.ElapsedMilliseconds, "ответ без status=ok");
+            }
+
+            // 404/405 — сборка без sessions.list. Тогда хотя бы «процесс жив», но честно как warn.
+            using var cts2 = new CancellationTokenSource(2000);
+            using var root = await _healthHttp.GetAsync(url + "/", cts2.Token);
+            string body = await root.Content.ReadAsStringAsync(cts2.Token);
+            sw.Stop();
+            return root.IsSuccessStatusCode && body.Contains("FlareSolverr", StringComparison.OrdinalIgnoreCase)
+                ? Svc(id, name, GrpInfra, "warn", sw.ElapsedMilliseconds, "процесс жив, но sessions.list не поддержан — проверка неполная")
+                : Svc(id, name, GrpInfra, "fail", sw.ElapsedMilliseconds, "http " + (int)resp.StatusCode);
         }
-        catch { }
-        return r;
+        catch (Exception ex) { return Svc(id, name, GrpInfra, "fail", sw.ElapsedMilliseconds, ShortErr(ex)); }
     }
 
-    /// <summary>Авторизация на jut.su — бесплатно, из канарейки транспорта (куки протухли → сайт молча режет ссылки).</summary>
-    static JObject ProbeJutAuth()
+    /// <summary>
+    /// IPCamLive: список камер — самая дешёвая ручка регистратора (SQLite, ничего не запускает).
+    /// ⚠️ Ни start-стрима, ни превью не трогаем — оба поднимают ffmpeg. И не зовём LiveApiJson:
+    /// он инстансный, ест слот _liveGate, а Live.cs вообще не залинкован в проект тестов.
+    /// </summary>
+    async static Task<JObject> ProbeIpcam()
     {
-        if (!JutOn) return Svc("jut-auth", "jut.su: авторизация", GrpJut, "off", 0, "вкладка выключена");
-        if (string.IsNullOrWhiteSpace(ModInit.conf?.jutUserId))
-            return Svc("jut-auth", "jut.su: авторизация", GrpJut, "off", 0, "куки не заданы");
+        const string id = "ipcam", name = "IPCamLive (регистратор)";
+        string url = ModInit.conf?.liveUrl;
+        if (string.IsNullOrWhiteSpace(url)) return Svc(id, name, GrpInfra, "off", 0, "не настроено");
 
-        bool? ok = JutNet.AuthOk;
-        return ok == null
-            ? Svc("jut-auth", "jut.su: авторизация", GrpJut, "off", 0, "ещё не проверялась")
-            : Svc("jut-auth", "jut.su: авторизация", GrpJut, ok == true ? "ok" : "fail", 0,
-                  ok == true ? "куки приняты" : "куки протухли — сайт подменяет ссылки");
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            using var cts = new CancellationTokenSource(2500);
+            using var resp = await _healthHttp.GetAsync(NoSlash(url) + "/api/cameras/", cts.Token);
+            string txt = await resp.Content.ReadAsStringAsync(cts.Token);
+            sw.Stop();
+
+            if (!resp.IsSuccessStatusCode)
+                return Svc(id, name, GrpInfra, "fail", sw.ElapsedMilliseconds, "http " + (int)resp.StatusCode);
+
+            int n = JArray.Parse(txt).OfType<JObject>().Count(o => (o.Value<int?>("id") ?? 0) > 0);
+            return n > 0
+                ? Svc(id, name, GrpInfra, "ok", sw.ElapsedMilliseconds, "камер: " + n)
+                : Svc(id, name, GrpInfra, "warn", sw.ElapsedMilliseconds, "регистратор отвечает, но камер нет");
+        }
+        catch (Exception ex) { return Svc(id, name, GrpInfra, "fail", sw.ElapsedMilliseconds, ShortErr(ex)); }
     }
     #endregion
 
@@ -242,35 +354,74 @@ public partial class QbitController
 
     internal static void AddSearchChecks(JArray arr, JObject st, DateTime now)
     {
-        if ((ModInit.conf?.searchMonitorIntervalMinutes ?? 0) <= 0)
+        int interval = ModInit.conf?.searchMonitorIntervalMinutes ?? 0;
+        if (interval <= 0)
         {
-            arr.Add(Svc("indexer", "Индексатор (канарейки)", GrpSearch, "off", 0, "мониторинг поиска выключен"));
+            arr.Add(Svc("searchmon", "Мониторинг поиска", GrpSearch, "off", 0, "мониторинг поиска выключен"));
             return;
         }
 
         var checks = st?["checks"] as JObject;
         var last = (st?["runs"] as JArray)?.OfType<JObject>().LastOrDefault();
-        var at = last?.Value<DateTime?>("at");
-        string when = at.HasValue
-            ? $"прогон {(int)Math.Max(0, (now - at.Value.ToUniversalTime()).TotalMinutes)} мин назад"
-            : "прогонов ещё не было";
+        var at = last?.Value<DateTime?>("at")?.ToUniversalTime();
 
-        if (checks == null || checks["indexer"] == null)
+        if (at == null || checks == null || checks.Count == 0)
         {
-            arr.Add(Svc("indexer", "Индексатор (канарейки)", GrpSearch, "off", 0, when));
+            arr.Add(Svc("searchmon", "Мониторинг поиска", GrpSearch, "off", 0, "прогонов ещё не было"));
             return;
         }
 
-        arr.Add(Svc("indexer", "Индексатор (канарейки)", GrpSearch, StateOf(checks["indexer"]), 0, when));
+        // Протухание. Фактор 250 %, а не 200 %: тик штатно пропускается на разогреве после старта
+        // и когда занят общий _watchGate, и при интервале 3 ч один законный пропуск не должен
+        // красить экран. Замороженный планировщик — это ⚠️ «данные неизвестны», а не ❌ сервиса.
+        int stalePct = Math.Max(120, ModInit.conf?.healthMonitorStalePercent ?? 250);
+        bool stale = (now - at.Value).TotalMinutes > interval * stalePct / 100.0;
+        string when = "прогон " + HealthState.Ago(now - at.Value);
+
+        arr.Add(Svc("searchmon", "Мониторинг поиска", GrpSearch, stale ? "warn" : "ok", 0,
+            stale ? when + " при интервале " + interval + " мин — данные ниже устарели" : when));
+
+        AddSearchRow(arr, checks["indexer"], "indexer", "Индексатор (канарейки)", stale);
 
         foreach (var p in checks.Properties().Where(p => p.Name.StartsWith("tracker:")))
-            arr.Add(Svc(p.Name, "Трекер " + p.Name.Substring("tracker:".Length), GrpSearch,
-                StateOf(p.Value), 0, "по выдаче канареек"));
+            AddSearchRow(arr, p.Value, p.Name, "Трекер " + p.Name.Substring("tracker:".Length), stale);
 
         if (checks["stars"] != null)
-            arr.Add(Svc("stars", "Умная выдача (⭐)", GrpSearch, StateOf(checks["stars"]), 0, "по выдаче канареек"));
+            AddSearchRow(arr, checks["stars"], "stars", "Умная выдача (⭐)", stale);
     }
 
-    static string StateOf(JToken c) => (c?.Value<string>("state") ?? "ok") == "ok" ? "ok" : "fail";
+    static void AddSearchRow(JArray arr, JToken c, string id, string name, bool stale)
+    {
+        if (c == null) return;
+        var (status, detail) = SearchRowStatus(c);
+
+        // Мониторинг стоит → вердикт ниже относится к неизвестно какому прошлому. Не врём «ok»,
+        // но и в «Проблемы» не тащим: причина одна, и она уже есть отдельной строкой searchmon.
+        if (stale && status == "ok")
+            arr.Add(Svc(id, name, GrpSearch, "warn", 0, "данные устарели — мониторинг не прогонялся", quiet: true));
+        else
+            arr.Add(Svc(id, name, GrpSearch, status, 0, detail, quiet: stale));
+    }
+
+    /// <summary>
+    /// 🔥 Сырой вердикт последнего прогона, а НЕ поле state.
+    /// state — это состояние машины УВЕДОМЛЕНИЙ: оно переключается только после needStreak
+    /// провалов подряд и вне кулдауна (12 ч), поэтому реально сломанный поиск оставался зелёным
+    /// до половины суток. streak же инкрементируется на КАЖДОМ провале и обнуляется на КАЖДОМ
+    /// успехе (SearchMonitor.EvalCheck) — то есть streak>0 ⇔ последний прогон провалился.
+    /// Прежний StateOf вдобавок был fail-open: отсутствующее поле трактовалось как «ok».
+    /// </summary>
+    internal static (string status, string detail) SearchRowStatus(JToken c)
+    {
+        if (c == null) return ("off", "нет данных");
+
+        int? streak = c.Value<int?>("streak");
+        if (streak == null) return ("off", "нет данных");
+        if (streak > 0)
+            return ("fail", "последний прогон канареек провалился · " + streak + " "
+                          + HealthState.Plural(streak.Value, "прогон", "прогона", "прогонов") + " подряд");
+
+        return ("ok", "по выдаче канареек");
+    }
     #endregion
 }

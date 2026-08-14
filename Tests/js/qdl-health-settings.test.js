@@ -71,6 +71,34 @@ test('healthRow: маркер по статусу, мс и detail', () => {
 
   assert.match(qdl.healthRow({ id: 'x', name: 'X', status: 'fail', ms: 0 }), /❌/);
   assert.match(qdl.healthRow({ id: 'x', name: 'X', status: 'off', ms: 0 }), /⏸/);
+  assert.match(qdl.healthRow({ id: 'x', name: 'X', status: 'warn', ms: 0 }), /⚠️/);
+});
+
+test('healthRow: неизвестный статус трактуется как сбой, а не как зелень', () => {
+  const { qdl } = H.loadQdl();
+  // страховка на будущее: лучше лишний раз позвать смотреть, чем показать ✅ у сломанного
+  assert.match(qdl.healthRow({ id: 'x', name: 'X', status: 'degraded', ms: 0 }), /❌/);
+  assert.match(qdl.healthRow({ id: 'x', name: 'X', ms: 0 }), /❌/);
+});
+
+test('healthSummary: считает по четырём статусам, неизвестный — в сбои', () => {
+  const { qdl } = H.loadQdl();
+  const n = qdl.healthSummary([
+    { status: 'ok' }, { status: 'ok' }, { status: 'warn' },
+    { status: 'fail' }, { status: 'off' }, { status: 'wat' },
+  ]);
+  // по полям, а не deepStrictEqual: объект приходит из realm'а jsdom и не reference-equal прототипу
+  assert.strictEqual(n.ok, 2);
+  assert.strictEqual(n.warn, 1);
+  assert.strictEqual(n.fail, 2, 'неизвестный статус обязан считаться сбоем');
+  assert.strictEqual(n.off, 1);
+});
+
+test('healthSummaryRow: без проблем говорит «всё работает»', () => {
+  const { qdl } = H.loadQdl();
+  assert.match(qdl.healthSummaryRow({ ok: 15, warn: 0, fail: 0, off: 3 }), /всё работает/);
+  assert.match(qdl.healthSummaryRow({ ok: 15, warn: 1, fail: 2, off: 0 }), /❌ 2 не работают/);
+  assert.match(qdl.healthSummaryRow({ ok: 15, warn: 0, fail: 1, off: 0 }), /❌ 1 не работает/);
 });
 
 test('healthRow: имя и detail экранируются (сервер отдаёт произвольный текст)', () => {
@@ -110,6 +138,73 @@ test('renderHealth: группирует сервисы и просит пере
   assert.match(last, /❌ TMDB API/);
   assert.match(last, /Обновить/);
   assert.ok(lampa.Params.listener._sent.includes('update_scroll'), 'после вставки нужен пересчёт скролла');
+});
+
+/** Экран с заданным списком сервисов: возвращает итоговый HTML и запрошенные URL. */
+function renderWith(services) {
+  const html = [];
+  const urls = [];
+  const node = { html: (h) => { if (h !== undefined) html.push(h); }, on: () => node, find: () => node };
+  const body = { find: () => node };
+  const lampa = H.makeLampa({
+    Params: { listener: { _sent: [], send(t) { this._sent.push(t); } } },
+    Reguest: function () {
+      this.timeout = () => {};
+      this.silent = (url, ok) => { urls.push(url); ok({ at: '2026-08-14T00:00:00Z', services: services }); };
+    },
+  });
+  const { qdl } = H.loadQdl({ lampa });
+  qdl.renderHealth(body);
+  return { html: html[html.length - 1], urls, qdl, body };
+}
+
+test('renderHealth: сводка сверху, «Проблемы» первой группой, сбойная строка не исчезает со своего места', () => {
+  const { html } = renderWith([
+    { id: 'qbit', name: 'qBittorrent', group: 'Инфраструктура', status: 'ok', ms: 5 },
+    { id: 'shikimori', name: 'Shikimori', group: 'jut.su', status: 'fail', detail: 'http 403' },
+    { id: 'jut-host', name: 'jut.su', group: 'jut.su', status: 'warn', detail: 'прокси-фолбэк' },
+  ]);
+
+  const iSummary = html.indexOf('❌ 1 не работает');
+  const iBad = html.indexOf('Проблемы');
+  const iFirstGroup = html.indexOf('Инфраструктура');
+  assert.ok(iSummary >= 0, 'строка-итог обязана быть');
+  assert.ok(iBad >= 0 && iBad < iFirstGroup, '«Проблемы» идут перед обычными группами');
+  assert.ok(iSummary < iBad, 'итог — выше «Проблем»');
+
+  // сбойные строки — КОПИИ: сервис остаётся и в своей группе, иначе список «съезжает»
+  assert.strictEqual(html.split('Shikimori').length - 1, 2);
+  assert.strictEqual(html.split('qBittorrent').length - 1, 1, 'здоровые в «Проблемы» не попадают');
+});
+
+test('renderHealth: без проблем группы «Проблемы» нет', () => {
+  const { html } = renderWith([
+    { id: 'qbit', name: 'qBittorrent', group: 'Инфраструктура', status: 'ok', ms: 5 },
+    { id: 'ipcam', name: 'IPCamLive', group: 'Инфраструктура', status: 'off', detail: 'не настроено' },
+  ]);
+  assert.ok(html.indexOf('Проблемы') === -1);
+  assert.match(html, /всё работает/);
+});
+
+test('renderHealth: quiet-строки красятся, но сводку не засоряют', () => {
+  // один вставший планировщик иначе даёт десяток одинаковых ⚠️ и топит настоящую причину
+  const { html } = renderWith([
+    { id: 'searchmon', name: 'Мониторинг поиска', group: 'Поиск раздач', status: 'warn', detail: 'прогон 10 ч назад' },
+    { id: 'tracker:rutor', name: 'Трекер rutor', group: 'Поиск раздач', status: 'warn', detail: 'данные устарели', quiet: true },
+  ]);
+
+  const bad = html.slice(html.indexOf('Проблемы'), html.indexOf('Поиск раздач'));
+  assert.ok(bad.indexOf('Мониторинг поиска') >= 0, 'причина в сводке нужна');
+  assert.ok(bad.indexOf('Трекер rutor') === -1, 'производная строка в сводку не тащится');
+  assert.match(html, /⚠️ Трекер rutor/);   // но на своём месте она жёлтая
+});
+
+test('renderHealth: первый заход без ?fresh, кнопка «Обновить» — с ним', () => {
+  const { urls, qdl, body } = renderWith([{ id: 'qbit', name: 'qBittorrent', group: 'Инфраструктура', status: 'ok' }]);
+  assert.match(urls[0], /\/qdl\/health$/, 'открытие экрана не должно обходить кеш сервера');
+
+  qdl.renderHealth(body, true);
+  assert.match(urls[urls.length - 1], /\/qdl\/health\?fresh=1$/);
 });
 
 test('renderHealth: недоступный /qdl/health показывает ошибку, а не пустой экран', () => {

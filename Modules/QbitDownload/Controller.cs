@@ -388,6 +388,7 @@ public partial class QbitController : BaseController
         if (string.IsNullOrEmpty(raw))
         {
             Console.WriteLine($"[QbitDownload] индексатор не ответил (не-200/таймаут): «{search}» is_serial={is_serial}");
+            HealthState.Fail(HealthState.Ids.Indexer, "не ответил (не-200/таймаут)");
             return null;
         }
 
@@ -431,8 +432,12 @@ public partial class QbitController : BaseController
         {
             // тело не JSON — почти всегда осмысленный текст от JacRed, его и показываем
             Console.WriteLine($"[QbitDownload] индексатор отдал не-JSON ({ex.GetType().Name}): «{search}» → {raw.Substring(0, System.Math.Min(120, raw.Length))}");
+            HealthState.Fail(HealthState.Ids.Indexer, "ответ не JSON");
             return null;
         }
+
+        // Пустой массив — это НЕ сбой (просто ничего не нашлось): сбоем считается только null выше.
+        HealthState.Ok(HealthState.Ids.Indexer);
         return result;
     }
 
@@ -1216,10 +1221,20 @@ public partial class QbitController : BaseController
         try { if (CoreInit.conf.listen.port > 0) port = CoreInit.conf.listen.port; } catch { }
 
         byte[] img = await PosterBytes($"http://127.0.0.1:{port}/tmdb/img/{tmdbPath}", clientAuthority, clientHttps);
+        if (img != null)
+        {
+            HealthState.OkDirect(HealthState.Ids.TmdbImg);
+            return img;
+        }
 
         // сам Kestrel не ответил — до 302-фолбэка ВНУТРИ /tmdb/img дело не дошло, идём на TMDB напрямую
-        if (img == null)
-            img = await PosterBytes("https://image.tmdb.org/" + tmdbPath);
+        img = await PosterBytes("https://image.tmdb.org/" + tmdbPath);
+
+        // Наблюдение стоит здесь, а не в PosterBytes: тот же низ качает произвольный клиентский
+        // poster_url, к TMDB отношения не имеющий. Прямой путь сработал — картинки живы, но своим
+        // прокси мы их не отдаём: это ровно «работает через запасной путь», то есть ⚠️.
+        if (img != null) HealthState.Degraded(HealthState.Ids.TmdbImg, "свой /tmdb/img не отдал — качаем с TMDB напрямую");
+        else HealthState.Fail(HealthState.Ids.TmdbImg, "картинку не отдали ни свой прокси, ни image.tmdb.org");
 
         return img;
     }

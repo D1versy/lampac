@@ -61,6 +61,7 @@
     <Compile Include="..\..\Modules\QbitDownload\CubExtensions.cs" Link="Module\CubExtensions.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Bitmagnet.cs" Link="Module\Bitmagnet.cs" />
     <Compile Include="..\..\Modules\QbitDownload\SearchMonitor.cs" Link="Module\SearchMonitor.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\HealthState.cs" Link="Module\HealthState.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Health.cs" Link="Module\Health.cs" />
     <Compile Include="..\..\Modules\QbitDownload\LocalIndex.cs" Link="Module\LocalIndex.cs" />
     <Compile Include="..\..\Modules\QbitDownload\IndexCrawler.cs" Link="Module\IndexCrawler.cs" />

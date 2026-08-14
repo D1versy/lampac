@@ -391,12 +391,40 @@ public static class CatalogWarmup
             string contentType = rs.Content.Headers.ContentType?.MediaType != null
                 ? rs.Content.Headers.ContentType.MediaType : null;
 
+            NoteHealth(pathQuery, rs.IsSuccessStatusCode, (int)rs.StatusCode, miss);
             return (rs.IsSuccessStatusCode, miss, body, contentType);
         }
         catch
         {
+            NoteHealth(pathQuery, false, 0, true);   // до апстрима не дошли — наблюдение честное
             return (false, false, null, null);
         }
+    }
+
+    /// <summary>
+    /// Пассивный хелс-чек внешних метаданных (HealthState.cs): прогрев регулярно тянет ряды,
+    /// детали и постеры, поэтому отдельные пробы ради экрана не нужны.
+    ///
+    /// 🔥 Считаем ТОЛЬКО MISS. Запрос идёт на НАШ /tmdb/*|/cub/* на loopback, и HIT в Staticache
+    /// отвечает 200, вообще не ходя наружу — засчитывать его как «TMDB работает» значило бы
+    /// повторить ровно ту ложную зелень, из-за которой пробы и переделывались.
+    /// </summary>
+    static void NoteHealth(string pathQuery, bool ok, int code, bool miss)
+    {
+        if (!miss || string.IsNullOrEmpty(pathQuery)) return;
+        try
+        {
+            string id = pathQuery.StartsWith("/tmdb/img/", StringComparison.OrdinalIgnoreCase) ? HealthState.Ids.TmdbImg
+                      : pathQuery.StartsWith("/tmdb/api/", StringComparison.OrdinalIgnoreCase) ? HealthState.Ids.TmdbApi
+                      : pathQuery.StartsWith("/cub/tmdb.", StringComparison.OrdinalIgnoreCase)
+                            ? (pathQuery.Contains("/3/", StringComparison.Ordinal) ? HealthState.Ids.TmdbApi : HealthState.Ids.Cub)
+                      : null;
+            if (id == null) return;
+
+            if (ok) HealthState.Ok(id);
+            else HealthState.Fail(id, code > 0 ? "http " + code : "не ответил");
+        }
+        catch { }
     }
 
     #region persist

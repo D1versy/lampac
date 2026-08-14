@@ -19,6 +19,7 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _jutTimer;      // jut.su: слежение за сезоном (раз в сутки)
     static System.Threading.Timer _jutWarmTimer;  // jut.su: прогрев кеша тайтлов (2 раза в сутки)
     static System.Threading.Timer _jutCatTimer;   // jut.su: снапшот-индекс каталога (сид/голова/ресид)
+    static System.Threading.Timer _healthTimer;   // пассивные хелс-чеки: сброс реестра на диск
     static System.TimeSpan _huntPeriod = System.TimeSpan.FromHours(4);
 
     // Ранний повтор охоты (EpisodeHunter): индексатор не дал кандидатов → следующий тик раньше срока.
@@ -35,6 +36,12 @@ public class ModInit : IModuleLoaded
         updateConf();
         EventListener.UpdateInitFile += updateConf;
         AppPatch.Attach();   // вырезание upstream-колокольчика/меню из app.min.js при отдаче (см. AppReplace.cs)
+
+        // Наблюдения хелс-чеков (HealthState.cs) — ДО таймеров: иначе первые же исходы легли бы
+        // в пустой реестр, а прочитанный следом файл затёр бы их старыми значениями.
+        try { HealthState.Load(); }
+        catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] health state load: " + ex); }
+
         EventListener.MyLocalIp += MyIp;   // внешний IP без api.ipify.org (qdl 2.15, см. MyIp ниже)
         CatalogWarmup.Attach();            // почасовой прогрев каталога главной (CatalogWarmup.cs)
 
@@ -138,6 +145,16 @@ public class ModInit : IModuleLoaded
             }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] crawler timer: " + ex); }
         }, null, System.TimeSpan.FromMinutes(25), CrawlPeriod());
+
+        // Наблюдения хелс-чеков на диск: липкий сбой обязан пережить рестарт контейнера (хост
+        // падает от скачков напряжения, ИБП нет) — иначе модель врёт ровно тогда, когда нужна.
+        // Тик на спокойном сервере бесплатен: без изменений FlushIfDirty выходит сразу.
+        _healthTimer?.Dispose();
+        _healthTimer = new System.Threading.Timer(_ =>
+        {
+            try { HealthState.FlushIfDirty(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] health flush: " + ex.Message); }
+        }, null, System.TimeSpan.FromSeconds(30), System.TimeSpan.FromSeconds(30));
 
         // Ретенция индекса — раз в сутки, первый прогон через час после старта.
         _pruneTimer?.Dispose();
@@ -290,6 +307,9 @@ public class ModInit : IModuleLoaded
         _jutWarmTimer = null;
         _jutCatTimer?.Dispose();
         _jutCatTimer = null;
+        _healthTimer?.Dispose();
+        _healthTimer = null;
+        try { HealthState.FlushIfDirty(); } catch { }
         // Грязное из горячего слоя обязано доехать до диска: иначе выгрузка модуля
         // теряет ещё не записанные маркер/activity (окно дебаунса — 200 мс).
         try { JsonStore.Flush(); } catch { }

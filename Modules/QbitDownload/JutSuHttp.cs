@@ -428,6 +428,25 @@ public static class JutNet
                 if (resp.reached) { try { pm.Success(); } catch { } }
                 else { try { pm.Refresh(); } catch { } }
             }
+
+            // ── Пассивный хелс-чек (HealthState.cs) ──
+            // Единственный выход ВСЕХ запросов к jut.su, поэтому наблюдение стоит здесь и
+            // больше нигде. Критерий — reached, а не HTTP-код: 404 сайт отдаёт с телом (Send
+            // ставит reached=true), это ответ живого сайта, а заглушку Cloudflare отсеивает
+            // предикат reached — она не содержит маркеров страницы.
+            try
+            {
+                if (resp != null && resp.reached) HealthState.Ok(HealthState.Ids.JutHost);
+                else HealthState.Fail(HealthState.Ids.JutHost, "сайт не ответил");
+
+                // Деградация: работаем, но не своим путём. Снятие обязательно — иначе ⚠️ залипнет.
+                var (mode, _) = JutProxyFallback.State("jutsu");
+                if (mode == "Direct") HealthState.Degraded(HealthState.Ids.JutHost, "прокси не отвечает — идём напрямую");
+                else if (mode == "NoRetry") HealthState.Degraded(HealthState.Ids.JutHost, "падали оба пути — прокси и прямой");
+                else HealthState.ClearDegraded(HealthState.Ids.JutHost);
+            }
+            catch { }
+
             return resp ?? new JutResp { error = "SITE_DOWN" };
         }
         finally { gate.Release(); }
@@ -688,6 +707,16 @@ public static class JutNet
 
     static void AuthAlarm(bool ok)
     {
+        // Наблюдение — ДО гейта changed: тревога в лог нужна раз на переходе, а хелс-чеку нужна
+        // свежая отметка времени на каждом резолве (у _authState её нет вовсе, и «✅ куки приняты»
+        // мог висеть сколь угодно долго после того, как они протухли).
+        try
+        {
+            if (ok) HealthState.Ok(HealthState.Ids.JutAuth);
+            else HealthState.Fail(HealthState.Ids.JutAuth, "куки протухли — сайт подменяет ссылки");
+        }
+        catch { }
+
         bool changed = _authState != ok;
         _authState = ok;
         if (!changed) return;

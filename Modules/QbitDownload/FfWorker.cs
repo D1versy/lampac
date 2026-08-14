@@ -275,6 +275,16 @@ static class FfWorker
                          && h.Value<bool?>("ok") == true && h.Value<bool?>("nvenc") == true;
             if (alive != _alive)
                 Console.WriteLine("[QbitDownload] ffworker " + (alive ? "доступен (NVENC)" : "недоступен → CPU-фолбэк"));
+
+            // Наблюдение ниже гейта Enabled (:268): выключенный воркер — это ⏸ «не настроено»,
+            // а не сбой. Одна точка покрывает и горячий путь транскода, и пробу с экрана.
+            try
+            {
+                if (alive) HealthState.Ok(HealthState.Ids.FfWorker);
+                else HealthState.Fail(HealthState.Ids.FfWorker, "не отвечает или NVENC недоступен → транскод на CPU");
+            }
+            catch { }
+
             _alive = alive;
             _checked = DateTime.UtcNow;
             return _alive;

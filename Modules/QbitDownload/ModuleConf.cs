@@ -169,6 +169,18 @@ public class ModuleConf : ModuleBaseConf
     // адрес там, поправьте и здесь, иначе хелс-чек будет врать про живой сервис.
     public int healthCacheSeconds { get; set; } = 30;      // общий кеш ответа /qdl/health
     public string healthFlaresolverrUrl { get; set; } = "http://flaresolverr:8191";
+
+    // Окно «флапа» (qdl 2.44): последняя операция удалась, но в окне были ошибки → ⚠️, а не ✅.
+    public int healthFlapWindowMinutes { get; set; } = 60;
+
+    // Сколько % от searchMonitorIntervalMinutes можно прожить без прогона, прежде чем вердикты
+    // канареек считать устаревшими. 250, а не 200: тик штатно пропускается на разогреве после
+    // старта и при занятом _watchGate — один законный пропуск не должен красить экран.
+    public int healthMonitorStalePercent { get; set; } = 250;
+
+    // ⚠️ Устарело с qdl 2.44 и больше не читается: чужой индекс проверялся пробой голого корня,
+    // которая ничего не доказывала. Боевой путь идёт через наш локальный индексатор и наблюдается
+    // пассивно (строка «Индексатор»). Ключ оставлен, чтобы не ломать существующий init.conf.
     public string healthJacredWebApi { get; set; } = "http://ns3bg91xvuqfvq9h.cfhttp.top";
 
     // ── bitmagnet: локальный индекс DHT-краулера (Postgres на хосте) ──
