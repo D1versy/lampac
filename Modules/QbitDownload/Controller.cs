@@ -596,11 +596,40 @@ public partial class QbitController : BaseController
                 }
             }
 
+            // Хеш нужен ВСЕМ, что идёт дальше: клиент по нему сохраняет карточку (/qdl/save), по нему
+            // пишется links/<hash>.json (слежение/охота) и промоутится донор. Раньше он вычислялся только
+            // из магнита, и раздачи login-трекеров (Кинозал/RuTracker отдают .torrent ФАЙЛОМ) оставались
+            // без карточки, описания и слежения — разбор «Холод», 14.08.2026.
             string hash = "";
             if (usedMagnet != null)
             {
                 var hm = Regex.Match(usedMagnet, "btih:([0-9a-fA-F]{40}|[0-9a-zA-Z]{32})", RegexOptions.IgnoreCase);
                 if (hm.Success) hash = hm.Groups[1].Value.ToLower();
+            }
+            else if (torrentFile != null)
+            {
+                // 1) считаем сами из тела файла — работает и на дубликате (409), где qBit ничего не отдаёт
+                hash = TorrentInfoHash(torrentFile) ?? "";
+
+                // 2) страховка: qBit v5 отдаёт id добавленного торрента в теле ответа
+                if (string.IsNullOrEmpty(hash) && body.StartsWith("{"))
+                {
+                    try
+                    {
+                        var ids = JObject.Parse(body)["added_torrent_ids"] as JArray;
+                        string id = ids?.FirstOrDefault()?.ToString();
+                        if (ValidHash(id)) hash = id.ToLower();
+                    }
+                    catch { }
+                }
+
+                // 3) сверка с qBit: под чужим ключом писать мету/links хуже, чем не писать вовсе
+                //    (v2/hybrid-торренты опознаются другим хешем — такие честно отдаём без hash)
+                if (!string.IsNullOrEmpty(hash) && await QbitTorrentInfo(c, hash) == null)
+                {
+                    Console.WriteLine("[QbitDownload] add: .torrent — хеш " + hash + " в qBit не найден, карточку привяжет MetaHeal");
+                    hash = "";
+                }
             }
 
             // Пользователь мог нажать «Скачать» на раздаче, которую охота уже качает ДОНОРОМ (она же
@@ -709,6 +738,7 @@ public partial class QbitController : BaseController
                 };
                 var meta = LoadMeta(h);
                 if (meta != null) item["meta"] = meta;
+                else MetaHealKick(h);   // безымянная карточка → в фоне поднимаем её по btih (MetaHeal.cs)
                 result.Add(item);
             }
 

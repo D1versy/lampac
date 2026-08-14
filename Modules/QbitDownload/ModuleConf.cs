@@ -57,6 +57,11 @@ public class ModuleConf : ModuleBaseConf
     // Отставание прогресса на TTL согласовано с владельцем: «несколько минут — не страшно».
     public int listCacheSeconds { get; set; } = 30;
 
+    // Восстановление карточки загрузки по infohash (MetaHeal.cs): безымянная карточка в «Загрузках»
+    // чинится в фоне через точную привязку btih → tmdb_id (наш индекс, затем bitmagnet).
+    // false = киллсвитч на лету (карточку тогда пишет только клиент при «Скачать»).
+    public bool metaHealEnabled { get; set; } = true;
+
     // HLS-транскод для браузеров (звук EAC3/AC3/DTS → AAC, видео copy). Кэш на HDD (дублирует видео).
     public string hlsPath { get; set; } = "/qdl-hls";
     public string ffmpeg { get; set; } = "/lampac/data/ffmpeg";

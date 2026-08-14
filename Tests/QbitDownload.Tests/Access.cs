@@ -60,6 +60,13 @@ public static class Access
     public static int NaturalCompare(string a, string b) => (int)Call("NaturalCompare", a, b);
     public static string MagnetHash(string magnet) => (string)Call("MagnetHash", magnet);
     public static bool LooksLikeTorrent(byte[] data) => (bool)Call("LooksLikeTorrent", data);
+    public static string TorrentInfoHash(byte[] data) => (string)Call("TorrentInfoHash", data);
+    public static JObject BuildSlimCard(JObject m, bool tv) => (JObject)Call("BuildSlimCard", m, tv);
+    public static Task<bool> MetaHealAsync(string hash) => (Task<bool>)Call("MetaHealAsync", hash);
+    public static void HealLink(string hash, string link, string queryNorm, int year, int isSerial, JObject card)
+        => Call("HealLink", hash, link, queryNorm, year, isSerial, card);
+    public static IDictionary HealTried()
+        => (IDictionary)C.GetField("_healTried", SF).GetValue(null);
     public static string SeriesKey(int seriesId, string link) => (string)Call("SeriesKey", seriesId, link);
     public static bool IsPrivateHost(Uri u) => (bool)Call("IsPrivateHost", u);
     public static bool IsLoopbackSelf(Uri u) => (bool)Call("IsLoopbackSelf", u);

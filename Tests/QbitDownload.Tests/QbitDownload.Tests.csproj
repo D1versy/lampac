@@ -33,6 +33,14 @@
     <PackageReference Include="Npgsql" Version="9.0.3" />
   </ItemGroup>
 
+  <!-- TorrentHash.cs — infohash из .torrent-файла. DLL та же, что приезжает в рантайме из
+       Modules/QbitDownload/references/ (вендорена в репозитории, пакетом нигде не подключена). -->
+  <ItemGroup>
+    <Reference Include="BencodeNET">
+      <HintPath>..\..\Modules\QbitDownload\references\BencodeNET.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\Shared\Shared.csproj" />
   </ItemGroup>
@@ -66,6 +74,8 @@
     <Compile Include="..\..\Modules\QbitDownload\JutSuGrab.cs" Link="Module\JutSuGrab.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuWatch.cs" Link="Module\JutSuWatch.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuCatalogIndex.cs" Link="Module\JutSuCatalogIndex.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\TorrentHash.cs" Link="Module\TorrentHash.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\MetaHeal.cs" Link="Module\MetaHeal.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Controller.cs" Link="Module\Controller.cs" />
 
     <!-- JacRed: линкуем ТОЛЬКО ProxyFallback.cs — он намеренно не обращается ни к ModInit, ни к

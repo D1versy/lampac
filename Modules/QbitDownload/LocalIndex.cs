@@ -275,6 +275,47 @@ limit @lim;", db);
 
         return res;
     }
+
+    // Обратный ход индекса: раздача (btih) → карточка, которую по ней искали.
+    //
+    // Индекс писался «карточка → раздачи», но привязка симметрична, и это единственное место в
+    // системе, где по скачанному торренту можно ТОЧНО узнать его TMDB id. Нужно, чтобы у загрузки
+    // всегда были карточка и описание: карточку сохраняет клиент сразу после «Скачать», а всё, что
+    // добавлено мимо этого пути (login-трекеры до фикса хеша, авто-контуры), чинится по btih отсюда.
+    internal static async Task<(int tmdbId, int isSerial, string queryNorm, int year, string magnet, string parselink)> TmdbByBtih(string btih)
+    {
+        var none = (0, 0, (string)null, 0, (string)null, (string)null);
+        if (!LocalIndexEnabled || LiDown || string.IsNullOrWhiteSpace(btih)) return none;
+        if (!await EnsureSchema()) return none;
+
+        try
+        {
+            await using var db = new NpgsqlConnection(ModInit.conf.localIndexConnection);
+            await db.OpenAsync();
+
+            await using var cmd = new NpgsqlCommand(@"
+select tt.tmdb_id, tt.is_serial, tt.query_norm, tt.year, i.magnet, i.parselink
+from torrent_index i
+join torrent_title tt on tt.torrent_id = i.id
+where lower(i.btih) = @b and tt.tmdb_id is not null
+order by tt.last_seen desc
+limit 1;", db);
+            cmd.CommandTimeout = Math.Max(2, ModInit.conf.localIndexTimeoutSec);
+            cmd.Parameters.AddWithValue("b", btih.ToLowerInvariant());
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            if (!await r.ReadAsync()) return none;
+
+            return (
+                r.IsDBNull(0) ? 0 : r.GetInt32(0),
+                r.IsDBNull(1) ? 0 : r.GetInt16(1),
+                r.IsDBNull(2) ? null : r.GetString(2),
+                r.IsDBNull(3) ? 0 : r.GetInt32(3),
+                r.IsDBNull(4) ? null : r.GetString(4),
+                r.IsDBNull(5) ? null : r.GetString(5));
+        }
+        catch (Exception ex) { LiFail("чтение по btih", ex); return none; }
+    }
     #endregion
 
     #region статистика

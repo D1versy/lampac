@@ -131,6 +131,44 @@ limit @lim";
         return result;
     }
 
+    // Обратный ход: раздача (btih) → TMDB id. Вторая попытка после нашего индекса, когда карточку
+    // загрузки надо восстановить, а искали её не мы (старые загрузки, ручное добавление в qBit).
+    // Привязка тут такая же точная — по info_hash, а не по имени.
+    static async Task<(int tmdbId, bool tv)> BitmagnetTmdbByBtih(string btih)
+    {
+        string conn = ModInit.conf.bitmagnetConnection;
+        if (string.IsNullOrWhiteSpace(conn) || string.IsNullOrWhiteSpace(btih))
+            return (0, false);
+
+        try
+        {
+            await using var db = new NpgsqlConnection(conn);
+            await db.OpenAsync();
+
+            await using var cmd = new NpgsqlCommand(@"
+select tc.content_id, tc.content_type
+from torrent_contents tc
+where tc.content_source = 'tmdb'
+  and tc.info_hash = decode(@h, 'hex')
+limit 1", db);
+            cmd.CommandTimeout = Math.Max(2, ModInit.conf.bitmagnetTimeoutSec);
+            cmd.Parameters.AddWithValue("h", btih.ToLowerInvariant());
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            if (!await r.ReadAsync() || r.IsDBNull(0))
+                return (0, false);
+
+            string id = r.GetString(0);
+            string ctype = r.IsDBNull(1) ? "" : r.GetString(1);
+            return (int.TryParse(id, out int tmdb) ? tmdb : 0, ctype == "tv_show");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[QbitDownload] bitmagnet по btih ({ex.GetType().Name}): {ex.Message}");
+            return (0, false);
+        }
+    }
+
     static int? QualityFromResolution(string res)
     {
         if (string.IsNullOrWhiteSpace(res))

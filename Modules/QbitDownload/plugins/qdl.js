@@ -454,12 +454,48 @@
         }, 5000);
     }
 
-    function tmdbSearch(name, cb) {
+    // Год из имени раздачи: cleanName его срезает, а для сверки кандидата он нужен.
+    function releaseYear(name) {
+        var m = String(name || '').match(/\b(19|20)\d\d\b/);
+        return m ? parseInt(m[0], 10) : 0;
+    }
+
+    // Ключ сверки: имя раздачи без хвоста сезона/серий («Холод S01», «Лаки Сезон 1»).
+    function matchKey(cleaned) {
+        return normTitle(String(cleaned || '')
+            .replace(/\bs\d{1,2}(\s*e\d{1,3})?\b/ig, ' ')
+            .replace(/\bсезон\s*\d+/ig, ' '));
+    }
+
+    // Строгая сверка кандидата TMDB с именем раздачи: название должно СОВПАСТЬ (или быть началом),
+    // и если год в имени раздачи есть — сойтись ±1.
+    // Без этого search/multi по «Holod…» отдавал «Голод-33» (1991) с постером, и чужая карточка
+    // прилипала к загрузке навсегда. Точную привязку (btih → tmdb) делает сервер — MetaHeal.cs;
+    // здесь остаются только очевидные совпадения, всё сомнительное лучше оставить без карточки.
+    function cardMatches(key, year, c) {
+        if (!key || !c) return false;
+
+        var cand = [c.title, c.name, c.original_title, c.original_name], hit = false;
+        for (var i = 0; i < cand.length; i++) {
+            var t = normTitle(cand[i]);
+            if (t && (t === key || t.indexOf(key + ' ') === 0 || key.indexOf(t + ' ') === 0)) { hit = true; break; }
+        }
+        if (!hit) return false;
+
+        if (year) {
+            var cy = parseInt(String(c.release_date || c.first_air_date || '').slice(0, 4), 10);
+            if (cy && Math.abs(cy - year) > 1) return false;
+        }
+        return true;
+    }
+
+    function tmdbSearch(name, year, cb) {
         try {
             var url = Lampa.TMDB.api('search/multi?api_key=' + tmdbKey() + '&language=ru-RU&query=' + encodeURIComponent(name));
             req(url, function (r) {
+                var key = matchKey(name);
                 var list = (r && r.results) ? r.results.filter(function (x) {
-                    return (x.media_type === 'movie' || x.media_type === 'tv') && x.poster_path;
+                    return (x.media_type === 'movie' || x.media_type === 'tv') && x.poster_path && cardMatches(key, year, x);
                 }) : [];
                 cb(list[0] || null);
             }, function () { cb(null); });
@@ -474,8 +510,8 @@
         } catch (e) { cb(null); }
     }
 
-    function enrich(name, cb) {   // имя раздачи → полная карточка TMDB
-        tmdbSearch(cleanName(name), function (found) {
+    function enrich(name, cb) {   // имя раздачи → полная карточка TMDB (только при строгом совпадении)
+        tmdbSearch(cleanName(name), releaseYear(name), function (found) {
             if (!found) { cb(null); return; }
             tmdbDetails(found.id, found.media_type, function (d) { cb(d || found); });
         });

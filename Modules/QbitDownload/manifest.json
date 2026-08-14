@@ -32,6 +32,8 @@
     "JutSuGrab.cs",
     "JutSuWatch.cs",
     "JutSuCatalogIndex.cs",
+    "TorrentHash.cs",
+    "MetaHeal.cs",
     "Controller.cs"
   ]
 }
