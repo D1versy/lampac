@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
+using System.Net;
 
 namespace JacRed.Controllers
 {
@@ -19,8 +20,10 @@ namespace JacRed.Controllers
 
         #region /qdl/nodes/hello
         /// <summary>
-        /// «Я жива, вот что я умею». Тело: {"name":"node1","egressPort":9121,"solverPort":0}.
-        /// Хост узла из тела НЕ читаем — берём адрес источника (см. NodeRegistry).
+        /// «Я жива, вот что я умею». Тело:
+        /// {"name":"node1","host":"192.168.87.60","egressPort":9121,"solverPort":0}.
+        /// host — адрес, по которому дом сможет достучаться; узел определяет его у себя сам.
+        /// Не прислали — берём адрес соединения (годится лишь без проброса портов, см. ниже).
         /// </summary>
         [HttpPost]
         [AllowAnonymous]
@@ -42,7 +45,7 @@ namespace JacRed.Controllers
             if (!NodeRegistry.IsPrivate(addr))
                 return StatusCode(403, new { ok = false, reason = "not a private address" });
 
-            string name;
+            string name, announced;
             int egressPort, solverPort;
 
             try
@@ -53,6 +56,7 @@ namespace JacRed.Controllers
 
                 var j = JObject.Parse(raw);
                 name = j.Value<string>("name");
+                announced = j.Value<string>("host");
                 egressPort = j.Value<int?>("egressPort") ?? 0;
                 solverPort = j.Value<int?>("solverPort") ?? 0;
             }
@@ -62,12 +66,35 @@ namespace JacRed.Controllers
                 return BadRequest(new { ok = false, reason = "bad body" });
             }
 
-            string ip = (addr.IsIPv4MappedToIPv6 ? addr.MapToIPv4() : addr).ToString();
+            // ⚠️ Адрес источника ненадёжен, и это выяснилось в бою. Docker Desktop
+            // подменяет его на шлюз своей сети у ВСЕХ запросов на проброшенный порт:
+            // и узел с другой машины, и локальный curl приходят как 172.24.0.1 — адрес,
+            // по которому никакого прокси нет. Поэтому основной источник — поле host,
+            // которое узел определяет у себя сам, а адрес соединения остаётся запасным
+            // (годится, когда дом и узел в одной docker-сети без проброса).
+            string connIp = (addr.IsIPv4MappedToIPv6 ? addr.MapToIPv4() : addr).ToString();
+            string ip = connIp;
+
+            if (!string.IsNullOrWhiteSpace(announced))
+            {
+                if (!IPAddress.TryParse(announced.Trim(), out var a) || !NodeRegistry.IsPrivate(a))
+                    return BadRequest(new { ok = false, reason = "bad host" });
+
+                ip = (a.IsIPv4MappedToIPv6 ? a.MapToIPv4() : a).ToString();
+            }
+
+            // Разовая проверка ДОСТИЖИМОСТИ на приёме объявления (не хелс-чек: живость
+            // ролей потом отслеживает сам трафик). Без неё неверный адрес принимался бы
+            // молча, дом гонял бы через него поиск и каждый раз откатывался — ровно то,
+            // что пришлось откапывать руками. Теперь узел получает внятный отказ и пишет
+            // его в свой лог.
+            if (egressPort > 0 && !await NodeRegistry.Reachable(ip, egressPort))
+                return BadRequest(new { ok = false, reason = "egress unreachable from home", ip, port = egressPort });
 
             if (!NodeRegistry.Hello(name, ip, egressPort, solverPort, nodes.maxNodes))
                 return BadRequest(new { ok = false, reason = "rejected" });
 
-            return Json(new { ok = true, ttlSeconds = nodes.ttlSeconds });
+            return Json(new { ok = true, ttlSeconds = nodes.ttlSeconds, ip });
         }
         #endregion
 

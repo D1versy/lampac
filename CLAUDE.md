@@ -30,6 +30,8 @@
 - **`Tests/QbitDownload.Tests/`** (C#/xUnit) + **`Tests/js/`** (JS) — наши тесты.
 - Правки upstream-файлов (**минимальные**): `Modules/LampaWeb/plugins/lampainit-invc.js` (регистрация `qdl.js` **и `music.js`** + скрытие вкладки CUB + ранний платформенный блок D1Vision, см. ниже), **`Core/plugins/invc-rch_nws.js`** (qdl 2.39, маркер `qdl-cut:rch-cors`: вердикт CORS без пробы `github.com` — она в браузере падала всегда; ⚠️ форму `if (true) check(...)` не сворачивать, иначе `else` ниже повисает = SyntaxError; при ребейзе восстановить — страж `Tests/js/rch-cors.test.js`), `Modules/LampaWeb/Controllers/ApiController.cs` (5 строк), `Modules/Music/manifest.json` (**флип `enable: true`** — у upstream модуль Music выключен по умолчанию; без флипа `/music.js` отдаёт 404, см. медиасервер `claude/06` §AP), `Core/Startup.cs` (~27 строк: подключение `UseD1VPerimeter` в нужной точке пайплайна, `EnableForHttps` для сжатия, `Cache-Control` статике в `OnPrepareResponse`).
 - `README.md`, этот `CLAUDE.md`.
+- **Удалены апстримные `docker-compose.yaml` и `docker-compose.dev.yaml`.** Мы собираем ТОЛЬКО свой образ (`docker build -t lampac-custom:latest .` по здешнему `Dockerfile`), а запускается он компоузом медиасервера из `E:\Media-server`. Апстримные файлы не использовались нигде и были ловушкой: `docker compose up -d` из этой папки поднимал контейнер с именем `lampac`, но на **upstream-образе без модуля QbitDownload** — все `/qdl/*` отдавали 404.
+  ⚠️ **При ребейзе с upstream** эти файлы будут возвращаться (upstream их правит) — конфликт modify/delete решается однозначно: `git rm docker-compose.yaml docker-compose.dev.yaml`, держим удалёнными.
 
 ## Что фиксить здесь, а что — в медиасервере
 
