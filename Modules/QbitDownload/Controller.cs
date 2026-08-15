@@ -828,6 +828,7 @@ public partial class QbitController : BaseController
                 var meta = LoadMeta(h);
                 if (meta != null) item["meta"] = meta;
                 else MetaHealKick(h);   // безымянная карточка → в фоне поднимаем её по btih (MetaHeal.cs)
+                DecorateListPoster(item);   // URL постера решает сервер (§BV)
                 result.Add(item);
             }
 
@@ -877,6 +878,8 @@ public partial class QbitController : BaseController
                         // Режим подписки — в JutDecorateListItem (JutSuWatch.cs): вынесен туда,
                         // чтобы контракт проверялся тестом, этот экшен в тестах не собрать.
                         JutDecorateListItem(item, loc, jutModes);
+                        // строго ПОСЛЕ декорации: слаг для jut-обложки берётся из item["jut"] (§BV)
+                        DecorateListPoster(item);
                         // без Touch activity == added → финализированный транскод позицию не меняет (§AG)
                         item["activity"] = Math.Max(item.Value<long?>("added") ?? 0, ActivityStored(act, h));
                         var lmeta = LoadMeta(h);
@@ -1383,7 +1386,10 @@ public partial class QbitController : BaseController
                 why = "rejected poster_url (не картинка TMDB и не публичный https)";
 
             if (img != null)
+            {
                 System.IO.File.WriteAllBytes(PosterPath(hash), img);
+                PosterWritten();   // без сброса снимка img/ has_poster в /qdl/list остался бы false (§BV)
+            }
             else if (why != null)
                 LogPosterOnce(hash, why);
 
@@ -3318,6 +3324,7 @@ public partial class QbitController : BaseController
         void mv(string a, string b) { try { if (System.IO.File.Exists(a)) { Directory.CreateDirectory(Path.GetDirectoryName(b)); System.IO.File.Copy(a, b, true); System.IO.File.Delete(a); } } catch { } }
         mv(MetaPath(oldH), MetaPath(newH));
         mv(PosterPath(oldH), PosterPath(newH));
+        PosterWritten();   // постер сменил имя: в снимке img/ он ещё под старым хешем (§BV)
         mv(LinkPath(oldH), LinkPath(newH));
         mv(LocalPath(oldH), LocalPath(newH));   // оверлей-маркер транскода следует за re-grab (пути внутри абсолютные)
         CollectionsMigrateHash(oldH, newH);
@@ -3869,6 +3876,29 @@ public partial class QbitController : BaseController
     }
 
     /// <summary>
+    /// То же решение для строки «Загрузок» (§BV, qdl 2.47): URL постера считает СЕРВЕР, клиент
+    /// дописывает только свой префикс. Тем самым карточка перестаёт зависеть от снимка каталога
+    /// (NotiPosterUrl смотрит File.Exists) и получает jut-обложку по слагу, когда своего файла
+    /// ещё нет — ровно как строки ленты после §BU.
+    ///
+    /// ⚠️ Звать ПОСЛЕ JutDecorateListItem: слаг берётся из уже проставленного item["jut"].
+    /// 🔴 Поле называется posterUrl, а НЕ poster: c["poster"] для JutPosterStampOne — это сырой
+    ///    CDN-URL тайтла, и наш путь уехал бы в match/&lt;slug&gt;.json (грабля §BU).
+    /// Живой хеш по seriesKey здесь не нужен: строка списка приходит из qBittorrent или маркера,
+    /// её хеш по определению актуальный.
+    /// Вынесено отдельной чистой функцией, чтобы контракт проверялся тестом — сам экшен List
+    /// требует живого qBittorrent и HttpContext (та же причина, что у JutDecorateListItem).
+    /// </summary>
+    internal static void DecorateListPoster(JObject item)
+    {
+        string hash = item?.Value<string>("hash");
+        if (string.IsNullOrEmpty(hash)) return;
+        string url = NotiPosterUrl(hash, (item["jut"] as JObject)?.Value<string>("slug"));
+        // null не кладём: 66 строк × лишний ключ на каждый запрос, а клиент и так проверяет наличие
+        if (url != null) item["posterUrl"] = url;
+    }
+
+    /// <summary>
     /// Карта «seriesKey → текущий hash раздачи» из watch.json. Строится ЛЕНИВО и один раз на запрос:
     /// нужна редко (только строкам, чей hash увёл SWITCH/re-grab), а тело ответа собирается на КАЖДЫЙ
     /// запрос — ETag считается из него, 304 чтение файла не экономит.
@@ -4410,14 +4440,44 @@ public partial class QbitController : BaseController
         DropListCache();
     }
 
-    /// <summary>Постер существует? Через кешированный листинг img/, а не File.Exists на карточку.</summary>
+    /// <summary>
+    /// Постер записан — снимок каталога img/ и готовый ответ /qdl/list устарели.
+    /// Парный к SaveMeta: мета и постер обязаны сбрасывать кеш ОДИНАКОВО. Звать везде, где файл
+    /// img/&lt;hash&gt;.jpg создаётся, копируется или переезжает (грабер jut, догоняющий апгрейд
+    /// постера, /qdl/save, MigrateCache, meta heal).
+    /// 🔥 §BV: инвалидация была ровно в ОДНОМ месте из пяти, поэтому обложка, доехавшая после
+    /// первого листинга каталога, не показывалась в «Загрузках» до рестарта контейнера.
+    /// </summary>
+    internal static void PosterWritten()
+    {
+        try
+        {
+            JsonStore.ForgetDir(Path.Combine(ModInit.conf.cachePath, "img"));
+            DropListCache();
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Постер существует? Через кешированный листинг img/, а не File.Exists на карточку.
+    /// ⚠️ Промах ОБЯЗАН перепроверяться — ровно как в FileInDir (§BM): снимок бессрочный, а постер
+    /// прилетает и мимо нас (копия апгрейда jut, docker cp), и ровно во время сборки списка.
+    /// Цена — один File.Exists на промах; при живых постерах промахов нет вовсе.
+    /// </summary>
     static bool HasPoster(string hash)
     {
         if (!ValidHash(hash)) return false;
         string p = PosterPath(hash);
-        foreach (string f in JsonStore.List(Path.GetDirectoryName(p), "*.jpg"))
+        string dir = Path.GetDirectoryName(p);
+        foreach (string f in JsonStore.List(dir, "*.jpg"))
             if (string.Equals(f, p, StringComparison.OrdinalIgnoreCase)) return true;
-        return false;
+        try
+        {
+            if (!System.IO.File.Exists(p)) return false;
+            JsonStore.ForgetDir(dir);   // снимок протух — дальше опять работает кеш
+            return true;
+        }
+        catch { return false; }
     }
 
     /// <summary>

@@ -39,7 +39,7 @@ function jsdomScroll(w) {
 }
 
 // files — что отдаёт /qdl/episodes; percents — прогресс просмотра по сериям
-function rig(files, percents) {
+function rig(files, percents, item) {
   const calls = { pushes: [], appended: [] };
   const { w, doc, qdl, lampa } = H.loadQdlDom({});
   w.Lampa.Scroll = jsdomScroll(w);   // qdl.js берёт Lampa.Scroll в момент создания компонента
@@ -58,10 +58,10 @@ function rig(files, percents) {
   });
   w.fetch = () => Promise.resolve({ json: () => Promise.resolve({}) });
 
-  const comp = new qdl.ComponentCard({ qdl: ITEM });
+  const comp = new qdl.ComponentCard({ qdl: item || ITEM });
   comp.activity = { loader() {}, toggle() {} };
   w.$('body').append(comp.create());
-  return { w, doc, calls, comp, lampa };
+  return { w, doc, calls, comp, lampa, qdl };
 }
 
 // прогресс просмотра серии — как после возврата из плеера
@@ -175,4 +175,39 @@ test('экран рисует мету загрузки: название, пр�
   assert.ok(doc.body.textContent.indexOf('Повелитель тайн') !== -1, 'название из меты');
   assert.ok(doc.body.textContent.indexOf('загружено') !== -1, 'бейдж прогресса загрузки');
   assert.ok(doc.querySelector('.qdl-poster'), 'постер (для jut — апгрейженный, из /qdl/poster)');
+});
+
+// ─────────────────── постер экрана (qdl 2.47) ───────────────────
+// Жалоба владельца 15.08.2026 на «Провальный навык»: на экране карточки постера нет, хотя файл
+// лежит на сервере и /qdl/poster отдаёт его с первого запроса (200, 102 526 байт). Экран смотрел
+// ТОЛЬКО на has_poster, а тот считается по кешированному листингу img/ — обложка, доехавшая после
+// снимка, не показывалась до рестарта контейнера. Теперь URL решает сервер (item.posterUrl).
+
+test('экран: постер берётся из posterUrl, посчитанного сервером', () => {
+  const { doc } = rig(EPISODES, [], Object.assign({}, ITEM,
+    { posterUrl: '/qdl/jut/poster?slug=guimi-zhi-zhu&v=2' }));
+  // ?v= (поколение апгрейда) обязан доехать нетронутым: на нём immutable на год
+  assert.strictEqual(doc.querySelector('.qdl-poster').getAttribute('src'),
+    '{localhost}/qdl/jut/poster?slug=guimi-zhi-zhu&v=2');
+});
+
+test('экран: старый сервер без posterUrl => прежний путь по хешу', () => {
+  // Страховка на время выкатки (клиент 2.47 против сервера 2.46). Не убирать раньше 2.48.
+  const { doc } = rig(EPISODES, [], Object.assign({}, ITEM, { has_poster: true }));
+  assert.strictEqual(doc.querySelector('.qdl-poster').getAttribute('src'),
+    '{localhost}/qdl/poster?hash=' + HASH);
+});
+
+test('экран: постера нет => нейтральная плитка, и на error тоже', () => {
+  const { w, doc, qdl } = rig(EPISODES, []);
+  const img = doc.querySelector('.qdl-poster');
+  assert.strictEqual(img.getAttribute('src'), qdl.PX1);
+  w.$(img).trigger('error');
+  assert.strictEqual(img.getAttribute('src'), qdl.PX1, 'обработчик ошибки тоже не рисует битый значок');
+});
+
+test('экран: img_broken.svg на карточке загрузки больше не встречается', () => {
+  const { doc } = rig(EPISODES, []);
+  assert.ok(!doc.body.innerHTML.includes('img_broken'),
+    'битый значок читается как поломка приложения, а «постера нет» — штатный случай');
 });

@@ -887,11 +887,16 @@ public partial class QbitController
             if (JutHasUpPoster(slug))
             {
                 System.IO.File.Copy(up, pp, true);
+                PosterWritten();
             }
             else if (!System.IO.File.Exists(pp) && !string.IsNullOrEmpty(t.poster))
             {
                 byte[] img = await JutFetchImage(t.poster);
-                if (img != null && img.Length > 128) await System.IO.File.WriteAllBytesAsync(pp, img);
+                if (img != null && img.Length > 128)
+                {
+                    await System.IO.File.WriteAllBytesAsync(pp, img);
+                    PosterWritten();   // снимок каталога img/ устарел — иначе has_poster врёт до рестарта (§BV)
+                }
             }
         }
         catch { }

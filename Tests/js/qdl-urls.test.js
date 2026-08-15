@@ -166,12 +166,43 @@ test('posterUrl: has_poster => qdl/poster URL with hash', () => {
   );
 });
 
-test('posterUrl: no has_poster => broken img placeholder', () => {
+// Постер карточки «Загрузок» решает СЕРВЕР (item.posterUrl, qdl 2.47). Прежний резолвер спрашивал
+// только has_poster, а тот считается по кешированному листингу img/: обложка, доехавшая позже,
+// не показывалась ни в гриде, ни на qdl_card до рестарта контейнера — при том, что файл лежал на
+// диске и /qdl/poster отдавал его с первого запроса (жалоба владельца 15.08.2026, §BV).
+
+test('posterUrl: сервер прислал posterUrl => берём его как есть', () => {
   const { qdl } = H.loadQdl({});
-  assert.strictEqual(qdl.posterUrl({ has_poster: false, hash: 'ABC' }), './img/img_broken.svg');
-  assert.strictEqual(qdl.posterUrl({ hash: 'ABC' }), './img/img_broken.svg');
-  assert.strictEqual(qdl.posterUrl(null), './img/img_broken.svg');
-  assert.strictEqual(qdl.posterUrl(undefined), './img/img_broken.svg');
+  // jut-обложка с поколением: ?v= обязан доехать нетронутым, на нём immutable на год
+  assert.strictEqual(
+    qdl.posterUrl({ posterUrl: '/qdl/jut/poster?slug=joutai-ijou-skill&v=2', hash: 'ABC' }),
+    API + '/qdl/jut/poster?slug=joutai-ijou-skill&v=2'
+  );
+});
+
+test('posterUrl: серверный URL главнее has_poster', () => {
+  const { qdl } = H.loadQdl({});
+  // has_poster мог протухнуть в обе стороны — источник истины один, и он на сервере
+  assert.strictEqual(
+    qdl.posterUrl({ posterUrl: '/qdl/jut/poster?slug=clevatess', has_poster: true, hash: 'DEAD' }),
+    API + '/qdl/jut/poster?slug=clevatess'
+  );
+});
+
+test('posterUrl: старый сервер без posterUrl => прежний путь по хешу', () => {
+  // Страховка на время выкатки (клиент 2.47 против сервера 2.46). Не убирать раньше 2.48.
+  const { qdl } = H.loadQdl({});
+  assert.strictEqual(qdl.posterUrl({ has_poster: true, hash: 'ABC' }), API + '/qdl/poster?hash=ABC');
+});
+
+test('posterUrl: постера нет вовсе => нейтральная плитка, НЕ img_broken', () => {
+  const { qdl } = H.loadQdl({});
+  for (const t of [{ has_poster: false, hash: 'ABC' }, { hash: 'ABC' }, {}, null, undefined]) {
+    const url = qdl.posterUrl(t);
+    assert.strictEqual(url, qdl.PX1);
+    assert.ok(!url.includes('img_broken'), 'битый значок читается как поломка приложения');
+    assert.ok(url.startsWith('data:image/gif;base64,'), 'должен быть самодостаточный data-URI');
+  }
 });
 
 // ─────────────────────────── notiPoster ───────────────────────────

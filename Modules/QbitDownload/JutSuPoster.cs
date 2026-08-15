@@ -583,7 +583,11 @@ public partial class QbitController
     /// <summary>
     /// Скачанный тайтл показывается в «Загрузках» по HASH-пути (/qdl-data/img/&lt;hash&gt;.jpg).
     /// Когда апгрейд доехал — перекладываем и туда, иначе карточка скачанного останется
-    /// с квадратом 186×186. has_poster — это File.Exists, перезапись его не ломает.
+    /// с квадратом 186×186.
+    /// 🔥 §BV: «has_poster — это File.Exists» было НЕВЕРНО (это кешированный листинг img/), и
+    /// обложка, доехавшая сюда после первого листинга, в «Загрузках» не появлялась до рестарта.
+    /// Отсюда PosterWritten() — перезапись существующего файла его не требует, но у НОВОГО тайтла
+    /// это ровно тот случай, на котором баг и поймали (joutai-ijou-skill, 15.08.2026).
     /// </summary>
     internal static async Task JutPosterSyncDownloads(string slug)
     {
@@ -598,6 +602,7 @@ public partial class QbitController
             string pp = PosterPath(hash);
             Directory.CreateDirectory(Path.GetDirectoryName(pp));
             await Task.Run(() => System.IO.File.Copy(up, pp, true));
+            PosterWritten();
         }
         catch { }
     }

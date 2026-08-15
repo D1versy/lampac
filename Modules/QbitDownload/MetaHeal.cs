@@ -106,8 +106,7 @@ public partial class QbitController
                             System.IO.File.WriteAllBytes(PosterPath(hash), img);
                             // ⚠️ has_poster в /qdl/list считается по КЕШИРОВАННОМУ листингу img/, а снимок
                             // бессрочный: без сброса карточка ехала бы с битой картинкой до рестарта.
-                            JsonStore.ForgetDir(dir);
-                            DropListCache();
+                            PosterWritten();
                         }
                     }
                     finally { _posterInFlight.TryRemove(hash, out _); }

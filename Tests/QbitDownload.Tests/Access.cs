@@ -191,6 +191,8 @@ public static class Access
     public static void SaveLocal(string hash, JObject marker) => Call("SaveLocal", hash, marker);
     /// <summary>Файл на месте? Через кешированный листинг каталога + самолечение промаха (§BM).</summary>
     public static bool FileInDir(string path) => (bool)Call("FileInDir", path);
+    /// <summary>Постер на месте? Тот же приём для каталога img/ + самолечение промаха (§BV).</summary>
+    public static bool HasPoster(string hash) => (bool)Call("HasPoster", hash);
     public static string BuildVodPlaylist(double duration) => (string)Call("BuildVodPlaylist", duration);
     public static bool SegReady(string dir, int n) => (bool)Call("SegReady", dir, n);
     public static JArray LoadWatch() => (JArray)Call("LoadWatch");

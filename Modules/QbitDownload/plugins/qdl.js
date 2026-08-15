@@ -319,6 +319,9 @@
         post(API + '/qdl/save', { hash: t.hash, poster_url: tmdbImg('t/p/w500' + t.meta.poster_path) }, function (r) {
             if (r && r.has_poster) {
                 t.has_poster = true;
+                // ⚠️ Поле сервера тоже правим: иначе перерисовка из этого же объекта (Activity.replace)
+                // вернула бы прежний URL, посчитанный ДО того, как постер лёг на диск (§BV).
+                t.posterUrl = '/qdl/poster?hash=' + t.hash;
                 img.attr('src', API + '/qdl/poster?hash=' + t.hash + '&t=' + Date.now());
             }
         });
@@ -517,17 +520,26 @@
         });
     }
 
-    function posterUrl(item) {
-        if (item && item.has_poster) return API + '/qdl/poster?hash=' + item.hash;
-        return './img/img_broken.svg';
-    }
-
-    // 1×1 прозрачный GIF. «Постера нет» в ленте уведомлений — ШТАТНЫЙ случай (строка DIAG «Поиск
-    // раздач», вычищенная раздача), а img_broken.svg читается как поломка приложения. У <img> уже
+    // 1×1 прозрачный GIF. «Постера нет» — ШТАТНЫЙ случай (строка DIAG «Поиск раздач», вычищенная
+    // раздача, тайтл без обложки), а img_broken.svg читается как поломка приложения. У <img> уже
     // есть background:#222, поэтому прозрачный пиксель поверх него даёт нейтральную плитку.
     // src='' резолвится в URL документа и сам стреляет error, а <img> вовсе без src на части
     // ТВ-движков всё равно рисует битую иконку — поэтому именно data-URI.
+    // ⚠️ Объявлен ВЫШЕ posterUrl намеренно: тот его использует, полагаться на var-hoisting не надо.
     var PX1 = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+
+    // Постер карточки «Загрузок» (грид, обложка коллекции, экран qdl_card). Решает СЕРВЕР
+    // (item.posterUrl, qdl 2.47): только он знает, лежит ли файл на диске СЕЙЧАС, есть ли
+    // апгрейженная jut-обложка и какое у неё поколение. Прежний путь спрашивал has_poster, а тот
+    // считается по кешированному листингу img/ — постер, доехавший позже, не показывался до
+    // рестарта контейнера (§BV, боевой случай 15.08.2026).
+    // ⚠️ Фолбэк на has_poster нужен на время выкатки (клиент 2.47 против сервера 2.46) — не
+    // убирать раньше 2.48.
+    function posterUrl(item) {
+        if (item && item.posterUrl) return API + item.posterUrl;
+        if (item && item.has_poster) return API + '/qdl/poster?hash=' + item.hash;
+        return PX1;
+    }
 
     // Постер строки уведомления. Решает СЕРВЕР (n.posterUrl, qdl 2.46): только он знает, лежит ли
     // файл на диске, есть ли апгрейженная обложка и какой хеш у раздачи СЕЙЧАС. У jut-уведомления
@@ -1490,7 +1502,8 @@
                   '</div>' +
                 '</div>'
             );
-            body.find('.qdl-poster').on('error', function () { this.src = './img/img_broken.svg'; });
+            // рваная иконка читается как поломка приложения — нейтральная плитка поверх #222 (§BV)
+            body.find('.qdl-poster').on('error', function () { this.src = PX1; });
             body.find('.qdl-watch').on('hover:enter', function () { watch(item); });
             body.find('.qdl-watch').on('hover:focus', function (e) { scroll.update($(e.target), true); });
 
@@ -1537,7 +1550,7 @@
                     saveMeta(item.hash, card, function (r) {
                         if (self.destroyed) return;
                         item.meta = slimCard(card);
-                        if (r && r.has_poster) item.has_poster = true;
+                        if (r && r.has_poster) { item.has_poster = true; item.posterUrl = '/qdl/poster?hash=' + item.hash; }
                         try { if (Lampa.Activity.own && !Lampa.Activity.own(self)) return; Lampa.Activity.replace(); } catch (e) {}
                     });
                 });
@@ -1633,7 +1646,7 @@
 
             var img = el.find('.card__img');
             img.attr('src', posterUrl(c.cover));
-            img.on('error', function () { this.src = './img/img_broken.svg'; });
+            img.on('error', function () { this.src = PX1; });
             healPoster(c.cover, img);   // обложка коллекции тоже лечится
 
             var view = el.find('.card__view'); if (!view.length) view = el;
@@ -1655,7 +1668,7 @@
 
             var img = el.find('.card__img');
             img.attr('src', posterUrl(t));
-            img.on('error', function () { this.src = './img/img_broken.svg'; });
+            img.on('error', function () { this.src = PX1; });
 
             var view = el.find('.card__view'); if (!view.length) view = el;
             view.append(t.local || t.state === 'local'
@@ -1677,7 +1690,7 @@
                     saveMeta(t.hash, card, function (r) {
                         t.meta = slimCard(card);
                         el.find('.card__title').text(card.title || card.name || t.name);
-                        if (r && r.has_poster) { t.has_poster = true; el.find('.card__img').attr('src', API + '/qdl/poster?hash=' + t.hash + '&t=' + Date.now()); }
+                        if (r && r.has_poster) { t.has_poster = true; t.posterUrl = '/qdl/poster?hash=' + t.hash; el.find('.card__img').attr('src', API + '/qdl/poster?hash=' + t.hash + '&t=' + Date.now()); }
                     });
                 });
             }
