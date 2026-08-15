@@ -121,6 +121,11 @@ public class ModuleConf : ModuleBaseConf
     // вызвала бы залп повторных уведомлений. 0 = не прунить (киллсвитч).
     public int notiKeepRows { get; set; } = 500;
 
+    // Не уведомлять о донорской серии, которой ещё не было в эфире по TMDB (§BS). Пропуск не пишет
+    // ни noti, ни seen, поэтому лаг TMDB стоит одного тика, а не потерянной серии. false = киллсвитч
+    // (и он же выключает поход в TMDB из тестов сканера).
+    public bool notifyAiredCap { get; set; } = true;
+
     // ── Умная выдача /qdl/search (TorrentScoring) ──
     public bool searchScoring { get; set; } = true;        // false = старая сортировка только по сидам
     public int preferredQuality { get; set; } = 2160;      // согласовано с video_quality_default клиента

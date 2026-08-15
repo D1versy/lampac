@@ -316,6 +316,19 @@ public static class Access
     public static bool AddStartNotification(int seriesId, string link, string hash, string title, string ep)
         => (bool)Call("AddStartNotification", seriesId, link, hash, title, ep);
     public static void PushNotiSignal(int count) => Call("PushNotiSignal", count);
+
+    /// <summary>Что донор реально отдал: план уведомлений строго по donors[].eps[] (§BS).</summary>
+    public static JArray DonorNotiPlan(JObject donor, JArray dfiles, HashSet<string> seenKeys, int mainSeason)
+        => (JArray)Call("DonorNotiPlan", donor, dfiles, seenKeys, mainSeason);
+
+    /// <summary>Потолок эфира: aired == 0 = неизвестно → fail-open.</summary>
+    public static bool AboveAired(int ep, int aired) => (bool)Call("AboveAired", ep, aired);
+
+    public static List<string> EpKeyForms(string epkey, int season, int ep)
+        => (List<string>)Call("EpKeyForms", epkey, season, ep);
+
+    public static int ForgetEpisodeNoti(string seriesKey, JObject epRec)
+        => (int)Call("ForgetEpisodeNoti", seriesKey, epRec);
 }
 
 /// <summary>Reflection view над приватным QbitController+TcJob (state/progress/error).</summary>

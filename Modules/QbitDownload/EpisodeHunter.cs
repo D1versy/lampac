@@ -1620,6 +1620,12 @@ public partial class QbitController
                         DropResolveCache(a.donorHash);   // файл донора удалён с диска — путь из кеша резолва больше не валиден
                         a.ep["status"] = "replaced";
                         a.ep["replacedAt"] = DateTime.UtcNow.ToString("o");
+                        // Запись оказалась ОШИБОЧНОЙ (чужой сезон), а не «серия замещена основной» —
+                        // значит и след в уведомлениях ошибочен. Чистим seen/noti, иначе ключ навсегда
+                        // глушит настоящую серию с тем же номером: ровно так «Укрытие» потеряло S03E07
+                        // (§BS). drop-file/upgraded не трогаем — там серия у зрителя реально есть.
+                        if (a.kind == "wrong-season")
+                            ForgetEpisodeNoti(SeriesKey(m.Value<int?>("id") ?? 0, m.Value<string>("link")), a.ep);
                         changed = true;
                         Console.WriteLine("[QbitDownload] hunt: серия " + a.ep.Value<string>("epkey") + (a.kind switch
                         {

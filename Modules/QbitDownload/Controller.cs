@@ -3415,6 +3415,109 @@ public partial class QbitController : BaseController
     internal static string StartKey(string hash, string ep)
         => "start:" + (hash ?? "").ToLowerInvariant() + ":" + (string.IsNullOrWhiteSpace(ep) ? "all" : ep);
 
+    // Потолок «серия реально вышла в эфир». aired == 0 — НЕИЗВЕСТНО (TMDB лёг, нет tmdb id,
+    // абсолютная нумерация) → fail-open. Отдельная функция, чтобы это правило жило в одном месте.
+    static bool AboveAired(int ep, int aired) => aired > 0 && ep > aired;
+
+    // Все формы ключа, под которыми серия могла осесть в seen/noti. §BA поменял ParseEp, и одна и та
+    // же серия писалась то как «e7», то как «s3e7» — у «Укрытия» донор был записан с epkey «e7», а в
+    // seen лежало «s3e7». Чистка по одному записанному ключу мусор бы не убрала.
+    internal static List<string> EpKeyForms(string epkey, int season, int ep)
+    {
+        var res = new List<string>();
+        if (!string.IsNullOrEmpty(epkey)) res.Add(epkey);
+        if (ep >= 0)
+        {
+            if (season >= 0 && !res.Contains("s" + season + "e" + ep)) res.Add("s" + season + "e" + ep);
+            if (!res.Contains("e" + ep)) res.Add("e" + ep);
+        }
+        return res;
+    }
+
+    // Забыть, что мы вообще уведомляли об этой серии: снимаем и seen, и noti.
+    // Зовётся ТОЛЬКО когда охота признала запись ошибочной (wrong-season) — см. ScanReplacements.
+    // Удаляем обе формы ключа: остаток «e7» при живом «s3e7» продолжал бы глушить серию.
+    // Побочка осознанная: у сериала со сквозной нумерацией это может снять законный «e7» —
+    // цена ровно одно повторное уведомление, тогда как остаток — немая серия навсегда.
+    internal static int ForgetEpisodeNoti(string seriesKey, JObject epRec)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(seriesKey) || epRec == null) return 0;
+            var forms = EpKeyForms(epRec.Value<string>("epkey"), epRec.Value<int?>("season") ?? -1, epRec.Value<int?>("ep") ?? -1);
+            if (forms.Count == 0) return 0;
+
+            using var db = new SqlContext();
+            int n = db.seen.Where(x => x.seriesKey == seriesKey && forms.Contains(x.epkey)).ExecuteDelete();
+            n += db.noti.Where(x => x.seriesKey == seriesKey && forms.Contains(x.epkey)).ExecuteDelete();
+            if (n > 0)
+                Console.WriteLine("[QbitDownload] noti: забыли ошибочную серию " + seriesKey + " " + string.Join("/", forms) + " — строк снято " + n);
+            return n;
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] noti forget: " + ex.Message); return 0; }
+    }
+
+    // Что донор реально отдал зрителю — по записям donors[].eps[], а НЕ по всем его файлам.
+    //
+    // 🔥 До фикса цикл шёл по всем файлам донора: «новой серией» считался любой файл с
+    // progress >= 0.999. Но донорский пак многосерийный и часто многосезонный (это разрешено —
+    // EpisodeHunter.cs, сезонный отсев по файлам), а выключенные filePrio=0 файлы показывают
+    // progress 1.0, когда их контент уже лежит на общем save_path или доехал на пересечении
+    // кусков. Сезон при этом пересчитывался ДОМИНИРУЮЩИМ СЕЗОНОМ ОСНОВНОЙ раздачи — так
+    // 2026-08-09 «Укрытие» получило уведомления про s3e7…s3e10 (серий не существует в природе)
+    // и s2e7…s2e10 из пака ВТОРОГО сезона. Ключи осели в seen, seen не чистится никогда —
+    // и настоящая S03E07 через шесть дней приехала молча (§BS).
+    //
+    // Возвращает по записи на серию: { epkey, season, episode, label }, в порядке eps.
+    static JArray DonorNotiPlan(JObject donor, JArray dfiles, HashSet<string> seenKeys, int mainSeason)
+    {
+        var res = new JArray();
+        if (donor == null || dfiles == null) return res;
+
+        // Запись донора без eps — либо доисторическая, либо правленая руками. Молчим: одно
+        // пропущенное уведомление дешевле, чем фантом, который навсегда глушит настоящую серию.
+        var eps = donor["eps"] as JArray;
+        if (eps == null || eps.Count == 0) return res;
+
+        foreach (var e in eps.OfType<JObject>())
+        {
+            if (e.Value<string>("status") != "hunted") continue;   // "replaced" — файла уже нет на диске
+            int fi = e.Value<int?>("fileIndex") ?? -1, en = e.Value<int?>("ep") ?? -1;
+            if (fi < 0 || en < 0) continue;
+
+            // Строго по индексу файла, без фолбэка на разбор имени: в многосезонном паке «серия 7»
+            // есть в каждом сезоне, и фолбэк привязал бы запись s3e7 к файлу Silo.S02E07.mkv —
+            // ровно та дыра, которую чиним. Так же строго матчат PlanReplacements/MergeEpisodeFiles.
+            var f = dfiles.FirstOrDefault(x => (x.Value<int?>("index") ?? -1) == fi);
+            if (f == null) continue;
+            if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
+            if ((f.Value<double?>("progress") ?? 0) < 0.999) continue;   // серия ещё качается
+
+            // Сезон: файл важнее записи. Записи, сделанные до fail-closed сезонного гейта, врут —
+            // у «Укрытия» файлы Silo.S02.E07…E10 лежали как season=3 (та же логика в MergeEpisodeFiles).
+            int es = FileSeason(f);
+            if (es <= 0) es = e.Value<int?>("season") ?? -1;
+            if (es <= 0) es = mainSeason;
+            if (es <= 0) es = -1;   // ⚠️ DominantSeason отдаёт 0 = «не определить», а Ep.season ждёт -1 (иначе ключ s0e7)
+
+            // чужой сезон в доноре — не наша серия (тот же рубеж, что в MergeEpisodeFiles)
+            if (mainSeason > 0 && es > 0 && es != mainSeason) continue;
+
+            // имя файла разобралось и говорит про ДРУГУЮ серию — запись протухла, не верим ей
+            var fe = ParseEp(BaseNoExt(f));
+            if (fe != null && fe.any && fe.kind == null && fe.ep >= 0 && fe.ep != en) continue;
+
+            var ep = new Ep { season = es, ep = en };
+            string key = EpKey(ep);
+            if (key == null || SeenAlready(seenKeys, ep, key)) continue;
+            if (!IsEpisodeLike(ep)) continue;
+            if (res.OfType<JObject>().Any(x => x.Value<string>("epkey") == key)) continue;   // две записи на один ключ
+
+            res.Add(new JObject { ["epkey"] = key, ["season"] = es, ["episode"] = en, ["label"] = EpLabel(ep) });
+        }
+        return res;
+    }
+
     // основной сканер: для каждой отслеживаемой раздачи — новые докачавшиеся серии → записи в noti
     public static async Task<int> ScanEpisodeNotifications()
     {
@@ -3448,6 +3551,20 @@ public partial class QbitController : BaseController
             }
             bool StageNoti(string sk2, string key2) => staged.Add("N|" + sk2 + "|" + key2);
 
+            // Потолок эфира спрашиваем один раз на (сериал, сезон) за прогон. AiredEpisodes кеширует
+            // на 6 ч только УСПЕХ, а на сбое возвращает 0 без кеша — при лежащем TMDB каждая серия
+            // стоила бы отдельного запроса с таймаутом 15 с, и всё это под удерживаемым _watchGate.
+            var airedMemo = new Dictionary<string, int>();
+            async Task<int> AiredFor(int sid, int season)
+            {
+                if (sid <= 0 || season <= 0) return 0;
+                string k = sid + ":" + season;
+                if (airedMemo.TryGetValue(k, out int v)) return v;
+                v = await AiredEpisodes(sid, season);
+                airedMemo[k] = v;
+                return v;
+            }
+
             foreach (var m in list)
             {
                 try
@@ -3467,6 +3584,12 @@ public partial class QbitController : BaseController
 
                     var seenKeys = new HashSet<string>(db.seen.Where(x => x.seriesKey == sk).Select(x => x.epkey));
                     bool baseline = seenKeys.Count == 0;   // первый проход (или старая запись до фичи) → только база, без уведомлений
+
+                    // ⚠️ У noti тот же UNIQUE(seriesKey, epkey), что у seen. Осиротевшая строка noti (её
+                    // близнеца в seen удалили руками при чистке фантомов) уронила бы SaveChanges на
+                    // уникальном индексе и откатила бы ВСЮ пачку уведомлений прогона — а исключение
+                    // только пишется в лог. Поэтому ключи ленты грузим рядом с seen и в noti не лезем.
+                    var notiKeys = new HashSet<string>(db.noti.Where(x => x.seriesKey == sk).Select(x => x.epkey));
                     int dom = DominantSeason(files);
 
                     foreach (var f in files)
@@ -3481,7 +3604,7 @@ public partial class QbitController : BaseController
                         double progress = f.Value<double?>("progress") ?? 0;
                         if (progress < 0.999) continue;   // серия ещё качается
 
-                        if (IsEpisodeLike(ep) && StageNoti(sk, key))
+                        if (IsEpisodeLike(ep) && !notiKeys.Contains(key) && StageNoti(sk, key))
                         {
                             db.noti.Add(new NotiModel
                             {
@@ -3500,6 +3623,7 @@ public partial class QbitController : BaseController
                     // серии, докачавшиеся у ДОНОРОВ (охота по всем раздачам): уведомление с пометкой.
                     // hash в noti — ОСНОВНОЙ (openNotification ищет карточку по нему). На baseline-проходе
                     // доноров пропускаем: их серии не должны молча осесть в базе без уведомления.
+                    // Что именно донор отдал — считает DonorNotiPlan строго по donors[].eps[] (§BS).
                     var donors = m["donors"] as JArray;
                     if (!baseline && donors != null)
                         foreach (var d in donors.OfType<JObject>())
@@ -3508,25 +3632,39 @@ public partial class QbitController : BaseController
                             if (!ValidHash(dh)) continue;
                             var dfiles = await QbitFiles(c, dh);
                             if (dfiles == null) continue;
-                            int ddom = DominantSeason(dfiles);
-                            foreach (var f in dfiles)
+
+                            foreach (var p in DonorNotiPlan(d, dfiles, seenKeys, dom).OfType<JObject>())
                             {
-                                if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
-                                if ((f.Value<double?>("progress") ?? 0) < 0.999) continue;   // серия ещё качается (или prio 0)
-                                var ep = NormSeason(ParseEp(BaseNoExt(f)), ddom > 0 ? ddom : dom);
-                                string key = EpKey(ep);
-                                if (key == null || SeenAlready(seenKeys, ep, key)) continue;
-                                if (IsEpisodeLike(ep) && StageNoti(sk, key))
+                                string key = p.Value<string>("epkey"), lab = p.Value<string>("label");
+                                int es = p.Value<int?>("season") ?? -1, en = p.Value<int?>("episode") ?? -1;
+
+                                // Потолок по РЕАЛЬНО вышедшим сериям. Пропуск не пишет НИ noti, НИ seen:
+                                // seen — структура односторонняя (её никто не чистит), и запись «видели»
+                                // без уведомления заглушила бы настоящую серию навсегда. Не записав ничего,
+                                // получаем самолечение: TMDB догонит эфир — уведомление придёт следующим тиком.
+                                // Только донорская ветка: файл ОСНОВНОЙ раздачи — факт, и русские WEB-DL
+                                // регулярно опережают air_date у TMDB.
+                                if ((ModInit.conf?.notifyAiredCap ?? true) && seriesId > 0 && es > 0)
+                                {
+                                    int aired = await AiredFor(seriesId, es);
+                                    if (AboveAired(en, aired))
+                                    {
+                                        Console.WriteLine($"[QbitDownload] notify (donor): {title} — {lab}: по TMDB вышло {aired}, серия не в эфире → пропуск");
+                                        continue;
+                                    }
+                                }
+
+                                if (!notiKeys.Contains(key) && StageNoti(sk, key))
                                 {
                                     db.noti.Add(new NotiModel
                                     {
                                         seriesKey = sk, seriesId = seriesId, hash = hash, title = title,
-                                        season = ep.season, episode = ep.ep, kind = ep.kind, epkey = key,
-                                        label = EpLabel(ep) + " · временно с другой раздачи", created = DateTime.UtcNow, read = false
+                                        season = es, episode = en, kind = null, epkey = key,
+                                        label = lab + " · временно с другой раздачи", created = DateTime.UtcNow, read = false
                                     });
                                     created++;
                                     touched.Add(hash);   // hash здесь — ОСНОВНОЙ (как и в noti): всплывает карточка сериала
-                                    Console.WriteLine("[QbitDownload] notify (donor): " + title + " — " + EpLabel(ep));
+                                    Console.WriteLine("[QbitDownload] notify (donor): " + title + " — " + lab);
                                 }
                                 StageSeen(sk, key);
                                 seenKeys.Add(key);
