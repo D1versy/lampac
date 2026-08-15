@@ -25,6 +25,12 @@
         /// </summary>
         public int proxyFallbackCooldownSeconds = 300;
 
+        /// <summary>
+        /// Узлы-помощники: выходы, о которых вспомогательные машины объявляют сами.
+        /// В init.conf прописывать ничего не нужно — см. NodesConf.
+        /// </summary>
+        public NodesConf nodes = new NodesConf();
+
 
         public TrackerSettings Rutor = new TrackerSettings("https://rutor.info"/*, priority: "torrent"*/);
 

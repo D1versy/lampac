@@ -87,6 +87,7 @@
          ⚠️ Не линковать сюда GlobalUsings.cs модуля: его global using подействовал бы на ВСЮ
          тестовую сборку. -->
     <Compile Include="..\..\Modules\JacRed\Engine\ProxyFallback.cs" Link="JacRed\ProxyFallback.cs" />
+    <Compile Include="..\..\Modules\JacRed\Engine\NodeRegistry.cs" Link="JacRed\NodeRegistry.cs" />
 
     <!-- Online: линкуем ТОЛЬКО OnlineEventsCache.cs — он не трогает ни Online.ModInit, ни
          BaseController, поэтому коллизии с QbitDownload.ModInit не возникает. Под тестами его

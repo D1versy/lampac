@@ -56,10 +56,45 @@ namespace JacRed.Engine
         public static Task<T> HttpOrDirect<T>(string plugin, TrackerSettings tracker, ProxyManager proxyManager,
                                               Func<T, bool> ok, Func<WebProxy, Task<T>> send) where T : class
             => ProxyFallback.Run(plugin,
-                                 proxyManager != null ? proxyManager.Get : null,
+                                 NodeOrProxy(proxyManager),
                                  send, ok,
                                  tracker?.proxyFallbackDirect ?? jackett.proxyFallbackDirect,
                                  jackett.proxyFallbackCooldownSeconds,
                                  consoleErrorLog);
+
+        /// <summary>
+        /// Единственная точка, где узлы-помощники вклиниваются в поход на трекер: есть живой
+        /// узел — идём его адресом, нет — всё как было (штатный proxyManager, а при useproxy:false
+        /// и он вернёт null, то есть прямой путь).
+        ///
+        /// Почему именно здесь, а не через globalproxy/globalnameproxy в init.conf: те ручки
+        /// работают только при useproxy:true, который стоит ровно у одного трекера, — остальные
+        /// пришлось бы включать руками. Здесь узлы работают МИМО всех конфиг-флагов, и на сервере
+        /// действительно не нужно настраивать ничего.
+        ///
+        /// ⚠️ Тонкость к инварианту 2 ProxyFallback («прокси нет → ветка ретрая недостижима»).
+        /// С узлом ветка ретрая становится достижимой и для трекеров с useproxy:false. Смысл
+        /// инварианта при этом цел: он запрещал ВТОРОЙ ПОБАЙТОВО ТОТ ЖЕ запрос, а теперь первый
+        /// заход идёт чужим адресом, второй — своим. Это и есть нужное поведение: узел отвалился
+        /// (или отдал не ту страницу) — дом молча доделывает работу сам.
+        ///
+        /// ⚠️ Единственное место, где смерть узла ощутима: трекер с proxyFallbackDirect:false
+        /// (сейчас torrent.by — у него забанен наш домашний IP, и прямой путь запрещён осознанно).
+        /// Там прямого ретрая нет, и до истечения TTL реестра (90с ≈ 3 пропущенных удара) его
+        /// раздачи будут теряться. Остальные 13 трекеров переживают смерть узла без следа.
+        /// </summary>
+        static Func<WebProxy> NodeOrProxy(ProxyManager proxyManager)
+        {
+            var nodes = jackett.nodes;
+
+            if (nodes != null && nodes.enable)
+            {
+                var viaNode = NodeRegistry.ProxyOrNull(nodes.ttlSeconds);
+                if (viaNode != null)
+                    return viaNode;
+            }
+
+            return proxyManager != null ? proxyManager.Get : null;
+        }
     }
 }
