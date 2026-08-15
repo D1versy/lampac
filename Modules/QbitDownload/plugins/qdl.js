@@ -1923,7 +1923,7 @@
                   '</div>' +
                 '</div>'
             );
-            el.find('img').on('error', function () { this.src = PX1; });   // не img_broken: см. notiPoster
+            el.find('img').on('error', function () { this.src = PX1; });   // нейтральная плитка, не рваная заглушка
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:enter', function () { openNotification(n); });
             body.append(el);

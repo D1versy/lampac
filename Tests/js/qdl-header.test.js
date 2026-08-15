@@ -271,3 +271,14 @@ test('лента: клиент 2.46 против сервера 2.45 (без pos
   assert.strictEqual(doc.querySelector('.qdl-noti-row img').getAttribute('src'),
                      '{localhost}/qdl/jut/poster?slug=clevatess');
 });
+
+test('лента: в исходнике экрана уведомлений нет ни одной ссылки на img_broken', () => {
+  // Структурная защита: DOM-тесты проверяют текущие фикстуры, а этот — сам код экрана.
+  // Любая новая ветка рендера, вернувшая рваную заглушку, уронит тест сразу.
+  const src = H.qdlSource();
+  const i = src.indexOf('function ComponentNotifications');
+  const j = src.indexOf('function buildNotiMenuItem');
+  assert.ok(i > 0 && j > i, 'границы компонента не найдены — тест устарел, поправь якоря');
+  assert.ok(!src.slice(i, j).includes('img_broken'),
+    '«постера нет» в ленте — штатный случай, рисуется PX1');
+});
