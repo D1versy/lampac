@@ -3823,6 +3823,75 @@ public partial class QbitController : BaseController
         catch (Exception ex) { Console.WriteLine("[QbitDownload] noti prune: " + ex.Message); return 0; }
     }
 
+    /// <summary>
+    /// Готовый URL постера для строки ленты (qdl 2.46). Решает СЕРВЕР — у клиента данных для выбора нет.
+    /// 🔥 hash у jut-уведомления ПСЕВДО (<c>sha1("jutsu:"+slug)</c>, JutSuHttp.cs): он проходит ValidHash,
+    /// поэтому весь hash-путь считает его торрентным, — а файл <c>img/&lt;hash&gt;.jpg</c> пишет ТОЛЬКО грабер
+    /// (JutEnsureMeta). В режиме «только уведомления» (2.35) грабер не запускается никогда, значит
+    /// /qdl/poster?hash= отвечал 404 и на каждой отслеживаемой, но не скачанной серии висел img_broken.
+    /// Тот же 404 у ПЕРВОЙ строки NEW свежей подписки в режиме «качаю» — она пишется до JutEnsureMeta.
+    /// 🔴 Фейковый постер по hash-пути для нескачанного НЕ пишем: meta и постер обязаны ездить парой
+    /// (PurgeCache удаляет их одним набором), а карточка в «Загрузках» без meta — фантом.
+    /// ⚠️ JutPosterStamp на ленту вешать НЕЛЬЗЯ: у строк нет original_title и годов, JutSuMatch.Pick
+    /// гарантированно отказал бы — и закешировал бы отказ на jutPosterRetryDays (14 суток), заглушив
+    /// настоящий апгрейд постера этого тайтла. pv берём напрямую из JutUpPosterGen.
+    /// Возврат — путь БЕЗ хоста (клиент дописывает свой префикс); null = постера нет ни одного.
+    /// </summary>
+    internal static string NotiPosterUrl(string hash, string slug, Func<string> liveHash = null)
+    {
+        // 1) Скачано (торрент или jut после грабера) — свой файл, он же получает апгрейд постера.
+        try { if (ValidHash(hash) && System.IO.File.Exists(PosterPath(hash))) return "/qdl/poster?hash=" + hash; }
+        catch { }
+
+        // 2) jut без скачивания: артворк лежит в каталожном кеше jut/img/<slug>.jpg либо догружается
+        //    ручкой по требованию (JutSu.cs). ⚠️ Гейт JutOn обязателен: при jutEnable:false ручка
+        //    отвечает 404 — гонять клиента за заведомо мёртвым URL нельзя.
+        if (JutOn && JutSuParse.IsValidSlug(slug))
+        {
+            string u = "/qdl/jut/poster?slug=" + Uri.EscapeDataString(slug);
+            // pv — ПОКОЛЕНИЕ кодировки: на ?v= стоит immutable на год, без бампа пережатый файл
+            // до уже показанной строки не доехал бы никогда.
+            if (JutHasUpPoster(slug)) u += "&v=" + JutUpPosterGen(slug);
+            return u;
+        }
+
+        // 3) Торрентная строка, чей hash умер: SWITCH/re-grab переносит постер на новый хеш
+        //    (MigrateCache → mv(PosterPath(oldH), PosterPath(newH))), а исторические строки noti
+        //    навсегда остаются со старым. Живой хеш берём по seriesKey — постер тайтла на диске есть.
+        try
+        {
+            string live = liveHash?.Invoke();
+            if (ValidHash(live) && System.IO.File.Exists(PosterPath(live))) return "/qdl/poster?hash=" + live;
+        }
+        catch { }
+
+        return null;   // нейтральную плитку рисует клиент
+    }
+
+    /// <summary>
+    /// Карта «seriesKey → текущий hash раздачи» из watch.json. Строится ЛЕНИВО и один раз на запрос:
+    /// нужна редко (только строкам, чей hash увёл SWITCH/re-grab), а тело ответа собирается на КАЖДЫЙ
+    /// запрос — ETag считается из него, 304 чтение файла не экономит.
+    /// </summary>
+    static Dictionary<string, string> WatchHashBySeriesKey()
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            JArray list;
+            lock (_watchLock) { list = LoadWatch(); }
+            foreach (var m in list.OfType<JObject>())
+            {
+                string h = m.Value<string>("hash");
+                if (!ValidHash(h)) continue;
+                string sk = SeriesKey(m.Value<int?>("id") ?? 0, m.Value<string>("link"));
+                if (!string.IsNullOrEmpty(sk)) map[sk] = h;
+            }
+        }
+        catch { }
+        return map;
+    }
+
     [HttpGet, AllowAnonymous]
     [Route("qdl/notifications")]
     public ActionResult Notifications()
@@ -3838,7 +3907,21 @@ public partial class QbitController : BaseController
             // всё сразу (qdl.js), поэтому бейдж и лента не разъезжаются.
             int unread = db.noti.Count(x => !x.read);
             var arr = new JArray();
+            // Дедуп резолва постера: строк в ленте 50, а тайтлов в ней обычно 3-10, и тело ответа
+            // строится на КАЖДЫЙ запрос (из него считается ETag) — File.Exists на каждую строку лишний.
+            var purl = new Dictionary<string, string>(StringComparer.Ordinal);
+            Dictionary<string, string> live = null;   // watch.json читаем, только если он реально понадобился
             foreach (var n in items)
+            {
+                string slug = JutSlugFromSeriesKey(n.seriesKey);
+                string pkey = (n.hash ?? "") + "|" + (slug ?? "") + "|" + (n.seriesKey ?? "");
+                if (!purl.TryGetValue(pkey, out string p))
+                    purl[pkey] = p = NotiPosterUrl(n.hash, slug, () =>
+                    {
+                        live ??= WatchHashBySeriesKey();
+                        return n.seriesKey != null && live.TryGetValue(n.seriesKey, out string h) ? h : null;
+                    });
+
                 arr.Add(new JObject
                 {
                     ["id"] = n.Id, ["seriesId"] = n.seriesId, ["hash"] = n.hash, ["title"] = n.title,
@@ -3847,9 +3930,15 @@ public partial class QbitController : BaseController
                     // уведомления» карточки в «Загрузках» нет, а hash необратим — без slug тап
                     // уходил в торрентную ветку и открывал плеер по мёртвому URL.
                     // Торрентные seriesKey наружу не идут (гейт внутри JutSlugFromSeriesKey).
-                    ["slug"] = JutSlugFromSeriesKey(n.seriesKey),
+                    ["slug"] = slug,
+                    // Постер решает сервер (qdl 2.46) — см. NotiPosterUrl. null = плитка без картинки.
+                    // ⚠️ Имя поля НЕ "poster": JutPosterStampOne читает c["poster"] как сырой CDN-URL
+                    // тайтла и записал бы наш путь в match/<slug>.json, если ленту когда-нибудь
+                    // пропустят через JutJsonArt.
+                    ["posterUrl"] = p,
                     ["created"] = DateTime.SpecifyKind(n.created, DateTimeKind.Utc).ToString("o"), ["read"] = n.read   // помечаем UTC → корректный парсинг на фронте
                 });
+            }
             // ETag: ручку дёргают ВСЕ клиенты по WS-пушу qdl_noti и плюс 90-секундным фолбэк-опросом,
             // а лента меняется только когда докачалась новая серия — почти всегда это 304.
             return JsonWithEtag(new JObject { ["items"] = arr, ["unread"] = unread }.ToString(Newtonsoft.Json.Formatting.None));

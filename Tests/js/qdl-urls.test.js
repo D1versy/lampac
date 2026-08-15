@@ -174,6 +174,60 @@ test('posterUrl: no has_poster => broken img placeholder', () => {
   assert.strictEqual(qdl.posterUrl(undefined), './img/img_broken.svg');
 });
 
+// ─────────────────────────── notiPoster ───────────────────────────
+// Постер строки ленты уведомлений (qdl 2.46). До него строка была `n.hash ? ... : img_broken`,
+// а у jut-уведомления hash ПСЕВДО (sha1("jutsu:"+slug)) — файла img/<hash>.jpg для НЕ скачанного
+// тайтла не существует, /qdl/poster отвечал 404, и на каждой отслеживаемой, но не скачанной
+// серии висела рваная заглушка (жалоба владельца 15.08.2026).
+
+test('notiPoster: сервер прислал posterUrl => берём его как есть', () => {
+  const { qdl } = H.loadQdl({});
+  // jut-форма с поколением постера: ?v= обязан доехать нетронутым, на нём immutable на год
+  assert.strictEqual(
+    qdl.notiPoster({ posterUrl: '/qdl/jut/poster?slug=clevatess&v=2', slug: 'clevatess', hash: 'FB' }),
+    API + '/qdl/jut/poster?slug=clevatess&v=2'
+  );
+  // hash-форма для скачанного
+  assert.strictEqual(
+    qdl.notiPoster({ posterUrl: '/qdl/poster?hash=ABC', hash: 'ABC' }),
+    API + '/qdl/poster?hash=ABC'
+  );
+});
+
+test('notiPoster: старый сервер без posterUrl => слаг спасает jut-строку', () => {
+  // Страховка на время выкатки (клиент 2.46 против сервера 2.45). Не убирать раньше 2.47.
+  const { qdl } = H.loadQdl({});
+  assert.strictEqual(
+    qdl.notiPoster({ slug: 'clevatess', hash: 'FBAC' }),
+    API + '/qdl/jut/poster?slug=clevatess'
+  );
+});
+
+test('notiPoster: старый сервер, торрентная строка => прежний hash-URL', () => {
+  const { qdl } = H.loadQdl({});
+  assert.strictEqual(qdl.notiPoster({ hash: 'ABC' }), API + '/qdl/poster?hash=ABC');
+});
+
+test('notiPoster: постера нет вовсе => нейтральная плитка, НЕ img_broken', () => {
+  const { qdl } = H.loadQdl({});
+  // «Постера нет» — штатный случай: строка DIAG «Поиск раздач» приходит с пустым hash.
+  for (const n of [{ hash: '', kind: 'DIAG' }, { posterUrl: null, hash: '' }, {}, null, undefined]) {
+    const url = qdl.notiPoster(n);
+    assert.strictEqual(url, qdl.PX1);
+    assert.ok(!url.includes('img_broken'), 'битый значок читается как поломка приложения');
+    assert.ok(url.startsWith('data:image/gif;base64,'), 'должен быть самодостаточный data-URI');
+  }
+});
+
+test('notiPoster: posterUrl главнее слага и хеша', () => {
+  const { qdl } = H.loadQdl({});
+  // Только сервер знает, лежит ли файл на диске и какой хеш у раздачи сейчас.
+  assert.strictEqual(
+    qdl.notiPoster({ posterUrl: '/qdl/poster?hash=LIVE', slug: 'clevatess', hash: 'DEAD' }),
+    API + '/qdl/poster?hash=LIVE'
+  );
+});
+
 // ─────────────────────────── relTime ───────────────────────────
 
 function pad(n) { return (n < 10 ? '0' : '') + n; }

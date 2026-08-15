@@ -426,6 +426,34 @@ public class JutSuWatchTickNotifyTests
     }
 
     [Fact]
+    async public Task Уведомление_notify_режима_несёт_ПОКАЗУЕМЫЙ_постер()
+    {
+        // 🔥 Сквозной тест: связывает ПРОДЮСЕРА уведомления с тем, что увидит лента.
+        // До qdl 2.46 продюсер писал псевдо-hash, клиент шёл в /qdl/poster?hash= и получал 404 —
+        // на каждой отслеживаемой, но не скачанной серии висел img_broken.svg (жалоба владельца).
+        // Каждый кусок по отдельности был «правильным», ломался только стык — тут он и закрыт.
+        JutWatchAccess.Env();
+        JutWatchAccess.Subscribe("liar", JutWatchAccess.Title("liar", true, (1, 1)), 0, 0);
+        var after = JutWatchAccess.Title("liar", true, (1, 1), (1, 2));
+
+        using (JutWatchAccess.PinWorker())
+            await JutWatchAccess.Tick(JutWatchAccess.Ongoing(true, ("liar", 2)), JutWatchAccess.One(after));
+
+        var n = JutWatchAccess.Noti("liar")[0];
+        string slug = QbitController.JutSlugFromSeriesKey(n.seriesKey);
+        Assert.Equal("liar", slug);
+
+        string url = QbitController.NotiPosterUrl(n.hash, slug);
+        Assert.NotNull(url);
+        Assert.StartsWith("/qdl/jut/poster?slug=liar", url);
+        Assert.DoesNotContain("/qdl/poster?hash=", url);   // файла нет и не будет — это был бы гарантированный 404
+
+        // 🔴 И при этом «фейковый постер» не появился: meta и постер обязаны ездить парой.
+        Assert.False(File.Exists(JutWatchAccess.PosterPath(n.hash)), "постер создан");
+        Assert.False(File.Exists(JutWatchAccess.MetaPath(n.hash)), "мета создана");
+    }
+
+    [Fact]
     async public Task Режим_уведомлений_продвигает_baseline_и_на_втором_тике_молчит()
     {
         // Иначе одно и то же «вышла новая серия» приходило бы каждые сутки.

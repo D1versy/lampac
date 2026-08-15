@@ -522,6 +522,26 @@
         return './img/img_broken.svg';
     }
 
+    // 1×1 прозрачный GIF. «Постера нет» в ленте уведомлений — ШТАТНЫЙ случай (строка DIAG «Поиск
+    // раздач», вычищенная раздача), а img_broken.svg читается как поломка приложения. У <img> уже
+    // есть background:#222, поэтому прозрачный пиксель поверх него даёт нейтральную плитку.
+    // src='' резолвится в URL документа и сам стреляет error, а <img> вовсе без src на части
+    // ТВ-движков всё равно рисует битую иконку — поэтому именно data-URI.
+    var PX1 = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+
+    // Постер строки уведомления. Решает СЕРВЕР (n.posterUrl, qdl 2.46): только он знает, лежит ли
+    // файл на диске, есть ли апгрейженная обложка и какой хеш у раздачи СЕЙЧАС. У jut-уведомления
+    // hash ПСЕВДО (sha1("jutsu:"+slug)), и файла img/<hash>.jpg для НЕ скачанного тайтла не бывает —
+    // /qdl/poster отвечал 404, и на каждой отслеживаемой, но не скачанной серии висела заглушка.
+    // ⚠️ Ветки-фолбэки нужны на время выкатки (клиент 2.46 против сервера 2.45) — не убирать раньше 2.47.
+    function notiPoster(n) {
+        if (!n) return PX1;
+        if (n.posterUrl) return API + n.posterUrl;
+        if (n.slug) return jutPosterUrl(n.slug);
+        if (n.hash) return API + '/qdl/poster?hash=' + n.hash;
+        return PX1;
+    }
+
     function videoFiles(files) {
         return (files || []).filter(function (f) { return /\.(mkv|mp4|avi|ts|m4v|webm|mov)$/i.test(f.name || ''); })
             .sort(function (a, b) { return String(a.name).localeCompare(String(b.name), undefined, { numeric: true }); });
@@ -1892,7 +1912,7 @@
         };
 
         this.append = function (n) {
-            var poster = n.hash ? (API + '/qdl/poster?hash=' + n.hash) : './img/img_broken.svg';
+            var poster = notiPoster(n);
             var el = $(
                 '<div class="qdl-noti-row selector qdl-row-focus" style="display:flex;align-items:center;gap:1em;padding:1em;margin:.35em .6em;background:rgba(255,255,255,.05);border-radius:.7em">' +
                   '<img src="' + poster + '" style="width:3.6em;height:5.4em;object-fit:cover;border-radius:.4em;background:#222;flex:none">' +
@@ -1903,7 +1923,7 @@
                   '</div>' +
                 '</div>'
             );
-            el.find('img').on('error', function () { this.src = './img/img_broken.svg'; });
+            el.find('img').on('error', function () { this.src = PX1; });   // не img_broken: см. notiPoster
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:enter', function () { openNotification(n); });
             body.append(el);

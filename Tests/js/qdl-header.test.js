@@ -194,3 +194,80 @@ test('single SWITCH keeps the detailed toast; downloaded episodes keep their own
   assert.ok(noty[0].indexOf('🔀 Сериал А — S01E05') === 0);
   assert.strictEqual(noty[1], '📺 Скачано новых серий: 2');
 });
+
+// ─────────────────── лента уведомлений: постеры строк (qdl 2.46) ───────────────────
+// Прямая регрессия на жалобу владельца 15.08.2026: «в уведомлениях от JUT.su для серий,
+// которые отслеживаются но не скачаны, нету карточек». Строка ленты брала картинку строго
+// как `n.hash ? '/qdl/poster?hash='+n.hash : img_broken`, а hash у jut-уведомления ПСЕВДО
+// (sha1("jutsu:"+slug)) — файла img/<hash>.jpg для НЕ скачанного тайтла не бывает никогда.
+// Замер на живом сервере: 4 битых строки из 50.
+
+// Lampa.Scroll харнесса отдаёт болванки вне DOM — ленте нужен скролл на настоящем jQuery,
+// иначе строки не окажутся в документе и проверять будет нечего (та же оснастка, что в
+// qdl-card-screen.test.js).
+function jsdomScroll(w) {
+  return function () {
+    const render = w.$('<div class="scroll"><div class="scroll__body"></div></div>');
+    this.render = () => render;
+    this.body = () => render.find('.scroll__body');
+    this.append = (el) => render.find('.scroll__body').append(el);
+    this.minus = () => {};
+    this.update = () => {};
+    this.destroy = () => {};
+  };
+}
+
+function feed(items) {
+  const { w, doc, qdl } = H.loadQdlDom({ bodyHtml: pageHtml() });
+  w.Lampa.Scroll = jsdomScroll(w);
+  w.Lampa.Reguest = function () {
+    this.timeout = () => {}; this.clear = () => {};
+    this.silent = (url, ok) => { if (String(url).indexOf('/qdl/notifications') !== -1) ok({ items, unread: 0 }); };
+  };
+  const comp = new qdl.ComponentNotifications({});
+  comp.activity = { loader() {}, toggle() {} };
+  w.$('body').append(comp.create());
+  return { w, doc, qdl };
+}
+
+const ROWS = [
+  // отслеживается, НЕ скачано — сервер отдал ручку jut.su по слагу (сама жалоба)
+  { id: 269, kind: 'NEW', title: 'Клеватесс', label: 'jut.su · сезон 2 · серия 6 — вышла',
+    slug: 'clevatess', hash: 'f'.repeat(40), posterUrl: '/qdl/jut/poster?slug=clevatess&v=2', created: '2026-08-15T12:37:27Z' },
+  // скачанная торрентная серия — прежний путь по своему хешу
+  { id: 265, kind: null, title: 'Великий расхититель гробниц', label: 'Серия 6',
+    slug: null, hash: '6'.repeat(40), posterUrl: '/qdl/poster?hash=' + '6'.repeat(40), created: '2026-08-15T10:00:00Z' },
+  // «Поиск раздач» — постера нет и быть не может, это ШТАТНО
+  { id: 200, kind: 'DIAG', title: 'Поиск раздач', label: 'Кинозал не отвечает',
+    slug: null, hash: '', posterUrl: null, created: '2026-08-15T09:00:00Z' },
+];
+
+test('лента: у каждой строки свой источник постера, jut идёт по слагу', () => {
+  const { doc, qdl } = feed(ROWS);
+  const src = [...doc.querySelectorAll('.qdl-noti-row img')].map((i) => i.getAttribute('src'));
+  assert.strictEqual(src.length, 3, 'все строки отрисованы — постер ничего не скрывает');
+  assert.strictEqual(src[0], '{localhost}/qdl/jut/poster?slug=clevatess&v=2');
+  assert.strictEqual(src[1], '{localhost}/qdl/poster?hash=' + '6'.repeat(40));
+  assert.strictEqual(src[2], qdl.PX1);
+});
+
+test('лента: img_broken.svg в экране уведомлений больше не встречается', () => {
+  const { doc } = feed(ROWS);
+  assert.ok(!doc.body.innerHTML.includes('img_broken'),
+    'битый значок читается как поломка приложения, а «постера нет» — штатный случай');
+});
+
+test('лента: не догрузившаяся картинка падает в плитку, а не в битый значок', () => {
+  const { w, doc, qdl } = feed(ROWS);
+  const img = doc.querySelector('.qdl-noti-row img');
+  w.$(img).trigger('error');
+  assert.strictEqual(img.getAttribute('src'), qdl.PX1);
+});
+
+test('лента: клиент 2.46 против сервера 2.45 (без posterUrl) всё равно находит постер jut', () => {
+  // Страховка на время выкатки: образ пересобран, а закешированный клиент ещё старый — и наоборот.
+  const { doc } = feed([{ id: 1, kind: 'NEW', title: 'Клеватесс', label: 'вышла',
+                          slug: 'clevatess', hash: 'f'.repeat(40), created: '2026-08-15T12:00:00Z' }]);
+  assert.strictEqual(doc.querySelector('.qdl-noti-row img').getAttribute('src'),
+                     '{localhost}/qdl/jut/poster?slug=clevatess');
+});
