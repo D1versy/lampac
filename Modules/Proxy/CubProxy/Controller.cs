@@ -317,8 +317,21 @@ public class CubProxyController : BaseController
                     {
                         proxyManager?.Success();
 
-                        if (ModInit.conf.cache_api > 0)
-                            HttpContext.Features.Set(new StatiCacheEntry(DateTimeOffset.Now.AddMinutes(ModInit.conf.cache_api)));
+                        // qdl 2.45: реакции живут отдельным, длинным TTL. Общий cache_api=180
+                        // подобран под РЯДЫ каталога (там свежесть важна), а реакции — почти
+                        // статика: их дёргают на КАЖДОМ открытии карточки, и при 3 ч это восемь
+                        // холодных промахов в сутки по 61 мс на каждую карточку. Прогрев карточек
+                        // идёт циклом ~24 ч, то есть с TTL 3 ч реакции всё равно успевали остыть
+                        // между тиками — поднимаем именно их.
+                        // ⚠️ Через Staticache.routes в init.conf это НЕ настраивается: строка ниже
+                        // ставит явный StatiCacheEntry на ответ, и он перебивает cacheMinutes роута
+                        // (проверено замером — TTL оставался 179 мин).
+                        int ttl = uri.StartsWith("api/reactions/get/") && init.cache_reactions > 0
+                            ? init.cache_reactions
+                            : init.cache_api;
+
+                        if (ttl > 0)
+                            HttpContext.Features.Set(new StatiCacheEntry(DateTimeOffset.Now.AddMinutes(ttl)));
                     }
                     else
                         proxyManager?.Refresh();
