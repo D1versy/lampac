@@ -52,12 +52,15 @@
     <Compile Include="..\..\Modules\QbitDownload\ModInit.cs" Link="Module\ModInit.cs" />
     <Compile Include="..\..\Modules\QbitDownload\SqlContext.cs" Link="Module\SqlContext.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JsonStore.cs" Link="Module\JsonStore.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\HttpCache.cs" Link="Module\HttpCache.cs" />
     <Compile Include="..\..\Modules\QbitDownload\FfWorker.cs" Link="Module\FfWorker.cs" />
     <Compile Include="..\..\Modules\QbitDownload\TorrentScoring.cs" Link="Module\TorrentScoring.cs" />
     <Compile Include="..\..\Modules\QbitDownload\EpisodeHunter.cs" Link="Module\EpisodeHunter.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Warmup.cs" Link="Module\Warmup.cs" />
     <Compile Include="..\..\Modules\QbitDownload\AppReplace.cs" Link="Module\AppReplace.cs" />
     <Compile Include="..\..\Modules\QbitDownload\CatalogWarmup.cs" Link="Module\CatalogWarmup.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\OnlineWarm.cs" Link="Module\OnlineWarm.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\SearchCache.cs" Link="Module\SearchCache.cs" />
     <Compile Include="..\..\Modules\QbitDownload\CubExtensions.cs" Link="Module\CubExtensions.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Bitmagnet.cs" Link="Module\Bitmagnet.cs" />
     <Compile Include="..\..\Modules\QbitDownload\SearchMonitor.cs" Link="Module\SearchMonitor.cs" />
@@ -84,6 +87,11 @@
          ⚠️ Не линковать сюда GlobalUsings.cs модуля: его global using подействовал бы на ВСЮ
          тестовую сборку. -->
     <Compile Include="..\..\Modules\JacRed\Engine\ProxyFallback.cs" Link="JacRed\ProxyFallback.cs" />
+
+    <!-- Online: линкуем ТОЛЬКО OnlineEventsCache.cs — он не трогает ни Online.ModInit, ни
+         BaseController, поэтому коллизии с QbitDownload.ModInit не возникает. Под тестами его
+         два инварианта: «пишем только полный набор» и «не закрепляем массовый сбой». -->
+    <Compile Include="..\..\Online\OnlineEventsCache.cs" Link="Online\OnlineEventsCache.cs" />
   </ItemGroup>
 
 </Project>

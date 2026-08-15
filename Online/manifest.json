@@ -4,6 +4,7 @@
     "SQL",
     "ModInit.cs",
     "ModuleConf.cs",
+    "OnlineEventsCache.cs",
     "OnlineApi.cs"
   ]
 }

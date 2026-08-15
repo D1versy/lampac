@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.44';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
+window.qdl_fork_version = '2.45';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
 // Лампа готова для использования
@@ -273,6 +273,17 @@ try {
 // Пояс и подтяжки к AppPatch (menu-items) — работает даже при смене tree, когда якорь не найдётся.
 // Дефолт subscribe=false ставит lampainit.js ВЫШЕ по файлу (наш код инлайнится после него, до app.min.js).
 try { window.lampa_settings.disable_features.subscribe = true; } catch (e) {}
+
+// metadata=true — CUB AI-метаданные (qdl 2.45). Гейт в бандле: `if (…disable_features.metadata)
+// return oncomplite({})`, то есть ровно тот же результат, что даёт error-путь запроса. В дефолтах
+// lampainit.js этого ключа НЕТ вовсе → undefined → запрос уходил ВСЕГДА, на каждое открытие любой
+// карточки при Lang.selected(['ru','uk','be']). Замер: /api/ai/metadata отвечает 500 на 6/6 тайтлов
+// («Метаданные не найдены» — премиум-фича CUB-аккаунта, которого у нас нет), 60–212 мс, изредка 4 с,
+// и НЕ кешируется: StaticacheWriter режет TTL не-200 до минуты. Клиентский кеш тоже мимо — у
+// metadataGet нет params.cache. Итого чистое мёртвое ожидание на горячем пути карточки.
+// Пояс и подтяжки: серверная заглушка в CubProxy/Controller.cs (регион «ai metadata») закрывает
+// клиентов со старым закешированным lampainit.js.
+try { window.lampa_settings.disable_features.metadata = true; } catch (e) {}
 
 // ── ДО загрузки Lampa: локализация внешних источников (qdl 2.15, см. claude/11 Media-server) ──
 // Клиент должен ходить ТОЛЬКО на наш сервер (осознанные исключения: YouTube-трейлеры, стрим балансеров).

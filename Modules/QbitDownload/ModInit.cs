@@ -20,6 +20,7 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _jutWarmTimer;  // jut.su: прогрев кеша тайтлов (2 раза в сутки)
     static System.Threading.Timer _jutCatTimer;   // jut.su: снапшот-индекс каталога (сид/голова/ресид)
     static System.Threading.Timer _healthTimer;   // пассивные хелс-чеки: сброс реестра на диск
+    static System.Threading.Timer _onlineWarmTimer; // прогрев кнопок «Онлайн» (три полосы, постепенно)
     static System.TimeSpan _huntPeriod = System.TimeSpan.FromHours(4);
 
     // Ранний повтор охоты (EpisodeHunter): индексатор не дал кандидатов → следующий тик раньше срока.
@@ -164,6 +165,13 @@ public class ModInit : IModuleLoaded
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] index prune: " + ex); }
             try { QbitController.NotiPrune(conf?.notiKeepRows ?? 500); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] noti prune: " + ex); }
+            // qdl 2.45: снимки поиска раздач (~80 КБ на тайтл) — без ретенции том рос бы вечно
+            try
+            {
+                int n = SearchCache.Prune();
+                if (n > 0) System.Console.WriteLine($"[QbitDownload] search cache prune: удалено {n}");
+            }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] search cache prune: " + ex); }
         }, null, System.TimeSpan.FromHours(1), System.TimeSpan.FromHours(24));
 
         // ── jut.su: слежение за сезоном, раз в сутки (решение владельца) ──
@@ -228,6 +236,27 @@ public class ModInit : IModuleLoaded
                 }
                 catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut catalog timer: " + ex); }
             }, null, System.TimeSpan.FromMinutes(50), System.TimeSpan.FromHours(System.Math.Max(1, catHours)));
+        }
+
+        // ── Прогрев кнопок «Онлайн» (qdl 2.45) ──
+        // Первый прогон на 55-й минуте — ПОСЛЕ всех jut-контуров (watch@35 / warm@45 / catalog@50),
+        // чтобы старты не толкались. Внутри прогона три полосы с маленькими капами и паузой
+        // onlineWarmPaceMs между карточками: греем постепенно, новинки в приоритете, хвост каталога
+        // ползёт по курсору. Устройство и арифметика нагрузки — в шапке OnlineWarm.cs.
+        int owHours = conf?.onlineWarmIntervalHours ?? 6;
+        _onlineWarmTimer?.Dispose();
+        _onlineWarmTimer = null;
+        if (owHours > 0)
+        {
+            _onlineWarmTimer = new System.Threading.Timer(async _ =>
+            {
+                try
+                {
+                    if (conf?.onlineWarmEnabled != true) return;   // выключатель — В НАЧАЛЕ прогона
+                    await OnlineWarm.Tick();
+                }
+                catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] online warm timer: " + ex); }
+            }, null, System.TimeSpan.FromMinutes(55), System.TimeSpan.FromHours(System.Math.Max(1, owHours)));
         }
 
         // Недокачанные .part после рестарта — добрать в очередь (очередь живёт в памяти).
@@ -309,6 +338,8 @@ public class ModInit : IModuleLoaded
         _jutCatTimer = null;
         _healthTimer?.Dispose();
         _healthTimer = null;
+        _onlineWarmTimer?.Dispose();
+        _onlineWarmTimer = null;
         try { HealthState.FlushIfDirty(); } catch { }
         // Грязное из горячего слоя обязано доехать до диска: иначе выгрузка модуля
         // теряет ещё не записанные маркер/activity (окно дебаунса — 200 мс).

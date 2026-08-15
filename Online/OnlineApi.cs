@@ -883,14 +883,27 @@ public class OnlineApiController : BaseController
 
             string memkey = Fnv1a.Base64Url(hash);
 
-            if (!memoryCache.TryGetValue(memkey, out List<EventLinkItem> links))
+            /*qdl-cut:online-l2*/
+            // qdl 2.45: TTL набора вынесен в конфиг (было жёстко 5 минут), плюс L2 на диске —
+            // см. OnlineEventsCache.cs. Полный набор из 23 балансеров собирается 8.2 с и раньше
+            // умирал вместе с процессом; теперь переживает рестарт. При ребейзе upstream сохранить.
+            int cosTtl = OnlineEventsCache.TtlMinutes;
+
+            if (!memoryCache.TryGetValue(memkey, out List<EventLinkItem> links)
+                && OnlineEventsCache.TryLoad(memkey, online.Count, out var l2))
+            {
+                links = l2.Select(i => new EventLinkItem(i.code, i.index, i.work)).ToList();
+                memoryCache.Set(memkey, links, DateTime.Now.AddMinutes(cosTtl));
+            }
+
+            if (links == null)
             {
                 var tasks = new List<Task>(online.Count);
                 links = new List<EventLinkItem>(online.Count);
                 for (int i = 0; i < online.Count; i++)
                     links.Add(default);
 
-                memoryCache.Set(memkey, links, DateTime.Now.AddMinutes(5));
+                memoryCache.Set(memkey, links, DateTime.Now.AddMinutes(cosTtl));
 
                 foreach (var o in online.OrderBy(i => i.index))
                 {
@@ -901,10 +914,26 @@ public class OnlineApiController : BaseController
                     ));
                 }
 
+                // Сохранение — континуейшн, а НЕ код после await: в life-режиме метод возвращается
+                // ниже, до завершения задач, и снимок бы не записался никогда. Континуейшн читает
+                // только List<EventLinkItem>, HttpContext не трогает.
+                var all = Task.WhenAll(tasks);
+                int expected = online.Count;
+                _ = all.ContinueWith(_ =>
+                {
+                    try
+                    {
+                        OnlineEventsCache.TrySave(memkey,
+                            links.Select(i => i == null ? null : new OnlineEventsCache.Item { code = i.code, index = i.index, work = i.work }).ToList(),
+                            expected);
+                    }
+                    catch { }
+                });
+
                 if (life)
                     return Json(new { life = true, memkey, title = (fix_title ? title : null) });
 
-                await Task.WhenAll(tasks);
+                await all;
             }
 
             if (life)

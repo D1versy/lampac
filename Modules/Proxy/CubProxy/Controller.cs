@@ -171,6 +171,24 @@ public class CubProxyController : BaseController
         }
         #endregion
 
+        #region ai metadata
+        // qdl 2.45: CUB AI-метаданные. Апстрим стабильно отдаёт 500 «Метаданные не найдены»
+        // (премиум-фича аккаунта, которого у нас нет) за 60–212 мс, изредка за 4 с, и это НЕ
+        // кешируется — StaticacheWriter режет TTL не-200 до минуты. Клиент ждёт этот ответ на
+        // КАЖДОМ открытии карточки: metadataGet идёт без params.cache, то есть и клиентского кеша
+        // нет. Пустой объект — ровно то, что бандл подставляет в своём error-пути (`oncomplite({})`),
+        // так что поведение UI не меняется, уходит только ожидание.
+        // Основной глушитель — клиентский `disable_features.metadata = true` в lampainit-invc.js
+        // (запрос вообще не уходит); эта ветка ловит клиентов со старым закешированным lampainit.
+        if (init.stubAiMetadata && uri.StartsWith("api/ai/metadata/"))
+        {
+            HttpContext.Response.ContentType = "application/json; charset=utf-8";
+            HttpContext.Response.StatusCode = StatusCodes.Status200OK;
+            HttpContext.Response.BodyWriter.Write("{}"u8);
+            return Task.CompletedTask;
+        }
+        #endregion
+
         #region metric
         if (uri.StartsWith("api/metric/") || uri.StartsWith("api/ad/stat"))
         {

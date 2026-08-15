@@ -38,6 +38,7 @@ public class ModInit : IModuleLoaded
             domain = CoreInit.conf.cub.domain,
             mirror = CoreInit.conf.cub.mirror,
             cache_api = 180, // 3h
+            stubAiMetadata = true, // qdl 2.45: у CUB там стабильный 500, ждать его незачем
             limit_map = new List<WafLimitRootMap>()
             {
                 new("^/cub/", new WafLimitMap { limit = 50, second = 1 })

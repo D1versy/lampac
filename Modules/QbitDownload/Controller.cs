@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Newtonsoft.Json.Linq;
 using Shared;
+using Shared.Attributes;
 using Shared.Services;
 using System;
 using System.Collections.Concurrent;
@@ -157,20 +158,30 @@ public partial class QbitController : BaseController
     #endregion
 
     #region qdl.js (клиентский плагин Lampa)
+    // qdl 2.45: добавлен [Staticache] — как у music.js и app.min.js. Без него ответ шёл мимо
+    // precompressed-сайдкаров и жался динамически (q1): 113 КБ br против ~74 КБ у того же файла
+    // через Staticache, плюс на каждый запрос читался файл и гонялся Replace по 297 КБ.
+    // TTL как у app.min.js; ключ Staticache включает Host, поэтому {localhost} безопасен.
+    // ?v теперь стабильный (PluginVersion в LampaWeb/ApiController: mtime+length файла + mtime
+    // init.conf) — рестарт контейнера больше не сбрасывает клиентам эти 113 КБ.
     [HttpGet, AllowAnonymous]
+    [Staticache(10080, always: true, immutable: true, queryKeys = ["v"])]
     [Route("qdl.js")]
     public ActionResult Plugin()
     {
         string js = FileCache.ReadAllText($"{ModInit.modpath}/plugins/qdl.js", "qdl.js")
             .Replace("{localhost}", host);
 
-        // /qdl.js?v={cacheVersion}: ?v меняется каждым рестартом, а задеплоить новый qdl.js без
-        // рестарта нельзя (код в образе) → versioned-URL кэшируем навсегда, 163 КБ не перекачиваются
-        // при каждом запуске. Легаси-запрос без ?v — прежний no-cache.
+        // Легаси-запрос без ?v (старые клиенты с закешированным lampainit) — прежний no-cache,
+        // и серверный кеш для него тоже выключаем: иначе правка qdl.js доезжала бы до них только
+        // через 7 суток TTL.
         if (HttpContext.Request.Query.ContainsKey("v"))
             HttpContext.Response.Headers["Cache-Control"] = "public,max-age=31536000,immutable";
         else
+        {
+            StatiCacheDisabled = true;
             SetHeadersNoCache();
+        }
         return ContentTo(js, "application/javascript; charset=utf-8");
     }
     #endregion
@@ -194,7 +205,12 @@ public partial class QbitController : BaseController
     [Route("d1vision/hosts.json")]
     public ActionResult D1VisionHosts()
     {
-        SetHeadersNoCache();
+        // qdl 2.45: было SetHeadersNoCache() → лишний RTT на КАЖДОМ старте каждой нативной оболочки
+        // (и ещё раз из appload в lampainit-invc.js ради бренда). Ответ — три строки и бренд, меняется
+        // раз в год правкой init.conf. 5 минут задержки безопасны: клиенты этим списком только
+        // ДОПОЛНЯЮТ свой зашитый bootstrap, никогда не заменяют его (защита от окирпичивания), так
+        // что даже полностью протухший ответ не может отрезать клиента от сервера.
+        HttpContext.Response.Headers["Cache-Control"] = "public,max-age=300";
         // Фильтруем null/пустые (в init.conf может оказаться "clientHosts": [null] или "") и чужие
         // адреса — иначе мусор уедет клиентам в hosts[]; если после фильтра пусто — падаем на дефолты.
         // Форма ответа не меняется: отсеянный хост просто не попадает в массив (старые mac/iOS-сборки
@@ -263,8 +279,56 @@ public partial class QbitController : BaseController
                                            int year = 0, int is_serial = -1, int season = 0, string apikey = null,
                                            string tmdb_id = null)
     {
+        // qdl 2.45: кеш выдачи со stale-семантикой — устройство и политика в SearchCache.cs.
+        // Читает кеш ТОЛЬКО эта ручка; фоновые контуры (охота, обходчик, переключение доноров)
+        // его лишь заполняют — им нужна свежая выдача, чтобы замечать новые раздачи.
+        string titleNorm = Shared.Services.Utilities.SearchNameTo.Convert(!string.IsNullOrWhiteSpace(title) ? title : query);
+        string ckey = SearchCache.Key(tmdb_id, titleNorm, year, is_serial);
+
+        var fresh = SearchCache.TryRead(ckey, out var cached);
+        if (fresh != SearchCache.Freshness.Miss && cached != null)
+        {
+            var scored = ScoreResult(cached, query, title, title_original, year, is_serial, season, tmdb_id, store: false);
+
+            if (fresh == SearchCache.Freshness.Stale)
+            {
+                // Пометка на КАЖДОМ элементе, а не на ответе целиком: /qdl/search обязан оставаться
+                // JSON-массивом — клиент делает list.length и list.slice(). Смена формы ответа
+                // сломала бы всех, у кого ещё живёт закешированный старый qdl.js.
+                foreach (var t in scored)
+                    if (t is JObject jo) jo["stale"] = true;
+
+                StaleRefresh(ckey, query, title, title_original, year, is_serial, season, apikey, tmdb_id);
+            }
+
+            return ContentTo(scored.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+        }
+
         var sorted = await SearchScored(query, title, title_original, year, is_serial, season, apikey, tmdb_id);
         return ContentTo(sorted.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
+
+    /// <summary>
+    /// Фоновое обновление протухшего снимка. Пользователю уже отдан stale-список, поэтому спешить
+    /// некуда — важнее не частить с трекерами: один ключ обновляется в одном экземпляре, и всего
+    /// не больше searchCacheRefreshParallel обновлений разом на весь сервер.
+    /// </summary>
+    static void StaleRefresh(string ckey, string query, string title, string title_original,
+                             int year, int is_serial, int season, string apikey, string tmdb_id)
+    {
+        int cap = Math.Max(1, ModInit.conf?.searchCacheRefreshParallel ?? 1);
+        if (SearchCache.RefreshingCount >= cap)
+            return;
+
+        if (!SearchCache.TryBeginRefresh(ckey))
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            try { await SearchScored(query, title, title_original, year, is_serial, season, apikey, tmdb_id); }
+            catch (Exception ex) { Console.WriteLine("[QbitDownload] search cache refresh: " + ex.Message); }
+            finally { SearchCache.EndRefresh(ckey); }
+        });
     }
 
     // Весь пайплайн поиска (проходы индексатора + bitmagnet + дедуп + скоринг) — статический:
@@ -339,6 +403,25 @@ public partial class QbitController : BaseController
             }
         }
 
+        // qdl 2.45: снимок в кеш — ДО скоринга и до любых пометок. SortAndMark мутирует элементы
+        // (score/watchable/ep), поэтому порядок здесь принципиален; сам Write ещё раз клонирует.
+        // Пишут ВСЕ вызывающие, включая фоновые контуры: обходчик индекса и так платит за трекеры,
+        // пусть заодно греет пользовательский кеш — нового трафика наружу это не создаёт.
+        SearchCache.Write(SearchCache.Key(tmdb_id, queryNorm, year, is_serial), result, search);
+
+        return ScoreResult(result, query, title, title_original, year, is_serial, season, tmdb_id, store: true);
+    }
+
+    /// <summary>
+    /// Скоринг и сортировка выдачи. Вынесено из SearchScored, потому что тем же путём должна
+    /// проходить и выдача из кеша: в снимке лежит «сырой» дедуплицированный результат, а порядок
+    /// зависит от season/preferredQuality, то есть считается на каждый запрос заново (чистый CPU).
+    /// </summary>
+    /// <param name="store">Писать ли выдачу в LocalIndex. Для пути из кеша — нет: те же раздачи
+    /// туда уже попали, когда снимок делали живым поиском.</param>
+    static JArray ScoreResult(JArray result, string query, string title, string title_original,
+                              int year, int is_serial, int season, string tmdb_id, bool store)
+    {
         // Умный порядок: релевантность (имя/год/тип/сезон/полнота/свежесть) доминирует над сидами;
         // ⭐ rec + why у лучшей прошедшей гейты. Kill-switch searchScoring → старая сортировка по сидам.
         if (ModInit.conf.searchScoring)
@@ -355,7 +438,8 @@ public partial class QbitController : BaseController
             var sorted = TorrentScoring.SortAndMark(result, ctx, ModInit.conf.recommendMinSeeds);
             // fire-and-forget: пользователь не должен ждать индекс. Пишем ПОСЛЕ отсева —
             // мусор и чужие тайтлы в базу не попадают by design.
-            IndexStoreAsync(sorted, tmdb_id, ctx.titleNorm, year, is_serial);
+            if (store)
+                IndexStoreAsync(sorted, tmdb_id, ctx.titleNorm, year, is_serial);
             return sorted;
         }
 
@@ -698,7 +782,7 @@ public partial class QbitController : BaseController
             lock (_listCacheLock)
             {
                 if (_listCache != null && (DateTime.UtcNow - _listCacheAt).TotalSeconds < ttl)
-                    return ContentTo(_listCache, "application/json; charset=utf-8");
+                    return JsonWithEtag(_listCache);
             }
         }
 
@@ -821,7 +905,7 @@ public partial class QbitController : BaseController
             string body = ordered.ToString(Newtonsoft.Json.Formatting.None);
             if (ttl > 0)
                 lock (_listCacheLock) { _listCache = body; _listCacheAt = DateTime.UtcNow; }
-            return ContentTo(body, "application/json; charset=utf-8");
+            return JsonWithEtag(body);
         }
         catch (Exception ex)
         {
@@ -3766,7 +3850,9 @@ public partial class QbitController : BaseController
                     ["slug"] = JutSlugFromSeriesKey(n.seriesKey),
                     ["created"] = DateTime.SpecifyKind(n.created, DateTimeKind.Utc).ToString("o"), ["read"] = n.read   // помечаем UTC → корректный парсинг на фронте
                 });
-            return ContentTo(new JObject { ["items"] = arr, ["unread"] = unread }.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+            // ETag: ручку дёргают ВСЕ клиенты по WS-пушу qdl_noti и плюс 90-секундным фолбэк-опросом,
+            // а лента меняется только когда докачалась новая серия — почти всегда это 304.
+            return JsonWithEtag(new JObject { ["items"] = arr, ["unread"] = unread }.ToString(Newtonsoft.Json.Formatting.None));
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] notifications: " + ex); return ContentTo("{\"items\":[],\"unread\":0}", "application/json; charset=utf-8"); }
     }
@@ -3996,7 +4082,9 @@ public partial class QbitController : BaseController
         {
             JArray a;
             lock (_colLock) { a = LoadCollections(); }
-            return ContentTo(a.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+            // ETag: ручка идёт в паре с /qdl/list при каждом входе в «Загрузки», а коллекции
+            // меняются только руками владельца — почти всегда это 304.
+            return JsonWithEtag(a.ToString(Newtonsoft.Json.Formatting.None));
         }
         catch (Exception ex)
         {
@@ -4282,6 +4370,23 @@ public partial class QbitController : BaseController
     internal static void DropListCache()
     {
         lock (_listCacheLock) _listCache = null;
+    }
+
+    // ── ETag/304 для горячих JSON-ручек (qdl 2.45) ───────────────────────
+    // Ставит валидатор и, если клиент уже держит ровно это тело, отдаёт 304 без тела.
+    // Устройство и почему именно no-cache — в HttpCache.cs.
+    // ⚠️ Отдельного поля под ETag нет намеренно: он считается из тела, поэтому не может
+    // разъехаться с ним при DropListCache() или истечении TTL — нечему протухать отдельно.
+    ActionResult JsonWithEtag(string body)
+    {
+        string etag = HttpCache.Etag(body);
+        Response.Headers["ETag"] = etag;
+        Response.Headers["Cache-Control"] = "no-cache";
+
+        if (HttpCache.IfNoneMatchHit(Request.Headers["If-None-Match"], etag))
+            return StatusCode(304);
+
+        return ContentTo(body, "application/json; charset=utf-8");
     }
 
     // один файл локального маркера (после транскода)

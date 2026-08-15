@@ -667,6 +667,63 @@ public class ApiController : BaseController
         catch { return cacheVersion; }
     }
 
+    // qdl 2.45: стабильный ?v для НАШИХ плагинов (qdl.js, music.js) — тот же приём, что уже спас
+    // app.min.js/app.css выше. До этого оба URL несли {version} = cacheVersion = тики старта
+    // процесса, поэтому КАЖДЫЙ рестарт контейнера заставлял всех клиентов перекачивать ~221 КБ br
+    // без единого изменённого байта. Хост падает по питанию ~23 раза в месяц — это был последний
+    // крупный «рестартный налог» (из заметного остаётся только сам lampainit.js, ~19 КБ).
+    //
+    // Версия = mtime+length файла плагина, смешанные с mtime init.conf. Второе слагаемое обязательно:
+    // тело music.js собирается ещё и из флагов init.conf ({client_debug_enabled} и соседние), и без
+    // него правка флага без замены файла оставила бы клиентов с ВЕЧНЫМ (immutable год) старым телом.
+    // Через mtime init.conf это ловится без обращения к чужому модулю: Music и QbitDownload —
+    // отдельные Roslyn-сборки, их ModInit отсюда не виден.
+    //
+    // Гард «файл моложе 60 с» — как в AppCacheVersion: пока файл могут дописывать (docker cp при
+    // быстрой итерации), новый ?v не выпускаем, иначе клиент рискует навечно закешировать обрезанный
+    // плагин.
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long stamp, string ver)> _pluginVer = new();
+
+    static string PluginVersion(string path)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(path))
+                return cacheVersion;
+
+            var fi = new IO.FileInfo(path);
+            long mt = fi.Exists ? fi.LastWriteTimeUtc.Ticks : 0;
+            long len = fi.Exists ? fi.Length : 0;
+
+            var ci = new IO.FileInfo("init.conf");
+            long ct = ci.Exists ? ci.LastWriteTimeUtc.Ticks : 0;
+
+            long stamp = mt ^ (len * 31) ^ (ct * 131);
+
+            if (_pluginVer.TryGetValue(path, out var prev))
+            {
+                if (prev.stamp == stamp)
+                    return prev.ver;
+
+                // файл ещё «горячий» — отдаём прежнюю версию, пока не отлежится
+                if (DateTime.UtcNow.Ticks - mt < TimeSpan.TicksPerMinute)
+                    return prev.ver;
+            }
+
+            string ver = $"{mt:x}-{len:x}-{ct:x}";
+            _pluginVer[path] = (stamp, ver);
+            return ver;
+        }
+        catch { return cacheVersion; }
+    }
+
+    /// <summary>Путь к файлу внутри каталога модуля; null, если модуль не загружен.</summary>
+    static string ModuleFile(string moduleName, string relative)
+    {
+        var m = CoreInit.modules?.FirstOrDefault(x => x != null && string.Equals(x.name, moduleName, StringComparison.OrdinalIgnoreCase));
+        return string.IsNullOrWhiteSpace(m?.path) ? null : IO.Path.Combine(m.path, relative);
+    }
+
     [HttpGet, AllowAnonymous]
     [Staticache(20, always: true)]
     [Route("lampainit.js")]
@@ -782,6 +839,12 @@ public class ApiController : BaseController
             sb = sb.Replace("{lampainit-invc}", initinvcjs);
             sb = sb.Replace("{country}", requestInfo.Country ?? string.Empty);
             sb = sb.Replace("{localhost}", host);
+            // qdl 2.45: адресные ?v для наших плагинов ДО общей замены — они получают версию по
+            // содержимому файла, а не по тикам старта процесса (см. PluginVersion). Остальные
+            // {version} остаются на cacheVersion: их тела зависят от init.conf/страны и вечный
+            // клиентский кеш там опасен.
+            sb = sb.Replace("/qdl.js?v={version}", "/qdl.js?v=" + PluginVersion(ModuleFile("QbitDownload", "plugins/qdl.js")));
+            sb = sb.Replace("/music.js?v={version}", "/music.js?v=" + PluginVersion(ModuleFile("Music", "plugin.js")));
             sb = sb.Replace("{version}", cacheVersion);
             sb = sb.Replace("{deny}", string.Empty);
             sb = sb.Replace("{pirate_store}", string.Empty);

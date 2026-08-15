@@ -249,7 +249,38 @@ public class ModuleConf : ModuleBaseConf
     public int catalogWarmupPruneDays { get; set; } = 14;    // ряд не запрашивался клиентами N дней → забыть
     public int catalogWarmupCardsPerRow { get; set; } = 12;  // сколько первых карточек ряда греть (видимая часть на ТВ)
     public int catalogWarmupPosterBudget { get; set; } = 120; // постеров за тик (ротация курсора добирает хвост)
-    public int catalogWarmupDetailBudget { get; set; } = 32;  // деталей за тик (каждый MISS = поход в api.themoviedb.org)
+    public int catalogWarmupDetailBudget { get; set; } = 32;  // (v2, больше не читается — бюджет теперь в карточках)
+    // v3 (qdl 2.45): бюджет считается в КАРТОЧКАХ, а не в URL. Открытие карточки — это ~8-9
+    // параллельных запросов (детали, credits, recommendations, similar, videos ru+en, для сериала
+    // ещё season/N, плюс cub-реакции), и клиент ждёт самый медленный из них — прогреть половину
+    // почти то же, что не греть вовсе. Арифметика: ~1128 карточек-кандидатов, TTL деталей 24 ч,
+    // 96 тиков в сутки → нужно ~11.75 карточек за тик; 16 даёт запас ×1.36. Стоимость тика:
+    // 16 × 9 ≈ 144 запроса × 100 мс ≈ 15 с. Наружу уходят только MISS (~0.12 rps при WAF-лимите 50/с).
+    public int catalogWarmupCardBudget { get; set; } = 16;
+
+    // ── Прогрев кнопок «Онлайн» (OnlineWarm.cs, qdl 2.45) ──
+    // Набор рабочих балансеров собирается 8.2 с при 23 балансерах; TTL набора поднят до суток
+    // (online.checkOnlineSearchMinutes) и лежит на диске, а джоба его продлевает — ПОСТЕПЕННО.
+    // Решение владельца: новинки подхватывать сразу, хвост каталога подтягивать «совсем не спеша,
+    // чтобы точно не заспамить и не попасть в лимиты». Отсюда три полосы с раздельными капами.
+    // Дефолты дают ~3220 исходящих проб в сутки (0.037 rps) против 26 000 за цикл при прогреве залпом.
+    public bool onlineWarmEnabled { get; set; } = true;
+    public bool onlineWarmCatalog { get; set; } = true;   // полосы B+C; false — только keep-warm
+    public int onlineWarmIntervalHours { get; set; } = 6; // 4 прогона в сутки
+    public int onlineWarmPerRunA { get; set; } = 20;      // keep-warm: скачанное, слежение, уже гретое
+    public int onlineWarmPerRunB { get; set; } = 10;      // новинки каталога (тёплые в пределах цикла)
+    public int onlineWarmPerRunC { get; set; } = 5;       // хвост каталога по персистентному курсору
+    public int onlineWarmPaceMs { get; set; } = 5000;     // пауза между карточками — прогон растянут, а не залпом
+
+    // ── Кеш выдачи поиска раздач (SearchCache.cs, qdl 2.45) ──
+    // /qdl/search — самое долгое ожидание в системе: два прохода по всем трекерам + bitmagnet +
+    // локальный индекс, реально 3–15 с при таймаутах 40/45 с. Политика владельца: 6 ч отдаём молча,
+    // до 7 дней — мгновенно с пометкой stale и фоновым обновлением, дальше живой поиск.
+    // Читает кеш только интерактивный /qdl/search; охота и обходчик его лишь заполняют.
+    public bool searchCacheEnabled { get; set; } = true;
+    public int searchCacheFreshHours { get; set; } = 6;
+    public int searchCacheStaleDays { get; set; } = 7;
+    public int searchCacheRefreshParallel { get; set; } = 1;  // не частить с трекерами: одно фоновое обновление разом
     // Фон карточки (backdrop_path, w1280) весит 130-280 КБ против 20-40 КБ у постера w300, поэтому
     // отдельный, заведомо меньший бюджет вместо общего счётчика штук: 24 фона ≈ 120 постеров по байтам.
     public int catalogWarmupBackdropsPerRow { get; set; } = 3; // сколько первых карточек ряда греть фоном
