@@ -171,6 +171,35 @@ public class JacRedNodeRegistryTests : IDisposable
         Assert.DoesNotContain("retired", json);
     }
 
+    [Fact]
+    public void Узел_убирается_из_реестра_руками()
+    {
+        NodeRegistry.Hello("keep", "192.168.87.50", 9121, 0, MAX);
+        NodeRegistry.Hello("drop", "192.168.87.51", 9121, 0, MAX);
+
+        Assert.Equal(1, NodeRegistry.Forget("drop"));
+        Assert.Equal(0, NodeRegistry.Forget("drop"));      // повторно — нечего убирать
+        Assert.Equal(0, NodeRegistry.Forget(""));
+
+        string json = System.Text.Json.JsonSerializer.Serialize(NodeRegistry.Snapshot(TTL, maskIp: false));
+        Assert.Contains("keep", json);
+        Assert.DoesNotContain("drop", json);
+    }
+
+    [Fact]
+    public void Неживые_записи_убираются_разом__живые_остаются()
+    {
+        NodeRegistry.Hello("old", "192.168.87.50", 9121, 0, MAX);
+        _now = _now.AddSeconds(TTL + 1);
+        NodeRegistry.Hello("fresh", "192.168.87.51", 9121, 0, MAX);
+
+        Assert.Equal(1, NodeRegistry.ForgetDead(TTL));
+
+        var items = NodeRegistry.Snapshot(TTL, maskIp: false);
+        Assert.Single(items);
+        Assert.Contains("fresh", System.Text.Json.JsonSerializer.Serialize(items));
+    }
+
     // ── Кого пускаем ──────────────────────────────────────────────────────────
 
     [Theory]

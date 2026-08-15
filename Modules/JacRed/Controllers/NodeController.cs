@@ -98,6 +98,36 @@ namespace JacRed.Controllers
         }
         #endregion
 
+        #region /qdl/nodes/forget
+        /// <summary>
+        /// Убрать узел из реестра руками: `?name=X`, либо `?dead=1` — все неживые разом.
+        /// Сам по себе узел исчезает лишь через час молчания, а следы тестов и
+        /// переименований мешают читать диагностику раньше.
+        ///
+        /// Живой узел убрать можно, но он вернётся ближайшим ударом (30 с) — это не
+        /// способ «отключить» узел, для этого его надо погасить на его машине.
+        /// </summary>
+        [HttpGet]
+        [AllowAnonymous]
+        [Route("qdl/nodes/forget")]
+        public ActionResult Forget(string name, int dead = 0)
+        {
+            if (nodes == null)
+                return Json(new { ok = false, reason = "nodes disabled" });
+
+            // Управляющая ручка — только из LAN, как и регистрация.
+            string edgeHeader = CoreInit.conf?.d1v?.edgeHeader;
+            if (!string.IsNullOrEmpty(edgeHeader) && HttpContext.Request.Headers.ContainsKey(edgeHeader))
+                return StatusCode(403, new { ok = false, reason = "external" });
+
+            int removed = dead == 1
+                ? NodeRegistry.ForgetDead(nodes.ttlSeconds)
+                : NodeRegistry.Forget(name);
+
+            return Json(new { ok = true, removed, items = NodeRegistry.Snapshot(nodes.ttlSeconds, maskIp: false) });
+        }
+        #endregion
+
         #region /qdl/nodes
         /// <summary>Кто сейчас в реестре. Снаружи адреса узлов маскируются.</summary>
         [HttpGet]

@@ -185,6 +185,28 @@ namespace JacRed.Engine
             };
         }
 
+        /// <summary>
+        /// Убрать узел из реестра руками. Нужно, когда узел снят с эксплуатации или это
+        /// след от теста: сам он исчезнет только через <see cref="ForgetAfterSeconds"/>,
+        /// а до тех пор мозолит глаза в диагностике. Возвращает, сколько записей убрано.
+        /// </summary>
+        public static int Forget(string name)
+            => !string.IsNullOrWhiteSpace(name) && _nodes.TryRemove(name, out _) ? 1 : 0;
+
+        /// <summary>Убрать все НЕживые записи разом (уборка после тестов и переименований).</summary>
+        public static int ForgetDead(int ttlSeconds)
+        {
+            int n = 0;
+
+            foreach (var kv in _nodes)
+            {
+                if (!Alive(kv.Value, ttlSeconds) && _nodes.TryRemove(kv.Key, out _))
+                    n++;
+            }
+
+            return n;
+        }
+
         /// <summary>Живые солверы (для пула FlareSolverr, следующий шаг).</summary>
         public static string[] Solvers(int ttlSeconds)
             => _nodes.Values
