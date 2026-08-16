@@ -1404,6 +1404,7 @@ public partial class QbitController
     [Route("qdl/hunt/run")]
     async public Task<ActionResult> HuntRun(string hash = null)
     {
+        var ro = ReplicaReadOnlyDeny(); if (ro != null) return ro;   // охота живёт только дома
         int n = await HuntAll(string.IsNullOrWhiteSpace(hash) ? null : hash);
         return Json(new { success = true, grabbed = n });
     }
@@ -2148,6 +2149,7 @@ public partial class QbitController
     [Route("qdl/watch/switch")]
     async public Task<ActionResult> WatchSwitch(string hash, int accept = 0)
     {
+        var ro = ReplicaReadOnlyDeny(); if (ro != null) return ro;
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {

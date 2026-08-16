@@ -172,6 +172,10 @@ public partial class QbitController : BaseController
         string js = FileCache.ReadAllText($"{ModInit.modpath}/plugins/qdl.js", "qdl.js")
             .Replace("{localhost}", host);
 
+        // Роль сервера — плагину. Реплика read-only, и кнопки, которые всё равно упрутся в 403,
+        // рисовать незачем. Настоящая защита — серверный гейт (ReplicaReadOnlyDeny), это косметика.
+        js = "window.qdl_replica=" + (ReplicaMode ? "true" : "false") + ";\n" + js;
+
         // Легаси-запрос без ?v (старые клиенты с закешированным lampainit) — прежний no-cache,
         // и серверный кеш для него тоже выключаем: иначе правка qdl.js доезжала бы до них только
         // через 7 суток TTL.
@@ -572,6 +576,7 @@ public partial class QbitController : BaseController
     async public Task<ActionResult> Add(string magnet = null, string parselink = null, string title = null, string query = null,
                                         string title_original = null, int year = 0, int is_serial = -1, int season = 0)
     {
+        var ro = ReplicaReadOnlyDeny(); if (ro != null) return ro;
         try
         {
             // link: настоящий "magnet:?...", либо URL-резолвер JacRed (parselink).
@@ -803,9 +808,6 @@ public partial class QbitController : BaseController
 
         try
         {
-            using var c = await Qbit();
-            string raw = await c.GetStringAsync($"/api/v2/torrents/info?category={HttpUtility.UrlEncode(ModInit.conf.category)}&sort=added_on&reverse=true");
-
             var watched = new HashSet<string>();
             var donorHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var w in LoadWatch())
@@ -820,7 +822,24 @@ public partial class QbitController : BaseController
             long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
             var result = new JArray();
-            foreach (var t in JArray.Parse(raw))
+
+            // 🔥 qBittorrent — в СВОЁМ try: его падение больше не уносит локальные карточки.
+            // Раньше исключение отсюда улетало в общий catch, и «Загрузки» гасли целиком — вместе
+            // с аниме и транскодами, которые к qBit отношения не имеют. Для сервера-реплики, вся
+            // ценность которого в этом списке, это худший из возможных отказов.
+            // Деградация теперь честная: торрентная часть пропала, локальная осталась.
+            string raw = null;
+            try
+            {
+                using var c = await Qbit();
+                raw = await c.GetStringAsync($"/api/v2/torrents/info?category={HttpUtility.UrlEncode(ModInit.conf.category)}&sort=added_on&reverse=true");
+            }
+            catch (Exception qex)
+            {
+                Console.WriteLine("[QbitDownload] list: qBittorrent недоступен (" + qex.Message + ") — отдаём только локальные карточки");
+            }
+
+            foreach (var t in raw == null ? new JArray() : JArray.Parse(raw))
             {
                 string h = t.Value<string>("hash") ?? "";
                 if (donorHashes.Contains(h)) continue;   // раздачи-доноры (охота) — не карточки «Загрузок»
@@ -905,14 +924,20 @@ public partial class QbitController : BaseController
             }
             catch (Exception ex) { Console.WriteLine("[QbitDownload] list local: " + ex.Message); }
 
-            // сироты в activity.json (карточка удалена мимо PurgeCache) — здесь единственное место с полным списком живых
-            try
+            // сироты в activity.json (карточка удалена мимо PurgeCache) — здесь единственное место с полным списком живых.
+            // ⚠️ Только при ЖИВОМ qBit: на деградированном списке «живыми» окажутся одни локальные
+            // карточки, и прун снёс бы штампы всех торрентов старше грейса — то есть порядок
+            // «Загрузок» пострадал бы от временного падения качалки.
+            if (raw != null)
             {
-                var live = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var it in result) live.Add((it.Value<string>("hash") ?? "").ToLowerInvariant());
-                ActivityPrune(live, nowUnix);
+                try
+                {
+                    var live = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var it in result) live.Add((it.Value<string>("hash") ?? "").ToLowerInvariant());
+                    ActivityPrune(live, nowUnix);
+                }
+                catch { }
             }
-            catch { }
 
             // единый порядок по актуальности последней загрузки (новое сверху): новая серия/докачка
             // поднимает карточку; фолбэк и тай-брейк — прежняя дата добавления
@@ -921,7 +946,9 @@ public partial class QbitController : BaseController
                 .ThenByDescending(x => x.Value<long?>("added") ?? 0));
 
             string body = ordered.ToString(Newtonsoft.Json.Formatting.None);
-            if (ttl > 0)
+            // Деградированный ответ (qBit не отозвался) НЕ кешируем: иначе поднявшаяся качалка
+            // ещё TTL секунд отдавала бы список без торрентов.
+            if (ttl > 0 && raw != null)
                 lock (_listCacheLock) { _listCache = body; _listCacheAt = DateTime.UtcNow; }
             return JsonWithEtag(body);
         }
@@ -994,6 +1021,9 @@ public partial class QbitController : BaseController
     async public Task<ActionResult> Stream(string hash, int index = -1)
     {
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
+        // На реплике это единственный сигнал «карточку смотрят ЗДЕСЬ»: домашний activity про
+        // местный просмотр не знает, а ротация обязана не выдёргивать фильм из-под зрителя.
+        ReplicaTouchPlayed(hash);
         try
         {
             string full = await ResolveFileCached(hash, index);   // на хите — ноль обращений к qBit (важно: плеер шлёт Range-seek'и очередями)
@@ -1152,6 +1182,9 @@ public partial class QbitController : BaseController
     [Route("qdl/delete")]
     async public Task<ActionResult> Delete(string hash, bool deleteFiles = false)
     {
+        // 🔴 На реплике удаление — привилегия ротации, и только своей. Ручка [AllowAnonymous]
+        // и доступна снаружи за ключом периметра: спрятать кнопку в UI защитой не является.
+        var ro = ReplicaReadOnlyDeny(); if (ro != null) return ro;
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
@@ -2652,6 +2685,7 @@ public partial class QbitController : BaseController
     [Route("qdl/transcode")]
     async public Task<ActionResult> Transcode(string hash, string mode = null)
     {
+        var ro = ReplicaReadOnlyDeny(); if (ro != null) return ro;   // на реплике транскода нет вовсе
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
@@ -3158,6 +3192,7 @@ public partial class QbitController : BaseController
     [Route("qdl/watch")]
     async public Task<ActionResult> WatchAdd(string hash)
     {
+        var ro = ReplicaReadOnlyDeny(); if (ro != null) return ro;   // слежение живёт только дома
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {

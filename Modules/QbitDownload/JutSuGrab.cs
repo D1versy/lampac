@@ -349,6 +349,9 @@ public partial class QbitController
     async public Task<ActionResult> JutDownload(string slug, int season = 0, int ep = 0,
                                                 string kind = null, string scope = "one")
     {
+        // Аниме на реплику приезжает мостом из дома, а не качается с jut.su второй раз:
+        // иначе два сервера независимо ходили бы на сайт и вели каждый своё состояние.
+        var ro = ReplicaReadOnlyDeny(); if (ro != null) return ro;
         if (!JutOn) return JutErr("DISABLED");
         if (!JutSuParse.IsValidSlug(slug)) return JutErr("BAD_SLUG");
 

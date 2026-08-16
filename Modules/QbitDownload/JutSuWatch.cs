@@ -205,6 +205,7 @@ public partial class QbitController
     [Route("qdl/jut/watch")]
     async public Task<ActionResult> JutWatchAdd(string slug, int season = 0, int autoGrab = -1)
     {
+        var ro = ReplicaReadOnlyDeny(); if (ro != null) return ro;   // подписки живут только дома
         if (!JutOn) return JutErr("DISABLED");
         if (!JutSuParse.IsValidSlug(slug)) return JutErr("BAD_SLUG");
 

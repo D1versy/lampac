@@ -2642,7 +2642,9 @@
                 return;   // НЕ добавляем «Скачать», прочие кнопки скрыты
             }
 
-            if (!$('.qdl-download', render).length) {
+            // Сервер-реплика — только чтение: на ней «Скачать» упрётся в 403 (ReplicaReadOnlyDeny),
+            // а всё, что там лежит, приезжает из дома. Кнопку не рисуем вовсе.
+            if (!window.qdl_replica && !$('.qdl-download', render).length) {
                 var btn = $('<div class="full-start__button selector qdl-download">' + ICON + '<span>Скачать</span></div>');
                 btn.on('hover:enter', function () { chooseAndDownload(movie); });
                 cont.append(btn);

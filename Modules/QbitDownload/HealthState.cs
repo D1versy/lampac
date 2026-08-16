@@ -35,6 +35,9 @@ public static class HealthState
         public const string Cub = "cub";
         public const string Indexer = "indexer-live";
         public const string FfWorker = "ffworker";
+        // Репликация (роль replica): «тихо перестала синхронизироваться» обязано быть видно
+        // ДО аварии дома, иначе вскроется ровно в момент, когда бекап понадобился.
+        public const string Replica = "replica";
     }
 
     public const string StatusOk = "ok";

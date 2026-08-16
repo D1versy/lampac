@@ -463,6 +463,42 @@ public static class CatalogWarmup
         _dirty = true;
     }
 
+    // ── Засев рядов на сервер-реплику ───────────────────────────────────────────
+    // Файлы Staticache между серверами непереносимы: ключ считается как Scheme+Host+Path+Query
+    // (Core/Middlewares/Staticache.cs), а исходного URL в имени файла нет — оно и есть
+    // односторонний хеш. Значит переносить надо не байты, а СПИСОК: реплика подставит свой
+    // scheme/host и наполнит собственный кеш правильными ключами, сходив за телами напрямую
+    // (её канал, домашний аплинк не участвует).
+
+    /// <summary>Пути рядов (без scheme/host) для передачи на реплику, свежие вперёд.</summary>
+    internal static List<string> ExportRowPaths()
+        => _rows.Values.OrderByDescending(e => e.lastSeen)
+                       .Select(e => e.pathQuery)
+                       .Where(p => !string.IsNullOrEmpty(p))
+                       .Distinct()
+                       .ToList();
+
+    /// <summary>
+    /// Принять ряды от дома под СВОИ scheme/host. Возвращает число принятых.
+    /// ⚠️ lastSeen ставится «сейчас», поэтому принятые ряды не выпадут по catalogWarmupPruneDays
+    /// раньше, чем реплика успеет их прогреть.
+    /// </summary>
+    internal static int ImportRowPaths(IEnumerable<string> pathQueries, string scheme, string host)
+    {
+        if (pathQueries == null || string.IsNullOrEmpty(host)) return 0;
+
+        int n = 0;
+        foreach (var pq in pathQueries)
+        {
+            if (string.IsNullOrEmpty(pq) || !pq.StartsWith("/", StringComparison.Ordinal)) continue;
+            Note(scheme ?? "http", host, pq);
+            n++;
+        }
+
+        if (n > 0) { try { Save(); } catch { } }
+        return n;
+    }
+
     sealed record WarmCard(string host, string scheme, long id, bool tv)
     {
         // стабильный ключ ротации: не зависит ни от порядка рядов, ни от рестарта

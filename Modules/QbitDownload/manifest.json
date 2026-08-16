@@ -38,6 +38,9 @@
     "JutSuCatalogIndex.cs",
     "TorrentHash.cs",
     "MetaHeal.cs",
+    "Replica.cs",
+    "ReplicaSync.cs",
+    "ReplicaRotate.cs",
     "Controller.cs"
   ]
 }

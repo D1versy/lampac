@@ -21,6 +21,7 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _jutCatTimer;   // jut.su: снапшот-индекс каталога (сид/голова/ресид)
     static System.Threading.Timer _healthTimer;   // пассивные хелс-чеки: сброс реестра на диск
     static System.Threading.Timer _onlineWarmTimer; // прогрев кнопок «Онлайн» (три полосы, постепенно)
+    static System.Threading.Timer _replicaTimer;    // цикл репликации (только при replicaRole=replica)
     static System.TimeSpan _huntPeriod = System.TimeSpan.FromHours(4);
 
     // Ранний повтор охоты (EpisodeHunter): индексатор не дал кандидатов → следующий тик раньше срока.
@@ -259,6 +260,24 @@ public class ModInit : IModuleLoaded
             }, null, System.TimeSpan.FromMinutes(55), System.TimeSpan.FromHours(System.Math.Max(1, owHours)));
         }
 
+        // Цикл репликации (роль "replica", Replica*.cs). На доме таймер не создаётся вовсе —
+        // роль там "main"/пусто, и весь вклад реплики в домашний сервер это три GET-ручки.
+        // Первый тик через 3 мин: дать подняться своему qBittorrent и прогреться JsonStore,
+        // иначе первый же манифест уткнётся в «свой qBit недоступен» и потратит тик впустую.
+        _replicaTimer?.Dispose();
+        _replicaTimer = null;
+        if (QbitController.ReplicaMode)
+        {
+            int rmin = System.Math.Max(1, conf?.replicaIntervalMin ?? 5);
+            System.Console.WriteLine($"[QbitDownload] РОЛЬ: РЕПЛИКА. Дом: {conf?.replicaMainUrl}; бюджет {conf?.replicaBudgetGb} ГБ; "
+                + $"мост {conf?.replicaBridgeMBps} МБ/с; ротация {(conf?.replicaRotateDryRun == false ? "БОЕВАЯ" : "dry-run")}; тик {rmin} мин");
+            _replicaTimer = new System.Threading.Timer(async _ =>
+            {
+                try { await QbitController.ReplicaTick(); }
+                catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] replica timer: " + ex); }
+            }, null, System.TimeSpan.FromMinutes(3), System.TimeSpan.FromMinutes(rmin));
+        }
+
         // Недокачанные .part после рестарта — добрать в очередь (очередь живёт в памяти).
         System.Threading.Tasks.Task.Run(async () =>
         {
@@ -330,6 +349,8 @@ public class ModInit : IModuleLoaded
         _crawlTimer = null;
         _pruneTimer?.Dispose();
         _pruneTimer = null;
+        _replicaTimer?.Dispose();
+        _replicaTimer = null;
         _jutTimer?.Dispose();
         _jutTimer = null;
         _jutWarmTimer?.Dispose();
