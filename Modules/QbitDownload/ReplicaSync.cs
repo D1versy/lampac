@@ -331,6 +331,11 @@ public partial class QbitController
         // ── 7. засев рядов прогрева ──────────────────────────────────────────────
         int rowsSeeded = ReplicaSeedRows(manifest, state);
 
+        // ── 7б. история просмотров ───────────────────────────────────────────────
+        // Отдельным запросом и ПОСЛЕ карточек: «Продолжить» без карточки бессмысленно,
+        // а карточка без «Продолжить» работает.
+        string historyNote = await ReplicaPullHistory(main);
+
         // ── 8. ротация ───────────────────────────────────────────────────────────
         int evicted = 0;
         if (allowRotate)
@@ -347,7 +352,8 @@ public partial class QbitController
         state["rowsSeeded"] = (state.Value<int?>("rowsSeeded") ?? 0) + rowsSeeded;
         JsonStore.Write(ReplicaStatePath, state);
 
-        string summary = $"план {target.Count} шт / {Bytes(planned)}; добавлено {added}; мост ждёт {bridgePending}; мета {metaSynced}, постеры {postersSynced}; вычищено {evicted}";
+        string summary = $"план {target.Count} шт / {Bytes(planned)}; добавлено {added}; мост ждёт {bridgePending}; мета {metaSynced}, постеры {postersSynced}; вычищено {evicted}"
+            + (historyNote != null ? "; " + historyNote : "");
         Console.WriteLine("[QbitDownload] replica: " + summary);
 
         if (allowRotate) HealthState.Ok(HealthState.Ids.Replica);

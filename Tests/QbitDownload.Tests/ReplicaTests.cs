@@ -267,6 +267,57 @@ public class ReplicaTests
         Assert.Contains("/cub/tmdb.red/3/discover/tv?page=1", rows);
     }
 
+    // ── история просмотров: перенос дом → реплика ─────────────────────────
+
+    [Fact]
+    public void History_newer_wins_and_local_progress_is_not_clobbered()
+    {
+        // 🔥 Ради этого правила перенос и односторонний: человек досмотрел серию ЗДЕСЬ, через
+        // пять минут пришёл тик с домашней (старой) позицией — кино не должно откатываться.
+        Assert.True(QbitController.HistoryNewer("2026-08-16 16:36:16.1795326", "2026-08-16 09:32:18.0987660"));
+        Assert.False(QbitController.HistoryNewer("2026-08-16 09:32:18.0987660", "2026-08-16 16:36:16.1795326"));
+
+        // равные — не трогаем (лишняя запись на каждом тике даром)
+        Assert.False(QbitController.HistoryNewer("2026-08-16 16:36:16.1795326", "2026-08-16 16:36:16.1795326"));
+    }
+
+    [Fact]
+    public void History_missing_local_record_is_always_newer()
+    {
+        Assert.True(QbitController.HistoryNewer("2026-08-16 16:36:16.1795326", null));
+        Assert.True(QbitController.HistoryNewer("2026-08-16 16:36:16.1795326", ""));
+    }
+
+    [Fact]
+    public void History_empty_remote_never_overwrites()
+    {
+        Assert.False(QbitController.HistoryNewer(null, "2026-08-16 16:36:16.1795326"));
+        Assert.False(QbitController.HistoryNewer("", "2026-08-16 16:36:16.1795326"));
+    }
+
+    [Fact]
+    public void History_unparsable_timestamps_fall_back_to_ordinal()
+    {
+        // формат мог смениться апстримом; молча «всё свежее» тут было бы худшим исходом
+        Assert.True(QbitController.HistoryNewer("zzz", "aaa"));
+        Assert.False(QbitController.HistoryNewer("aaa", "zzz"));
+    }
+
+    [Fact]
+    public void History_blob_path_rejects_traversal()
+    {
+        // 🔴 rel приходит по сети: единственная защита от «дома», который притворился домом
+        Assert.Null(QbitController.HistoryBlobPath("../../init.conf"));
+        Assert.Null(QbitController.HistoryBlobPath("..\\..\\init.conf"));
+        Assert.Null(QbitController.HistoryBlobPath("syncview/../../../etc/passwd"));
+        Assert.Null(QbitController.HistoryBlobPath(""));
+        Assert.Null(QbitController.HistoryBlobPath(null));
+
+        var ok = QbitController.HistoryBlobPath("syncview/1d/4a6a0d26033d495ed22adc8ba99962");
+        Assert.NotNull(ok);
+        Assert.Contains("syncview", ok);
+    }
+
     [Fact]
     public void Warm_rows_ignore_garbage()
     {
