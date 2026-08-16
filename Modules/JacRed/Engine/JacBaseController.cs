@@ -35,6 +35,20 @@ namespace JacRed.Engine
             return false;
         }
 
+        /// <summary>
+        /// Гард открытого редиректа в parseMagnet у rutor и torrent.by: параметр <c>magnet</c>
+        /// приходит из query и уезжает прямо в <c>Location:</c>. Ссылку формируем мы сами и
+        /// клиент возвращает её обратно, но ручка <c>[AllowAnonymous]</c> — подставить туда можно
+        /// что угодно, и это работало бы как редиректор с нашего домена, а заодно проносило бы
+        /// произвольный магнет мимо санитайза в /qdl/add.
+        ///
+        /// Пропускаем только настоящий магнет с btih.
+        /// </summary>
+        public static bool IsSafeMagnet(string magnet)
+            => !string.IsNullOrEmpty(magnet)
+               && magnet.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase)
+               && Regex.IsMatch(magnet, "xt=urn:btih:([0-9a-fA-F]{40}|[0-9a-zA-Z]{32})", RegexOptions.IgnoreCase);
+
         // reason нужен потому, что раньше сюда сходились 8 разных причин (таймаут, 403,
         // Cloudflare, DNS, протухшая кука, пустая выдача...) под одной строкой — по логу было
         // невозможно понять, что именно сломалось.

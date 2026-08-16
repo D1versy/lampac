@@ -51,6 +51,11 @@ public partial class QbitController
     // к уже сидящему торренту (см. комментарий у QbitAddStatus).
     static async Task<QbitAddStatus> QbitAddMagnetStatus(HttpClient c, string magnet, string category, string tags = null, bool stopAfterMeta = false)
     {
+        // Последний барьер перед qBittorrent. Здесь, а не на входе, потому что сюда сходятся
+        // ЧЕТЫРЕ фоновых контура (re-grab, QbitAddMagnet, захват донора, переключение), и все
+        // они читают магнеты из watch.json / индекса, записанных ДО появления санитайза.
+        magnet = SanitizeMagnet(magnet);
+
         var content = new MultipartFormDataContent
         {
             { new StringContent(magnet), "urls" },

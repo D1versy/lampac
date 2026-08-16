@@ -395,7 +395,19 @@ public partial class QbitController : BaseController
             if (arr == null) continue;
             foreach (var t in arr)
             {
+                // Единственное место, где сходятся все четыре источника (индексатор ×2, bitmagnet,
+                // локальный индекс) — значит и единственная точка, где санитайз делает чистыми
+                // сразу всех потребителей: SearchCache, LocalIndex, JSON клиенту, donors[].link,
+                // pendingSwitch.magnet. Дедуп от этого не страдает — он считается по btih, а btih
+                // санитайз не трогает. Старые грязные строки мигрируют сами: dedupe_key тот же,
+                // и `on conflict do update` в LocalIndex перезапишет магнет чистым.
                 string mag = t.Value<string>("magnet");
+                if (!string.IsNullOrWhiteSpace(mag))
+                {
+                    string clean = SanitizeMagnet(mag);
+                    if (!ReferenceEquals(clean, mag)) { mag = clean; t["magnet"] = clean; }
+                }
+
                 string link = t.Value<string>("parselink");
                 string dedupe = !string.IsNullOrWhiteSpace(mag) ? MagnetHash(mag) : link;   // дедуп по btih / parselink
                 if (!string.IsNullOrEmpty(dedupe) && !seen.Add(dedupe)) continue;
@@ -645,7 +657,10 @@ public partial class QbitController : BaseController
             }
             else
             {
-                usedMagnet = link;
+                // ⚠️ Санитайз именно ЗДЕСЬ, а не на входном параметре: ручка [AllowAnonymous],
+                // magnet целиком контролируется вызывающим, а второй вход — parselink, который
+                // резолвится выше и может прийти 302-м редиректом с трекера.
+                usedMagnet = SanitizeMagnet(link);
                 if (string.IsNullOrWhiteSpace(usedMagnet) || !usedMagnet.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
                     return Json(new { success = false, error = "no magnet" });
                 content = new MultipartFormDataContent
@@ -3336,6 +3351,95 @@ public partial class QbitController : BaseController
         var hm = Regex.Match(magnet ?? "", "btih:([0-9a-fA-F]{40}|[0-9a-zA-Z]{32})", RegexOptions.IgnoreCase);
         return hm.Success ? hm.Groups[1].Value.ToLower() : "";
     }
+
+    #region санитайз магнетов
+    // Какие анонс-хосты встречались в магнетах: данные, по которым решать, включать ли
+    // sanitizeMagnetTrackers. Живёт в памяти, отдаётся в /qdl/diag/state.
+    static readonly ConcurrentDictionary<string, int> _announceHosts = new();
+
+    static void NoteAnnounce(string tr)
+    {
+        if (string.IsNullOrWhiteSpace(tr) || _announceHosts.Count > 200) return;
+        try
+        {
+            string host = new Uri(HttpUtility.UrlDecode(tr)).Host.ToLowerInvariant();
+            if (host.Length > 0) _announceHosts.AddOrUpdate(host, 1, (_, n) => n + 1);
+        }
+        catch { }   // мусор в tr — просто не считаем
+    }
+
+    internal static JObject AnnounceSnapshot()
+    {
+        var o = new JObject();
+        foreach (var kv in _announceHosts.OrderByDescending(x => x.Value).Take(50))
+            o[kv.Key] = kv.Value;
+        return o;
+    }
+
+    /// <summary>
+    /// Оставить в магните только безопасное. Магнет — это НЕ только хеш: в него можно дописать
+    /// чужие адреса, и qBittorrent их послушается.
+    ///
+    ///   ws / as / xs — веб-сид: клиент пойдёт HTTP-запросом по указанному URL прямо из дома;
+    ///   x.pe         — адрес пира: клиент к нему подключится;
+    ///   mt           — URL манифеста, то же самое;
+    ///   tr           — трекер для анонса: клиент сам сообщит внешний IP дома, порт, peer_id и
+    ///                  infohash, и будет делать это на КАЖДОМ анонсе, пока раздача жива.
+    ///
+    /// Почему это не паранойя: сегодня БОЛЬШИНСТВО магнетов приходит не от нашего парсинга, а с
+    /// чужого сервера (JacRed typesearch: "webapi" → webApiHost) — по канарейкам это 232 раздачи
+    /// из 249 и 733 из 811. Строка на входе недоверенная по построению.
+    ///
+    /// Список БЕЛЫЙ, а не чёрный: незнакомый параметр режется. Чёрный список пришлось бы
+    /// дополнять на каждое расширение magnet-схемы, и молчаливо пропускал бы новое.
+    ///
+    /// ⚠️ tr режется только при sanitizeMagnetTrackers — см. комментарий у ручки в ModuleConf.
+    /// ⚠️ Путь через .torrent-файл сюда НЕ попадает: announce лежит внутри bencode-словаря.
+    /// </summary>
+    internal static string SanitizeMagnet(string magnet)
+    {
+        if (string.IsNullOrWhiteSpace(magnet)) return magnet;
+        if (!magnet.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase)) return magnet;
+
+        int q = magnet.IndexOf('?');
+        if (q < 0) return magnet;
+
+        bool dropTrackers = ModInit.conf?.sanitizeMagnetTrackers ?? false;
+        var kept = new List<string>();
+        bool changed = false;
+
+        foreach (string part in magnet.Substring(q + 1).Split('&'))
+        {
+            if (part.Length == 0) continue;
+
+            int eq = part.IndexOf('=');
+            string key = (eq > 0 ? part.Substring(0, eq) : part).ToLowerInvariant();
+
+            // xt.1/xt.2 и tr.1/tr.2 — законная форма множественного значения
+            if (key == "xt" || key.StartsWith("xt.") || key == "dn")
+            {
+                kept.Add(part);
+                continue;
+            }
+
+            if (key == "tr" || key.StartsWith("tr."))
+            {
+                NoteAnnounce(eq > 0 ? part.Substring(eq + 1) : null);
+                if (dropTrackers) changed = true;
+                else kept.Add(part);
+                continue;
+            }
+
+            changed = true;
+        }
+
+        // Хеша не осталось — значит строка вообще не то, за что себя выдаёт. Возвращаем как было:
+        // дальше её отбракует MagnetHash/qBittorrent, а глотать молча нельзя.
+        if (!changed || kept.Count == 0) return magnet;
+
+        return "magnet:?" + string.Join("&", kept);
+    }
+    #endregion
 
     // резолв нашего loopback-парселинка в magnet (фоновая проверка, без request-host)
     static async Task<string> ResolveMagnetStatic(string link)

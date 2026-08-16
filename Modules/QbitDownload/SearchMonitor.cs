@@ -377,6 +377,15 @@ public partial class QbitController
     [HttpGet, AllowAnonymous]
     [Route("qdl/diag/state")]
     public ActionResult DiagState()
-        => ContentTo(LoadDiagState().ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    {
+        var st = LoadDiagState();
+
+        // Какие анонс-хосты реально встречаются в магнетах. Это данные для решения «включать ли
+        // sanitizeMagnetTrackers»: список из знакомых публичных трекеров — резать не спешим,
+        // посторонние адреса — повод включить. Счётчик в памяти, обнуляется рестартом.
+        st["magnetAnnounce"] = AnnounceSnapshot();
+
+        return ContentTo(st.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
     #endregion
 }

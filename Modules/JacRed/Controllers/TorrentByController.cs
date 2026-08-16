@@ -35,6 +35,9 @@ namespace JacRed.Controllers
             if (string.IsNullOrEmpty(magnet))
                 return Content("empty");
 
+            if (!IsSafeMagnet(magnet))
+                return Content("empty");   // не магнет — не редиректим (открытый редирект)
+
             return Redirect(magnet);
         }
         #endregion
