@@ -297,8 +297,17 @@ public partial class QbitController
                 {
                     var j = JObject.Parse(txt);
                     if (j.Value<string>("status") == "ok")
-                        return Svc(id, name, GrpInfra, "ok", sw.ElapsedMilliseconds,
-                                   "сессий: " + ((j["sessions"] as JArray)?.Count ?? 0));
+                    {
+                        // Число сессий — это и есть датчик утечки, и раньше он был слепым: вердикт
+                        // был зелёным при любом N. Боевой случай §BW: 37 живых Chrome'ов, память в
+                        // потолок mem_limit, cgroup убивает дочерние процессы — а /health отвечает,
+                        // потому что жив питоновский вебсервер, и autoheal не срабатывает никогда.
+                        // Норма — ОДНА сессия: имя стабильное, больше одной быть не должно.
+                        int sessions = (j["sessions"] as JArray)?.Count ?? 0;
+                        string state = sessions > 10 ? "fail" : sessions > 3 ? "warn" : "ok";
+                        string note = "сессий: " + sessions + (state == "ok" ? "" : " (норма 1 — копятся, см. §BW)");
+                        return Svc(id, name, GrpInfra, state, sw.ElapsedMilliseconds, note);
+                    }
                 }
                 catch { }
                 return Svc(id, name, GrpInfra, "fail", sw.ElapsedMilliseconds, "ответ без status=ok");

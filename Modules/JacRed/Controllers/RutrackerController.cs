@@ -30,6 +30,13 @@ namespace JacRed.Controllers
         // в HttpClient бессмысленно — Cloudflare привязывает клиренс к TLS-отпечатку.
         static DateTime _fsLoginAt;
 
+        // Поколение сессии, в браузере которой лежит наша кука, и поколение, в котором логин
+        // уже пробовали. Оба нужны потому, что «залогинены» — свойство КОНКРЕТНОГО браузера,
+        // а не отрезка времени.
+        static int _fsLoginEpoch = -1;
+        static int _fsLoginTriedEpoch = -1;
+        static DateTime _fsLoginRetryAt;
+
         // ⚠️ Логин тоже НЕ должен блокировать пользовательский поиск: он идёт через тот же
         // браузер и стоит те же десятки секунд. При нулевом бюджете отправляем его в фон —
         // rutracker подключится со следующего поиска. Первая версия ждала логин и разогнала
@@ -38,10 +45,24 @@ namespace JacRed.Controllers
 
         static Task EnsureFsLogin(int budgetSeconds)
         {
-            if ((DateTime.Now - _fsLoginAt).TotalMinutes < 60) return Task.CompletedTask;
+            int epoch = FlareSolverr.SessionEpoch;
+
+            // ⚠️ Сверяем ПОКОЛЕНИЕ, а не только время. Кука логина живёт в браузере конкретной
+            // сессии: солвер пересоздал сессию — куки больше нет, сколько бы минут ни прошло.
+            // Раньше проверялось только «прошло меньше 60 минут», и после каждого падения солвера
+            // мы ещё час считали себя залогиненными, ходили на rutracker анонимно и молча отдавали
+            // пустую выдачу — в логе при этом ни строчки (боевой лог §BW).
+            if (_fsLoginEpoch == epoch && (DateTime.Now - _fsLoginAt).TotalMinutes < 60)
+                return Task.CompletedTask;
 
             lock (_fsLoginLock)
             {
+                // Бэкофф: одна попытка на браузер. Раньше условие «_fsLoginTask.IsCompleted»
+                // запускало логин заново на КАЖДОМ следующем поиске, а каждая попытка — это
+                // тяжёлый solve через браузер, который и роняет солвер дальше по кругу.
+                if (_fsLoginTriedEpoch == epoch && DateTime.Now < _fsLoginRetryAt)
+                    return Task.CompletedTask;
+
                 if (_fsLoginTask == null || _fsLoginTask.IsCompleted)
                 {
                     _fsLoginTask = Task.Run(async () =>
@@ -53,8 +74,21 @@ namespace JacRed.Controllers
                                 ["login_password"] = jackett.Rutracker.login.p,
                                 ["login"] = "Вход"
                             });
-                        if (sol != null) { _fsLoginAt = DateTime.Now; Console.WriteLine("[FlareSolverr] rutracker: логин выполнен"); }
-                        else consoleErrorLog("rutracker", "flaresolverr login failed");
+
+                        // Поколение читаем ПОСЛЕ запроса: сам логин мог поднять новую сессию, и
+                        // запомнить надо ту, в браузере которой кука теперь и лежит.
+                        if (sol != null)
+                        {
+                            _fsLoginEpoch = FlareSolverr.SessionEpoch;
+                            _fsLoginAt = DateTime.Now;
+                            Console.WriteLine("[FlareSolverr] rutracker: логин выполнен");
+                        }
+                        else
+                        {
+                            _fsLoginTriedEpoch = FlareSolverr.SessionEpoch;
+                            _fsLoginRetryAt = DateTime.Now.AddSeconds(Math.Max(30, fs?.cooldownSeconds ?? 300));
+                            consoleErrorLog("rutracker", "flaresolverr login failed");
+                        }
                     });
                 }
             }

@@ -88,6 +88,12 @@ namespace JacRed
         {
             IsDispose = true;
             EventListener.UpdateInitFile -= updateConf;
+
+            // Снять сессию солвера при штатной остановке: иначе в контейнере остаётся живой Chrome.
+            // Ожидание ограничено 3 секундами — у docker stop всего 10 до SIGKILL, и уборка не
+            // имеет права задерживать остановку. Если не успели, не страшно: имя сессии стабильное,
+            // и следующий процесс снесёт её по этому же имени (см. EnsureSession).
+            try { FlareSolverr.DropSession(conf?.Jackett?.flaresolverr).Wait(TimeSpan.FromSeconds(3)); } catch { }
         }
 
         void updateConf()

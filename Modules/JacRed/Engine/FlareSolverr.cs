@@ -43,6 +43,21 @@ namespace JacRed.Engine
         static DateTime _sessionAt;
         static DateTime _downUntil;
 
+        // Сломались — следующий EnsureSession обязан снести браузер и поднять новый.
+        // Раньше здесь было _session = null, и это была УТЕЧКА: имя терялось, а сессия на
+        // солвере оставалась жить. За сутки набегало 153 sessions.create против 0 destroy,
+        // 37 живых Chrome'ов и упор в mem_limit (боевой лог §BW).
+        static bool _forceNew;
+
+        static int _epoch;
+
+        /// <summary>
+        /// Поколение сессии: +1 на каждый новый браузер. Кука логина живёт ВНУТРИ браузера,
+        /// поэтому потребителям (rutracker) надо знать, что их логин уехал вместе со старой
+        /// сессией, — иначе они час считают себя залогиненными и молча отдают пустую выдачу.
+        /// </summary>
+        public static int SessionEpoch => Volatile.Read(ref _epoch);
+
         // Солвер — это один браузер: два параллельных solve его роняют.
         static readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
         static readonly ConcurrentDictionary<string, Task<string>> _inflight = new();
@@ -51,6 +66,25 @@ namespace JacRed.Engine
         /// <summary>Подмена транспорта в тестах: (url, jsonBody, timeoutSec) → тело ответа.</summary>
         public static Func<string, string, int, Task<string>> Transport = RealTransport;
 
+        /// <summary>Подмена часов в тестах: кулдаун и TTL сессии иначе не промотать.</summary>
+        public static Func<DateTime> Now = () => DateTime.Now;
+
+        /// <summary>
+        /// Сброс состояния процесса — ТОЛЬКО для тестов. Сессию на солвере не трогает
+        /// (для этого <see cref="DropSession"/>), поэтому в бою вызывать нельзя: забыли имя —
+        /// получили орфана.
+        /// </summary>
+        public static void Reset()
+        {
+            _session = null;
+            _sessionAt = default;
+            _downUntil = default;
+            _forceNew = false;
+            _epoch = 0;
+            _cache.Clear();
+            _inflight.Clear();
+        }
+
         static Task<string> RealTransport(string url, string json, int timeoutSec)
             // statusCodeOK:false обязателен — FlareSolverr кладёт осмысленный message в тело 500,
             // а при true Http вернул бы null и причина потерялась бы.
@@ -58,12 +92,15 @@ namespace JacRed.Engine
                          timeoutSeconds: timeoutSec, statusCodeOK: false);
 
         public static bool Available(FlareSolverrConf c)
-            => c != null && c.enable && !string.IsNullOrWhiteSpace(c.url) && DateTime.Now >= _downUntil;
+            => c != null && c.enable && !string.IsNullOrWhiteSpace(c.url) && Now() >= _downUntil;
 
         static void MarkDown(FlareSolverrConf c, string why)
         {
-            _downUntil = DateTime.Now.AddSeconds(Math.Max(30, c?.cooldownSeconds ?? 300));
-            _session = null;
+            _downUntil = Now().AddSeconds(Math.Max(30, c?.cooldownSeconds ?? 300));
+
+            // ⚠️ Имя сессии НЕ забываем — только помечаем, что браузер надо пересоздать.
+            // Забыть имя = потерять единственную возможность его снести.
+            _forceNew = true;
             Console.WriteLine($"[FlareSolverr] недоступен ({why}) — пауза {Math.Max(30, c?.cooldownSeconds ?? 300)}с");
         }
 
@@ -76,20 +113,66 @@ namespace JacRed.Engine
             try { return JObject.Parse(raw); } catch { return null; }
         }
 
+        static string SessionName(FlareSolverrConf c)
+            => string.IsNullOrWhiteSpace(c?.sessionName) ? "jacred" : c.sessionName;
+
+        /// <summary>
+        /// Снести сессию на солвере. true = «на солвере её больше нет».
+        ///
+        /// ⚠️ destroy НЕсуществующей сессии образ отдаёт HTTP 500 с «The session doesn't exist»
+        /// (flaresolverr_service.py:206-208). Это УСПЕХ — цель достигнута, браузера нет. Считать
+        /// это отказом нельзя: уборка сама ставила бы себе кулдаун. Настоящий отказ — только
+        /// r == null, то есть транспорт не дошёл и браузер мог остаться.
+        /// </summary>
+        static async Task<bool> DestroySession(FlareSolverrConf c, string name)
+        {
+            var r = await Cmd(c, new JObject { ["cmd"] = "sessions.destroy", ["session"] = name });
+            if (r == null)
+                return false;
+
+            if (r.Value<string>("status") == "ok")
+                return true;
+
+            string msg = r.Value<string>("message") ?? "";
+            return msg.Contains("exist", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Живая сессия солвера. Имя СТАБИЛЬНОЕ — и это главная защита от утечки: в образе
+        /// sessions.create идемпотентен по имени (sessions.py:38-45 — «уже есть» возвращает
+        /// существующую со статусом ok). Значит сколько бы мы ни падали, ни таймаутились и ни
+        /// перезапускались, больше ОДНОГО браузера не заведётся никогда.
+        ///
+        /// ⚠️ Раньше имя было `jacred-{Ticks}`, уникальное на каждый заход: любая потеря имени
+        /// делала браузер невосстановимым, и они копились до упора в mem_limit (§BW).
+        /// </summary>
         static async Task<string> EnsureSession(FlareSolverrConf c)
         {
-            if (_session != null && (DateTime.Now - _sessionAt).TotalMinutes < Math.Max(5, c.sessionTtlMinutes))
+            string name = SessionName(c);
+
+            if (!_forceNew && _session != null && (Now() - _sessionAt).TotalMinutes < Math.Max(5, c.sessionTtlMinutes))
                 return _session;
 
-            if (_session != null)
-                await Cmd(c, new JObject { ["cmd"] = "sessions.destroy", ["session"] = _session });
+            // Сюда попадаем в двух случаях: сломались (_forceNew) или истёк наш TTL. И там и там
+            // прошлый браузер надо снести. Шлём destroy и когда _session == null: имя стабильное,
+            // значит сессия от прошлого процесса lampac зовётся так же — иначе она осталась бы
+            // висеть навсегда, ведь никто больше её имени не знает.
+            if (_forceNew || _session != null)
+            {
+                // Не дошли — старый браузер, возможно, остался жив. Создать новый всё равно надо
+                // (имя то же, create идемпотентен), но знать об этом полезно: регулярная строчка
+                // здесь означает, что солвер не отвечает вообще, а не «страница не решилась».
+                if (!await DestroySession(c, name))
+                    Console.WriteLine($"[FlareSolverr] сессию «{name}» снести не удалось — солвер не ответил");
+            }
 
-            string name = (c.sessionName ?? "jacred") + "-" + DateTime.Now.Ticks;
             var r = await Cmd(c, new JObject { ["cmd"] = "sessions.create", ["session"] = name });
             if (r == null || r.Value<string>("status") != "ok") return null;
 
             _session = name;
-            _sessionAt = DateTime.Now;
+            _sessionAt = Now();
+            _forceNew = false;
+            Interlocked.Increment(ref _epoch);
             return _session;
         }
 
@@ -125,7 +208,13 @@ namespace JacRed.Engine
                 if (s == null) { MarkDown(c, "сессия"); return null; }
                 return Read(c, await Cmd(c, new JObject
                 {
-                    ["cmd"] = "request.get", ["session"] = s, ["url"] = url, ["maxTimeout"] = c.maxTimeoutMs
+                    ["cmd"] = "request.get", ["session"] = s, ["url"] = url, ["maxTimeout"] = c.maxTimeoutMs,
+
+                    // Вторая линия обороны от утечки: образ умеет ротировать сессию сам
+                    // (sessions.py:79-82 → create(force_new: true) → корректный destroy с
+                    // driver.quit() и уборкой /tmp/FlareSolverr/<id>). Раньше поле не слали
+                    // никогда, и sessionTtlMinutes работал только в НАШЕЙ памяти.
+                    ["session_ttl_minutes"] = Math.Max(5, c.sessionTtlMinutes)
                 }), "get " + url);
             }
             catch (Exception ex) { MarkDown(c, ex.GetType().Name + ": " + ex.Message); return null; }
@@ -151,7 +240,8 @@ namespace JacRed.Engine
                 return Read(c, await Cmd(c, new JObject
                 {
                     ["cmd"] = "request.post", ["session"] = s, ["url"] = url,
-                    ["postData"] = sb.ToString(), ["maxTimeout"] = c.maxTimeoutMs
+                    ["postData"] = sb.ToString(), ["maxTimeout"] = c.maxTimeoutMs,
+                    ["session_ttl_minutes"] = Math.Max(5, c.sessionTtlMinutes)
                 }), "post " + url);
             }
             catch (Exception ex) { MarkDown(c, ex.GetType().Name + ": " + ex.Message); return null; }
@@ -168,7 +258,7 @@ namespace JacRed.Engine
         {
             if (!Available(c)) return null;
 
-            if (_cache.TryGetValue(cacheKey, out var hit) && DateTime.Now < hit.until)
+            if (_cache.TryGetValue(cacheKey, out var hit) && Now() < hit.until)
                 return hit.html;
 
             // дедуп одинаковых запросов: пять клиентов на одном тайтле = один solve
@@ -178,7 +268,7 @@ namespace JacRed.Engine
                 {
                     var sol = await Get(c, url);
                     if (sol?.html != null)
-                        _cache[cacheKey] = (sol.html, DateTime.Now.AddMinutes(Math.Max(1, c.htmlCacheMinutes)));
+                        _cache[cacheKey] = (sol.html, Now().AddMinutes(Math.Max(1, c.htmlCacheMinutes)));
                     return sol?.html;
                 }
                 finally { _inflight.TryRemove(cacheKey, out Task<string> _); }
@@ -189,16 +279,22 @@ namespace JacRed.Engine
             return done == task ? task.Result : null;
         }
 
-        /// <summary>Снять сессию (при выгрузке модуля): иначе в солвере копятся Chrome'ы.</summary>
-        public static async Task DropSession(FlareSolverrConf c)
+        /// <summary>
+        /// Снять сессию (перечит init.conf, выгрузка модуля): иначе в солвере копятся Chrome'ы.
+        ///
+        /// ⚠️ Не проверяет `_session != null`, как раньше: имя стабильное, и снести надо в том
+        /// числе сессию, оставшуюся от прошлого процесса lampac. Именно эта проверка делала метод
+        /// бесполезным ровно в том случае, ради которого он написан.
+        /// </summary>
+        public static async Task<bool> DropSession(FlareSolverrConf c)
         {
             try
             {
-                if (_session == null || c == null || string.IsNullOrWhiteSpace(c.url)) return;
-                await Cmd(c, new JObject { ["cmd"] = "sessions.destroy", ["session"] = _session });
+                if (c == null || string.IsNullOrWhiteSpace(c.url)) return false;
+                return await DestroySession(c, SessionName(c));
             }
-            catch { }
-            finally { _session = null; }
+            catch { return false; }
+            finally { _session = null; _forceNew = false; }
         }
         #endregion
     }
