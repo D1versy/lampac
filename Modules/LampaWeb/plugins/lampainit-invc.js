@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.49';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
+window.qdl_fork_version = '2.50';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
 // Лампа готова для использования
@@ -21,6 +21,10 @@ lampainit_invc.appload = function appload() {
   lampainit_invc._apploaded = true;
   Lampa.Utils.putScriptAsync(["{localhost}/qdl.js?v={version}"]);  // QbitDownload: кнопка «Скачать» + раздел «Загрузки» ({version} = cache-buster, подставляет сервер)
   Lampa.Utils.putScriptAsync(["{localhost}/music.js?v={version}"]);  // Music (upstream 1.45, manifest enable:true — наш флип): раздел «Музыка»; откат = убрать строку + рестарт
+  // qdl 2.50: десктоп-адаптации ТОЛЬКО для windows/mac (плавный скролл колесом, ранняя
+  // подгрузка, ресинк фокуса) — ТВ/мобилка файл даже не скачивают; откат = убрать строку
+  if (window.d1vision_platform === 'windows' || window.d1vision_platform === 'mac')
+    Lampa.Utils.putScriptAsync(["{localhost}/desktop.js?v={version}"]);
   // TorrServer — через прокси lampac (/ts/* → контейнер torrserver, модуль TorrServer external_url).
   // location.origin: в LAN → http://192.168.87.24:9118/ts, извне → https://tv.d1versy.com:9443/ts —
   // работает отовсюду и не светит LAN-IP (раньше тут был хардкод http://192.168.87.24:8090).
@@ -223,6 +227,14 @@ try {
     localStorage.setItem('player_iptv', 'android');
     localStorage.setItem('internal_torrclient', 'true');
   }
+
+  // qdl 2.50: десктопам — мышиная навигация (hover-фокус карточек, contextmenu,
+  // кнопка «назад» в модалках). Из-за андроидной UA-маски дефолт Lampa для них —
+  // 'controll' (пульт), хотя для настоящих десктопов upstream ставит 'mouse'.
+  // ⚠️ Только здесь, сырым localStorage ДО загрузки Lampa: смена этого ключа в
+  // рантайме (Lampa.Storage.set) триггерит слушатель с window.location.reload().
+  if (d1plat === 'windows' || d1plat === 'mac')
+    localStorage.setItem('navigation_type', 'mouse');
 } catch (e) {}
 
 // ── ДО загрузки Lampa: стабильный uid устройства (серверный синк per-device, qdl 2.18) ──

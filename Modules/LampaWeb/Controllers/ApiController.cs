@@ -845,6 +845,7 @@ public class ApiController : BaseController
             // клиентский кеш там опасен.
             sb = sb.Replace("/qdl.js?v={version}", "/qdl.js?v=" + PluginVersion(ModuleFile("QbitDownload", "plugins/qdl.js")));
             sb = sb.Replace("/music.js?v={version}", "/music.js?v=" + PluginVersion(ModuleFile("Music", "plugin.js")));
+            sb = sb.Replace("/desktop.js?v={version}", "/desktop.js?v=" + PluginVersion(ModuleFile("QbitDownload", "plugins/desktop.js")));
             sb = sb.Replace("{version}", cacheVersion);
             sb = sb.Replace("{deny}", string.Empty);
             sb = sb.Replace("{pirate_store}", string.Empty);

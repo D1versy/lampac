@@ -190,6 +190,30 @@ public partial class QbitController : BaseController
     }
     #endregion
 
+    #region desktop.js (десктоп-адаптации Windows/Mac)
+    // qdl 2.50: плавный скролл колесом/трекпадом + ранняя подгрузка + ресинк фокуса.
+    // Отдаётся ВСЕМ (Staticache не различает UA — платформенный гейт в самом файле и в
+    // lampainit-invc.js: putScriptAsync только для d1vision_platform windows|mac, т.е.
+    // ТВ/мобилка файл даже не запрашивают). Кеш-схема — копия qdl.js выше.
+    [HttpGet, AllowAnonymous]
+    [Staticache(10080, always: true, immutable: true, queryKeys = ["v"])]
+    [Route("desktop.js")]
+    public ActionResult DesktopPlugin()
+    {
+        string js = FileCache.ReadAllText($"{ModInit.modpath}/plugins/desktop.js", "desktop.js")
+            .Replace("{localhost}", host);
+
+        if (HttpContext.Request.Query.ContainsKey("v"))
+            HttpContext.Response.Headers["Cache-Control"] = "public,max-age=31536000,immutable";
+        else
+        {
+            StatiCacheDisabled = true;
+            SetHeadersNoCache();
+        }
+        return ContentTo(js, "application/javascript; charset=utf-8");
+    }
+    #endregion
+
     #region /d1vision/hosts.json — OTA-список хостов + бренд для клиентских оболочек
     // Клиенты (D1Vision mac/ios, LAMPA-App android, Tizen-виджет) после успешного старта кэшируют
     // этот список нативно и на следующем запуске ДОБАВЛЯЮТ его к своему зашитому bootstrap-списку
