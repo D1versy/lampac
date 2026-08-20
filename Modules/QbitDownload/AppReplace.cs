@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Text;
 using Shared.Models.Events;
 
@@ -13,6 +13,11 @@ namespace QbitDownload;
 //   menu-items  — пункты левого меню «Релизы»/«Расписание»/«Подписки»;
 //   tt-extract  — фоновый парсер TimeTable: TMDB-запрос каждые 30 сек вечным циклом;
 //   tt-rows     — ряды «Скоро выйдут»/«Недавно вышли» на главной (питались от TimeTable);
+//   dev-wait    — 1000 мс ожидания «тройного вверх» перед стартом очереди загрузки
+//                 (оставлено под кукой qdl_unlock=1);
+//   splash-*    — 1000 мс + fadeOut 500 мс логотипа УЖЕ ПОСЛЕ готовности интерфейса;
+//   shots       — сторонний JS с cub.red каждый старт (services=false его не ловил);
+//   plugin-reset— reset=Math.random() у URL плагинов: кеш-бастер, бивший по внешним клиентам;
 //   preroll     — рекламный преролл перед плеером: Preroll.show() тянет Google IMA SDK
 //                 (https://imasdk.googleapis.com/js/sdkloader/ima3.js) и крутит VAST из data.vast_url.
 //                 Штатного выключателя нет: disable_features.ads в текущем бандле не читается
@@ -64,6 +69,53 @@ public static class AppPatch
         new P("segments-export",
             "PlayerPlaylist: PlayerPlaylist,",
             "PlayerPlaylist: PlayerPlaylist,\n      Segments: Segments,/*qdl-cut:segments-export*/"),
+        // ── qdl 2.53: стартовые паузы бандла ───────────────────────────────────────────
+        // Обе — чистое ожидание, а НЕ сеть. Замер живого сервера: index.html 2.3 мс,
+        // app.min.js 5.5 мс, /lampainit.js 4–8 мс, /qdl/notifications 7 мс. «Загрузка»,
+        // которую видит пользователь, — вот эти 2.5 с, и они платятся каждым стартом
+        // каждого клиента (веб, mac, iOS, Windows, Android — страница у всех одна).
+        //
+        // dev-wait: developerApp() жёстко ждёт 1000 мс, не нажмут ли трижды «вверх» (вход в
+        // меню разработчика), и только потом зовёт loadLang → loadTask, то есть пауза стоит
+        // ДО всей очереди загрузки. Режем не насухо, а гейтим кукой qdl_unlock=1 — той же,
+        // что уже открывает «Настройки»/«Консоль» (lampainit-invc.js и qdl.js): у обычных
+        // клиентов 0 мс, у владельца с кукой прежние 1000 мс и рабочий тройной «вверх».
+        new P("dev-wait",
+            "function developerApp(proceed) {",
+            "function developerApp(proceed) {if (!/(?:^|;\\s*)qdl_unlock=1/.test(document.cookie || '')) return proceed();/*qdl-cut:dev-wait*/"),
+        // splash-wait / splash-fade: showApp() зовёт startApp() СРАЗУ, а логотип .welcome
+        // снимает через setTimeout 1000 мс + fadeOut 500 мс — полторы секунды заставки уже
+        // ПОСЛЕ того, как интерфейс готов и работает. 150 мс / fade 200 мс — выбор владельца
+        // (нолём не делаем: на слабом ТВ первый кадр застал бы недорисованный экран).
+        new P("splash-wait",
+            "}, 1000); // Старт приложения",
+            "}, 150);/*qdl-cut:splash-wait*/ // Старт приложения"),
+        new P("splash-fade",
+            "$('.welcome').fadeOut(500, function () {",
+            "$('.welcome').fadeOut(200, function () {/*qdl-cut:splash-fade*/"),
+        // shots: сторонний JS с cub.red (177 КБ сырых / 45 КБ br) грузится КАЖДЫЙ старт и
+        // исполняется в НАШЕМ origin, где в cookie лежит ключ периметра D1Vision. Мы считали,
+        // что его гасит services=false — неправда, и в lampainit-invc.js это было написано
+        // ошибочно: у sport и tsarea гейт действительно по services, а у shots СВОЙ, только
+        // по iptv и hostname !== 'localhost'. Подчиняем его тому же флагу, а не вырезаем:
+        // вернуть = services:true, и поведение совпадёт с тем, что обещает комментарий.
+        // ⚠️ Якорь БЕЗ хоста: {localhost} подставляется в ApiController.LampaApp ДО того,
+        // как дёргается EventListener.AppReplace.
+        new P("shots",
+            "if (window.location.hostname !== 'localhost' && !window.lampa_settings.iptv) include.push(",
+            "if (window.lampa_settings.services && window.location.hostname !== 'localhost' && !window.lampa_settings.iptv) include.push(/*qdl-cut:shots*/"),
+        // plugin-reset: addPluginParams дописывает к URL КАЖДОГО плагина reset=<random>. Весь
+        // блок гейтится «в адресе нет IPv4», поэтому дома (192.168.87.24) не срабатывает, а на
+        // tv.d1versy.com срабатывает всегда — внешние клиенты качают все шесть плагинов
+        // (~42 КБ br) мимо любого кеша на каждом старте, и заставку держит именно это:
+        // showApp() зовётся из Plugins.load(showApp), то есть ждёт ВСЕ плагины.
+        // 🔴 Снимать ТОЛЬКО в паре с revalidate-ветвью Staticache (no-cache + ETag): reset=
+        // был единственным механизмом доставки новой версии плагина внешнему клиенту.
+        // Якорь с Utils$1 — как и preroll (show$5) выше: tree бандла пинится в LampaWeb/ModInit,
+        // при его смене якорь тихо не найдётся и уедет warn в лог.
+        new P("plugin-reset",
+            "encode = Utils$1.addUrlComponent(encode, 'reset=' + Math.random());",
+            "/*qdl-cut:plugin-reset*/"),
     };
 
     public static void Attach() => EventListener.AppReplace += OnAppReplace;

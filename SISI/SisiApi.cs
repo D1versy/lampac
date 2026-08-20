@@ -17,7 +17,7 @@ public class SisiApiController : BaseController
 {
     #region sisi.js
     [HttpGet, AllowAnonymous]
-    [Staticache(20, always: true, setHeadersNoCache: true)]
+    [Staticache(20, always: true, revalidate: true)]
     [Route("sisi.js")]
     [Route("sisi/js/{token}")]
     public ActionResult Sisi(string token)
@@ -101,7 +101,7 @@ public class SisiApiController : BaseController
 
     #region startpage.js
     [HttpGet, AllowAnonymous]
-    [Staticache(10, always: true, setHeadersNoCache: true)]
+    [Staticache(10, always: true, revalidate: true)]
     [Route("startpage.js")]
     public ActionResult StartPage()
     {

@@ -35,7 +35,7 @@ public class OnlineApiController : BaseController
 
     #region online.js
     [HttpGet, AllowAnonymous]
-    [Staticache(20, always: true, setHeadersNoCache: true)]
+    [Staticache(20, always: true, revalidate: true)]
     [Route("online.js")]
     [Route("online/js/{token}")]
     public ActionResult Online(string token)

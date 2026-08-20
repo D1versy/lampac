@@ -28,7 +28,7 @@ public class CubProxyController : BaseController
     [Staticache(
         cacheMinutes: 10,
         always: true,
-        setHeadersNoCache: true
+        revalidate: true
     )]
     [Route("cubproxy.js")]
     [Route("cubproxy/js/{token}")]

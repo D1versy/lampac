@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
@@ -42,7 +42,7 @@ public class TmdbProxyController : BaseController
     [Staticache(
         cacheMinutes: 10,
         always: true,
-        setHeadersNoCache: true
+        revalidate: true
     )]
     [Route("tmdbproxy.js")]
     [Route("tmdbproxy/js/{token}")]

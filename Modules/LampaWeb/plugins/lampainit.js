@@ -1,4 +1,4 @@
-(function() {
+﻿(function() {
   'use strict';
 
   window.lampac_version = { major: 0, minor: 0 };
@@ -88,7 +88,7 @@
     Lampa.Storage.set('source', 'cub');
     Lampa.Storage.set('video_quality_default', '2160');
     Lampa.Storage.set('full_btn_priority', '{full_btn_priority_hash}');
-    Lampa.Storage.set('proxy_tmdb', '{country}' == 'RU');
+    Lampa.Storage.set('proxy_tmdb', true);   // qdl 2.53: было по гео-токену — он выключал Staticache всей ручки, а значение и так перебивал форс из lampainit-invc
     Lampa.Storage.set('poster_size', 'w300');
 
     Lampa.Storage.set('parser_use', 'true');

@@ -11,7 +11,7 @@ public class SyncController : BaseController
 {
     #region sync.js
     [HttpGet, AllowAnonymous]
-    [Staticache(cacheMinutes: 10, always: true, setHeadersNoCache: true)]
+    [Staticache(cacheMinutes: 10, always: true, revalidate: true)]
     [Route("sync.js")]
     [Route("sync/js/{token}")]
     public ActionResult SyncJS(string token, bool lite)
@@ -27,7 +27,7 @@ public class SyncController : BaseController
 
     #region invc-ws.js
     [HttpGet, AllowAnonymous]
-    [Staticache(cacheMinutes: 10, always: true, setHeadersNoCache: true)]
+    [Staticache(cacheMinutes: 10, always: true, revalidate: true)]
     [Route("invc-ws.js")]
     [Route("invc-ws/js/{token}")]
     public ActionResult InvcSyncJS(string token)

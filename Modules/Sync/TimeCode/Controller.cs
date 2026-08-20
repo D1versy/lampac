@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -19,7 +19,7 @@ public class TimeCodeController : BaseController
 {
     #region timecode.js
     [HttpGet, AllowAnonymous]
-    [Staticache(cacheMinutes: 10, always: true, setHeadersNoCache: true)]
+    [Staticache(cacheMinutes: 10, always: true, revalidate: true)]
     [Route("timecode.js")]
     [Route("timecode/js/{token}")]
     public ActionResult timecode(string token)

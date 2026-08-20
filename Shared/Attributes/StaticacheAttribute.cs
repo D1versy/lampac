@@ -17,6 +17,14 @@ public class StaticacheAttribute : Attribute
     /// <param name="always">
     /// Кеширует на уровне системы даже если в init отключён
     /// </param>
+    /// <param name="revalidate">
+    /// Ответ отдаётся с Cache-Control: no-cache + слабым ETag тела, а совпавший If-None-Match
+    /// получает 304 с пустым телом. Для эндпоинтов БЕЗ versioned-URL, тело которых меняется
+    /// только при деплое (плагины lampac: online.js, sisi.js, sync.js, …): клиент хранит копию
+    /// и каждый старт лишь переспрашивает, вместо того чтобы качать её заново.
+    /// ⚠️ Взаимоисключающе с setHeadersNoCache: тот ставит no-store, который запрещает ХРАНИТЬ,
+    /// то есть убивает саму возможность ревалидации (та же грабля, что в QbitDownload/HttpCache).
+    /// </param>
     /// <param name="immutable">
     /// Ответ отдаётся с Cache-Control: public,max-age=31536000,immutable (и на HIT, и на MISS).
     /// ТОЛЬКО для эндпоинтов с versioned-URL (?v=...): клиент кэширует навсегда, обновление — сменой ?v.
@@ -29,7 +37,8 @@ public class StaticacheAttribute : Attribute
         bool skipUids = false,
         string[] queryKeys = null,
         string[] ignoreQueryKeys = null,
-        bool immutable = false)
+        bool immutable = false,
+        bool revalidate = false)
     {
         if (0 >= cacheMinutes)
             cacheMinutes = 1;
@@ -42,6 +51,7 @@ public class StaticacheAttribute : Attribute
         this.queryKeys = queryKeys;
         this.ignoreQueryKeys = ignoreQueryKeys;
         this.immutable = immutable;
+        this.revalidate = revalidate;
     }
 
     public int cacheMinutes { get; }
@@ -51,6 +61,8 @@ public class StaticacheAttribute : Attribute
     public bool always { get; }
 
     public bool setHeadersNoCache { get; }
+
+    public bool revalidate { get; }
 
     public bool skipUids { get; set; }
 

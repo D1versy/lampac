@@ -55,7 +55,7 @@ public class ApiController : BaseController
         {
             string html = IO.File.ReadAllText($"wwwroot/{ModInit.conf.index}");
             html = html.Replace("<head>", $"<head><base href=\"/{Regex.Match(ModInit.conf.index, "^([^/]+)/").Groups[1].Value}/\" />");
-            html = html.Replace("src=\"/lampainit.js\"", $"src=\"/lampainit.js?v={cacheVersion}\"");
+            html = html.Replace("src=\"/lampainit.js\"", $"src=\"/lampainit.js?v={LamInitVersion()}\"");
 
             // ?v= у app.min.js/app.css: вместо апстримового 15-минутного тика — стабильная версия
             // (см. AppCacheVersion); в паре с immutable-заголовками LampaApp/LampaAppCss клиент
@@ -716,6 +716,17 @@ public class ApiController : BaseController
         }
         catch { return cacheVersion; }
     }
+
+    // qdl 2.53: стабильный ?v для самого lampainit.js — последний «рестартный налог». Он несёт
+    // immutable-заголовок при наличии ?v (LamInit ниже), но версия была cacheVersion = тики старта
+    // процесса, поэтому после каждого рестарта (хост падает по питанию ~23 раза в месяц) все
+    // клиенты тянули ~22 КБ br заново. Тело ручки = lampainit.js + инлайн lampainit-invc.js, обе
+    // версии считает PluginVersion, а он уже подмешивает mtime init.conf — то есть прежнее
+    // возражение «тело зависит от читаемого на лету init.conf» закрыто.
+    // ⚠️ Тело зависит ещё и от host, но клиентский кеш адресуется URL'ом, в котором host и есть.
+    static string LamInitVersion()
+        => PluginVersion($"{ModInit.modpath}/plugins/lampainit.js") + "-" +
+           PluginVersion($"{ModInit.modpath}/plugins/lampainit-invc.js");
 
     /// <summary>Путь к файлу внутри каталога модуля; null, если модуль не загружен.</summary>
     static string ModuleFile(string moduleName, string relative)

@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Http;
+﻿using Microsoft.AspNetCore.Http;
 using Microsoft.Net.Http.Headers;
 using Microsoft.Win32.SafeHandles;
 using Shared.Attributes;
@@ -106,6 +106,10 @@ public class StaticacheWriter
                 var stAttr = httpContext.GetEndpoint()?.Metadata?.GetMetadata<StaticacheAttribute>();
                 if (stAttr?.immutable == true && httpContext.Response.StatusCode == 200 && (stAttr.queryKeys == null || httpContext.Request.Query.ContainsKey("v")))
                     httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=31536000,immutable";
+                // qdl 2.53: revalidate уже поставил no-cache в Staticache до ветвления HIT/MISS —
+                // не перебиваем его вечным max-age. ETag на MISS не шлём: тело сейчас и так свежее,
+                // а хеш посчитает первая же HIT-отдача этой записи.
+                else if (stAttr?.revalidate == true) { }
                 else if (contentLength > 0)
                     httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=86400,immutable";
                 #endregion

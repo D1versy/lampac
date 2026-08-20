@@ -10,6 +10,9 @@
 // то есть результат ровно тот же, что даёт error-путь — только мгновенно и без сети.
 // ⚠️ Ключа metadata НЕТ в дефолтах lampainit.js (там перечислены dmca/ads/reactions/discuss/ai/…),
 // поэтому он был undefined → falsy → запрос уходил всегда.
+//
+// qdl 2.53: сюда же добавились blacklist (сетевой шаг последовательной очереди старта ради
+// заведомо пустого ответа) и reactions (запрос на скрытый CSS-ом интерфейс, в Status(9) карточки).
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -26,12 +29,29 @@ test('lampainit-invc: disable_features.metadata выставляется в true
   assert.strictEqual(sandbox.window.lampa_settings.disable_features.metadata, true);
 });
 
-test('lampainit-invc: соседние выключатели не задеты', () => {
-  // subscribe наш (тоже true), а reactions обязан остаться как был — реакции работают и кешируются
-  const { sandbox } = load({ reactions: false });
+test('lampainit-invc: blacklist и reactions выключены (qdl 2.53)', () => {
+  // blacklist: loadBlackList — сетевой шаг ПОСЛЕДОВАТЕЛЬНОЙ очереди старта ради заведомо
+  //   пустого ответа (у нас заглушка CubProxy отдаёт []).
+  // reactions: интерфейс реакций и так скрыт CSS, а запрос с таймаутом 5 с уходил на каждое
+  //   открытие карточки и входил в Status(9), которого ждёт экран карточки.
+  // Оба ставим ПОВЕРХ пришедших значений — как раз затем и ставим.
+  const { sandbox } = load({ blacklist: false, reactions: false });
+  const df = sandbox.window.lampa_settings.disable_features;
+  assert.strictEqual(df.blacklist, true);
+  assert.strictEqual(df.reactions, true);
+});
+
+test('lampainit-invc: чужие выключатели не задеты', () => {
+  // трогаем ровно четыре ключа (subscribe/metadata/blacklist/reactions) — всё остальное,
+  // что налил бандл или lampainit.js, обязано дойти до Lampa как есть.
+  const { sandbox } = load({ discuss: false, persons: false, trailers: false, lgbt: true });
   const df = sandbox.window.lampa_settings.disable_features;
   assert.strictEqual(df.subscribe, true);
-  assert.strictEqual(df.reactions, false, 'реакции выключать не собирались');
+  assert.strictEqual(df.metadata, true);
+  assert.strictEqual(df.discuss, false, 'discuss выключать не собирались');
+  assert.strictEqual(df.persons, false, 'persons выключать не собирались');
+  assert.strictEqual(df.trailers, false, 'trailers выключать не собирались');
+  assert.strictEqual(df.lgbt, true);
 });
 
 test('lampainit-invc: отсутствие lampa_settings не роняет загрузку', () => {

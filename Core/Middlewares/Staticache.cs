@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Http;
+﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Abstractions;
 using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.Extensions.Primitives;
@@ -278,6 +278,12 @@ public class Staticache
 
         if (staticache.setHeadersNoCache)
             WriteNoCache(httpContext);
+        // qdl 2.53: revalidate — «храни, но каждый раз переспрашивай». Ставим ЗДЕСЬ, до ветвления
+        // HIT/MISS, чтобы заголовок был одинаковый на обоих путях. 🔴 Именно no-cache, а НЕ
+        // no-store: последний запрещает хранить и убивает саму ревалидацию (грабля из
+        // QbitDownload/HttpCache). ETag добавляется ниже, на HIT-пути, где есть файл тела.
+        else if (staticache.revalidate)
+            httpContext.Response.Headers[HeaderNames.CacheControl] = "no-cache";
 
         var init = CoreInit.conf.Staticache;
 
@@ -378,6 +384,9 @@ public class Staticache
             // версия не нужна — immutable всегда.
             if (staticache.immutable && _r.statusCode == 200 && (staticache.queryKeys == null || httpContext.Request.Query.ContainsKey("v")))
                 httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=31536000,immutable";
+            // revalidate уже поставил no-cache выше — сюда не проваливаемся, иначе ветка
+            // "contentLength > 0" перебила бы его вечным max-age.
+            else if (staticache.revalidate) { }
             else if (_r.contentLength > 0)
                 httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=86400,immutable";
             else if (ext is "json" or "html")
@@ -386,6 +395,50 @@ public class Staticache
             httpContext.Response.ContentType = ext;
 
             string file = GetFilePath(cachekey, _r.ex, _r.contentLength, _r.ext);
+
+            #region revalidate: ETag / 304
+            // Плагины lampac (online.js, sisi.js, sync.js, …) не имеют versioned-URL: их адреса
+            // лежат в localStorage клиента с первого запуска, менять их нельзя. Раньше они шли с
+            // no-store и качались целиком каждый старт (~47 КБ br на восьмерых), причём showApp()
+            // ждёт именно их — он зовётся из Plugins.load(showApp).
+            //
+            // ETag считается ЛЕНИВО от байтов raw-файла и кладётся в модель: TTL-пересчёт записи
+            // его не меняет (тело то же — тот же хеш), поэтому 304 работает и через сутки. Хеш
+            // берётся один раз на запись за жизнь процесса; после рестарта модели поднимаются
+            // сканом каталога без etag — первая отдача его и посчитает.
+            //
+            // ⚠️ ETag СЛАБЫЙ (W/): при Accept-Encoding: br то же тело уезжает сайдкаром, побайтовой
+            // идентичности представления нет. Vary: Accept-Encoding ставится ниже.
+            if (staticache.revalidate && _r.statusCode == 200)
+            {
+                string etag = _r.etag;
+
+                if (etag == null)
+                {
+                    try
+                    {
+                        var hash = Fnv1a.Empty;
+                        Fnv1a.Append(ref hash, File.ReadAllBytes(file));
+                        etag = "W/\"" + Fnv1a.Base64Url(hash) + "\"";
+                        cacheFiles.TryUpdate(cachekey, _r with { etag = etag }, _r);
+                    }
+                    catch { etag = null; }   // файл вытеснили из-под нас — просто отдаём тело
+                }
+
+                if (etag != null)
+                {
+                    httpContext.Response.Headers[HeaderNames.ETag] = etag;
+
+                    if (IfNoneMatchHit(httpContext.Request.Headers[HeaderNames.IfNoneMatch], etag))
+                    {
+                        httpContext.Response.StatusCode = StatusCodes.Status304NotModified;
+                        httpContext.Response.Headers[HeaderNames.Vary] = "Accept-Encoding";
+                        httpContext.Response.ContentLength = null;
+                        return Task.CompletedTask;
+                    }
+                }
+            }
+            #endregion
 
             // qdl 2.16: готовый brotli-сайдкар мимо ResponseCompression: Content-Encoding ДО записи
             // тела → ShouldCompressResponse видит его и уходит в pass-through (нативный SendFile,
@@ -477,6 +530,52 @@ public class Staticache
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static string GetFilePath(string cachekey, long ex, int length, string ext)
         => Path.Combine("cache", "static", BucketFolders.Name(cachekey[0]), $"{cachekey}-{ex}_{length}.{ext}");
+
+
+    /// <summary>
+    /// Слабое сравнение If-None-Match по RFC 9110 §8.8.3.2: сопоставляются только «непрозрачные»
+    /// части тегов, префикс W/ игнорируется. Заголовок может нести список через запятую и "*".
+    /// Тот же алгоритм, что в QbitDownload/HttpCache для /qdl/list — продублирован намеренно:
+    /// Core не может ссылаться на модуль.
+    /// </summary>
+    private static bool IfNoneMatchHit(string header, string etag)
+    {
+        if (string.IsNullOrWhiteSpace(header) || string.IsNullOrEmpty(etag))
+            return false;
+
+        string mine = Opaque(etag);
+        if (mine == null)
+            return false;
+
+        if (header.Trim() == "*")
+            return true;
+
+        foreach (var part in header.Split(','))
+        {
+            string other = Opaque(part);
+            if (other != null && string.Equals(other, mine, StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>`W/"abc"` и `"abc"` → `abc`; всё, что не похоже на entity-tag → null.</summary>
+    private static string Opaque(string tag)
+    {
+        if (tag == null)
+            return null;
+
+        var t = tag.AsSpan().Trim();
+
+        if (t.StartsWith("W/"))
+            t = t[2..].TrimStart();
+
+        if (t.Length < 2 || t[0] != '"' || t[^1] != '"')
+            return null;
+
+        return t[1..^1].ToString();
+    }
 
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

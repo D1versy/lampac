@@ -25,7 +25,7 @@ public class BookmarkController : BaseController
 {
     #region bookmark.js
     [HttpGet, AllowAnonymous]
-    [Staticache(cacheMinutes: 10, always: true, setHeadersNoCache: true)]
+    [Staticache(cacheMinutes: 10, always: true, revalidate: true)]
     [Route("bookmark.js")]
     [Route("bookmark/js/{token}")]
     public ActionResult BookmarkJS(string token)

@@ -1,4 +1,4 @@
-using Xunit;
+﻿using Xunit;
 
 namespace QbitDownload.Tests;
 
@@ -35,6 +35,34 @@ public class AppPatchTests
       other_lately_code();
       if (screen == 'category' && params.url == 'movie') return;
       other_recently_code();
+      function developerApp(proceed) {
+        var expect = true;
+        var pressed = 0;
+        var timer = setTimeout(function () {
+          expect = false;
+          proceed();
+        }, 1000);
+      }
+      function showApp() {
+        setTimeout(function () {
+          if (window.show_app) return;
+          $('.welcome').fadeOut(500, function () {
+            $(_this).remove();
+          });
+        }, 1000); // Старт приложения
+        startApp();
+      }
+      if (!window.lampa_settings.iptv && window.lampa_settings.services) {
+        include.push(protocol() + cub_domain + '/plugin/sport');
+      }
+      if (window.location.hostname !== 'localhost' && !window.lampa_settings.iptv) include.push(protocol() + cub_domain + '/plugin/shots');
+      function addPluginParams(url) {
+        var encode = url;
+        encode = Utils$1.addUrlComponent(encode, 'logged=' + logged);
+        encode = Utils$1.addUrlComponent(encode, 'reset=' + Math.random());
+        encode = Utils$1.addUrlComponent(encode, 'origin=' + origin);
+        return encode;
+      }
     ";
 
     [Fact]
@@ -49,6 +77,72 @@ public class AppPatchTests
         Assert.Contains("/*qdl-cut:tt-rows*/", result);
         Assert.Contains("/*qdl-cut:jut-autonext*/", result);
         Assert.Contains("/*qdl-cut:segments-export*/", result);
+        Assert.Contains("/*qdl-cut:dev-wait*/", result);
+        Assert.Contains("/*qdl-cut:splash-wait*/", result);
+        Assert.Contains("/*qdl-cut:splash-fade*/", result);
+        Assert.Contains("/*qdl-cut:shots*/", result);
+        Assert.Contains("/*qdl-cut:plugin-reset*/", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_StartupPauses_Shortened()
+    {
+        // 1000 мс «тройного вверх» + 1000 мс/fade 500 логотипа = 2.5 с, которые платил КАЖДЫЙ
+        // старт каждого клиента. Проверяем и то, что новые значения на месте, и то, что старых
+        // не осталось (иначе патч «применился», но мимо нужной ветки).
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.Contains("}, 150);", result);
+        Assert.Contains("fadeOut(200,", result);
+        Assert.DoesNotContain("}, 1000); // Старт приложения", result);
+        Assert.DoesNotContain("fadeOut(500,", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_DevMenu_StaysReachableUnderUnlockCookie()
+    {
+        // Меню разработчика не отнимаем — оно живёт под той же кукой qdl_unlock=1, что и
+        // «Настройки»/«Консоль»: у обычных клиентов ранний proceed(), у владельца прежние 1000 мс.
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.Contains("qdl_unlock=1", result);
+        Assert.Contains("return proceed();", result);
+        Assert.Contains("var timer = setTimeout(function () {", result);   // сам механизм цел
+    }
+
+    [Fact]
+    public void PatchAppJs_Shots_ObeysServicesFlag()
+    {
+        // У shots в бандле СВОЙ гейт, и services=false его не ловил — подчиняем тому же флагу,
+        // а не вырезаем: вернуть = services:true. Гейты sport/tsarea при этом не трогаем.
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.Contains("if (window.lampa_settings.services && window.location.hostname !== 'localhost'", result);
+        Assert.Contains("'/plugin/shots'", result);                        // сам include цел
+        Assert.Contains("if (!window.lampa_settings.iptv && window.lampa_settings.services) {", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_PluginReset_DropsBusterKeepsOtherParams()
+    {
+        // reset=Math.random() бил только по внешним клиентам (блок гейтится «в URL нет IPv4»),
+        // зато бил каждый старт: showApp() зовётся из Plugins.load(showApp) и ждёт ВСЕ плагины.
+        // Остальные параметры (logged/origin) обязаны уцелеть — их читают сами плагины.
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.DoesNotContain("Math.random()", result);
+        Assert.Contains("'logged=' + logged", result);
+        Assert.Contains("'origin=' + origin", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_Idempotent_SecondPassChangesNothing()
+    {
+        // Staticache может прогнать отдачу повторно — второй проход обязан быть no-op.
+        string once = AppPatch.PatchAppJs(AllAnchors);
+        string twice = AppPatch.PatchAppJs(once);
+
+        Assert.Equal(once, twice);
     }
 
     [Fact]

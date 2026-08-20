@@ -1,4 +1,4 @@
-// //////////////
+﻿// //////////////
 // Переименуйте файл lampainit-invc.js в lampainit-invc.my.js
 // //////////////
 
@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.52';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
+window.qdl_fork_version = '2.53';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
 // Лампа готова для использования
@@ -297,6 +297,23 @@ try { window.lampa_settings.disable_features.subscribe = true; } catch (e) {}
 // клиентов со старым закешированным lampainit.js.
 try { window.lampa_settings.disable_features.metadata = true; } catch (e) {}
 
+// blacklist=true — чёрный список плагинов (qdl 2.53). Гейт в бандле: `if (…disable_features
+// .blacklist) return call([])`. Без него Plugins.task (шаг 4 из 6 ПОСЛЕДОВАТЕЛЬНОЙ очереди
+// загрузки, watchdog 16 с) шлёт два запроса с таймаутом 5 с: /cub/red/api/plugins/blacklist и
+// ./plugins_black_list.json. Первый у нас и так заглушка CubProxy, отдающая [] (Controller.cs,
+// регион «plugins blacklist»), второй — двухбайтовый локальный файл. То есть шаг очереди
+// существует ради заведомо пустого ответа.
+try { window.lampa_settings.disable_features.blacklist = true; } catch (e) {}
+
+// reactions=true — реакции CUB (qdl 2.53). Их интерфейс мы и так прячем CSS ниже по файлу
+// (.full-start-new__reactions/.full-start__reactions), а запрос /cub/red/api/reactions/get/*
+// с таймаутом 5 с всё равно уходил на КАЖДОЕ открытие карточки и входил в Status(9), которого
+// ждёт экран карточки, — то есть платился скрытый интерфейс. Гейт в бандле:
+// `if (…disable_features.reactions) return oncomplite({result: []})` — Status закрывается
+// ровно как на пустом ответе. Серверная ручка cache_reactions при этом остаётся: она
+// прикрывает клиентов со старым закешированным lampainit.js.
+try { window.lampa_settings.disable_features.reactions = true; } catch (e) {}
+
 // ── ДО загрузки Lampa: локализация внешних источников (qdl 2.15, см. claude/11 Media-server) ──
 // Клиент должен ходить ТОЛЬКО на наш сервер (осознанные исключения: YouTube-трейлеры, стрим балансеров).
 // mirrors=false — гейт пробы зеркал CUB: 6 raw-$.ajax на cub.rip/durex.monster/cubnotrip.top//api/checker
@@ -315,6 +332,10 @@ try { window.lampa_settings.disable_features.metadata = true; } catch (e) {}
 // services=false — гигиена, не утечка: /plugin/sport, /plugin/tsarea, /plugin/shots приезжают
 //   через НАШ релей /cub/red/plugin/*, но это сторонний НЕстатический JS, исполняемый в нашем
 //   origin, где в cookie лежит ключ периметра D1Vision.
+//   ⚠️ qdl 2.53: до 2.52 включительно этот флаг гасил только sport и tsarea. У shots в
+//   ServiceLibs.init СВОЙ гейт (`hostname !== 'localhost' && !iptv`), и он тихо грузил 177 КБ
+//   сырых / 45 КБ br чужого JS КАЖДЫЙ старт. Теперь shots подчинён этому же флагу патчем
+//   AppPatch «shots» — фраза выше стала правдой.
 // ВАЖНО: работает только потому, что бандл наливает дефолты через Arrays.extend(lampa_settings, …)
 //   БЕЗ флага replase — extend пишет лишь в ключи со значением undefined, наши false переживают.
 try {

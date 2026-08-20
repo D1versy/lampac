@@ -42,6 +42,11 @@ public class StaticachePreparedRoute
 
 /// brLength > 0 — рядом с raw-файлом лежит готовый "<file>.br" такого размера (сжат один раз при
 /// записи, см. Staticache.CompressBr): HIT отдаёт его мимо ResponseCompression без пережима.
-public readonly record struct StaticacheCacheModel(long ex, string ext, short statusCode = 200, int contentLength = 0, int brLength = 0);
+///
+/// etag (qdl 2.53) — слабый ETag ТЕЛА для роутов с revalidate:true. Считается лениво, при первой
+/// отдаче записи (хеш raw-файла), и живёт в модели до вытеснения: пересчёт TTL его не трогает,
+/// поэтому клиент получает 304 и через сутки. null = ещё не посчитан (в т.ч. сразу после
+/// рестарта, когда модели поднимаются сканом каталога) — тогда ревалидации просто нет.
+public readonly record struct StaticacheCacheModel(long ex, string ext, short statusCode = 200, int contentLength = 0, int brLength = 0, string etag = null);
 
 public record StaticacheFeature(int cacheMinutes, string cachekey);
