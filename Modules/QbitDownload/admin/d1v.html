@@ -3,21 +3,40 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>D1Vision — доступы устройств</title>
+  <title>D1Vision — админка</title>
   <style>
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     body{background:#0c0e12;color:#e6e9f0;font:400 15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:28px 20px 60px}
     .wrap{max-width:1180px;margin:0 auto}
-    header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px}
+    header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:16px}
     h1{font-size:22px;font-weight:600}
-    .sub{font-size:13px;color:#8b93a7;margin-bottom:22px;max-width:860px}
-    .warn{margin-bottom:22px;padding:12px 14px;border-radius:10px;background:#3a2a12;border:1px solid #6b4a17;
+    .sub{font-size:13px;color:#8b93a7;margin-bottom:20px;max-width:880px}
+    .warn{margin-bottom:20px;padding:12px 14px;border-radius:10px;background:#3a2a12;border:1px solid #6b4a17;
           color:#f0c987;font-size:13px}
+
+    /* вкладки */
+    .tabs{display:flex;gap:6px;margin-bottom:20px;border-bottom:1px solid #2a3040}
+    .tab{padding:9px 16px;border:0;background:none;color:#8b93a7;font-size:14px;font-weight:500;cursor:pointer;
+         border-bottom:2px solid transparent;margin-bottom:-1px}
+    .tab:hover{color:#e6e9f0}
+    .tab.on{color:#e6e9f0;border-bottom-color:#4a7dff}
+    .pane{display:none}
+    .pane.on{display:block}
+
     .bar{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
-    .bar .muted{font-size:13px;color:#8b93a7}
+    .bar .muted{font-size:13px;color:#8b93a7;flex:1;min-width:240px}
     button.mini{padding:7px 13px;border:1px solid #2a3040;border-radius:8px;background:#1a1e28;color:#e6e9f0;
                 font-size:13px;cursor:pointer}
     button.mini:hover{background:#222733}
+    .find{position:relative}
+    .find input{width:260px;padding:8px 30px 8px 12px;border-radius:8px;border:1px solid #2a3040;background:#0c0e12;
+                color:#e6e9f0;font-size:14px;outline:none}
+    .find input:focus{border-color:#4a7dff}
+    .find .clr{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:0;background:none;color:#8b93a7;
+               cursor:pointer;font-size:16px;line-height:1;padding:2px 4px;display:none}
+    .find .clr.on{display:block}
+    mark{background:rgba(74,125,255,.35);color:inherit;border-radius:3px;padding:0 1px}
+
     .scroll{overflow-x:auto;border:1px solid #2a3040;border-radius:12px;background:#13161d}
     table{width:100%;border-collapse:collapse;min-width:900px}
     th{text-align:left;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#8b93a7;
@@ -36,6 +55,20 @@
     .kill{border:0;background:none;color:#d9606a;cursor:pointer;font-size:13px;padding:4px}
     .kill:hover{text-decoration:underline}
     .empty{padding:40px 20px;text-align:center;color:#8b93a7;font-size:14px}
+
+    /* хелс-чеки */
+    .hgroup{padding:14px 16px 4px;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#8b93a7;font-weight:600}
+    .hrow{display:flex;align-items:baseline;gap:10px;padding:9px 16px;border-bottom:1px solid rgba(255,255,255,.05)}
+    .hrow:last-child{border-bottom:0}
+    .hrow .mark{flex:none;width:20px}
+    .hrow .nm2{flex:1;min-width:0}
+    .hrow .det{color:#8b93a7;font-size:13px;margin-top:2px}
+    .hrow.bad{background:rgba(217,96,106,.10)}
+    .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;font-weight:600}
+    .pill.ok{background:rgba(60,170,110,.18);color:#6ddaa0}
+    .pill.bad{background:rgba(217,96,106,.18);color:#f09aa2}
+    .pill.off{background:#222733;color:#8b93a7}
+
     #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#1a1e28;
            border:1px solid #2a3040;border-radius:10px;padding:10px 18px;font-size:14px;opacity:0;
            transition:opacity .2s;pointer-events:none}
@@ -44,36 +77,61 @@
 </head>
 <body>
 <div class="wrap">
-  <header><h1>D1Vision — доступы устройств</h1><span class="dim" id="cnt"></span></header>
-  <div class="sub">
-    Разделы <b>D1versy Live</b> (эфир камер) и <b>D1versy Rec</b> (записи регистратора) отдаются только
-    тем устройствам, которым выдано право здесь. Устройство появляется в списке само — при первом же
-    запуске приложения. Свой айди пользователь видит в самом низу ленты «Уведомления».
-  </div>
-  <div class="warn" id="killswitch" style="display:none">
-    ⚠️ Проверка прав <b>выключена</b> (<code>permsEnabled: false</code> в init.conf) — разделы сейчас
-    доступны всем, независимо от галочек ниже.
+  <header><h1>D1Vision — админка</h1><span class="dim" id="cnt"></span></header>
+
+  <div class="tabs">
+    <button class="tab on" data-pane="access">Доступы</button>
+    <button class="tab" data-pane="health">Хелс-чеки</button>
   </div>
 
-  <div class="bar">
-    <button class="mini" id="reload">Обновить</button>
-    <span class="muted">Подсвечены устройства, замеченные за последние 10 минут. ⚠️ У всех, кто зашёл
-      из локальной сети, в колонке IP будет один и тот же адрес шлюза Docker — различать их по IP нельзя,
-      опознавай по платформе, версии и времени последней активности.</span>
-  </div>
-
-  <div class="scroll">
-    <table>
-      <thead><tr>
-        <th>Устройство</th><th>Платформа</th><th>Айди</th><th>IP</th><th>Видели</th>
-        <th>Live</th><th>Rec</th><th></th>
-      </tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
-    <div class="empty" id="empty" style="display:none">
-      Пока ни одного устройства. Запусти приложение на нужном устройстве и нажми «Обновить».
+  <!-- ───────── доступы ───────── -->
+  <section class="pane on" id="pane-access">
+    <div class="sub">
+      Разделы <b>D1versy Live</b> (эфир камер) и <b>D1versy Rec</b> (записи регистратора) отдаются только
+      тем устройствам, которым выдано право здесь. Устройство появляется в списке само — при первом же
+      запуске приложения. Свой айди пользователь видит в самом низу ленты «Уведомления».
     </div>
-  </div>
+    <div class="warn" id="killswitch" style="display:none">
+      ⚠️ Проверка прав <b>выключена</b> (<code>permsEnabled: false</code> в init.conf) — разделы сейчас
+      доступны всем, независимо от галочек ниже.
+    </div>
+
+    <div class="bar">
+      <div class="find">
+        <input id="q" type="search" placeholder="Поиск: айди, имя, платформа…" autocomplete="off" autofocus>
+        <button class="clr" id="qclr" title="Очистить">×</button>
+      </div>
+      <button class="mini" id="reload">Обновить</button>
+      <span class="muted">Подсвечены устройства, замеченные за последние 10 минут. ⚠️ У всех, кто зашёл
+        из локальной сети, в колонке IP будет один и тот же адрес шлюза Docker — различать их по IP нельзя,
+        опознавай по платформе, версии и времени последней активности.</span>
+    </div>
+
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>Устройство</th><th>Платформа</th><th>Айди</th><th>IP</th><th>Видели</th>
+          <th>Live</th><th>Rec</th><th></th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty" style="display:none"></div>
+    </div>
+  </section>
+
+  <!-- ───────── хелс-чеки ───────── -->
+  <section class="pane" id="pane-health">
+    <div class="sub">
+      Живые пробы внешних сервисов — тот же <code>GET /qdl/health</code>, что питает экран в настройках
+      Lampa. Статус <b>⏸ выключено</b> — это не сбой, а «сервис не подключён».
+      Ответ кэшируется сервером на несколько секунд, поэтому «Обновить» подряд отдаёт то же самое.
+    </div>
+    <div class="bar">
+      <button class="mini" id="hreload">Обновить</button>
+      <span class="muted" id="hsum"></span>
+    </div>
+    <div class="scroll" id="hlist"><div class="empty">Загружаю…</div></div>
+  </section>
 </div>
 <div id="toast"></div>
 
@@ -84,7 +142,11 @@
   var rows = document.getElementById('rows');
   var empty = document.getElementById('empty');
   var toastEl = document.getElementById('toast');
+  var qInput = document.getElementById('q');
+  var qClr = document.getElementById('qclr');
   var toastTimer = null;
+  var devices = [];        // последний ответ сервера — фильтруем локально, без похода на сервер
+  var healthLoaded = false;
 
   function toast(text) {
     toastEl.textContent = text;
@@ -97,6 +159,17 @@
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
+  }
+
+  // Подсветка совпадения. Экранируем СНАЧАЛА, ищем в уже экранированной строке — иначе вставка
+  // <mark> в сырой текст дала бы XSS через имя устройства.
+  function hi(text, needle) {
+    var s = esc(text);
+    if (!needle) return s;
+    var n = esc(needle);
+    var i = s.toLowerCase().indexOf(n.toLowerCase());
+    if (i < 0) return s;
+    return s.slice(0, i) + '<mark>' + s.slice(i, i + n.length) + '</mark>' + s.slice(i + n.length);
   }
 
   function ago(iso) {
@@ -123,17 +196,50 @@
     });
   }
 
+  // ───────── вкладки ─────────
+  [].forEach.call(document.querySelectorAll('.tab'), function (t) {
+    t.addEventListener('click', function () {
+      [].forEach.call(document.querySelectorAll('.tab'), function (x) { x.classList.toggle('on', x === t); });
+      [].forEach.call(document.querySelectorAll('.pane'), function (p) {
+        p.classList.toggle('on', p.id === 'pane-' + t.dataset.pane);
+      });
+      // хелс-чеки тянем лениво: пробы живые, дёргать их на каждом открытии админки незачем
+      if (t.dataset.pane === 'health' && !healthLoaded) loadHealth();
+      if (t.dataset.pane === 'access') qInput.focus();
+    });
+  });
+
+  // ───────── доступы ─────────
   function load() {
     fetch('/admin/d1v/api/devices', { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
-      .then(render)
+      .then(function (data) {
+        devices = (data && data.devices) || [];
+        document.getElementById('killswitch').style.display = (data && data.enabled === false) ? '' : 'none';
+        render();
+      })
       .catch(function () { toast('Не удалось получить список'); });
   }
 
-  function render(data) {
-    var list = (data && data.devices) || [];
-    document.getElementById('killswitch').style.display = (data && data.enabled === false) ? '' : 'none';
-    document.getElementById('cnt').textContent = list.length ? ('устройств: ' + list.length) : '';
+  function matches(d, q) {
+    if (!q) return true;
+    return [d.uid, d.name, d.platform, d.client, d.ip].some(function (v) {
+      return String(v || '').toLowerCase().indexOf(q) >= 0;
+    });
+  }
+
+  function render() {
+    var q = qInput.value.trim().toLowerCase();
+    var list = devices.filter(function (d) { return matches(d, q); });
+
+    qClr.classList.toggle('on', !!q);
+    document.getElementById('cnt').textContent = devices.length
+      ? (q ? 'найдено: ' + list.length + ' из ' + devices.length : 'устройств: ' + devices.length)
+      : '';
+
+    empty.textContent = devices.length
+      ? 'По запросу «' + q + '» ничего не найдено.'
+      : 'Пока ни одного устройства. Запусти приложение на нужном устройстве и нажми «Обновить».';
     empty.style.display = list.length ? 'none' : '';
     rows.innerHTML = '';
 
@@ -144,9 +250,9 @@
       if (fresh) tr.className = 'fresh';
       tr.innerHTML =
         '<td><input class="nm" value="' + esc(d.name) + '" placeholder="без имени"></td>' +
-        '<td><span class="plat">' + esc(d.platform || '—') + '</span>' +
-          (d.client ? ' <span class="dim">' + esc(d.client) + '</span>' : '') + '</td>' +
-        '<td class="uid">' + esc(d.uid) + '</td>' +
+        '<td><span class="plat">' + hi(d.platform || '—', q) + '</span>' +
+          (d.client ? ' <span class="dim">' + hi(d.client, q) + '</span>' : '') + '</td>' +
+        '<td class="uid">' + hi(d.uid, q) + '</td>' +
         '<td class="dim">' + esc(d.ip || '—') + '</td>' +
         '<td class="dim">' + esc(ago(d.last)) + '</td>' +
         '<td><label class="sw"><input type="checkbox" data-f="live"' + (grants.indexOf('live') >= 0 ? ' checked' : '') + '>эфир</label></td>' +
@@ -156,7 +262,14 @@
       tr.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
         cb.addEventListener('change', function () {
           post('/admin/d1v/api/grant', { uid: d.uid, feature: cb.dataset.f, on: cb.checked })
-            .then(function () { toast((cb.checked ? 'Выдано: ' : 'Отозвано: ') + cb.dataset.f + ' · ' + d.uid); })
+            .then(function () {
+              // держим локальный список в согласии с сервером: следующая перерисовка
+              // (поиск, автообновление) не должна возвращать галочку назад
+              var g = (d.grants || []).filter(function (x) { return x !== cb.dataset.f; });
+              if (cb.checked) g.push(cb.dataset.f);
+              d.grants = g;
+              toast((cb.checked ? 'Выдано: ' : 'Отозвано: ') + cb.dataset.f + ' · ' + d.uid);
+            })
             .catch(function () { cb.checked = !cb.checked; toast('Не сохранилось'); });
         });
       });
@@ -164,7 +277,7 @@
       var nm = tr.querySelector('.nm');
       nm.addEventListener('change', function () {
         post('/admin/d1v/api/name', { uid: d.uid, name: nm.value })
-          .then(function () { toast('Имя сохранено'); })
+          .then(function () { d.name = nm.value.trim(); toast('Имя сохранено'); })
           .catch(function () { toast('Не сохранилось'); });
       });
 
@@ -177,7 +290,73 @@
     });
   }
 
+  qInput.addEventListener('input', render);
+  qInput.addEventListener('keydown', function (e) { if (e.key === 'Escape') { qInput.value = ''; render(); } });
+  qClr.addEventListener('click', function () { qInput.value = ''; render(); qInput.focus(); });
   document.getElementById('reload').addEventListener('click', load);
+
+  // ───────── хелс-чеки ─────────
+  var MARK = { ok: '✅', warn: '⚠️', off: '⏸', fail: '❌' };
+
+  function loadHealth() {
+    healthLoaded = true;
+    var box = document.getElementById('hlist');
+    box.innerHTML = '<div class="empty">Загружаю…</div>';
+    fetch('/qdl/health', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(renderHealth)
+      .catch(function () {
+        box.innerHTML = '<div class="empty">❌ /qdl/health недоступен</div>';
+        document.getElementById('hsum').textContent = '';
+      });
+  }
+
+  function renderHealth(data) {
+    var list = (data && data.services) || [];
+    var box = document.getElementById('hlist');
+    if (!list.length) { box.innerHTML = '<div class="empty">Пусто — сервер не вернул ни одной проверки</div>'; return; }
+
+    var n = { ok: 0, warn: 0, off: 0, fail: 0 };
+    list.forEach(function (s) { n[MARK[s.status] ? s.status : 'fail']++; });   // неизвестный статус — в сбои
+
+    var sum = [];
+    if (n.fail) sum.push('<span class="pill bad">❌ не работают: ' + n.fail + '</span>');
+    if (n.warn) sum.push('<span class="pill bad">⚠️ ' + n.warn + '</span>');
+    sum.push('<span class="pill ok">✅ ' + n.ok + '</span>');
+    if (n.off) sum.push('<span class="pill off">⏸ выключено: ' + n.off + '</span>');
+    if (data.at) sum.push('<span class="dim">снято ' + esc(new Date(data.at).toLocaleTimeString('ru-RU')) + '</span>');
+    document.getElementById('hsum').innerHTML = sum.join(' &nbsp; ');
+
+    // сбои — наверх: в 32 строках взгляд не должен искать красное
+    var groups = [], byName = {};
+    list.forEach(function (s) {
+      var g = s.group || 'Прочее';
+      if (!byName[g]) { byName[g] = { name: g, items: [] }; groups.push(byName[g]); }
+      byName[g].items.push(s);
+    });
+    groups.sort(function (a, b) {
+      var bad = function (x) { return x.items.some(function (s) { return s.status === 'fail' || s.status === 'warn'; }) ? 0 : 1; };
+      return bad(a) - bad(b);
+    });
+
+    var html = '';
+    groups.forEach(function (g) {
+      html += '<div class="hgroup">' + esc(g.name) + '</div>';
+      g.items.forEach(function (s) {
+        var bad = s.status === 'fail' || s.status === 'warn';
+        html += '<div class="hrow' + (bad ? ' bad' : '') + '">' +
+          '<span class="mark">' + (MARK[s.status] || '❌') + '</span>' +
+          '<span class="nm2"><span>' + esc(s.name || s.id) + '</span>' +
+            (s.ms ? ' <span class="dim">' + (+s.ms || 0) + ' мс</span>' : '') +
+            (s.detail ? '<div class="det">' + esc(String(s.detail)) + '</div>' : '') +
+          '</span></div>';
+      });
+    });
+    box.innerHTML = html;
+  }
+
+  document.getElementById('hreload').addEventListener('click', loadHealth);
+
   load();
   setInterval(load, 30000);   // чтобы новое устройство всплывало само, пока владелец ждёт с телефоном в руках
 })();
