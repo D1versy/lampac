@@ -33,6 +33,8 @@
     "JutSuPosterOptimize.cs",
     "JutSu.cs",
     "JutSuStream.cs",
+    "JutSuSegments.cs",
+    "JutSuHistory.cs",
     "JutSuGrab.cs",
     "JutSuWatch.cs",
     "JutSuCatalogIndex.cs",

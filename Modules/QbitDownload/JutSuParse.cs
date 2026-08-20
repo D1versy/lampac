@@ -126,7 +126,14 @@ public sealed class JutEpisodePage
     public int voiceCount;                  // сколько блоков wap_player (мультиозвучка)
     public double duration;                 // сек, 0 = неизвестно
     public double outro;                    // начало эндинга, сек; 0 = нет
+    // 🔥 Границы опенинга. У части серий переменных нет вовсе (spy-family s1e1), а у части
+    // introStart честно равен 0 (onepiece s1e5: 0..125) — поэтому «есть интро» определяется
+    // ТОЛЬКО по introEnd (см. hasIntro), а не по ненулевому introStart.
+    public double introStart;               // сек
+    public double introEnd;                 // сек, 0 = интро не размечено
     public string poster;
+
+    public bool hasIntro => introEnd > 0 && introEnd > introStart;
 
     public bool ok => error == null && videos.Count > 0;
 }
@@ -579,6 +586,10 @@ public static class JutSuParse
     // ⚠️ после Base64.decode( стоит ПРОБЕЛ — без \s* regex не сработает (проверено на фикстуре)
     static readonly Regex _rxB64 = new(@"Base64\.decode\(\s*""(?<v>[A-Za-z0-9+/=]+)""", RO);
     static readonly Regex _rxOutro = new(@"video_outro_start\s*=\s*(?<v>\d+)", RO);
+    // Те же переменные, что читает плеер самого сайта: кнопка «Пропустить заставку» ставит
+    // currentTime = video_intro_end. Лежат в том же base64-блобе, что и outro.
+    static readonly Regex _rxIntroStart = new(@"video_intro_start\s*=\s*(?<v>\d+)", RO);
+    static readonly Regex _rxIntroEnd = new(@"video_intro_end\s*=\s*(?<v>\d+)", RO);
 
     static readonly Regex _rxDerou = new(@"[?&]derou=[^&]*", RO);
     static readonly Regex _rxHash2 = new(@"[?&]hash2=[^&]*", RO);
@@ -607,14 +618,29 @@ public static class JutSuParse
         var r = new JutEpisodePage();
         if (string.IsNullOrEmpty(html)) { r.error = "PARSE"; return r; }
 
-        // outro лежит в base64 внутри <script> — достаём ДО Strip()
+        // outro и границы опенинга лежат в base64 внутри <script> — достаём ДО Strip().
+        // Блоков несколько (настройки плеера, мета видео, ачивки) — нужный тот, где есть
+        // хотя бы одна из меток; выходим по первому такому.
         foreach (Match b in _rxB64.Matches(html))
         {
             string dec;
             try { dec = Encoding.UTF8.GetString(Convert.FromBase64String(Pad(b.Groups["v"].Value))); }
             catch { continue; }
+
             var om = _rxOutro.Match(dec);
-            if (om.Success && double.TryParse(om.Groups["v"].Value, out double ov)) { r.outro = ov; break; }
+            bool got = false;
+            if (om.Success && double.TryParse(om.Groups["v"].Value, out double ov)) { r.outro = ov; got = true; }
+
+            var iem = _rxIntroEnd.Match(dec);
+            if (iem.Success && double.TryParse(iem.Groups["v"].Value, out double iev))
+            {
+                r.introEnd = iev;
+                var ism = _rxIntroStart.Match(dec);
+                if (ism.Success && double.TryParse(ism.Groups["v"].Value, out double isv)) r.introStart = isv;
+                got = true;
+            }
+
+            if (got) break;
         }
 
         string clean = Strip(html);

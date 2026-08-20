@@ -264,7 +264,13 @@ public partial class QbitController
         if (nocache == 0)
         {
             var cached = JutCacheRead("search", key, ttl, out bool stale);
-            if (cached != null && !stale) return JutJsonArt(cached);
+            if (cached != null && !stale)
+            {
+                // Память экрана поиска пополняется и на кеш-хите: повторный запрос — это
+                // такой же интерес зрителя, как первый.
+                if (page == 1) JutHistoryRecordSearch(cached["items"]);
+                return JutJsonArt(cached);
+            }
         }
 
         // ⚠️ show_search обязан быть в UTF-8. В CP1251 сайт возвращает 0 результатов.
@@ -294,6 +300,7 @@ public partial class QbitController
             ["items"] = JutCardsJson(parsed.items)
         };
         JutCacheWrite("search", key, payload);
+        if (page == 1) JutHistoryRecordSearch(payload["items"]);
         return JutJsonArt(payload);
     }
 
@@ -432,6 +439,9 @@ public partial class QbitController
         if (link == null) return JutErr("NOT_FOUND");
         if (link.error != null) return JutErr(link.error);
 
+        // Разметка серии переживает TTL ссылки (240 с) — кладём её при каждом резолве.
+        JutSegStore(link);
+
         return JutJson(new JObject
         {
             ["ok"] = true,
@@ -442,6 +452,11 @@ public partial class QbitController
             ["available"] = new JArray(link.available),
             ["duration"] = link.duration,
             ["outro"] = link.outro,
+            // Границы опенинга + готовый сегмент для плеера: первая серия обходится
+            // без отдельного запроса к /qdl/jut/segments.
+            ["intro_start"] = link.hasIntro ? link.introStart : (JToken)JValue.CreateNull(),
+            ["intro_end"] = link.hasIntro ? link.introEnd : (JToken)JValue.CreateNull(),
+            ["segments"] = JutSegJson(link)["segments"],
             ["season"] = season,
             ["ep"] = ep,
             ["kind"] = kind
@@ -594,6 +609,13 @@ public partial class QbitController
                 ["until"] = until
             },
             ["links"] = new JObject { ["cached"] = cached, ["oldestAgeSec"] = oldest },
+            // Канарейка на смену формата страницы: если сайт переименует video_intro_*,
+            // seen перестанет расти — единственный способ заметить это без жалобы владельца.
+            ["intro"] = new JObject
+            {
+                ["seen"] = JutSegCounters.State().seen,
+                ["miss"] = JutSegCounters.State().miss
+            },
             ["posters"] = JutPosterStats(),
             ["posterOptimize"] = JutPosterOptDiag(),
             ["catalogIndex"] = JutIdxDiag()

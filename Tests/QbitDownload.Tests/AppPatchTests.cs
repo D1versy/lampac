@@ -11,8 +11,13 @@ namespace QbitDownload.Tests;
 /// </summary>
 public class AppPatchTests
 {
-    // все 5 якорей + окружение, как в бандле (пин tree в LampaWeb/ModInit)
+    // все якори + окружение, как в бандле (пин tree в LampaWeb/ModInit)
     const string AllAnchors = @"
+      PlayerPlaylist: PlayerPlaylist,
+      Timeline: Timeline,
+      PlayerVideo.listener.follow('ended', function (e) {
+        if (Storage.field('playlist_next') && !$('body').hasClass('selectbox--open')) PlayerPlaylist.next();
+      });
       key: 'init',
       value: function init() {
         var _this = this;
@@ -42,6 +47,30 @@ public class AppPatchTests
         Assert.Contains("/*qdl-cut:menu*/", result);
         Assert.Contains("/*qdl-cut:tt-extract*/", result);
         Assert.Contains("/*qdl-cut:tt-rows*/", result);
+        Assert.Contains("/*qdl-cut:jut-autonext*/", result);
+        Assert.Contains("/*qdl-cut:segments-export*/", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_AutonextGate_KeepsUpstreamCondition()
+    {
+        // Автопереход глушится ТОЛЬКО для элементов с нашим флагом: штатный playlist_next
+        // остаётся в условии, иначе «Загрузки» и всё остальное потеряли бы автопереход.
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.Contains("!(work && work.qdl_no_autonext)", result);
+        Assert.Contains("Storage.field('playlist_next')", result);
+        Assert.Contains("PlayerPlaylist.next();", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_ExportsSegments()
+    {
+        // Разметка серии, приехавшая после старта плеера, доставляется через Lampa.Segments.set
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.Contains("Segments: Segments,", result);
+        Assert.Contains("PlayerPlaylist: PlayerPlaylist,", result);
     }
 
     [Fact]

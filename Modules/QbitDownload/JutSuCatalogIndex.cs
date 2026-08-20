@@ -178,6 +178,25 @@ public partial class QbitController
         return true;
     }
 
+    /// <summary>
+    /// Карточка по слагу из снапшота. Нужна экрану поиска (/qdl/jut/recent), когда кеша
+    /// тайтла ещё нет: показать название и постер лучше, чем голый слаг.
+    /// Отдаётся КЛОН по той же причине, что и в JutIdxTryServe.
+    /// </summary>
+    internal static JObject JutIdxFindCard(string slug)
+    {
+        if (!JutIdxOn || string.IsNullOrEmpty(slug)) return null;
+
+        var st = JutIdxLoad();
+        lock (_jutIdxLock)
+        {
+            if (st.items.Count == 0 || !st.slugs.Contains(slug)) return null;
+            var hit = st.items.FirstOrDefault(x =>
+                string.Equals(x?.Value<string>("slug"), slug, StringComparison.OrdinalIgnoreCase));
+            return hit == null ? null : (JObject)hit.DeepClone();
+        }
+    }
+
     #endregion
 
     #region тик: сид, голова, ресид

@@ -75,6 +75,8 @@
     <Compile Include="..\..\Modules\QbitDownload\JutSuPosterOptimize.cs" Link="Module\JutSuPosterOptimize.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSu.cs" Link="Module\JutSu.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuStream.cs" Link="Module\JutSuStream.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\JutSuSegments.cs" Link="Module\JutSuSegments.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\JutSuHistory.cs" Link="Module\JutSuHistory.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuGrab.cs" Link="Module\JutSuGrab.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuWatch.cs" Link="Module\JutSuWatch.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuCatalogIndex.cs" Link="Module\JutSuCatalogIndex.cs" />

@@ -71,6 +71,11 @@ public partial class QbitController
             return StatusCode(link.error == "NOT_AUTHORIZED" ? 403
                             : link.error == "NOT_FOUND" ? 404 : 502);
 
+        // Разметка опенинга — в кеш (переживёт TTL ссылки), а сам факт просмотра — в историю.
+        // HEAD-пробы плеера просмотром не считаем.
+        JutSegStore(link);
+        if (!head) JutHistoryTouchWatch(link.slug);
+
         string clientRange = Request.Headers.TryGetValue("Range", out var rv) ? rv.ToString() : null;
 
         HttpResponseMessage resp = null;
@@ -124,12 +129,17 @@ public partial class QbitController
             if (head) return new EmptyResult();
 
             // Абсолютное смещение начала тела: нужно, чтобы переоткрыть с правильного места.
-            long absStart = 0;
+            // Полная длина оттуда же — по ней считается порог прогрева следующей серии.
+            long absStart = 0, totalLen = 0;
             var crv = resp.Content.Headers.TryGetValues("Content-Range", out var cr) ? cr.FirstOrDefault() : null;
             if (crv != null)
             {
                 var m = _jutContentRangeRx.Match(crv);
-                if (m.Success) long.TryParse(m.Groups["from"].Value, out absStart);
+                if (m.Success)
+                {
+                    long.TryParse(m.Groups["from"].Value, out absStart);
+                    long.TryParse(m.Groups["len"].Value, out totalLen);   // "*" → 0, порог не сработает
+                }
             }
             else if (clientRange != null)
             {
@@ -137,8 +147,9 @@ public partial class QbitController
                 if (m.Success && m.Groups["from"].Value.Length > 0)
                     long.TryParse(m.Groups["from"].Value, out absStart);
             }
+            if (totalLen == 0) totalLen = resp.Content.Headers.ContentLength ?? 0;
 
-            await JutPumpBody(resp, link, t, absStart, ct);
+            await JutPumpBody(resp, link, t, absStart, totalLen, ct);
         }
 
         return new EmptyResult();
@@ -162,7 +173,8 @@ public partial class QbitController
     /// статус и заголовки клиенту уже отправлены, поэтому «ретрай запроса» невозможен —
     /// возможно только молча продолжить дописывать байты с нужного офсета.
     /// </summary>
-    async Task JutPumpBody(HttpResponseMessage first, JutLink link, string token, long absStart, CancellationToken ct)
+    async Task JutPumpBody(HttpResponseMessage first, JutLink link, string token,
+                           long absStart, long totalLen, CancellationToken ct)
     {
         const int MaxReopen = 3;
         byte[] buf = ArrayPool<byte>.Shared.Rent(128 * 1024);
@@ -170,6 +182,12 @@ public partial class QbitController
         int reopened = 0;
         var current = first;
         bool ownsCurrent = false;   // first диспозится вызывающим
+
+        // 🔥 Прогрев следующей серии вешаем на ПРОГРЕСС, а не на старт: ссылка живёт 240 с,
+        // и прогретая в начале серии протухла бы задолго до автоперехода.
+        int pct = Math.Clamp(ModInit.conf?.jutPrewarmAtPercent ?? 60, 10, 95);
+        long warmAt = totalLen > 0 ? totalLen / 100 * pct : 0;
+        bool warmFired = false;
 
         try
         {
@@ -183,6 +201,12 @@ public partial class QbitController
                     {
                         await Response.Body.WriteAsync(buf, 0, n, ct);
                         written += n;
+
+                        if (!warmFired && warmAt > 0 && absStart + written >= warmAt)
+                        {
+                            warmFired = true;
+                            JutPrewarmNext(link);
+                        }
                     }
                     return;                                  // дочитали до конца
                 }

@@ -154,7 +154,12 @@ public sealed class JutLink
     public int[] available = Array.Empty<int>();
     public double duration;
     public double outro;
+    // Границы опенинга со страницы серии. «Есть интро» — только по introEnd (introStart=0 валиден).
+    public double introStart;
+    public double introEnd;
     public string error;         // NOT_AUTHORIZED | NOT_FOUND | SITE_DOWN | PARSE
+
+    public bool hasIntro => introEnd > 0 && introEnd > introStart;
 }
 
 public static class JutNet
@@ -685,7 +690,10 @@ public static class JutNet
         link.available = page.videos.Select(v => v.res).ToArray();
         link.duration = page.duration;
         link.outro = page.outro;
+        link.introStart = page.introStart;
+        link.introEnd = page.introEnd;
         link.exitId = resp.exitId;
+        JutSegCounters.Note(page.hasIntro);
         return link;
     }
 

@@ -126,7 +126,22 @@
             '.qdl-jut-head{gap:1.2em;padding:1em 0}.qdl-jut-poster{width:9.5em}}' +
             // бейдж непрочитанных на нашей иконке уведомлений в хедере (красный кружок с числом)
             '.qdl-noti-head{position:relative}' +
-            '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}';
+            '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}' +
+            // Автопилот jut.su. Выключен — приглушённый контур; включён — зелёный, как «Смотреть».
+            // Кнопка стоит между заголовком и значками, поэтому нужны свои поля.
+            '.qdl-jut-skip{margin:0 .2em 0 .8em;opacity:.45;transition:opacity .2s,color .2s,transform .2s}' +
+            '.qdl-jut-skip svg{width:1.5em;height:1.5em;display:block}' +
+            '.qdl-jut-skip.qdl-jut-skip--on{opacity:1;color:#19b531}' +
+            '.qdl-jut-skip.focus{opacity:1;transform:scale(1.08)}' +
+            // Экран поиска jut.su: поле сверху (не впритык к краю) + лента «Недавнее» под ним
+            '.qdl-jut-search-wrap{padding:2em 1.5em 0;display:flex;justify-content:center}' +
+            '.qdl-jut-search-field{display:flex;align-items:center;gap:.7em;width:70%;max-width:44em;padding:.85em 1.2em;' +
+            'background:rgba(255,255,255,.09);border:0.12em solid rgba(255,255,255,.16);border-radius:.7em;font-size:1.25em}' +
+            '.qdl-jut-search-field.focus{background:rgba(255,255,255,.18);border-color:#fff;transform:scale(1.01)}' +
+            '.qdl-jut-search-field input{flex:1;min-width:0;background:transparent;border:0;outline:0;color:inherit;font-size:1em;font-family:inherit}' +
+            '.qdl-jut-search-hint{opacity:.55}' +
+            '.qdl-jut-recent-title{padding:1.4em 1.5em .4em;font-size:1.3em;opacity:.7}' +
+            '@media screen and (max-width:580px){.qdl-jut-search-wrap{padding:1.2em 1em 0}.qdl-jut-search-field{width:100%}}';
         document.head.appendChild(st);
     }
 
@@ -3514,13 +3529,99 @@
 
     function startHeaderNotiWatcher() {
         ensureHeaderNoti();
+        ensureJutAutopilot();
         var deb = null;
-        function onMut() { if (deb) return; deb = setTimeout(function () { deb = null; ensureHeaderNoti(); }, 300); }
+        function onMut() {
+            if (deb) return;
+            deb = setTimeout(function () { deb = null; ensureHeaderNoti(); ensureJutAutopilot(); }, 300);
+        }
         try {
             var headEl = document.querySelector('.head') || document.body;   // узкий observer
             new MutationObserver(onMut).observe(headEl, { childList: true, subtree: true });
         } catch (e) {}
-        [500, 1500, 3000, 6000].forEach(function (t) { setTimeout(ensureHeaderNoti, t); });
+        [500, 1500, 3000, 6000].forEach(function (t) {
+            setTimeout(function () { ensureHeaderNoti(); ensureJutAutopilot(); }, t);
+        });
+    }
+
+    // ───────── Автопилот jut.su: пропуск опенинга + автозапуск следующей серии ─────────
+    // Одна кнопка на обе фичи (требование владельца: «двойная стрелочка», активна/неактивна),
+    // видна ТОЛЬКО на страницах jut.su. Состояние едет между устройствами через sync_invc
+    // (ключ добавлен в import_keys) — включил на телефоне, работает и на ТВ.
+    var JUT_AUTOPILOT_KEY = 'qdl_jut_autopilot';
+    var JUT_PAGES = { jut_catalog: 1, jut_title: 1, jut_episodes: 1, jut_search: 1 };
+
+    // Двойной шеврон: «мотать вперёд» — то, что кнопка и делает (опенинг + следующая серия).
+    var JUT_SKIP_SVG =
+        '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+        '<path d="M4 5l7 7-7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '<path d="M12 5l7 7-7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '</svg>';
+
+    function jutAutopilot() {
+        try { return Lampa.Storage.get(JUT_AUTOPILOT_KEY, false) === true; } catch (e) { return false; }
+    }
+
+    function jutAutopilotPaint() {
+        try {
+            var on = jutAutopilot();
+            dedupe('.qdl-jut-skip')
+                .toggleClass('qdl-jut-skip--on', on)
+                .attr('title', on ? 'Автопилот включён: пропуск опенинга и следующая серия'
+                                  : 'Автопилот выключен');
+        } catch (e) {}
+    }
+
+    // Кнопка живёт в DOM постоянно, а прячется/показывается по активности: пересоздавать её
+    // на каждом переходе — это гонка с MutationObserver хедера и лишние дубли.
+    function jutAutopilotVisibility() {
+        try {
+            var act = Lampa.Activity.active() || {};
+            dedupe('.qdl-jut-skip').css('display', JUT_PAGES[act.component] ? '' : 'none');
+        } catch (e) {}
+    }
+
+    function ensureJutAutopilot() {
+        try {
+            if (dedupe('.qdl-jut-skip').length) { jutAutopilotVisibility(); return; }
+            // Владелец просил «слева возле названия jut.su»: в шаблоне хедера .head__title
+            // стоит вплотную перед .head__actions, поэтому вставка сразу за ним даёт кнопку
+            // слева от зоны значков. ⚠️ .first(): вставка в НАБОР клонирует узел.
+            var title = $('.head .head__title').first();
+            if (!title.length) return;
+            injectCss();
+
+            var btn = $('<div class="head__action selector qdl-jut-skip">' + JUT_SKIP_SVG + '</div>');
+            btn.data('controller', 'head');   // поздняя иконка в хедере иначе не фокусируется пультом
+            btn.on('hover:enter', function () {
+                var on = !jutAutopilot();
+                try { Lampa.Storage.set(JUT_AUTOPILOT_KEY, on); } catch (e) {}
+                jutAutopilotPaint();
+                Lampa.Noty.show(on ? 'Автопилот jut.su включён: пропускаю опенинг и запускаю следующую серию'
+                                   : 'Автопилот jut.su выключен');
+            });
+
+            title.after(btn);
+            jutAutopilotPaint();
+            jutAutopilotVisibility();
+        } catch (e) {}
+    }
+
+    function initJutAutopilot() {
+        // Возврат из плеера идёт через Activity.backward(), а он события 'start' НЕ шлёт —
+        // поэтому слушаем ещё и закрытие плеера (тот же приём, что в initContinueRefresh).
+        try {
+            Lampa.Listener.follow('activity', function (e) {
+                if (e && e.type === 'start') { ensureJutAutopilot(); jutAutopilotVisibility(); }
+            });
+        } catch (e) {}
+        try { Lampa.Player.listener.follow('destroy', jutAutopilotVisibility); } catch (e) {}
+        // Прилетело чужое состояние с другого устройства — перекрасить кнопку.
+        try {
+            Lampa.Storage.listener.follow('change', function (e) {
+                if (e && e.name === JUT_AUTOPILOT_KEY) jutAutopilotPaint();
+            });
+        } catch (e) {}
     }
 
     // ───────── Кнопка фуллскрина в плеере на мобильном (Lampa прячет свою на android/iOS) ─────────
@@ -3615,6 +3716,51 @@
         return (titleName ? titleName + ' · ' : '') + base;
     }
 
+    // Плейлист текущего просмотра — нужен префетчу сегментов, чтобы у следующей серии
+    // разметка опенинга уже лежала на элементе к моменту переключения.
+    var jutActivePlaylist = null;
+
+    function jutTokOf(list, e) {
+        for (var i = 0; i < list.length; i++) if (list[i].key === e.key) return list[i].tok || '';
+        return e.tok || '';
+    }
+
+    /// Сегменты соседних серий сервер знает только после резолва их страниц, поэтому веб
+    /// подтягивает их заранее: к моменту 'select' элемент уже несёт segments, а бандл сам
+    /// применит их в play$1 → Segments.set. Нативные плееры делают это сами по segmentsUrl.
+    function initJutSegmentsPrefetch() {
+        try {
+            Lampa.Player.listener.follow('start', function (e) {
+                var data = e && e.data;
+                if (!data || !data.qdl_jut_tok || !jutAutopilot() || !jutActivePlaylist) return;
+
+                var idx = -1;
+                for (var i = 0; i < jutActivePlaylist.length; i++)
+                    if (jutActivePlaylist[i].qdl_jut_tok === data.qdl_jut_tok) { idx = i; break; }
+
+                // Текущая серия без разметки — значит её сегменты не успели приехать к старту
+                // (переключились раньше префетча). Досылаем прямо в плеер.
+                var cur = idx >= 0 ? jutActivePlaylist[idx] : null;
+                if (cur && !cur.segments && cur.segmentsUrl) {
+                    req(cur.segmentsUrl, function (r) {
+                        if (!r || !r.ok || !r.segments) return;
+                        cur.segments = r.segments;
+                        try { if (Lampa.Segments) Lampa.Segments.set(r.segments); } catch (e2) {}
+                    }, function () {});
+                }
+
+                var next = idx >= 0 ? jutActivePlaylist[idx + 1] : null;
+                if (!next || next.segments || !next.segmentsUrl) return;
+
+                req(next.segmentsUrl, function (r) {
+                    if (r && r.ok && r.segments) next.segments = r.segments;
+                }, function () {});
+            });
+        } catch (e) {}
+        // Плеер закрыли — плейлист больше не наш (иначе префетч цеплялся бы к чужому просмотру).
+        try { Lampa.Player.listener.follow('destroy', function () { jutActivePlaylist = null; }); } catch (e) {}
+    }
+
     // Плеер запускается ТОЛЬКО после resolve: прямую ссылку на CDN отдавать нельзя —
     // hash в ней вяжется с UA, а у плеера он свой → 403.
     function jutPlay(slug, e, titleName, siblings) {
@@ -3623,10 +3769,17 @@
             '&season=' + e.season + '&ep=' + e.ep + '&kind=' + encodeURIComponent(e.kind === 'gameova' ? 'game-ova' : e.kind),
             function (r) {
                 if (!r || !r.ok) { Lampa.Noty.show(jutErrText(r)); return; }
+                var on = jutAutopilot();
                 var item = { title: jutEpTitle(e, titleName), url: API + r.url };
                 var tl = jutTl(slug, e.key); if (tl) item.timeline = tl;
+                // Пропуск опенинга: секунды приходят со страницы серии (те же, что читает
+                // кнопка «Пропустить заставку» на сайте). Формат — штатный для Lampa:
+                // модуль Segments сам скипнет в режиме auto. duration_ms НЕ кладём — с ним
+                // бандл «подгоняет» метки, а наши секунды точны для этого файла.
+                if (on && r.segments) item.segments = r.segments;
+                if (!on) item.qdl_no_autonext = true;
+
                 try {
-                    Lampa.Player.play(item);
                     // Плейлист сезона — чтобы работал автопереход к следующей серии.
                     // 🔥 Токен обязателен: /qdl/jut/stream резолвит ссылку ПО НЕМУ, а раньше всем
                     // элементам, кроме текущего, подставлялся пустой t= → автопереход упирался
@@ -3638,13 +3791,33 @@
                         return x.kind === e.kind && x.season === e.season && (x.key === e.key || x.tok);
                     });
                     list = sortEpisodes(list.map(jutAsFile)).map(function (f) { return f._jut; });
-                    Lampa.Player.playlist(list.map(function (x) {
+                    var plist = list.map(function (x) {
                         var pi = { title: jutEpTitle(x, titleName) };
                         pi.url = (x.key === e.key) ? (API + r.url)
                                                    : (API + '/qdl/jut/stream?t=' + encodeURIComponent(x.tok));
                         var t2 = jutTl(slug, x.key); if (t2) pi.timeline = t2;
+                        if (x.tok) {
+                            pi.qdl_jut_tok = x.tok;
+                            // Сегменты соседних серий известны только серверу — их подтягивает
+                            // префетч (веб) или сам нативный плеер по этому URL.
+                            if (on) pi.segmentsUrl = API + '/qdl/jut/segments?t=' + encodeURIComponent(x.tok);
+                        }
+                        if (x.key === e.key && item.segments) pi.segments = item.segments;
+                        if (!on) pi.qdl_no_autonext = true;
                         return pi;
-                    }));
+                    });
+
+                    item.qdl_jut_tok = jutTokOf(list, e);
+                    // 🔥 Плейлист обязан лежать НА ОБЪЕКТЕ до play: нативная ветка (мак/винда/
+                    // андроид — наши оболочки всегда идут по ней) сериализует data синхронно
+                    // внутри Player.play, а Player.playlist() отрабатывает уже после — до
+                    // нативов список так и не доезжал, и автоперехода у них не было вовсе.
+                    // При выключенном автопилоте не кладём вовсе: это и есть гейт для нативов.
+                    if (on) item.playlist = plist;
+
+                    jutActivePlaylist = on ? plist : null;
+                    Lampa.Player.play(item);
+                    Lampa.Player.playlist(plist);   // веб-плеер: ручное переключение серий остаётся
                 } catch (err) { Lampa.Noty.show('Плеер не запустился'); }
             },
             function () { Lampa.Noty.show('jut.su недоступен'); });
@@ -3837,7 +4010,9 @@
             comp.activity.toggle();
         };
 
-        // Ввод текста с пульта — штатной экранной клавиатурой Lampa
+        // Плитка ведёт на свой экран поиска (поле + топ-50 недавнего), а не открывает
+        // клавиатуру поверх каталога: раньше из клавиатуры некуда было вернуться, и история
+        // выдачи нигде не жила.
         this.appendSearchTile = function () {
             var el = Lampa.Template.get('card', { title: 'Поиск', release_year: 'по названию' });
             el.addClass('qdl-jut-search');
@@ -3848,10 +4023,7 @@
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:touch hover:hover', markLast(el));
             el.on('hover:enter', function () {
-                Lampa.Input.edit({ value: '', title: 'Поиск на jut.su', free: true }, function (q) {
-                    q = (q || '').trim();
-                    if (q) Lampa.Activity.push({ url: '', title: 'jut.su — ' + q, component: 'jut_catalog', jut_query: q, page: 1 });
-                });
+                Lampa.Activity.push({ url: '', title: 'jut.su — поиск', component: 'jut_search', page: 1 });
             });
             body.append(el);
             try { Lampa.Controller.collectionAppend(el); } catch (e) {}
@@ -4239,6 +4411,157 @@
         };
     }
 
+    // ───────── Экран поиска jut.su: поле сверху + топ-50 недавнего ─────────
+    // Раньше плитка «Поиск» открывала клавиатуру сразу и на весь экран, а вернуться было
+    // некуда. Теперь это отдельный экран: поле ввода (не впритык к верхнему краю) и под ним
+    // лента последнего — сперва то, что реально смотрели, потом добор из поисковых выдач.
+    // Память общая на все устройства: её ведёт сервер (/qdl/jut/recent), клиент только читает.
+    //
+    // ⚠️ Клавиатура выбирается по устройству, а не по платформе «на глаз»: на ТВ нужна
+    // экранная клавиатура Lampa (пультом), на телефоне и десктопе — системная.
+    function jutUseNativeInput() {
+        try { if (Lampa.Storage.field('keyboard_type') === 'integrate') return true; } catch (e) {}
+        try { if (isMobile() && Lampa.Platform.screen('mobile')) return true; } catch (e) {}
+        var p = window.d1vision_platform;
+        return p === 'windows' || p === 'mac';
+    }
+
+    function ComponentJutSearch(object) {
+        var comp = this;
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+        var html = $('<div></div>');
+        var wrap = $('<div class="qdl-jut-search-wrap"></div>');
+        var field = $('<div class="selector qdl-jut-search-field"><span>🔍</span></div>');
+        var input = null;
+        var recentTitle = $('<div class="qdl-jut-recent-title">Недавнее</div>');
+        var body = $('<div class="category-full mapping--grid cols--6"></div>');
+        var last;
+
+        function submit(q) {
+            q = (q || '').trim();
+            if (!q) return;
+            Lampa.Activity.push({ url: '', title: 'jut.su — ' + q, component: 'jut_catalog', jut_query: q, page: 1 });
+        }
+
+        function openKeyboard() {
+            Lampa.Input.edit({ value: input ? input.val() : '', title: 'Поиск на jut.su', free: true }, function (q) {
+                // 🔴 Закрытие клавиатуры уводит фокус в 'settings_component' (штатный back
+                // у Input.edit) — без возврата экран остаётся живым, но глухим к пульту.
+                try { Lampa.Controller.toggle('content'); } catch (e) {}
+                submit(q);
+            });
+        }
+
+        this.create = function () {
+            injectCss();
+            this.activity.loader(true);
+            scroll.minus();                       // ⚠️ без этого на ТВ у .scroll нет высоты
+            html.append(scroll.render());
+
+            if (jutUseNativeInput()) {
+                input = $('<input type="text" placeholder="Название аниме" />');
+                field.append(input);
+                // Клавиши уходят движку Lampa (он слушает keydown без preventDefault) —
+                // без остановки всплытия набор текста дёргал бы навигацию и скролл.
+                input.on('keydown', function (ev) {
+                    ev.stopPropagation();
+                    if (ev.keyCode === 13) { ev.preventDefault(); submit(input.val()); }
+                });
+                field.on('hover:enter', function () { try { input[0].focus(); } catch (e) {} });
+                field.on('click', function () { try { input[0].focus(); } catch (e) {} });
+            } else {
+                field.append('<span class="qdl-jut-search-hint">Название аниме</span>');
+                field.on('hover:enter', openKeyboard);
+            }
+            field.on('hover:focus', function () { last = field[0]; scroll.update(field, true); });
+            field.on('hover:touch hover:hover', function () {
+                last = field[0];
+                try { Navigator.focused(field[0]); } catch (e) {}
+            });
+
+            wrap.append(field);
+            scroll.body().append(wrap);
+            scroll.body().append(recentTitle);
+            scroll.body().append(body);
+
+            this.load();
+            return this.render();
+        };
+
+        this.load = function () {
+            req(API + '/qdl/jut/recent?limit=50', function (r) {
+                comp.activity.loader(false);
+                var items = (r && r.ok && r.items) || [];
+                if (!items.length) {
+                    recentTitle.remove();
+                    body.append($('<div style="width:100%;padding:2em;font-size:1.3em;opacity:.7">Пока пусто — найди что-нибудь, и оно появится здесь</div>'));
+                } else items.forEach(comp.append);
+                // Постеры ленивые: без этого вызова первая пачка осталась бы с заглушками
+                // (Scroll шлёт visible только при реальной прокрутке).
+                try { Lampa.Layer.visible(scroll.render(true)); } catch (e) {}
+                comp.activity.toggle();
+            }, function () {
+                comp.activity.loader(false);
+                recentTitle.remove();
+                body.append($('<div style="width:100%;padding:2em;font-size:1.3em;opacity:.7">Не удалось получить недавнее</div>'));
+                comp.activity.toggle();
+            });
+        };
+
+        this.append = function (c) {
+            var el = Lampa.Template.get('card', {
+                title: c.title || c.slug,
+                release_year: (c.years && c.years.length ? c.years[c.years.length - 1] : '') + ''
+            });
+            var img = el.find('.card__img');
+            img.on('error', function () { this.src = './img/img_broken.svg'; });
+
+            var psrc = jutPosterUrl(c.slug, c.pv);
+            var loadPoster = function () { if (img.attr('src') !== psrc) img.attr('src', psrc); };
+            el.on('visible', loadPoster);   // ⚠️ scroll.onScroll здесь задавать нельзя — убьёт lazy
+
+            var view = el.find('.card__view'); if (!view.length) view = el;
+            if (c.ongoing)
+                view.append('<div style="position:absolute;left:.4em;top:.4em;background:rgba(40,160,80,.92);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">онгоинг</div>');
+            if (c.episodes)
+                view.append('<div style="position:absolute;right:.4em;top:.4em;background:rgba(0,0,0,.65);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">' + c.episodes + '</div>');
+
+            el.on('hover:focus', function () { loadPoster(); last = el[0]; scroll.update(el, true); });
+            el.on('hover:touch hover:hover', function () {
+                last = el[0];
+                try { Navigator.focused(el[0]); } catch (e) {}
+            });
+            el.on('hover:enter', function () {
+                Lampa.Activity.push({ url: '', title: c.title || c.slug, component: 'jut_title', jut_slug: c.slug, jut_card: c });
+            });
+            el.on('hover:long', function () { jutDownloadMenu(c.slug, null, 0); });
+
+            body.append(el);
+            try { if (!Lampa.Controller.own || Lampa.Controller.own(comp)) Lampa.Controller.collectionAppend(el); } catch (e) {}
+        };
+
+        this.render = function () { return html; };
+        this.start = function () {
+            Lampa.Controller.add('content', {
+                link: comp,
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    // Стартовый фокус — на поле: экран открывают, чтобы искать.
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                right: function () { Navigator.move('right'); },
+                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
+                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
+                back: function () { Lampa.Activity.backward(); }
+            });
+            Lampa.Controller.toggle('content');
+        };
+        this.pause = function () {};
+        this.stop = function () {};
+        this.destroy = function () { scroll.destroy(); html.remove(); };
+    }
+
     // ── Экран «Хелс-чеки» в настройках (qdl 2.39). Виден только при куке qdl_unlock=1:
     // без неё компонент вообще не регистрируется (плитку раздела иначе не скрыть).
     // Данные — GET /qdl/health (сервер кеширует ответ ~30 с, поллинга нет: перезапрос
@@ -4339,6 +4662,7 @@
         Lampa.Component.add('jut_catalog', ComponentJutCatalog);
         Lampa.Component.add('jut_title', ComponentJutTitle);
         Lampa.Component.add('jut_episodes', ComponentJutEpisodes);
+        Lampa.Component.add('jut_search', ComponentJutSearch);
         Lampa.Listener.follow('full', addButton);
         startMenuWatcher();
         startHeaderNotiWatcher();
@@ -4349,6 +4673,8 @@
         try { initTimelineMirror(); } catch (e) {}       // аварийный фолбэк зеркала (режим 'auto', см. qdl 2.18)
         try { initTimecodeBridge(); } catch (e) {}       // перерисовка экрана серий по pull серверных таймкодов
         try { initContinueRefresh(); } catch (e) {}      // «Продолжить» на полной карточке — свежая после возврата
+        try { initJutAutopilot(); } catch (e) {}         // тумблер автопилота jut.su в хедере (видимость + синк)
+        try { initJutSegmentsPrefetch(); } catch (e) {}  // сегменты следующей серии — заранее, к моменту переключения
         try { whenDmca(function () {}); } catch (e) {}   // прогрев DMCA-списка до первого открытия карточки
         try { setInterval(pollNotifications, 90000); } catch (e) {}   // фолбэк: основной путь — пуш по 'lwsEvent' (qdl 2.19)
     }

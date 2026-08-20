@@ -49,6 +49,21 @@ public static class AppPatch
         new P("preroll",
             "function show$5(data, call) {",
             "function show$5(data, call) {return call();/*qdl-cut:preroll*/"),
+        // Автопилот jut.su: при ВЫКЛЮЧЕННОМ тумблере автопереход к следующей серии не нужен.
+        // Гейт именно здесь, потому что штатный выключатель `playlist_next` глобальный —
+        // выключив его, мы отняли бы автопереход у «Загрузок» и у всего остального.
+        // Флаг ставит qdl.js на сам элемент плейлиста, `work` — текущий элемент плеера.
+        // Ручное переключение серий (кнопки панели) при этом остаётся.
+        new P("jut-autonext",
+            "if (Storage.field('playlist_next') && !$('body').hasClass('selectbox--open')) PlayerPlaylist.next();",
+            "if (!(work && work.qdl_no_autonext) && Storage.field('playlist_next') && !$('body').hasClass('selectbox--open')) PlayerPlaylist.next();/*qdl-cut:jut-autonext*/"),
+        // Segments наружу не экспортирован, а нам нужно доставить разметку опенинга серии,
+        // которая приехала уже ПОСЛЕ старта плеера (сегменты соседних серий сервер знает
+        // только после резолва их страниц). Без экспорта такая серия просто останется без
+        // скипа — поэтому патч не критичный, но полезный.
+        new P("segments-export",
+            "PlayerPlaylist: PlayerPlaylist,",
+            "PlayerPlaylist: PlayerPlaylist,\n      Segments: Segments,/*qdl-cut:segments-export*/"),
     };
 
     public static void Attach() => EventListener.AppReplace += OnAppReplace;

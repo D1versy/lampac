@@ -414,6 +414,45 @@ public class JutSuParseTests
     }
 
     [Fact]
+    public void Границы_опенинга_вытаскиваются()
+    {
+        // Живая страница spy-family s1e3: video_intro_start=80, video_intro_end=170.
+        // Те же переменные читает кнопка «Пропустить заставку» на самом сайте.
+        var r = JutSuParse.ParseEpisode(Fx("episode-intro.html"));
+        Assert.True(r.hasIntro, "video_intro_* лежат в том же base64, что и outro");
+        Assert.Equal(80, r.introStart);
+        Assert.Equal(170, r.introEnd);
+        Assert.True(r.outro > r.introEnd, "эндинг не должен путаться с опенингом");
+    }
+
+    [Fact]
+    public void Опенинга_может_не_быть()
+    {
+        // Размечены не все серии (spy-family s1e1) — это штатно, а не ошибка разбора.
+        var r = JutSuParse.ParseEpisode(Fx("episode-authorized.html"));
+        Assert.False(r.hasIntro);
+        Assert.Equal(0, r.introEnd);
+        Assert.True(r.outro > 0, "отсутствие интро не должно ломать разбор эндинга");
+    }
+
+    [Fact]
+    public void Опенинг_с_нулевого_начала_считается_размеченным()
+    {
+        // 🔥 onepiece s1e5: video_intro_start=0. Признак «есть интро» — только introEnd,
+        // иначе такие серии молча теряли бы разметку.
+        string js = "pview_anime = \"onepiece\"; video_intro_start = 0; video_intro_end = 125; " +
+                    "video_outro_start = 1387; this_video_duration = 1500;";
+        string b64 = System.Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(js));
+        string html = "<script>eval(Base64.decode( \"" + b64 + "\"));</script>" +
+                      @"<span class=""wap_player"" data-player-1080=""https://cdn/a.mp4?hash=1""></span>";
+
+        var r = JutSuParse.ParseEpisode(html);
+        Assert.True(r.hasIntro);
+        Assert.Equal(0, r.introStart);
+        Assert.Equal(125, r.introEnd);
+    }
+
+    [Fact]
     public void Одна_озвучка_на_реальной_странице()
     {
         // Механика мультиозвучек в HTML заложена, но контента пока нет.

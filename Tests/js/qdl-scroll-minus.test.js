@@ -38,6 +38,7 @@ const COMPONENTS = [
   'ComponentJutCatalog',
   'ComponentJutTitle',
   'ComponentJutEpisodes',
+  'ComponentJutSearch',
 ];
 
 for (const name of COMPONENTS) {
