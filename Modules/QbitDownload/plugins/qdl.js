@@ -3042,7 +3042,12 @@
                     if (!st || st.error) { stop((st && st.error) || 'Не вышло включить эфир'); return; }
                     if (st.ready && st.path) {
                         liveDayToken++;   // опрос завершён — токен закрываем сами
-                        var item = { title: (cam.name || 'Камера') + '   ·   Эфир', url: API + st.path };
+                        // 🔴 withUid обязателен: плейлист уходит в НАТИВНЫЙ плеер (VLC на Android/маке,
+                        // LibVLCSharp на Windows), а тот не несёт ни cookie, ни заголовков — айди
+                        // устройства живёт только в query. Без него гейт прав (LiveDenied) отдаёт 404
+                        // и эфир падает в «Не удалось воспроизвести». У iOS своя ветка
+                        // (liveWatchPlayIOS), там withUid стоял — потому айфон и продолжал играть.
+                        var item = { title: (cam.name || 'Камера') + '   ·   Эфир', url: withUid(API + st.path) };
                         Lampa.Player.play(item);
                         Lampa.Player.playlist([item]);
                         return;
