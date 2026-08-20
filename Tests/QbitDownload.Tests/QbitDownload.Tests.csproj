@@ -82,6 +82,8 @@
     <Compile Include="..\..\Modules\QbitDownload\JutSuCatalogIndex.cs" Link="Module\JutSuCatalogIndex.cs" />
     <Compile Include="..\..\Modules\QbitDownload\TorrentHash.cs" Link="Module\TorrentHash.cs" />
     <Compile Include="..\..\Modules\QbitDownload\MetaHeal.cs" Link="Module\MetaHeal.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\Perms.cs" Link="Module\Perms.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\Admin.cs" Link="Module\Admin.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Controller.cs" Link="Module\Controller.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Replica.cs" Link="Module\Replica.cs" />
     <Compile Include="..\..\Modules\QbitDownload\ReplicaSync.cs" Link="Module\ReplicaSync.cs" />

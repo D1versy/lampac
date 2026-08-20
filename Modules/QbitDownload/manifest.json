@@ -40,6 +40,8 @@
     "JutSuCatalogIndex.cs",
     "TorrentHash.cs",
     "MetaHeal.cs",
+    "Perms.cs",
+    "Admin.cs",
     "Replica.cs",
     "ReplicaSync.cs",
     "ReplicaRotate.cs",

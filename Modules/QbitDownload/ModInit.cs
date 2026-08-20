@@ -46,6 +46,7 @@ public class ModInit : IModuleLoaded
 
         EventListener.MyLocalIp += MyIp;   // внешний IP без api.ipify.org (qdl 2.15, см. MyIp ниже)
         CatalogWarmup.Attach();            // почасовой прогрев каталога главной (CatalogWarmup.cs)
+        Perms.Attach();                    // реестр устройств для прав на D1versy Live/Rec (Perms.cs)
 
         // SQLite-хранилище уведомлений: создаём схему (без миграций) + WAL для параллельных read/write
         try
@@ -337,6 +338,7 @@ public class ModInit : IModuleLoaded
         AppPatch.Detach();
         EventListener.MyLocalIp -= MyIp;
         CatalogWarmup.Detach();
+        Perms.Detach();
         _watchTimer?.Dispose();
         _watchTimer = null;
         _notifyTimer?.Dispose();
@@ -388,6 +390,7 @@ public class ModInit : IModuleLoaded
                 // Снапшот каталога живёт файлом внутри cachePath — РАМ-копия относится
                 // к прежнему пути и обязана быть забыта (перечитается лениво с нового).
                 QbitController.JutIdxReset();
+                Perms.ResetForConfigReload();
             }
             QbitController.DropListCache();
         }

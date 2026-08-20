@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>D1Vision — доступы устройств</title>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0c0e12;color:#e6e9f0;font:400 15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:28px 20px 60px}
+    .wrap{max-width:1180px;margin:0 auto}
+    header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px}
+    h1{font-size:22px;font-weight:600}
+    .sub{font-size:13px;color:#8b93a7;margin-bottom:22px;max-width:860px}
+    .warn{margin-bottom:22px;padding:12px 14px;border-radius:10px;background:#3a2a12;border:1px solid #6b4a17;
+          color:#f0c987;font-size:13px}
+    .bar{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+    .bar .muted{font-size:13px;color:#8b93a7}
+    button.mini{padding:7px 13px;border:1px solid #2a3040;border-radius:8px;background:#1a1e28;color:#e6e9f0;
+                font-size:13px;cursor:pointer}
+    button.mini:hover{background:#222733}
+    .scroll{overflow-x:auto;border:1px solid #2a3040;border-radius:12px;background:#13161d}
+    table{width:100%;border-collapse:collapse;min-width:900px}
+    th{text-align:left;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#8b93a7;
+       padding:12px 14px;border-bottom:1px solid #2a3040;white-space:nowrap;font-weight:600}
+    td{padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:middle}
+    tr:last-child td{border-bottom:0}
+    tr.fresh td{background:rgba(74,125,255,.09)}
+    .uid{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:14px;color:#9ec1ff}
+    .plat{display:inline-block;padding:2px 8px;border-radius:6px;background:#222733;font-size:12px}
+    .dim{color:#8b93a7;font-size:13px;white-space:nowrap}
+    .nm{width:100%;min-width:150px;padding:7px 9px;border-radius:7px;border:1px solid #2a3040;background:#0c0e12;
+        color:#e6e9f0;font-size:14px;outline:none}
+    .nm:focus{border-color:#4a7dff}
+    .sw{display:inline-flex;align-items:center;gap:7px;cursor:pointer;user-select:none;font-size:13px}
+    .sw input{width:17px;height:17px;accent-color:#4a7dff;cursor:pointer}
+    .kill{border:0;background:none;color:#d9606a;cursor:pointer;font-size:13px;padding:4px}
+    .kill:hover{text-decoration:underline}
+    .empty{padding:40px 20px;text-align:center;color:#8b93a7;font-size:14px}
+    #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#1a1e28;
+           border:1px solid #2a3040;border-radius:10px;padding:10px 18px;font-size:14px;opacity:0;
+           transition:opacity .2s;pointer-events:none}
+    #toast.on{opacity:1}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>D1Vision — доступы устройств</h1><span class="dim" id="cnt"></span></header>
+  <div class="sub">
+    Разделы <b>D1versy Live</b> (эфир камер) и <b>D1versy Rec</b> (записи регистратора) отдаются только
+    тем устройствам, которым выдано право здесь. Устройство появляется в списке само — при первом же
+    запуске приложения. Свой айди пользователь видит в самом низу ленты «Уведомления».
+  </div>
+  <div class="warn" id="killswitch" style="display:none">
+    ⚠️ Проверка прав <b>выключена</b> (<code>permsEnabled: false</code> в init.conf) — разделы сейчас
+    доступны всем, независимо от галочек ниже.
+  </div>
+
+  <div class="bar">
+    <button class="mini" id="reload">Обновить</button>
+    <span class="muted">Подсвечены устройства, замеченные за последние 10 минут.</span>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <thead><tr>
+        <th>Устройство</th><th>Платформа</th><th>Айди</th><th>IP</th><th>Видели</th>
+        <th>Live</th><th>Rec</th><th></th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" style="display:none">
+      Пока ни одного устройства. Запусти приложение на нужном устройстве и нажми «Обновить».
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var rows = document.getElementById('rows');
+  var empty = document.getElementById('empty');
+  var toastEl = document.getElementById('toast');
+  var toastTimer = null;
+
+  function toast(text) {
+    toastEl.textContent = text;
+    toastEl.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('on'); }, 2200);
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function ago(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (isNaN(d)) return '—';
+    var s = Math.max(0, (Date.now() - d.getTime()) / 1000);
+    if (s < 60) return 'только что';
+    if (s < 3600) return Math.floor(s / 60) + ' мин назад';
+    if (s < 86400) return Math.floor(s / 3600) + ' ч назад';
+    return d.toLocaleDateString('ru-RU') + ' ' + d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  // X-D1V-Admin обязателен: он же и анти-CSRF (простой form-POST такой заголовок не поставит).
+  function post(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-D1V-Admin': '1' },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    });
+  }
+
+  function load() {
+    fetch('/admin/d1v/api/devices', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(render)
+      .catch(function () { toast('Не удалось получить список'); });
+  }
+
+  function render(data) {
+    var list = (data && data.devices) || [];
+    document.getElementById('killswitch').style.display = (data && data.enabled === false) ? '' : 'none';
+    document.getElementById('cnt').textContent = list.length ? ('устройств: ' + list.length) : '';
+    empty.style.display = list.length ? 'none' : '';
+    rows.innerHTML = '';
+
+    list.forEach(function (d) {
+      var grants = d.grants || [];
+      var fresh = d.last && (Date.now() - new Date(d.last).getTime()) < 10 * 60 * 1000;
+      var tr = document.createElement('tr');
+      if (fresh) tr.className = 'fresh';
+      tr.innerHTML =
+        '<td><input class="nm" value="' + esc(d.name) + '" placeholder="без имени"></td>' +
+        '<td><span class="plat">' + esc(d.platform || '—') + '</span>' +
+          (d.client ? ' <span class="dim">' + esc(d.client) + '</span>' : '') + '</td>' +
+        '<td class="uid">' + esc(d.uid) + '</td>' +
+        '<td class="dim">' + esc(d.ip || '—') + '</td>' +
+        '<td class="dim">' + esc(ago(d.last)) + '</td>' +
+        '<td><label class="sw"><input type="checkbox" data-f="live"' + (grants.indexOf('live') >= 0 ? ' checked' : '') + '>эфир</label></td>' +
+        '<td><label class="sw"><input type="checkbox" data-f="rec"' + (grants.indexOf('rec') >= 0 ? ' checked' : '') + '>записи</label></td>' +
+        '<td><button class="kill">Забыть</button></td>';
+
+      tr.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
+        cb.addEventListener('change', function () {
+          post('/admin/d1v/api/grant', { uid: d.uid, feature: cb.dataset.f, on: cb.checked })
+            .then(function () { toast((cb.checked ? 'Выдано: ' : 'Отозвано: ') + cb.dataset.f + ' · ' + d.uid); })
+            .catch(function () { cb.checked = !cb.checked; toast('Не сохранилось'); });
+        });
+      });
+
+      var nm = tr.querySelector('.nm');
+      nm.addEventListener('change', function () {
+        post('/admin/d1v/api/name', { uid: d.uid, name: nm.value })
+          .then(function () { toast('Имя сохранено'); })
+          .catch(function () { toast('Не сохранилось'); });
+      });
+
+      tr.querySelector('.kill').addEventListener('click', function () {
+        if (!confirm('Забыть устройство ' + d.uid + '? Права будут сняты.')) return;
+        post('/admin/d1v/api/forget', { uid: d.uid }).then(load).catch(function () { toast('Не вышло'); });
+      });
+
+      rows.appendChild(tr);
+    });
+  }
+
+  document.getElementById('reload').addEventListener('click', load);
+  load();
+  setInterval(load, 30000);   // чтобы новое устройство всплывало само, пока владелец ждёт с телефоном в руках
+})();
+</script>
+</body>
+</html>

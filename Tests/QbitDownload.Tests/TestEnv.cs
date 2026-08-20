@@ -38,6 +38,7 @@ public static class TestEnv
             // Без сброса следующий тест читал бы РАМ и готовый ответ предыдущего.
             // В проде это делает updateConf при смене cachePath.
             JsonStore.ResetForConfigReload();
+            Perms.ResetForConfigReload();   // троттлинг «когда видели» относился к прежнему cachePath
             QbitController.DropListCache();
             // Снимок «что уже скачано» держится 10 с, а тесты меняют каталог загрузок
             // быстрее — без сброса следующий тест читал бы снимок предыдущего.

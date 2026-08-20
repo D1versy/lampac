@@ -47,6 +47,38 @@
         } catch (e) { return url; }
     }
 
+    // ───────── Права на скрытые разделы (qdl 2.54) ─────────
+    // Кому показывать «D1versy Live» (эфир) и «D1versy Rec» (записи), решает СЕРВЕР по айди
+    // устройства — Modules/QbitDownload/Perms.cs, выдача прав в админке /admin/d1v.
+    // 🔴 Кеш в Lampa.Storage нужен ТОЛЬКО чтобы пункт меню не мигал на старте: правом он не является,
+    // подделка localStorage даёт пустой экран — сервер всё равно отвечает 404 на qdl/live/*.
+    var qdlPerms = null;   // {live:bool, rec:bool} — свежий ответ сервера
+    var qdlCard = null;    // {uid,name,platform,client} — для футера «Уведомлений»
+
+    function qdlAllowed(feature) {
+        var p = qdlPerms;
+        if (!p) { try { p = Lampa.Storage.get('qdl_features', null); } catch (e) { p = null; } }
+        return !!(p && p[feature]);
+    }
+
+    function loadFeatures(done) {
+        req(API + '/qdl/features', function (r) {
+            if (r && r.features) {
+                qdlPerms = r.features;
+                qdlCard = r;
+                try { Lampa.Storage.set('qdl_features', r.features); } catch (e) {}
+            }
+            if (done) done();
+        }, function () { if (done) done(); });
+    }
+
+    // Экран без права. Сюда можно попасть только дип-линком или из меню, отрисованного по
+    // протухшему кешу прав: сервер всё равно ответит 404, но пустой экран читался бы как поломка.
+    function denySection() {
+        try { Lampa.Noty.show('Раздел недоступен на этом устройстве'); } catch (e) {}
+        try { setTimeout(function () { Lampa.Activity.backward(); }, 100); } catch (e) {}
+    }
+
     function req(url, cb, err) {
         url = withUid(url);
         try {
@@ -1962,6 +1994,7 @@
                 body.append($('<div style="padding:2em;font-size:1.4em;opacity:.7">Пока нет уведомлений. «🔔 Следить» в карточке тайтла jut.su — буду сообщать о новых сериях; то же в «Загрузках» — буду ещё и качать их.</div>'));
 
             items.forEach(function (n) { comp.append(n); });
+            comp.appendId();
 
             // открыли центр → помечаем всё прочитанным, бейдж гаснет
             req(API + '/qdl/notifications/read', function () { updateNotiBadge(0); });
@@ -1985,6 +2018,26 @@
             el.find('img').on('error', function () { this.src = PX1; });   // нейтральная плитка, не рваная заглушка
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:enter', function () { openNotification(n); });
+            body.append(el);
+        };
+
+        // Айди устройства — в самом низу ленты (требование владельца): по нему выдаются права на
+        // скрытые разделы в админке /admin/d1v. Строка ФОКУСИРУЕМАЯ, иначе на ТВ до неё не доскроллить;
+        // по «ОК» — тот же текст крупным тостом, чтобы прочитать с дивана.
+        // Показываем и на пустой ленте, и когда айди не определился (старый кеш lampainit.js, сбой
+        // нативного KV) — «не определён» честнее пустого места: клиент без айди прав не получит.
+        this.appendId = function () {
+            var card = qdlCard || {};
+            var uid = card.uid || qdlUid();
+            var tail = [];
+            if (card.name) tail.push(card.name);
+            if (card.platform) tail.push(card.platform + (card.client ? ' ' + card.client : ''));
+
+            var text = 'ID устройства: ' + (uid || 'не определён') + (tail.length ? '   ·   ' + tail.join('   ·   ') : '');
+            var el = $('<div class="qdl-noti-id selector qdl-row-focus" style="padding:1.1em 1.4em;margin:1.2em .6em .4em;' +
+                'background:rgba(255,255,255,.04);border-radius:.7em;opacity:.75;font-size:1.15em">' + esc(text) + '</div>');
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:enter', function () { Lampa.Noty.show(text); });
             body.append(el);
         };
 
@@ -2800,7 +2853,7 @@
             if (my === liveDayToken) liveDayToken++;
             var item = {
                 title: (cam.name || 'Камера') + (label ? '   ·   ' + label : ''),
-                url: API + info.path
+                url: withUid(API + info.path)
             };
             try {
                 var tl = Lampa.Timeline.view(Lampa.Utils.hash('qdlliveday:' + cam.id + ':' + info.date));
@@ -2850,7 +2903,7 @@
     function livePlay(cam, items, index) {
         if (!items || !items.length) { Lampa.Noty.show('Записей нет'); return; }
         var playlist = items.map(function (r) {
-            var item = { title: r.start + ' – ' + r.end + '   ·   ' + (cam.name || 'Камера'), url: API + '/qdl/live/stream?id=' + r.id };
+            var item = { title: r.start + ' – ' + r.end + '   ·   ' + (cam.name || 'Камера'), url: withUid(API + '/qdl/live/stream?id=' + r.id) };
             var tl = liveTimeline(r);
             if (tl) item.timeline = tl;
             return item;
@@ -2915,7 +2968,7 @@
         v.controls = true;                      // БЕЗ playsinline → play() уводит в нативный фуллскрин iOS
         v.style.cssText = 'width:100%;height:100%;object-fit:contain';
         v.__qdlWrap = wrap;
-        v.src = API + '/qdl/live/watch/hls/' + encodeURIComponent(cam.id) + '/index.m3u8';
+        v.src = withUid(API + '/qdl/live/watch/hls/' + encodeURIComponent(cam.id) + '/index.m3u8');
         wrap.appendChild(v);
 
         // ✕ — на случай, если фуллскрин так и не поднялся, а эфир играет инлайн в оверлее
@@ -3027,12 +3080,14 @@
         function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
 
         this.create = function () {
+            if (!qdlAllowed('live')) { denySection(); return this.render(); }
+
             injectCss();
             this.activity.loader(true);
             scroll.minus();
             html.append(scroll.render());
             scroll.body().append(body);
-            network.silent(API + '/qdl/live/watch',
+            network.silent(withUid(API + '/qdl/live/watch'),
                 function (r) { comp.build(r || {}); },
                 function () { comp.build({ error: 'Видеорегистратор не отвечает' }); });
             return this.render();
@@ -3074,7 +3129,7 @@
                 '</div>'
             );
             var img = el.find('img');
-            img.attr('src', API + '/qdl/live/watch/thumb?camera=' + c.id + '&t=' + Date.now());
+            img.attr('src', withUid(API + '/qdl/live/watch/thumb?camera=' + c.id + '&t=' + Date.now()));
             img.on('error', function () { this.src = './img/img_broken.svg'; });
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
 
@@ -3097,7 +3152,7 @@
         function refresh() {
             // плеер открыт оверлеем (activity остаётся «активной») — сетку под ним не обновляем
             try { if (Lampa.Player.opened && Lampa.Player.opened()) return; } catch (e) {}
-            network.silent(API + '/qdl/live/watch', function (r) {
+            network.silent(withUid(API + '/qdl/live/watch'), function (r) {
                 if (comp.destroyed || !r || !r.cameras) return;
                 r.cameras.forEach(function (c) {
                     var el = body.find('.qdl-watch-tile[data-cam="' + c.id + '"]');
@@ -3105,7 +3160,7 @@
                     el.attr('data-live', c.live ? '1' : '0');   // свежий статус для iOS-пути (замыкание тайла — снимок)
                     el.find('.qdl-watch-badge').html(badgeHtml(c));
                     // живой кадр дышит только у эфирных — остальным нечего обновлять
-                    if (c.live) el.find('img').attr('src', API + '/qdl/live/watch/thumb?camera=' + c.id + '&t=' + Date.now());
+                    if (c.live) el.find('img').attr('src', withUid(API + '/qdl/live/watch/thumb?camera=' + c.id + '&t=' + Date.now()));
                 });
             }, function () {});
         }
@@ -3158,6 +3213,8 @@
         var userTouched = false;            // зритель сам менял день → в его выбор не вмешиваемся
 
         this.create = function () {
+            if (!qdlAllowed('rec')) { denySection(); return this.render(); }
+
             injectCss();   // фокус-стили dayBar/camRow
             scroll.minus();
             html.append(scroll.render());
@@ -3169,7 +3226,7 @@
         function load() {
             var my = ++reqId;
             comp.activity.loader(true);
-            network.silent(API + '/qdl/live/cameras' + (date ? '?date=' + encodeURIComponent(date) : ''),
+            network.silent(withUid(API + '/qdl/live/cameras' + (date ? '?date=' + encodeURIComponent(date) : '')),
                 function (r) { if (my === reqId) draw(r || {}); },
                 function () { if (my === reqId) draw({ error: 'Видеорегистратор не отвечает' }); });
         }
@@ -3195,7 +3252,7 @@
                 if (!autoJumped && !userTouched && !object.qdl_date) {
                     autoJumped = true;
                     body.append(liveMsg('За сегодня записей нет — ищу последний день с записями…'));
-                    network.silent(API + '/qdl/live/days', function (dr) {
+                    network.silent(withUid(API + '/qdl/live/days'), function (dr) {
                         if (comp.destroyed) return;
                         var target = null;
                         ((dr && dr.days) || []).forEach(function (d) { if (!target && d.count > 0) target = d; });
@@ -3249,7 +3306,7 @@
         }
 
         function pickDay() {
-            network.silent(API + '/qdl/live/days', function (r) {
+            network.silent(withUid(API + '/qdl/live/days'), function (r) {
                 var days = (r && r.days) || [];
                 if (!days.length) { Lampa.Noty.show('Список дней пуст'); return; }
                 Lampa.Select.show({
@@ -3281,7 +3338,7 @@
                 '</div>'
             );
             var img = el.find('img');
-            img.attr('src', API + '/qdl/live/thumb?id=' + c.thumb);
+            img.attr('src', withUid(API + '/qdl/live/thumb?id=' + c.thumb));
             img.on('error', function () { this.src = './img/img_broken.svg'; });
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             // Обычный вход = весь день одной записью. Разбивка на куски осталась запасным путём
@@ -3338,12 +3395,14 @@
         var date = object.qdl_date || '';
 
         this.create = function () {
+            if (!qdlAllowed('rec')) { denySection(); return this.render(); }
+
             injectCss();   // фокус-стили кнопок/строк записей
             this.activity.loader(true);
             scroll.minus();
             html.append(scroll.render());
             scroll.body().append(body);
-            network.silent(API + '/qdl/live/recordings?camera=' + encodeURIComponent(cam.id) + (date ? '&date=' + encodeURIComponent(date) : ''),
+            network.silent(withUid(API + '/qdl/live/recordings?camera=' + encodeURIComponent(cam.id) + (date ? '&date=' + encodeURIComponent(date) : '')),
                 function (r) { comp.build(r || {}); },
                 function () { comp.build({ error: 'Видеорегистратор не отвечает' }); });
             return this.render();
@@ -3404,7 +3463,7 @@
                 '</div>'
             );
             var img = el.find('img');
-            img.attr('src', API + '/qdl/live/thumb?id=' + rec.id);
+            img.attr('src', withUid(API + '/qdl/live/thumb?id=' + rec.id));
             img.on('error', function () { this.src = './img/img_broken.svg'; });
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:enter', function () { livePlay(cam, items, i); });
@@ -3476,49 +3535,43 @@
         return n.first();
     }
 
+    // Порядок наших пунктов слева, сверху вниз. Каждый цепляется за ПОСЛЕДНИЙ существующий выше,
+    // а не жёстко за соседа. 🔴 Раньше Rec цеплялся за Live, а jut.su за Rec — стоило спрятать Live,
+    // и исчезали все три сразу. С правами (qdl 2.54) пункты пропадают штатно, так что цепочка обязана
+    // переживать любую дырку в середине.
+    var MENU_ORDER = [
+        { cls: 'qdl-menu',       build: function () { return buildMenuItem(); },      show: function () { return true; } },
+        { cls: 'qdl-noti-menu',  build: function () { return buildNotiMenuItem(); },  show: function () { return true; },
+          onAdd: function () { setTimeout(pollNotifications, 200); } },   // подтянуть бейдж сразу после появления пункта
+        { cls: 'qdl-watch-menu', build: function () { return buildWatchMenuItem(); }, show: function () { return qdlAllowed('live'); } },
+        { cls: 'qdl-live-menu',  build: function () { return buildLiveMenuItem(); },  show: function () { return qdlAllowed('rec'); } },
+        { cls: 'qdl-jut-menu',   build: function () { return buildJutMenuItem(); },   show: function () { return true; } }
+    ];
+
     function ensureMenu() {
         try {
             var anchor = $('.menu .menu__item[data-action="myperson"]').first();
             if (!anchor.length) return;                 // «Персоны» ещё не отрисованы — ждём
-            var existing = dedupe('.menu .qdl-menu');
-            if (!existing.length) { anchor.after(buildMenuItem()); }
-            // уже есть — держим строго сразу после «Персоны» (меню могло пере-рендериться)
-            else if (existing.prev('.menu__item')[0] !== anchor[0]) {
-                existing.detach();
-                anchor.after(existing);
-            }
 
-            // «Уведомления» — строго сразу после «Загрузки»
-            var dl = dedupe('.menu .qdl-menu');
-            var noti = dedupe('.menu .qdl-noti-menu');
-            if (dl.length) {
-                if (!noti.length) { dl.after(buildNotiMenuItem()); setTimeout(pollNotifications, 200); }   // подтянуть бейдж сразу после появления пункта
-                else if (noti.prev('.menu__item')[0] !== dl[0]) { noti.detach(); dl.after(noti); }
-            }
+            for (var i = 0; i < MENU_ORDER.length; i++) {
+                var spec = MENU_ORDER[i];
+                var node = dedupe('.menu .' + spec.cls);
 
-            // «D1versy Live» (эфир) — строго сразу после «Уведомления»
-            var nt = dedupe('.menu .qdl-noti-menu');
-            var watch = dedupe('.menu .qdl-watch-menu');
-            if (nt.length) {
-                if (!watch.length) nt.after(buildWatchMenuItem());
-                else if (watch.prev('.menu__item')[0] !== nt[0]) { watch.detach(); nt.after(watch); }
-            }
+                // право отозвали (или его и не было) — пункт снимаем, якорем он не становится
+                if (!spec.show()) { if (node.length) node.remove(); continue; }
 
-            // «D1versy Rec» (записи) — строго сразу после «D1versy Live»
-            var w = dedupe('.menu .qdl-watch-menu');
-            var live = dedupe('.menu .qdl-live-menu');
-            if (w.length) {
-                if (!live.length) w.after(buildLiveMenuItem());
-                else if (live.prev('.menu__item')[0] !== w[0]) { live.detach(); w.after(live); }
-            }
+                if (!node.length) {
+                    anchor.after(spec.build());
+                    node = dedupe('.menu .' + spec.cls);
+                    if (spec.onAdd) spec.onAdd();
+                }
+                // уже есть — держим строго сразу после якоря (меню могло пере-рендериться)
+                else if (node.prev('.menu__item')[0] !== anchor[0]) {
+                    node.detach();
+                    anchor.after(node);
+                }
 
-            // «jut.su» — строго сразу после «D1versy Rec» (класс .qdl-live-menu, имена обманчивы:
-            // .qdl-watch-menu = Live/эфир, .qdl-live-menu = Rec/записи)
-            var lv = dedupe('.menu .qdl-live-menu');
-            var jut = dedupe('.menu .qdl-jut-menu');
-            if (lv.length) {
-                if (!jut.length) lv.after(buildJutMenuItem());
-                else if (jut.prev('.menu__item')[0] !== lv[0]) { jut.detach(); lv.after(jut); }
+                anchor = node;
             }
         } catch (e) {}
     }
@@ -4702,6 +4755,10 @@
         Lampa.Component.add('jut_episodes', ComponentJutEpisodes);
         Lampa.Component.add('jut_search', ComponentJutSearch);
         Lampa.Listener.follow('full', addButton);
+        // Права тянем ДО первой отрисовки меню, но не ждём ответа: стартовый проход рисует по кешу
+        // (мгновенно и без мигания), а пришедший ответ перестраивает меню — в том числе снимает
+        // пункт, если право отозвали.
+        loadFeatures(function () { try { ensureMenu(); } catch (e) {} });
         startMenuWatcher();
         startHeaderNotiWatcher();
         startPlayerFsWatcher();
@@ -4715,6 +4772,9 @@
         try { initJutSegmentsPrefetch(); } catch (e) {}  // сегменты следующей серии — заранее, к моменту переключения
         try { whenDmca(function () {}); } catch (e) {}   // прогрев DMCA-списка до первого открытия карточки
         try { setInterval(pollNotifications, 90000); } catch (e) {}   // фолбэк: основной путь — пуш по 'lwsEvent' (qdl 2.19)
+        // Права перечитываем на живом клиенте: владелец выдаёт их в админке, пока аппка уже открыта.
+        // Заодно это пульс устройства — по нему свежая строка всплывает в списке /admin/d1v.
+        try { setInterval(function () { loadFeatures(function () { try { ensureMenu(); } catch (e) {} }); }, 60000); } catch (e) {}
     }
 
     if (window.appready) start();

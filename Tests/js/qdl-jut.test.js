@@ -18,22 +18,21 @@ test('пункт меню называется ровно «jut.su» (решен
     'пункт «Аниме» — остаток раннего черновика, его быть не должно');
 });
 
-test('пункт меню встаёт строго после «D1versy Rec» (.qdl-live-menu)', () => {
-  const src = H.qdlSource();
-  const i = src.indexOf("dedupe('.menu .qdl-jut-menu')");
-  assert.ok(i > 0, 'вставка пункта jut.su должна идти через dedupe');
-  const before = src.slice(Math.max(0, i - 400), i);
-  assert.ok(before.includes(".qdl-live-menu"),
-    'якорем должен быть .qdl-live-menu (это «D1versy Rec» — имена классов обманчивы)');
+test('пункт меню идёт последним в MENU_ORDER, сразу за «D1versy Rec» (.qdl-live-menu)', () => {
+  const { qdl } = H.loadQdl();
+  // Array.from — массив из vm-песочницы живёт в другом realm, и deepStrictEqual ловит чужой прототип
+  const order = Array.from(qdl.MENU_ORDER, (x) => x.cls);
+  assert.deepStrictEqual(order.slice(-2), ['qdl-live-menu', 'qdl-jut-menu'],
+    'jut.su стоит сразу после «D1versy Rec» (имена классов обманчивы: .qdl-live-menu = Rec/записи)');
 });
 
-test('dedupe применяется — иначе .after() на jQuery-наборе клонирует пункт', () => {
-  const src = H.qdlSource();
-  const block = src.slice(src.indexOf("var lv = dedupe('.menu .qdl-live-menu')"));
-  assert.ok(block.slice(0, 400).includes("dedupe('.menu .qdl-jut-menu')"));
-  // перепозиционирование при пере-рендере меню
-  assert.ok(block.slice(0, 500).includes('jut.detach()'),
-    'пункт должен возвращаться на место после пере-рендера меню');
+test('jut.su не зависит от прав на Live/Rec — иначе чужой гейт уносил бы вкладку', () => {
+  // 🔴 Регресс qdl 2.54: до переписывания цепочки якорей jut.su цеплялся ЗА .qdl-live-menu,
+  // и скрытый по правам «D1versy Rec» уносил вкладку аниме вместе с собой.
+  const { qdl } = H.loadQdl();
+  const jut = qdl.MENU_ORDER.filter((x) => x.cls === 'qdl-jut-menu')[0];
+  assert.ok(jut, 'jut.su обязан быть в MENU_ORDER');
+  assert.strictEqual(jut.show(), true, 'вкладка jut.su видна всегда, правами не гейтится');
 });
 
 test('ключ таймлайна совпадает с серверным tl (прогресс переживает скачивание)', () => {

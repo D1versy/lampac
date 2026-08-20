@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход — D1Vision</title>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{min-height:100vh;display:flex;align-items:center;justify-content:center;
+         background:#0c0e12;color:#e6e9f0;font:400 15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+    .box{width:min(360px,92vw);background:#13161d;border:1px solid #2a3040;border-radius:14px;padding:28px}
+    h1{font-size:19px;font-weight:600;margin-bottom:6px}
+    p{font-size:13px;color:#8b93a7;margin-bottom:20px}
+    label{display:block;font-size:12px;color:#8b93a7;margin-bottom:6px}
+    input{width:100%;padding:11px 13px;border-radius:9px;border:1px solid #2a3040;background:#0c0e12;
+          color:#e6e9f0;font-size:15px;outline:none}
+    input:focus{border-color:#4a7dff}
+    button{width:100%;margin-top:16px;padding:11px;border:0;border-radius:9px;background:#4a7dff;color:#fff;
+           font-size:15px;font-weight:600;cursor:pointer}
+    button:hover{background:#3a6de8}
+  </style>
+</head>
+<body>
+  <form class="box" id="f">
+    <h1>D1Vision — доступы</h1>
+    <p>Пароль администратора сервера. Страница открыта только из локальной сети.</p>
+    <label for="p">Пароль</label>
+    <input id="p" type="password" autocomplete="current-password" autofocus>
+    <button type="submit">Войти</button>
+  </form>
+  <script>
+    // Кука та же, что у штатной админки lampac (accspasswd == rootPasswd) — своя форма нужна
+    // только чтобы вернуться на /admin/d1v, а не на /adminpanel.
+    document.getElementById('f').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var v = document.getElementById('p').value;
+      document.cookie = 'accspasswd=' + encodeURIComponent(v) + '; max-age=' + (60 * 60 * 24 * 180) +
+                        '; path=/; SameSite=Lax' + (window.isSecureContext ? '; Secure' : '');
+      window.location.href = '/admin/d1v';
+    });
+  </script>
+</body>
+</html>

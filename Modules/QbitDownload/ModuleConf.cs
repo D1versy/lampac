@@ -239,6 +239,12 @@ public class ModuleConf : ModuleBaseConf
     public string liveTimezone { get; set; } = "";   // IANA-зона для показа времени; пусто = TZ контейнера
     public int liveDaysBack { get; set; } = 14;      // как далеко назад предлагать дни в выборе даты
 
+    // Права на скрытые разделы (Perms.cs, qdl 2.54): D1versy Live/Rec видят только те устройства,
+    // которым выдано право в админке /admin/d1v. Права лежат в access.json (cachePath), не в конфиге.
+    // false — КИЛЛСВИТЧ на лету: разделы снова открыты всем, как было до 2.54. Оставлен потому, что
+    // отказ прав ломал бы боевые разделы, а конфиг перечитывается без рестарта контейнера.
+    public bool permsEnabled { get; set; } = true;
+
     // ── Заброшенная основная раздача: предложение переключиться на более полную ──
     public string watchAutoSwitch { get; set; } = "notify"; // off | notify (уведомление+подтверждение) | auto
     public int watchStaleChecks { get; set; } = 8;          // проверок без смены infohash (~2 суток при 6ч)

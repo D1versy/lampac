@@ -283,6 +283,8 @@ public partial class QbitController
     [Route("qdl/live/cameras")]
     async public Task<ActionResult> LiveCameras(string date = null)
     {
+        if (LiveDenied(Perms.FeatureLive) && LiveDenied(Perms.FeatureRec)) return NotFound();
+
         var tz = LiveTz();
         if (!TryLiveDay(date, tz, out var day))
             return LiveErr("Неверная дата");
@@ -351,6 +353,8 @@ public partial class QbitController
     [Route("qdl/live/recordings")]
     async public Task<ActionResult> LiveRecordings(int camera, string date = null)
     {
+        if (LiveDenied(Perms.FeatureRec)) return NotFound();
+
         if (camera <= 0)
             return LiveErr("Не указана камера");
 
@@ -414,6 +418,8 @@ public partial class QbitController
     [Route("qdl/live/days")]
     async public Task<ActionResult> LiveDays(int back = 0)
     {
+        if (LiveDenied(Perms.FeatureRec)) return NotFound();
+
         var tz = LiveTz();
         var ct = HttpContext.RequestAborted;
         var today = LiveToday(tz);
@@ -694,12 +700,41 @@ public partial class QbitController
         return build;
     }
 
-    /// <summary>Подставить ключ периметра предъявителя в сегментные строки (в LAN — просто убрать плейсхолдер).</summary>
+    /// <summary>Подставить query предъявителя в сегментные строки (в LAN без прав — просто убрать плейсхолдер).</summary>
     string LiveSignDay(string playlist)
     {
-        string d1v = LiveD1vKey();
-        return playlist.Replace("{d1v}", string.IsNullOrEmpty(d1v) ? "" : "?d1v=" + Uri.EscapeDataString(d1v));
+        return playlist.Replace("{d1v}", LiveSegQuery());
     }
+
+    /// <summary>
+    /// Query для сегментных URI: ключ периметра предъявителя + его айди устройства.
+    /// 🔴 Оба обязаны стоять В САМОЙ строке сегмента: нативные плееры (VLC/ExoPlayer) резолвят
+    /// относительные URI без query базового URL (RFC 3986) и не несут ни заголовков, ни cookie.
+    /// Без uid здесь гейт прав (LiveDenied) отдавал бы 404 на каждый сегмент уже начатого просмотра.
+    /// </summary>
+    string LiveSegQuery()
+    {
+        var q = new StringBuilder();
+
+        string d1v = LiveD1vKey();
+        if (!string.IsNullOrEmpty(d1v))
+            q.Append("d1v=").Append(Uri.EscapeDataString(d1v));
+
+        string uid = Perms.NormUid(requestInfo?.user_uid);
+        if (uid != null)
+        {
+            if (q.Length > 0) q.Append('&');
+            q.Append("uid=").Append(Uri.EscapeDataString(uid));
+        }
+
+        return q.Length == 0 ? "" : "?" + q.ToString();
+    }
+
+    /// <summary>
+    /// Гейт прав раздела. Отказ — пустой 404 (стелс, как у D1VPerimeter): отличать «нет доступа» от
+    /// «нет такого пути» незачем, а разница в ответах помогала бы перебирать чужие айди.
+    /// </summary>
+    bool LiveDenied(string feature) => !Perms.Allowed(requestInfo?.user_uid, feature);
 
     string LiveD1vKey()
     {
@@ -719,6 +754,8 @@ public partial class QbitController
     [Route("qdl/live/day")]
     async public Task<ActionResult> LiveDay(int camera, string date = null)
     {
+        if (LiveDenied(Perms.FeatureRec)) return NotFound();
+
         if (camera <= 0)
             return LiveErr("Не указана камера");
 
@@ -766,6 +803,8 @@ public partial class QbitController
     [Route("qdl/live/day/{camera:int}/{date}/stream.m3u8")]
     async public Task<ActionResult> LiveDayPlaylist(int camera, string date)
     {
+        if (LiveDenied(Perms.FeatureRec)) return NotFound();
+
         var tz = LiveTz();
         if (camera <= 0 || string.IsNullOrEmpty(date) || !TryLiveDay(date, tz, out var day))
             return BadRequest();
@@ -808,6 +847,8 @@ public partial class QbitController
     [Route("qdl/live/seg/{rec:int}/{file}")]
     async public Task<ActionResult> LiveSegment(int rec, string file)
     {
+        if (LiveDenied(Perms.FeatureRec)) return NotFound();
+
         if (rec <= 0 || file == null || !_liveSegRx.IsMatch(file))
             return BadRequest();
 
@@ -830,6 +871,8 @@ public partial class QbitController
     [Route("qdl/live/watch")]
     async public Task<ActionResult> LiveWatch()
     {
+        if (LiveDenied(Perms.FeatureLive)) return NotFound();
+
         var ct = HttpContext.RequestAborted;
 
         List<KeyValuePair<int, string>> cams;
@@ -878,6 +921,8 @@ public partial class QbitController
     [Route("qdl/live/watch/start")]
     async public Task<ActionResult> LiveWatchStart(int camera)
     {
+        if (LiveDenied(Perms.FeatureLive)) return NotFound();
+
         if (camera <= 0)
             return LiveErr("Не указана камера");
 
@@ -928,6 +973,8 @@ public partial class QbitController
     [Route("qdl/live/watch/hls/{camera:int}/index.m3u8")]
     async public Task<ActionResult> LiveWatchPlaylist(int camera)
     {
+        if (LiveDenied(Perms.FeatureLive)) return NotFound();
+
         if (camera <= 0)
             return BadRequest();
 
@@ -964,8 +1011,7 @@ public partial class QbitController
             return StatusCode(502);
         }
 
-        string d1v = LiveD1vKey();
-        string sign = string.IsNullOrEmpty(d1v) ? "" : "?d1v=" + Uri.EscapeDataString(d1v);
+        string sign = LiveSegQuery();
         string prefix = $"/qdl/live/watch/seg/{camera}/";
 
         var sb = new StringBuilder(body.Length + 512);
@@ -996,6 +1042,8 @@ public partial class QbitController
     [Route("qdl/live/watch/seg/{camera:int}/{file}")]
     async public Task<ActionResult> LiveWatchSegment(int camera, string file)
     {
+        if (LiveDenied(Perms.FeatureLive)) return NotFound();
+
         if (camera <= 0 || file == null || !_liveWatchSegRx.IsMatch(file))
             return BadRequest();
 
@@ -1009,6 +1057,8 @@ public partial class QbitController
     [Route("qdl/live/watch/thumb")]
     async public Task<ActionResult> LiveWatchThumb(int camera)
     {
+        if (LiveDenied(Perms.FeatureLive)) return NotFound();
+
         if (camera <= 0)
             return BadRequest();
 
@@ -1056,6 +1106,8 @@ public partial class QbitController
     [Route("qdl/live/stream")]
     async public Task<ActionResult> LiveStream(int id)
     {
+        if (LiveDenied(Perms.FeatureRec)) return NotFound();
+
         if (id <= 0)
             return BadRequest();
 
@@ -1067,6 +1119,8 @@ public partial class QbitController
     [Route("qdl/live/thumb")]
     async public Task<ActionResult> LiveThumb(int id)
     {
+        if (LiveDenied(Perms.FeatureRec)) return NotFound();
+
         if (id <= 0)
             return BadRequest();
 

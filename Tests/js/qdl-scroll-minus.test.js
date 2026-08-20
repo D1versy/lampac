@@ -45,6 +45,9 @@ for (const name of COMPONENTS) {
   test(`${name}: create() зовёт scroll.minus() (высота скролла на ТВ)`, () => {
     const Scroll = recordingScroll();
     const { qdl: q } = H.loadQdl({ lampa: H.makeLampa({ Scroll }) });
+    // qdl 2.54: экраны D1versy Live/Rec гейтятся правами устройства — без них create() уходит
+    // в denySection() и до scroll.minus() не доходит. Права к этому тесту отношения не имеют.
+    q.setPerms({ live: true, rec: true });
     const C = q[name];
     assert.ok(typeof C === 'function', name + ' экспортирован из qdl.js');
 
