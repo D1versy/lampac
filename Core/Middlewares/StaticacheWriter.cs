@@ -107,17 +107,46 @@ public class StaticacheWriter
                 if (stAttr?.immutable == true && httpContext.Response.StatusCode == 200 && (stAttr.queryKeys == null || httpContext.Request.Query.ContainsKey("v")))
                     httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=31536000,immutable";
                 // qdl 2.53: revalidate уже поставил no-cache в Staticache до ветвления HIT/MISS —
-                // не перебиваем его вечным max-age. ETag на MISS не шлём: тело сейчас и так свежее,
-                // а хеш посчитает первая же HIT-отдача этой записи.
+                // не перебиваем его вечным max-age.
+                //
+                // 🔴 If-None-Match проверяем и ЗДЕСЬ, а не только на HIT-пути. Кеш этих роутов живёт
+                // 10–20 минут, а клиент стартует раз в сутки — то есть в проде почти каждый старт
+                // приходит именно на MISS. Без этой ветки ревалидация давала бы 304 только в
+                // редком окне «кто-то дёрнул ручку минуту назад», а обычный старт по-прежнему качал
+                // бы тело целиком. Тег считаем от буфера ответа — файл ниже пишется из него же,
+                // поэтому HIT потом посчитает ровно такой же (Staticache.BodyEtag/FileEtag).
                 else if (stAttr?.revalidate == true) { }
                 else if (contentLength > 0)
                     httpContext.Response.Headers[HeaderNames.CacheControl] = "public,max-age=86400,immutable";
                 #endregion
 
+                string revalidateEtag = null;
+                bool notModified = false;
+
+                if (stAttr?.revalidate == true && httpContext.Response.StatusCode == 200)
+                {
+                    revalidateEtag = Staticache.BodyEtag(msm.Stream.GetReadOnlySequence());
+                    httpContext.Response.Headers[HeaderNames.ETag] = revalidateEtag;
+
+                    if (Staticache.IfNoneMatchHit(httpContext.Request.Headers[HeaderNames.IfNoneMatch], revalidateEtag))
+                    {
+                        notModified = true;
+                        httpContext.Response.StatusCode = StatusCodes.Status304NotModified;
+                        httpContext.Response.Headers[HeaderNames.Vary] = "Accept-Encoding";
+                        httpContext.Response.ContentLength = null;
+                    }
+                }
+
                 #region Сбрасываем поток клиенту
                 msm.Stream.Position = 0;
 
-                if (contentLength > 0)
+                if (notModified)
+                {
+                    // тело клиенту не нужно, но на диск запись ниже всё равно кладём:
+                    // работа уже сделана, а следующему клиенту она пригодится
+                    await httpContext.Response.CompleteAsync();
+                }
+                else if (contentLength > 0)
                 {
                     /// один overhead "write && flush" при наличии content-length
                     await msm.Stream.CopyToAsync(httpContext.Response.Body, httpContext.RequestAborted);
@@ -187,7 +216,11 @@ public class StaticacheWriter
                         }
                     }
 
-                    var model = new StaticacheCacheModel(exTicks, ext, (short)httpContext.Response.StatusCode, contentLength);
+                    // statusCode берём НЕ из ответа: при 304 в кеш ушёл бы «пустой» ответ,
+                    // и все следующие клиенты получали бы 304 без тела вместо самого тела.
+                    var model = new StaticacheCacheModel(exTicks, ext,
+                        (short)(notModified ? StatusCodes.Status200OK : httpContext.Response.StatusCode),
+                        contentLength, etag: revalidateEtag);
                     Staticache.cacheFiles[cachekey] = model;
 
                     // qdl 2.16: brotli-сайдкар — фоново (финальный flush хвоста идёт после выхода из
@@ -195,7 +228,9 @@ public class StaticacheWriter
                     // CompressBr читает только что записанный raw-файл). Гейты: 200, сжимаемый ext,
                     // ≥1 КБ, TTL ≥ 2 мин (отсекает и ветки «не-200/length mismatch → 1 минута»).
                     long rawLen = msm.Stream.Length;
-                    if (httpContext.Response.StatusCode == 200 && rawLen >= 1024
+                    // при 304 в Response.StatusCode лежит 304, а на диск лёг полноценный ответ —
+                    // сайдкар ему нужен так же, иначе следующий HIT уйдёт на динамическое сжатие
+                    if ((notModified || httpContext.Response.StatusCode == 200) && rawLen >= 1024
                         && ext is "html" or "json" or "js" or "css" or "svg"
                         && ex >= DateTimeOffset.Now.AddMinutes(2))
                     {

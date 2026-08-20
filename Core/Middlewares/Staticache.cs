@@ -1,4 +1,5 @@
 ﻿using Microsoft.AspNetCore.Http;
+using System.Buffers;
 using Microsoft.AspNetCore.Mvc.Abstractions;
 using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.Extensions.Primitives;
@@ -417,9 +418,7 @@ public class Staticache
                 {
                     try
                     {
-                        var hash = Fnv1a.Empty;
-                        Fnv1a.Append(ref hash, File.ReadAllBytes(file));
-                        etag = "W/\"" + Fnv1a.Base64Url(hash) + "\"";
+                        etag = FileEtag(file);
                         cacheFiles.TryUpdate(cachekey, _r with { etag = etag }, _r);
                     }
                     catch { etag = null; }   // файл вытеснили из-под нас — просто отдаём тело
@@ -533,12 +532,31 @@ public class Staticache
 
 
     /// <summary>
+    /// Слабый ETag тела для revalidate-роутов. HIT считает его от байтов кеш-файла, MISS — от
+    /// буфера ответа; файл пишется из того же буфера, поэтому значения совпадают побайтово —
+    /// иначе первый же MISS выдал бы клиенту новый тег на неизменившееся тело.
+    /// </summary>
+    public static string BodyEtag(ReadOnlySequence<byte> body)
+    {
+        var hash = Fnv1a.Empty;
+        foreach (ReadOnlyMemory<byte> segment in body)
+        {
+            if (!segment.IsEmpty)
+                Fnv1a.Append(ref hash, segment.Span);
+        }
+        return "W/" + '"' + Fnv1a.Base64Url(hash) + '"';
+    }
+
+    public static string FileEtag(string file)
+        => BodyEtag(new ReadOnlySequence<byte>(File.ReadAllBytes(file)));
+
+    /// <summary>
     /// Слабое сравнение If-None-Match по RFC 9110 §8.8.3.2: сопоставляются только «непрозрачные»
     /// части тегов, префикс W/ игнорируется. Заголовок может нести список через запятую и "*".
     /// Тот же алгоритм, что в QbitDownload/HttpCache для /qdl/list — продублирован намеренно:
     /// Core не может ссылаться на модуль.
     /// </summary>
-    private static bool IfNoneMatchHit(string header, string etag)
+    public static bool IfNoneMatchHit(string header, string etag)
     {
         if (string.IsNullOrWhiteSpace(header) || string.IsNullOrEmpty(etag))
             return false;
