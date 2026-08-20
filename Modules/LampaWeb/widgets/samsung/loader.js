@@ -42,6 +42,17 @@ function d1vSign(url) {
 // у Tizen свой UA, поэтому вместо UA-токена сеем ключ напрямую — ДО загрузки lampainit/app.
 try { window.localStorage.setItem('d1vision_platform', 'tizen'); } catch (e) {}
 
+// Русский язык без экрана выбора — тем же приёмом и по той же причине.
+// Обычно язык сеет сервер (lampainit-invc.js), но у виджета есть офлайн-ветка loadFromLocal():
+// она поднимает app.js из localStorage БЕЗ lampainit.js, и серверный посев туда не доезжает —
+// на телевизоре без сети первый запуск упёрся бы в выбор языка. Условно: ручной выбор не трогаем.
+try {
+    if (!window.localStorage.getItem('language')) {
+        window.localStorage.setItem('language', 'ru');
+        window.localStorage.setItem('tmdb_lang', 'ru');
+    }
+} catch (e) {}
+
 function d1vHosts() {
     var list = [];
     var push = function (h) { if (h && list.indexOf(h) === -1) list.push(h); };   // дедуп bootstrap + OTA

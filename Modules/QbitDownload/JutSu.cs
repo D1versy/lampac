@@ -267,8 +267,8 @@ public partial class QbitController
             if (cached != null && !stale)
             {
                 // Память экрана поиска пополняется и на кеш-хите: повторный запрос — это
-                // такой же интерес зрителя, как первый.
-                if (page == 1) JutHistoryRecordSearch(cached["items"]);
+                // такой же интерес зрителя, как первый. Пишем в историю ЭТОГО устройства.
+                if (page == 1) JutHistoryRecordSearch(cached["items"], requestInfo?.user_uid);
                 return JutJsonArt(cached);
             }
         }
@@ -300,7 +300,7 @@ public partial class QbitController
             ["items"] = JutCardsJson(parsed.items)
         };
         JutCacheWrite("search", key, payload);
-        if (page == 1) JutHistoryRecordSearch(payload["items"]);
+        if (page == 1) JutHistoryRecordSearch(payload["items"], requestInfo?.user_uid);
         return JutJsonArt(payload);
     }
 

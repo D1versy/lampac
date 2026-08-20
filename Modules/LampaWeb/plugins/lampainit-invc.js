@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.51';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
+window.qdl_fork_version = '2.52';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
 // Лампа готова для использования
@@ -352,6 +352,40 @@ try {
 // Строка 'true' — ровно то, что кладёт Lampa.Storage.set(…, true). Ручной тумблер «Прокси TMDB»
 // в настройках теперь живёт до перезагрузки — это осознанно.
 try { localStorage.setItem('proxy_tmdb', 'true'); } catch (e) {}
+
+// ── Первый запуск: сразу русский, без экрана выбора языка (требование владельца) ──
+// Гейт в бандле буквально такой: if (localStorage.getItem('language') || !lampa_settings.lang_use)
+// грузим приложение, иначе LangChoice.open(...). Пока язык не выбран, приложение НЕ стартует
+// вообще — appready не наступает, #app пуст (на этом же виснут headless-скрипты, claude/06 §AM).
+// Значение — ГОЛАЯ строка: Storage.set оборачивает в JSON только объекты и массивы.
+// tmdb_lang — потому что штатный колбэк выбора ставит оба ключа парой.
+// ⚠️ УСЛОВНО (как screensaver выше, а не безусловно как proxy_tmdb): иначе ручная смена языка
+// в настройках не пережила бы перезагрузку. Пункт «Язык» намеренно остаётся рабочим —
+// lampa_settings.lang_use не трогаем, он убрал бы и саму возможность сменить язык.
+try {
+  if (!localStorage.getItem('language')) {
+    localStorage.setItem('language', 'ru');
+    localStorage.setItem('tmdb_lang', 'ru');
+  }
+} catch (e) {}
+
+// Фолбэк на случай, если бандл всё же успел показать экран выбора.
+// ⚠️ Форы у нас НЕТ: app.min.js запрашивается раньше (preload в <head> + вызов loadCurrentLampa()
+// из инлайн-скрипта ДО нашего тега), а /lampainit.js — последний тег в body. Выигрыш держится
+// только на разнице объёма (2 МБ против ~20 КБ) — на первой установке кэш пуст и мы успеваем,
+// но полагаться на это одно нельзя. Обработчик пункта висит на 'hover:enter click', поэтому
+// нативного клика достаточно: отработает штатный колбэк Lampa (Storage.set + loadLang).
+try {
+  var d1LangTries = 0;
+  var d1LangTimer = setInterval(function () {
+    try {
+      if (++d1LangTries > 40) { clearInterval(d1LangTimer); return; }   // ~10 с и хватит
+      if (window.appready) { clearInterval(d1LangTimer); return; }
+      var ru = document.querySelector('.lang__selector-item[data-code="ru"]');
+      if (ru) { clearInterval(d1LangTimer); ru.click(); }
+    } catch (e) { clearInterval(d1LangTimer); }
+  }, 250);
+} catch (e) {}
 
 // ── ДО загрузки Lampa: XHR-перехват для DMCA-фолбека (пара к qdl.js, см. claude/06 Media-server) ──
 // CUB на заблокированные правообладателем карточки отдаёт {"blocked":true} → Lampa рисует

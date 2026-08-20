@@ -403,6 +403,36 @@ test('lampainit 2.15: без window.lampa_settings не падает, а proxy_t
   assert.strictEqual(localStorage.getItem('proxy_tmdb'), 'true');
 });
 
+// ─────────────────────── 2.52: первый запуск сразу на русском ───────────────────────
+// Гейт бандла: if (localStorage.getItem('language') || !lampa_settings.lang_use) — грузим
+// приложение, иначе показываем выбор языка и НЕ стартуем вовсе.
+
+test('lampainit 2.52: на чистом клиенте сеет русский язык парой ключей', () => {
+  const { localStorage } = H.loadLampaInit();
+  // голая строка, а не JSON: Storage.set оборачивает только объекты и массивы
+  assert.strictEqual(localStorage.getItem('language'), 'ru');
+  assert.strictEqual(localStorage.getItem('tmdb_lang'), 'ru');
+});
+
+test('lampainit 2.52: выбранный руками язык не перетирается', () => {
+  // ⚠️ Посев условный (как screensaver, а не как proxy_tmdb): иначе смена языка
+  // в настройках не пережила бы перезагрузку страницы.
+  const ls = H.makeStorage();
+  ls.setItem('language', 'en');
+  ls.setItem('tmdb_lang', 'en');
+  const { localStorage } = H.loadLampaInit({ localStorage: ls });
+  assert.strictEqual(localStorage.getItem('language'), 'en');
+  assert.strictEqual(localStorage.getItem('tmdb_lang'), 'en');
+});
+
+test('lampainit 2.52: пункт смены языка не отключается (lang_use не трогаем)', () => {
+  // lang_use=false убрал бы и сам выбор из «Настройки → Интерфейс» — владелец просил
+  // убрать ЭКРАН при первой установке, а не отнять возможность сменить язык.
+  const settings = { disable_features: {} };
+  const { sandbox } = H.loadLampaInit({ windowExtra: { lampa_settings: settings } });
+  assert.notStrictEqual(sandbox.window.lampa_settings.lang_use, false);
+});
+
 // ─────────────────────────── first_initiale() ───────────────────────────
 
 test('lampainit: first_initiale exists and does not throw', () => {

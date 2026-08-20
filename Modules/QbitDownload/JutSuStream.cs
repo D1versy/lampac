@@ -71,10 +71,11 @@ public partial class QbitController
             return StatusCode(link.error == "NOT_AUTHORIZED" ? 403
                             : link.error == "NOT_FOUND" ? 404 : 502);
 
-        // Разметка опенинга — в кеш (переживёт TTL ссылки), а сам факт просмотра — в историю.
+        // Разметка опенинга — в кеш (переживёт TTL ссылки), а сам факт просмотра — в историю
+        // ТОГО устройства, чей плеер открыл поток (uid приходит в query, см. JutSuHistory).
         // HEAD-пробы плеера просмотром не считаем.
         JutSegStore(link);
-        if (!head) JutHistoryTouchWatch(link.slug);
+        if (!head) JutHistoryTouchWatch(link.slug, requestInfo?.user_uid);
 
         string clientRange = Request.Headers.TryGetValue("Range", out var rv) ? rv.ToString() : null;
 

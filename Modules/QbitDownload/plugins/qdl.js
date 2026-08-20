@@ -17,7 +17,38 @@
     var REC = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/></svg>';
     var ANIME = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="4" width="18" height="14" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M10 8.5l4.5 2.5L10 13.5v-5z" fill="currentColor"/><path d="M8 21h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
+    // ───────── Идентификатор устройства (для истории jut.su на сервере) ─────────
+    // Берём канонический uid форка — тот же, с которым ходят Sync/TimeCode/Bookmark.
+    // Своё второе понятие «устройства» немедленно разъехалось бы с прогрессом просмотра.
+    // Сервер разбирает его сам: RequestInfo читает query uid= → requestInfo.user_uid.
+    // ⚠️ String(): Utils.uid(8) может выдать чисто цифровую строку, а Storage.get такую
+    // возвращает ЧИСЛОМ (ветка /^\d+$/) — конкатенация с number молча дала бы 'NaN'-мусор.
+    function qdlUid() {
+        try {
+            var u = Lampa.Storage.get('lampac_unic_id', '');
+            if (u) return String(u);
+        } catch (e) {}
+        try {
+            if (window.AndroidJS && typeof window.AndroidJS.get === 'function')
+                return String(window.AndroidJS.get('qdl_device_uid') || '');
+        } catch (e) {}
+        return '';
+    }
+
+    // 🔴 Гейт по API обязателен: тот же req() ходит и в /cub/-прокси, который склеивает
+    // upstream-URL вместе с нашей строкой запроса дословно — лишний параметр уехал бы наружу.
+    function withUid(url) {
+        try {
+            if (String(url).indexOf(API) !== 0) return url;
+            if (/[?&]uid=/.test(url)) return url;
+            var u = qdlUid();
+            if (!u) return url;
+            return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'uid=' + encodeURIComponent(u);
+        } catch (e) { return url; }
+    }
+
     function req(url, cb, err) {
+        url = withUid(url);
         try {
             var net = new Lampa.Reguest();
             net.timeout(45000);
@@ -3770,7 +3801,10 @@
             function (r) {
                 if (!r || !r.ok) { Lampa.Noty.show(jutErrText(r)); return; }
                 var on = jutAutopilot();
-                var item = { title: jutEpTitle(e, titleName), url: API + r.url };
+                // 🔴 uid дописываем В САМУ строку URL: поток открывает НАТИВНЫЙ плеер
+                // (VLC/ExoPlayer), заголовок или cookie туда не подложить, а история
+                // просмотров пишется именно по факту байтов через /qdl/jut/stream.
+                var item = { title: jutEpTitle(e, titleName), url: withUid(API + r.url) };
                 var tl = jutTl(slug, e.key); if (tl) item.timeline = tl;
                 // Пропуск опенинга: секунды приходят со страницы серии (те же, что читает
                 // кнопка «Пропустить заставку» на сайте). Формат — штатный для Lampa:
@@ -3793,8 +3827,11 @@
                     list = sortEpisodes(list.map(jutAsFile)).map(function (f) { return f._jut; });
                     var plist = list.map(function (x) {
                         var pi = { title: jutEpTitle(x, titleName) };
-                        pi.url = (x.key === e.key) ? (API + r.url)
-                                                   : (API + '/qdl/jut/stream?t=' + encodeURIComponent(x.tok));
+                        // 🔴 Текущей серии берём ГОТОВЫЙ item.url, а не строим заново: Android
+                        // ищет текущий элемент плейлиста сравнением строк url, и расхождение
+                        // хоть на символ молча заиграло бы первую серию сезона вместо выбранной.
+                        pi.url = (x.key === e.key) ? item.url
+                                                   : withUid(API + '/qdl/jut/stream?t=' + encodeURIComponent(x.tok));
                         var t2 = jutTl(slug, x.key); if (t2) pi.timeline = t2;
                         if (x.tok) {
                             pi.qdl_jut_tok = x.tok;
@@ -4415,7 +4452,8 @@
     // Раньше плитка «Поиск» открывала клавиатуру сразу и на весь экран, а вернуться было
     // некуда. Теперь это отдельный экран: поле ввода (не впритык к верхнему краю) и под ним
     // лента последнего — сперва то, что реально смотрели, потом добор из поисковых выдач.
-    // Память общая на все устройства: её ведёт сервер (/qdl/jut/recent), клиент только читает.
+    // Память ведёт сервер (/qdl/jut/recent), клиент только читает. С 2.52 она РАЗДЕЛЬНАЯ
+    // по устройствам: uid уезжает в запросах (withUid), у каждого клиента своя выдача.
     //
     // ⚠️ Клавиатура выбирается по устройству, а не по платформе «на глаз»: на ТВ нужна
     // экранная клавиатура Lampa (пультом), на телефоне и десктопе — системная.
