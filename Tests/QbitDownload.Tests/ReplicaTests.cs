@@ -329,4 +329,341 @@ public class ReplicaTests
 
         Assert.Equal(1, n);
     }
+
+    // ── зеркалирование удалений: отбор сирот ──────────────────────────────
+    //
+    // 🔴 Самая дорогая ошибка в этом контуре — спутать targetSet (бюджетный план) с known
+    // (всё, что есть у дома). Первое меньше второго втрое, и подмена превратила бы «не влезло
+    // в 240 ГБ» в «удалить с диска». Поэтому отбор вынесен в чистую функцию и закрыт тестами.
+
+    const string H1 = "1111111111111111111111111111111111111111";
+    const string H2 = "2222222222222222222222222222222222222222";
+    const string H3 = "3333333333333333333333333333333333333333";
+
+    static Dictionary<string, JObject> Mine(params string[] hashes)
+    {
+        var d = new Dictionary<string, JObject>(StringComparer.OrdinalIgnoreCase);
+        foreach (var h in hashes) d[h] = new JObject { ["name"] = h, ["size"] = 5L * GiB };
+        return d;
+    }
+
+    static HashSet<string> Known(params string[] hashes)
+        => new HashSet<string>(hashes, StringComparer.OrdinalIgnoreCase);
+
+    static List<(string hash, bool jut)> Orphans(Dictionary<string, JObject> mine, HashSet<string> known)
+        => QbitController.ReplicaOrphanCandidates(mine, new Dictionary<string, JObject>(), known);
+
+    [Fact]
+    public void Hash_in_manifest_but_not_in_plan_is_not_an_orphan()
+    {
+        // 🔥 Регресс. У дома 598 ГБ, в план реплики влезает ~204 ГБ. Всё, что не влезло, ЖИВО
+        // у дома и обязано остаться на диске до давления бюджета — сиротой оно не является.
+        var mine = Mine(H1, H2);
+        var orphans = Orphans(mine, Known(H1, H2));   // known накрывает оба, план тут ни при чём
+
+        Assert.Empty(orphans);
+    }
+
+    [Fact]
+    public void Transcoded_card_is_known_but_not_planned_and_is_not_an_orphan()
+    {
+        // 🔥 Боевой случай. Дом дотранскодил карточку: торрент удалён ВМЕСТЕ С ФАЙЛАМИ, а
+        // local-маркер остался под тем же хешем — и в manifest.local не попал, потому что у
+        // маркера транскода нет объекта jut. В torrents его тоже нет. Единственное, что держит
+        // его живым для реплики, — присутствие в known.
+        var mine = Mine(H1);
+        Assert.Empty(Orphans(mine, Known(H1)));
+
+        // а без known-покрытия он стал бы сиротой — цена ошибки: безвозвратная потеря копии,
+        // потому что .torrent дом уже не отдаст и моста для файлов нет
+        Assert.Single(Orphans(mine, Known(H2)));
+    }
+
+    [Fact]
+    public void Orphan_is_a_hash_home_does_not_have_at_all()
+    {
+        var mine = Mine(H1, H2, H3);
+        var orphans = Orphans(mine, Known(H1, H3));
+
+        Assert.Single(orphans);
+        Assert.Equal(H2, orphans[0].hash);
+        Assert.False(orphans[0].jut);
+    }
+
+    [Fact]
+    public void Empty_home_set_is_not_a_command_to_delete_everything()
+    {
+        // Дом с пустой библиотекой и дом, отдавший мусор, снаружи неразличимы,
+        // а цена ошибки различается на три порядка.
+        Assert.Empty(Orphans(Mine(H1, H2), Known()));
+        Assert.Empty(Orphans(Mine(H1, H2), null));
+    }
+
+    [Fact]
+    public void Missing_known_disables_mirroring()
+    {
+        var set = QbitController.ReplicaKnownSet(null, new[] { H1 }, out string why);
+
+        Assert.Null(set);
+        Assert.Contains("не отдаёт known", why);
+    }
+
+    [Fact]
+    public void Known_that_does_not_cover_the_plan_is_rejected()
+    {
+        // Поле есть, но собрано не тем кодом: дом сам прислал H2 к репликации и сам же не
+        // упомянул его в known. Доверять такому нельзя — пробел читался бы как «удалено».
+        var set = QbitController.ReplicaKnownSet(new JArray(H1), new[] { H1, H2 }, out string why);
+
+        Assert.Null(set);
+        Assert.Contains("не покрывает", why);
+    }
+
+    [Fact]
+    public void Known_is_parsed_case_insensitively_and_garbage_is_dropped()
+    {
+        var set = QbitController.ReplicaKnownSet(
+            new JArray(H1.ToUpperInvariant(), "не-хеш", "", H2), new[] { H1 }, out string why);
+
+        Assert.Null(why);
+        Assert.Equal(2, set.Count);
+        Assert.Contains(H1, set);
+    }
+
+    // ── подтверждение пропажи ─────────────────────────────────────────────
+
+    static (List<string> ready, int pending) Confirm(JObject state, long now, params string[] missing)
+        => QbitController.ReplicaOrphanConfirm(state, missing, now, 3, 15, out _);
+
+    [Fact]
+    public void Orphan_needs_both_ticks_and_minutes()
+    {
+        var state = new JObject();
+
+        // три тика подряд, но прошло всего 10 минут — окно по стенным часам не закрыто
+        Assert.Empty(Confirm(state, Now, H1).ready);
+        Assert.Empty(Confirm(state, Now + 300, H1).ready);
+        var third = Confirm(state, Now + 600, H1);
+        Assert.Empty(third.ready);
+        Assert.Equal(1, third.pending);
+
+        // четвёртый тик — 15 минут набрались
+        Assert.Equal(new[] { H1 }, Confirm(state, Now + 900, H1).ready);
+    }
+
+    [Fact]
+    public void Orphan_needs_ticks_even_if_time_has_passed()
+    {
+        // 🔴 Одного времени мало: после долгого простоя (тик занят мостом, дом лежал) первый же
+        // здоровый снимок иначе удалил бы всё разом.
+        var state = new JObject();
+
+        Assert.Empty(Confirm(state, Now, H1).ready);
+        Assert.Empty(Confirm(state, Now + 100000, H1).ready);          // misses=2, времени вагон
+        Assert.Equal(new[] { H1 }, Confirm(state, Now + 100001, H1).ready);
+    }
+
+    [Fact]
+    public void Orphan_confirmation_resets_when_hash_returns()
+    {
+        var state = new JObject();
+        Confirm(state, Now, H1);
+        Confirm(state, Now + 300, H1);
+
+        // хеш снова есть у дома → запись снимается целиком
+        var back = QbitController.ReplicaOrphanConfirm(state, Array.Empty<string>(), Now + 600, 3, 15, out bool changed);
+        Assert.Empty(back.ready);
+        Assert.True(changed);
+        Assert.Null(state[H1]);
+
+        // пропал снова — счётчик и окно стартуют заново, а не досчитывают старое
+        Confirm(state, Now + 900, H1);
+        Assert.Equal(1, state[H1].Value<int>("misses"));
+        Assert.Equal(Now + 900, state[H1].Value<long>("since"));
+    }
+
+    [Fact]
+    public void Orphan_since_survives_restart()
+    {
+        // состояние поднимается с диска: второй тик не имеет права сдвигать точку отсчёта,
+        // иначе окно подтверждения не закрылось бы никогда
+        var state = new JObject { [H1] = new JObject { ["since"] = Now, ["misses"] = 2 } };
+
+        Confirm(state, Now + 1200, H1);
+
+        Assert.Equal(Now, state[H1].Value<long>("since"));
+        Assert.Equal(3, state[H1].Value<int>("misses"));
+    }
+
+    [Fact]
+    public void Orphan_state_prunes_hashes_we_no_longer_have()
+    {
+        // удалённые и снятые вручную записи не должны копиться вечно
+        var state = new JObject { [H1] = new JObject { ["since"] = Now, ["misses"] = 9 } };
+
+        QbitController.ReplicaOrphanConfirm(state, new[] { H2 }, Now + 60, 3, 15, out _);
+
+        Assert.Null(state[H1]);
+        Assert.NotNull(state[H2]);
+    }
+
+    // ── гарды сироты ──────────────────────────────────────────────────────
+
+    static bool MayEvictOrphan(JObject t, out bool filesOk, JObject played = null, long grace = 1800)
+    {
+        var mine = new Dictionary<string, JObject> { ["h"] = t };
+        return QbitController.ReplicaMayEvictOrphan("h", false, mine, new Dictionary<string, JObject>(),
+            played ?? new JObject(), Now, grace, out filesOk, out _);
+    }
+
+    [Fact]
+    public void Orphan_is_evicted_even_if_unfinished()
+    {
+        // 🔴 Контраст с бюджетным гардом: там незавершённое не трогаем, здесь недокачанный
+        // огрызок удалённого не просто не нужен — он ещё и занимает канал.
+        TestEnv.EnsureConf();
+        ModInit.conf.downloadsPath = Path.Combine(Path.GetTempPath(), "qdl-dl-root");
+        var t = Torrent(Path.Combine(ModInit.conf.downloadsPath, "film.mkv"), progress: 0.3);
+
+        Assert.False(MayEvict(t));                       // бюджет: блокирует
+        Assert.True(MayEvictOrphan(t, out bool filesOk)); // зеркало: пропускает
+        Assert.True(filesOk);
+    }
+
+    [Fact]
+    public void Orphan_is_evicted_even_if_fresh()
+    {
+        TestEnv.EnsureConf();
+        ModInit.conf.downloadsPath = Path.Combine(Path.GetTempPath(), "qdl-dl-root");
+        var t = Torrent(Path.Combine(ModInit.conf.downloadsPath, "film.mkv"), addedOn: Now - 60);
+
+        Assert.False(MayEvict(t, residence: 24 * 3600));
+        Assert.True(MayEvictOrphan(t, out _));
+    }
+
+    [Fact]
+    public void Orphan_keeps_the_category_guard()
+    {
+        // чужие раздачи на той же машине не наши ни при каком основании
+        TestEnv.EnsureConf();
+        ModInit.conf.downloadsPath = Path.Combine(Path.GetTempPath(), "qdl-dl-root");
+
+        Assert.False(MayEvictOrphan(
+            Torrent(Path.Combine(ModInit.conf.downloadsPath, "film.mkv"), cat: "other"), out _));
+    }
+
+    [Fact]
+    public void Orphan_outside_downloads_is_removed_without_files()
+    {
+        // 🔴 Отличие от бюджетного гарда: раздачу снять НАДО (иначе она вечно стучится в
+        // трекер уже после удаления дома), но файлы за пределами downloadsPath — никогда.
+        TestEnv.EnsureConf();
+        ModInit.conf.downloadsPath = Path.Combine(Path.GetTempPath(), "qdl-dl-root");
+        var t = Torrent(Path.Combine(Path.GetTempPath(), "elsewhere", "film.mkv"));
+
+        Assert.False(MayEvict(t));                        // бюджет: не трогаем вовсе
+        Assert.True(MayEvictOrphan(t, out bool filesOk));  // зеркало: снимаем раздачу
+        Assert.False(filesOk);                             // …но файлы оставляем
+    }
+
+    [Fact]
+    public void Orphan_without_metadata_is_removed_without_files()
+    {
+        // магнет, у которого метаданные так и не приехали: content_path пуст или равен корню
+        TestEnv.EnsureConf();
+        ModInit.conf.downloadsPath = Path.Combine(Path.GetTempPath(), "qdl-dl-root");
+
+        Assert.True(MayEvictOrphan(Torrent(""), out bool f1));
+        Assert.False(f1);
+
+        Assert.True(MayEvictOrphan(Torrent(ModInit.conf.downloadsPath), out bool f2));
+        Assert.False(f2);   // сам корень удалять нельзя никогда
+    }
+
+    [Fact]
+    public void Orphan_recently_played_is_deferred_not_vetoed()
+    {
+        TestEnv.EnsureConf();
+        ModInit.conf.downloadsPath = Path.Combine(Path.GetTempPath(), "qdl-dl-root");
+        var t = Torrent(Path.Combine(ModInit.conf.downloadsPath, "film.mkv"));
+
+        // смотрят прямо сейчас — не выдёргиваем из-под зрителя
+        Assert.False(MayEvictOrphan(t, out _, new JObject { ["h"] = Now - 720 }));
+
+        // грейс истёк — уходит; счётчик подтверждений при этом не сбрасывался
+        Assert.True(MayEvictOrphan(t, out _, new JObject { ["h"] = Now - 2400 }));
+
+        // грейс 0 — гард выключен
+        Assert.True(MayEvictOrphan(t, out _, new JObject { ["h"] = Now - 10 }, grace: 0));
+    }
+
+    [Fact]
+    public void Orphan_local_marker_pointing_outside_keeps_files()
+    {
+        TestEnv.EnsureConf();
+        ModInit.conf.downloadsPath = Path.Combine(Path.GetTempPath(), "qdl-dl-root");
+
+        var loc = new JObject
+        {
+            ["name"] = "anime",
+            ["size"] = 3L * GiB,
+            ["files"] = new JArray(new JObject
+            {
+                ["index"] = 0,
+                ["name"] = "ep1.mkv",
+                ["path"] = Path.Combine(Path.GetTempPath(), "elsewhere", "ep1.mkv"),
+                ["size"] = 3L * GiB
+            })
+        };
+
+        bool ok = QbitController.ReplicaMayEvictOrphan("h", true,
+            new Dictionary<string, JObject>(), new Dictionary<string, JObject> { ["h"] = loc },
+            new JObject(), Now, 1800, out bool filesOk, out _);
+
+        Assert.True(ok);
+        Assert.False(filesOk);
+    }
+
+    // ── разбор ответа qBittorrent на добавление ───────────────────────────
+
+    [Fact]
+    public void Qbit_add_fails_body_is_not_a_success()
+    {
+        // 🔥 Ровно этим реплика и болела: `IsSuccessStatusCode || 409` читал 200 «Fails.» как
+        // успех, печатал «поставлено в закачку» и молча ретраил добавление каждые пять минут.
+        Assert.Equal(QbitAddStatus.Failed, QbitController.QbitAddOutcome(200, "Fails."));
+    }
+
+    [Fact]
+    public void Qbit_add_outcome_matrix()
+    {
+        Assert.Equal(QbitAddStatus.Added, QbitController.QbitAddOutcome(200, "Ok."));
+        Assert.Equal(QbitAddStatus.Added, QbitController.QbitAddOutcome(200, ""));
+        Assert.Equal(QbitAddStatus.Added, QbitController.QbitAddOutcome(200, null));
+
+        Assert.Equal(QbitAddStatus.Duplicate, QbitController.QbitAddOutcome(409, ""));
+        Assert.Equal(QbitAddStatus.Duplicate, QbitController.QbitAddOutcome(200, "Conflict"));
+
+        // qBit v5 отвечает JSON со счётчиками
+        Assert.Equal(QbitAddStatus.Added, QbitController.QbitAddOutcome(200, "{\"success_count\":1}"));
+        Assert.Equal(QbitAddStatus.Added, QbitController.QbitAddOutcome(200, "{\"pending_count\":1}"));
+        Assert.Equal(QbitAddStatus.Duplicate, QbitController.QbitAddOutcome(200, "{\"duplicate_count\":1}"));
+        Assert.Equal(QbitAddStatus.Failed, QbitController.QbitAddOutcome(200, "{\"failed_count\":1}"));
+
+        Assert.Equal(QbitAddStatus.Failed, QbitController.QbitAddOutcome(403, "Ok."));
+        Assert.Equal(QbitAddStatus.Failed, QbitController.QbitAddOutcome(500, ""));
+    }
+
+    // ── порядок бюджетного выселения ──────────────────────────────────────
+
+    [Fact]
+    public void Evict_order_prefers_activity_then_added_then_oldest()
+    {
+        // 🔴 Прежний код давал записи БЕЗ штампа активности long.MaxValue — она выселялась
+        // последней, ровно наоборот канону. Но и «без штампа = самое старое» неточно:
+        // собственная дата появления у кандидата почти всегда есть, и терять её незачем.
+        Assert.Equal(500, QbitController.ReplicaEvictOrder(500, 100));   // активность важнее
+        Assert.Equal(100, QbitController.ReplicaEvictOrder(0, 100));     // нет активности → дата
+        Assert.Equal(0, QbitController.ReplicaEvictOrder(0, 0));         // нет ничего → первым
+    }
 }

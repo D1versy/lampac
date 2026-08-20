@@ -172,6 +172,14 @@ public partial class QbitController
         string cubMirror = "cub.rip";
         try { cubMirror = CoreInit.conf.cub?.mirror ?? "cub.rip"; } catch { }
 
+        // ── Репликация ── только на реплике: возраст последнего успешного манифеста, блокировки
+        // удаления, недоступность дома или своего qBit.
+        // 🔴 HealthState.Ids.Replica писался из ReplicaSync с самого начала, но строки для него
+        // здесь не было — вердикты копились в реестре и не показывались никому. Дом получает тот
+        // же образ, и вечно-серая строка на его экране была бы шумом, поэтому гейт по роли.
+        if (QbitController.ReplicaMode)
+            AddPassiveRow(arr, HealthState.Ids.Replica, "Репликация", GrpInfra, now, flap);
+
         // ── Метаданные ── наблюдаются прогревом каталога (CatalogWarmup.Fetch) и качалкой постеров
         AddPassiveRow(arr, HealthState.Ids.TmdbApi, "TMDB API", GrpMeta, now, flap);
         AddPassiveRow(arr, HealthState.Ids.TmdbImg, "TMDB картинки", GrpMeta, now, flap);

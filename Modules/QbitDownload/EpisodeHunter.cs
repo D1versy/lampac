@@ -66,9 +66,21 @@ public partial class QbitController
         if (stopAfterMeta) content.Add(new StringContent("MetadataReceived"), "stopCondition");
 
         var r = await c.PostAsync("/api/v2/torrents/add", content);
-        string body = (await r.Content.ReadAsStringAsync())?.Trim() ?? "";
-        if ((int)r.StatusCode == 409 || body.Equals("Conflict", StringComparison.OrdinalIgnoreCase)) return QbitAddStatus.Duplicate;
-        if (!r.IsSuccessStatusCode) return QbitAddStatus.Failed;
+        return QbitAddOutcome((int)r.StatusCode, await r.Content.ReadAsStringAsync());
+    }
+
+    /// <summary>
+    /// Разбор ответа /api/v2/torrents/add. Вынесен отдельно, потому что точек добавления ДВЕ —
+    /// магнет (охота, re-grab, /qdl/add) и .torrent файлом (реплика), — а главная ловушка в них
+    /// общая: 🔴 qBittorrent на НЕУДАЧНОЕ добавление отвечает 200 с телом «Fails.». Наивное
+    /// `IsSuccessStatusCode` читает это как успех, и провал молча ретраится каждый тик вечно.
+    /// </summary>
+    internal static QbitAddStatus QbitAddOutcome(int status, string rawBody)
+    {
+        string body = (rawBody ?? "").Trim();
+
+        if (status == 409 || body.Equals("Conflict", StringComparison.OrdinalIgnoreCase)) return QbitAddStatus.Duplicate;
+        if (status < 200 || status >= 300) return QbitAddStatus.Failed;
         if (body == "Ok." || body.Length == 0) return QbitAddStatus.Added;
         if (body.StartsWith("{"))
         {

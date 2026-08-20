@@ -35,6 +35,12 @@ public partial class QbitController
     static string ReplicaPlayedPath => Path.Combine(ModInit.conf.cachePath, "replica-played.json");
     static readonly object _replicaPlayedLock = new object();
 
+    // Подтверждение пропажи хеша у дома: {hash: {since, misses, name, size}}. Отдельный файл, а
+    // не поле в replica-state.json: состояние тика перезаписывается целиком каждые пять минут,
+    // а здесь копится история наблюдений, терять которую нельзя — на ней держится окно.
+    static string ReplicaOrphansPath => Path.Combine(ModInit.conf.cachePath, "replica-orphans.json");
+    static readonly object _replicaOrphansLock = new object();
+
     // ── шейпер моста: ОДИН на процесс ───────────────────────────────────────────
     // Личный лимит на поток дал бы кратную скорость при параллельных докачках и съел бы
     // домашний аплинк ровно тогда, когда владелец считает, что ограничил его пятью МБ/с.
@@ -241,6 +247,16 @@ public partial class QbitController
             });
         }
 
+        // ── 3б. множество «что вообще есть у дома» ───────────────────────────────
+        // 🔴 Это НЕ то же самое, что torrents+local: там «что реплицировать», и живые
+        // транскод-карточки, доноры охоты и jut-карточки с отвалившимся маунтом туда намеренно
+        // не попадают. Зеркалирование удалений обязано опираться только на known.
+        var homeKnown = ReplicaKnownSet(manifest["known"] as JArray, all.Select(x => x.hash), out string knownWhy);
+
+        // Молчим, если зеркалирование и так выключено: отсутствие known тогда не новость.
+        if (knownWhy != null && !ModInit.conf.replicaMirrorDeletes) knownWhy = null;
+        if (knownWhy != null) Console.WriteLine("[QbitDownload] replica: ⚠️ " + knownWhy);
+
         long budget = Math.Max(1, ModInit.conf.replicaBudgetGb) * GiB;
         long highMark = budget * Math.Clamp(ModInit.conf.replicaHighWatermark, 20, 100) / 100;
 
@@ -336,12 +352,21 @@ public partial class QbitController
         // а карточка без «Продолжить» работает.
         string historyNote = await ReplicaPullHistory(main);
 
-        // ── 8. ротация ───────────────────────────────────────────────────────────
-        int evicted = 0;
+        // ── 8. удаления ──────────────────────────────────────────────────────────
+        // Оба класса под одним fail-safe: манифест получен, версия сошлась, оба источника ok,
+        // набор не съёжился. Зеркало идёт ПЕРВЫМ — освобождённое им место часто уводит
+        // занятость под верхнюю ватерлинию, и бюджетный проход не запускается вовсе.
+        int evicted = 0, mirrored = 0, orphansPending = 0;
         if (allowRotate)
-            evicted = await ReplicaRotate(mine, myLocal, targetSet, highMark);
+        {
+            var (m, pend, gone) = await ReplicaMirrorDeletes(mine, myLocal, homeKnown);
+            mirrored = m;
+            orphansPending = pend;
+
+            evicted = await ReplicaRotate(mine, myLocal, targetSet, highMark, gone);
+        }
         else
-            Console.WriteLine("[QbitDownload] replica: ротация пропущена — " + rotateBlockedWhy);
+            Console.WriteLine("[QbitDownload] replica: удаления пропущены — " + rotateBlockedWhy);
 
         // ── 9. состояние и наблюдаемость ─────────────────────────────────────────
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -350,14 +375,25 @@ public partial class QbitController
         state["planned"] = planned;
         state["bridgePending"] = bridgePending;
         state["rowsSeeded"] = (state.Value<int?>("rowsSeeded") ?? 0) + rowsSeeded;
+        state["orphansPending"] = orphansPending;
+        state["orphansDeleted"] = (state.Value<int?>("orphansDeleted") ?? 0) + mirrored;
+        state["mirror"] = !ModInit.conf.replicaMirrorDeletes ? "выключено"
+            : homeKnown == null ? "нет known"
+            : ModInit.conf.replicaMirrorDryRun ? "dry-run" : "боевой";
+        if (mirrored > 0) state["lastOrphanAt"] = now;
         JsonStore.Write(ReplicaStatePath, state);
 
-        string summary = $"план {target.Count} шт / {Bytes(planned)}; добавлено {added}; мост ждёт {bridgePending}; мета {metaSynced}, постеры {postersSynced}; вычищено {evicted}"
+        string mirrorNote = !ModInit.conf.replicaMirrorDeletes ? ""
+            : homeKnown == null ? "зеркало: нет known; "
+            : $"зеркало −{mirrored}, ждут {orphansPending}; ";
+
+        string summary = $"план {target.Count} шт / {Bytes(planned)}; добавлено {added}; мост ждёт {bridgePending}; мета {metaSynced}, постеры {postersSynced}; {mirrorNote}вычищено {evicted}"
             + (historyNote != null ? "; " + historyNote : "");
         Console.WriteLine("[QbitDownload] replica: " + summary);
 
-        if (allowRotate) HealthState.Ok(HealthState.Ids.Replica);
-        else HealthState.Degraded(HealthState.Ids.Replica, rotateBlockedWhy);
+        if (!allowRotate) HealthState.Degraded(HealthState.Ids.Replica, rotateBlockedWhy);
+        else if (knownWhy != null) HealthState.Degraded(HealthState.Ids.Replica, knownWhy);
+        else HealthState.Ok(HealthState.Ids.Replica);
     }
 
     /// <summary>
@@ -448,8 +484,15 @@ public partial class QbitController
             content.Add(new StringContent("0"), "ratioLimit");
 
             var add = await c.PostAsync("/api/v2/torrents/add", content);
-            bool ok = add.IsSuccessStatusCode || (int)add.StatusCode == 409;
-            Console.WriteLine($"[QbitDownload] replica: + «{it.name}» ({Bytes(it.size)}) — {(ok ? "поставлено в закачку" : "ошибка " + (int)add.StatusCode)}");
+
+            // 🔴 Не IsSuccessStatusCode: qBit на провал отвечает 200 с телом «Fails.», и
+            // прежний код печатал «поставлено в закачку», молча ретраясь каждые пять минут.
+            var outcome = QbitAddOutcome((int)add.StatusCode, await add.Content.ReadAsStringAsync());
+            bool ok = outcome != QbitAddStatus.Failed;
+
+            Console.WriteLine($"[QbitDownload] replica: + «{it.name}» ({Bytes(it.size)}) — "
+                + (ok ? (outcome == QbitAddStatus.Duplicate ? "уже был в qBit" : "поставлено в закачку")
+                      : $"ОШИБКА добавления (http {(int)add.StatusCode})"));
             return ok;
         }
         catch (Exception ex)

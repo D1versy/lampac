@@ -132,6 +132,14 @@ public partial class QbitController
         var torrents = new JArray();
         var local = new JArray();
 
+        // 🔴 known — множество ВСЕХ хешей, о которых дом знает, собранное ДО фильтров назначения.
+        // torrents/local отвечают на вопрос «что реплицировать», а этот — на вопрос «что у дома
+        // вообще есть». Вопросы разные, и путать их опасно: транскод-карточка, донор охоты и
+        // jut-карточка с отвалившимся маунтом ЖИВЫ у дома, но в torrents/local не попадают.
+        // Без known реплика приняла бы их отсутствие за удаление и снесла бы свои копии, а
+        // вернуть транскод нечем — .torrent у дома уже нет, моста для файлов нет тоже.
+        var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         JObject act; lock (_activityLock) act = ActivityLoad();
 
@@ -151,6 +159,15 @@ public partial class QbitController
         }
         catch { }
 
+        // Доноры в манифест не идут, но дом про них знает. Без этой строки коллизия «донор И ЕСТЬ
+        // основная» (EpisodeHunter.cs, PromoteIfDonor вернул false) прятала бы живую основную
+        // раздачу от реплики, и та удалила бы её у себя как сироту.
+        foreach (var dh in donorHashes)
+        {
+            string h = (dh ?? "").ToLowerInvariant();
+            if (ValidHash(h)) known.Add(h);
+        }
+
         try
         {
             using var c = await Qbit();
@@ -159,7 +176,9 @@ public partial class QbitController
             foreach (var t in JArray.Parse(raw))
             {
                 string h = (t.Value<string>("hash") ?? "").ToLowerInvariant();
-                if (!ValidHash(h) || donorHashes.Contains(h)) continue;
+                if (!ValidHash(h)) continue;
+                known.Add(h);                                  // ДО фильтра доноров — см. выше
+                if (donorHashes.Contains(h)) continue;
 
                 double prog = t.Value<double?>("progress") ?? 0;
                 long addedOn = t.Value<long?>("added_on") ?? 0;
@@ -203,6 +222,13 @@ public partial class QbitController
             {
                 string h = Path.GetFileNameWithoutExtension(lf);
                 if (!ValidHash(h)) continue;
+
+                // 🔴 ДО всех фильтров ниже. Здесь лежит транскод-карточка: дом при финализации
+                // удалил торрент ВМЕСТЕ С ФАЙЛАМИ и оставил маркер под тем же хешем, а маркер
+                // транскода объекта "jut" не имеет и отсеивается тремя строками ниже. Для
+                // репликации он не нужен (на реплике играется оригинал торрента), но «дома
+                // этого нет» про него — ложь, и стоила бы она безвозвратной потери карточки.
+                known.Add(h);
 
                 JObject loc = LoadLocal(h);
                 if (loc == null || LocalIsOverlay(loc)) continue;
@@ -260,6 +286,17 @@ public partial class QbitController
             ["rows"] = new JArray(CatalogWarmup.ExportRowPaths().Cast<object>().ToArray()),
             ["notiMaxId"] = NotiMaxIdSafe()
         };
+
+        // 🔴 Fail-closed: неполный known ХУЖЕ отсутствующего. Отсутствие реплика читает как
+        // «зеркалирование недоступно» и не удаляет ничего; неполный она прочитала бы как
+        // «этих хешей у дома нет» — и снесла бы живое. Поле аддитивное, manifestVersion не
+        // меняем: версия сверяется на равенство и при расхождении отменяет тик ЦЕЛИКОМ, то
+        // есть бамп парализовал бы реплику на всё окно деплоя ради необязательной фичи.
+        if (qbitStatus == "ok" && localStatus == "ok")
+        {
+            manifest["known"] = new JArray(known.Cast<object>().ToArray());
+            manifest["knownCount"] = known.Count;
+        }
 
         return ContentTo(manifest.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
     }
