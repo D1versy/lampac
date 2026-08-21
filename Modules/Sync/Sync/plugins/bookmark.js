@@ -152,8 +152,57 @@
         }
 
 
+        // ── D1V (qdl 2.61), ФОРК-ДИФФ — переживать при синках с upstream ──────────────────
+        // Upstream писал `Lampa.Storage.set('favorite', data)` — полный снимок сервера ПОВЕРХ
+        // локального объекта. Пока таблица закладок пуста, это безобидно; как только на сервере
+        // появляется хоть одна строка (у нас — после бэкфилла истории), первый же старт устройства,
+        // которое ещё не успело засеяться, стирал его локальные «Нравится»/«Позже»/«Закладки».
+        // Порядок ведёт сервер (он и есть «свежее»), локальные хвосты дописываются следом.
+        // ⚠️ Осознанная цена слияния: удаление, сделанное ОФФЛАЙН, вернётся с сервера. Онлайн такого
+        // нет — remove уходит на /bookmark/remove сразу же, тем же слушателем, что и add.
+        function mergeBookmarks(local, remote) {
+          local = (local && typeof local === 'object') ? local : {};
+          remote = (remote && typeof remote === 'object') ? remote : {};
+
+          var isArr = function (v) { return Object.prototype.toString.call(v) === '[object Array]'; };
+          var out = {}, k, i;
+          for (k in local) out[k] = local[k];
+
+          for (k in remote) {
+            if (k === 'card') continue;                 // карточки — отдельным проходом ниже
+            var rv = remote[k];
+            if (!isArr(rv)) { out[k] = rv; continue; }
+            var lv = isArr(out[k]) ? out[k] : [];
+            var seen = {}, merged = [];
+            for (i = 0; i < rv.length; i++) { var ri = String(rv[i]); if (seen[ri]) continue; seen[ri] = 1; merged.push(rv[i]); }
+            for (i = 0; i < lv.length; i++) { var li = String(lv[i]); if (seen[li]) continue; seen[li] = 1; merged.push(lv[i]); }
+            out[k] = merged;
+          }
+
+          if (isArr(remote.card)) {
+            var lc = isArr(out.card) ? out.card : [];
+            var have = {}, cards = [];
+            for (i = 0; i < remote.card.length; i++) {
+              var rc = remote.card[i]; if (!rc || rc.id === undefined || rc.id === null) continue;
+              var rid = String(rc.id); if (have[rid]) continue; have[rid] = 1; cards.push(rc);
+            }
+            for (i = 0; i < lc.length; i++) {
+              var lcc = lc[i]; if (!lcc || lcc.id === undefined || lcc.id === null) continue;
+              var lid = String(lcc.id); if (have[lid]) continue; have[lid] = 1; cards.push(lcc);
+            }
+            out.card = cards;
+          }
+
+          return out;
+        }
+
         function applyBookmarks(data) {
-          Lampa.Storage.set('favorite', data);
+          var local;
+          try { local = JSON.parse(localStorage.getItem('favorite') || '{}') || {}; } catch (e) { local = {}; }
+          // ⚠️ Пара «запись + Favorite.read()» обязана быть в ОДНОМ тике: у Favorite свой in-memory
+          // снимок, и первая же его запись клоббернула бы слияние старым состоянием (та же грабля,
+          // что в TimeCode/plugin.js). Здесь меняется только ЧТО пишем, порядок — как в upstream.
+          Lampa.Storage.set('favorite', mergeBookmarks(local, data));
           if (Lampa.Favorite.read) Lampa.Favorite.read(true);
           else Lampa.Favorite.init();
         }

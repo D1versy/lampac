@@ -6,6 +6,7 @@ using Shared.Attributes;
 using System;
 using System.IO;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace QbitDownload;
 
@@ -110,6 +111,38 @@ public class D1VAdminController : BaseController
 
         return Done(Perms.Forget(body.uid));
     }
+
+    #region разовый бэкфилл «Истории просмотров» (qdl 2.61)
+
+    /// <summary>Сухой прогон: что и кому легло бы. В БД не пишется ничего.</summary>
+    [HttpGet]
+    [Route("/admin/d1v/api/history-backfill")]
+    async public Task<ActionResult> HistoryBackfillPreview() => await RunHistoryBackfill(false);
+
+    /// <summary>Применить. Идемпотентно — гонять можно сколько угодно.</summary>
+    [HttpPost]
+    [Route("/admin/d1v/api/history-backfill")]
+    async public Task<ActionResult> HistoryBackfillApply()
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        return await RunHistoryBackfill(true);
+    }
+
+    async Task<ActionResult> RunHistoryBackfill(bool apply)
+    {
+        // 🔴 ТОЛЬКО ДОМ. На реплике запись поставила бы строке updated=now, и домашняя копия
+        // навсегда оказалась бы «старее» (ReplicaHistory.ApplyBookmarks сравнивает именно время) —
+        // то есть история дома перестала бы доезжать сюда вообще. Читать тоже незачем: она
+        // приезжает на реплику сама, ближайшим тиком репликации.
+        if (QbitController.ReplicaMode)
+            return StatusCode(403, new { error = "replica role" });
+
+        SetHeadersNoCache();
+        var report = await QbitController.HistoryBackfillRun(apply);
+        return Content(report.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
+
+    #endregion
 
     public class GrantBody { public string uid { get; set; } public string feature { get; set; } public bool on { get; set; } }
     public class NameBody { public string uid { get; set; } public string name { get; set; } }

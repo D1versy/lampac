@@ -47,6 +47,7 @@
     "ReplicaSync.cs",
     "ReplicaRotate.cs",
     "ReplicaHistory.cs",
+    "HistoryBackfill.cs",
     "Controller.cs"
   ]
 }

@@ -138,3 +138,55 @@ test('без uid ссылки остаются прежними (старый к
   assert.ok(!data.url.includes('uid='));
   assert.strictEqual(data.playlist[0].url, data.url);
 });
+
+// ── сеятель uid в lampainit-invc.js (до загрузки Lampa) ───────────────────
+//
+// qdl 2.61: uid обязан существовать ДО плагинов синка. У нативных оболочек канон живёт в KV
+// (qdl_device_uid), а браузер и Tizen раньше ждали, пока uid заведёт первый дотянувшийся
+// timecode.js — но bookmark.js грузится тем же putScriptAsync-массивом, порядок не гарантирован,
+// а запрос без uid сервер отвергает МОЛЧА (пустой user_uid → success:false с кодом 200).
+
+function seed(opts) {
+  const localStorage = (opts && opts.localStorage) || H.makeStorage();
+  H.loadLampaInit({ localStorage, windowExtra: (opts && opts.windowExtra) || {} });
+  return localStorage.getItem('lampac_unic_id');
+}
+
+function kv(store) {
+  return { get: (k) => (k in store ? store[k] : null), set: (k, v) => { store[k] = String(v); } };
+}
+
+test('браузер без моста получает uid сам', () => {
+  const uid = seed();
+  assert.ok(uid, 'uid должен быть заведён');
+  // первый символ — буква: Lampa.Storage.get парсит чисто цифровую строку как number
+  assert.match(uid, /^d[a-z0-9]{7}$/);
+});
+
+test('существующий uid браузера не перетирается', () => {
+  const ls = H.makeStorage();
+  ls.setItem('lampac_unic_id', 'dexisting');
+  assert.strictEqual(seed({ localStorage: ls }), 'dexisting');
+});
+
+test('с мостом канон берётся из нативного KV, а не генерится заново', () => {
+  const store = { qdl_device_uid: 'dnative1' };
+  const ls = H.makeStorage();
+  ls.setItem('lampac_unic_id', 'dorigin1');   // per-origin значение обязано уступить канону
+
+  assert.strictEqual(seed({ localStorage: ls, windowExtra: { AndroidJS: kv(store) } }), 'dnative1');
+});
+
+test('пустой KV усыновляет uid этого origin', () => {
+  const store = {};
+  const ls = H.makeStorage();
+  ls.setItem('lampac_unic_id', 'dorigin1');
+
+  assert.strictEqual(seed({ localStorage: ls, windowExtra: { AndroidJS: kv(store) } }), 'dorigin1');
+  assert.strictEqual(store.qdl_device_uid, 'dorigin1', 'и становится каноном для всех origin');
+});
+
+test('бросающий AndroidJS.set не мешает старту (поток «Мигрировать» на Android)', () => {
+  const bridge = { get: () => null, set: () => { throw new Error('dumped'); } };
+  assert.doesNotThrow(() => seed({ windowExtra: { AndroidJS: bridge } }));
+});

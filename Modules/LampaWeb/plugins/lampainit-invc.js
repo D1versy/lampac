@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.60';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
+window.qdl_fork_version = '2.61';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
 // Лампа готова для использования
@@ -267,6 +267,20 @@ try {
       try { d1kv.set('qdl_device_uid', d1dev); } catch (e) {}
     }
     if (d1ls !== d1dev) localStorage.setItem('lampac_unic_id', d1dev);
+  }
+  // qdl 2.61 — браузер и Tizen: моста нет, но uid всё равно обязан существовать ДО плагинов.
+  // Раньше его заводил первый же дотянувшийся timecode.js (Lampa.Utils.uid(8)), а bookmark.js
+  // грузится тем же putScriptAsync-массивом — порядок не гарантирован. Запрос без uid сервер
+  // отвергает МОЛЧА (BookmarkController: пустой user_uid → {"success":false} с кодом 200),
+  // то есть закладки и история просто терялись. Формат тот же, что у канона выше.
+  else {
+    var d1web = '';
+    try { d1web = localStorage.getItem('lampac_unic_id') || ''; } catch (e) {}
+    if (!d1web) {
+      d1web = 'd';
+      for (var d1w = 0; d1w < 7; d1w++) d1web += 'abcdefghijklmnopqrstuvwxyz0123456789'.charAt(Math.floor(Math.random() * 36));
+      try { localStorage.setItem('lampac_unic_id', d1web); } catch (e) {}
+    }
   }
 } catch (e) {}
 

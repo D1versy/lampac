@@ -703,4 +703,66 @@ public class ReplicaTests
         Assert.Equal(100, QbitController.ReplicaEvictOrder(0, 100));     // нет активности → дата
         Assert.Equal(0, QbitController.ReplicaEvictOrder(0, 0));         // нет ничего → первым
     }
+
+    // ── применение закладок дома (qdl 2.61) ───────────────────────────────
+    //
+    // До 2.61 таблица bookmarks была пуста, и замена строки целиком была безобидной. С живой
+    // историей она означала бы: всё, что посмотрели через tv2, стирается первым же домашним
+    // обновлением. Инвариант «реплика не пишет в дом» при слиянии цел — поток остаётся односторонним.
+
+    [Fact]
+    public void Bookmarks_merge_keeps_what_was_watched_on_replica()
+    {
+        string home = @"{""history"":[1,2],""card"":[{""id"":1},{""id"":2}]}";
+        string local = @"{""history"":[9],""card"":[{""id"":9}]}";
+
+        var merged = JObject.Parse(QbitController.HistoryMergeBookmarks(local, home));
+
+        // порядок ведёт дом (источник правды), местный хвост дописывается следом
+        Assert.Equal(new[] { "1", "2", "9" }, merged["history"].Select(t => t.ToString()));
+        Assert.Equal(3, ((JArray)merged["card"]).Count);
+    }
+
+    [Fact]
+    public void Bookmarks_merge_prefers_home_card_object()
+    {
+        string home = @"{""history"":[1],""card"":[{""id"":1,""title"":""дом""}]}";
+        string local = @"{""history"":[1],""card"":[{""id"":1,""title"":""реплика""}]}";
+
+        var merged = JObject.Parse(QbitController.HistoryMergeBookmarks(local, home));
+
+        Assert.Single((JArray)merged["card"]);
+        Assert.Equal("дом", merged["card"][0].Value<string>("title"));
+    }
+
+    [Fact]
+    public void Bookmarks_merge_keeps_local_only_categories()
+    {
+        string home = @"{""history"":[1]}";
+        string local = @"{""like"":[42],""history"":[]}";
+
+        var merged = JObject.Parse(QbitController.HistoryMergeBookmarks(local, home));
+
+        Assert.Equal(new[] { "42" }, merged["like"].Select(t => t.ToString()));
+        Assert.Equal(new[] { "1" }, merged["history"].Select(t => t.ToString()));
+    }
+
+    [Fact]
+    public void Bookmarks_merge_falls_back_to_home_on_empty_or_broken_local()
+    {
+        string home = @"{""history"":[1]}";
+
+        Assert.Equal(home, QbitController.HistoryMergeBookmarks(null, home));
+        Assert.Equal(home, QbitController.HistoryMergeBookmarks("", home));
+        Assert.Equal(home, QbitController.HistoryMergeBookmarks("не json", home));
+    }
+
+    [Fact]
+    public void Bookmarks_merge_never_loses_local_when_home_is_empty()
+    {
+        // домашняя строка пустая/битая — местную не трогаем вовсе
+        string local = @"{""history"":[9]}";
+        Assert.Equal(local, QbitController.HistoryMergeBookmarks(local, null));
+        Assert.Equal(local, QbitController.HistoryMergeBookmarks(local, ""));
+    }
 }

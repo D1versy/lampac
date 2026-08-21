@@ -711,6 +711,102 @@
     }
     function baseName(p) { return String(p || '').split('/').pop().split('\\').pop(); }
 
+    // ───────── История просмотров Lampa (favorite.history) ─────────
+    // В бандле историю пишут только торрент-плеер Lampa и плагин «Онлайн», а наши экраны
+    // («Загрузки», jut.su) играют через Lampa.Player.play напрямую — оттого раздел «История
+    // просмотров» и ряд «Продолжить» на главной (Favorite.continues читает ту же history) были пусты.
+    //
+    // Момент записи — СТАРТ воспроизведения, как в upstream, а НЕ открытие экрана: иначе история
+    // превратится в лог блужданий по карточкам. Своего сетевого кода не нужно: Favorite.add шлёт
+    // событие 'add', его подхватывает серверный bookmark.js и уносит на /bookmark/add вместе с uid
+    // устройства. limit 100 — то же число, что у самой Lampa.
+    function noteHistory(card) {
+        try {
+            if (!card) return;
+            var id = card.id;
+            // id === 0 у сервера означает «TMDB id нет» (jut-маркеры, безымянные раздачи) —
+            // такая карточка в истории бесполезна: открывать её будет нечем.
+            if (id === null || id === undefined || id === '' || id === 0 || id === '0') return;
+            Lampa.Favorite.add('history', historyCard(card), 100);
+        } catch (e) {}
+    }
+
+    // 🔴 Нормализация под ожидания Lampa. Вход из истории роутер строит как
+    // `method: data.original_name ? 'tv' : 'movie'`, а наш slimCard полей сериала не несёт вовсе
+    // (только title/original_title) — сериал открылся бы как ФИЛЬМ, то есть ЧУЖИМ объектом TMDB:
+    // у movie и tv id живут в разных пространствах. first_air_date заодно нужен Favorite.continues,
+    // который по нему отличает сериал от фильма в ряду «Продолжить».
+    // Клонируем: карточку нам дают из активности, портить чужой объект нельзя.
+    function historyCard(card) {
+        var c = {}, k;
+        for (k in card) if (Object.prototype.hasOwnProperty.call(card, k)) c[k] = card[k];
+        var isTv = c.media_type === 'tv' || !!c.number_of_seasons || !!c.number_of_episodes || !!c.first_air_date || !!c.name;
+        if (isTv) {
+            if (!c.name) c.name = c.title;
+            if (!c.original_name) c.original_name = c.original_title;
+            if (!c.first_air_date) c.first_air_date = c.release_date;
+        }
+        return c;
+    }
+
+    // Фолбэк, когда карточку в активность не положили (экран восстановлен из истории активностей):
+    // ближайшая вверх по стеку ПОЛНАЯ карточка. Гейт по component==='full' обязателен — иначе
+    // в историю уехала бы случайная карточка чужого экрана, просто оказавшегося ниже в стеке.
+    function activityCard() {
+        try {
+            var list = Lampa.Activity.all() || [];
+            for (var i = list.length - 1; i >= 0; i--) {
+                var o = list[i] || {};
+                if (o.component !== 'full') continue;
+                var c = o.card || o.movie;
+                if (c && c.id) return c;
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    // Карточка тайтла jut.su для истории. TMDB-идентификатора у аниме с jut.su нет (JutSuMatch
+    // сопоставляет с Shikimori/MAL ради ПОСТЕРА, а не с TMDB), а на полной TMDB-карточке кнопки
+    // «смотреть на jut.su» не существует — подставив чужую, мы завели бы вход из истории в тупик.
+    // Слаг едет ВНУТРИ id: Utils.clearCard сохраняет только поля из белого списка card_fields,
+    // произвольного jut_slug там нет, а id/title/img/source — есть.
+    // 🔴 source:'jutsu' ОБЯЗАТЕЛЕН: сканер рекомендаций берёт из истории только карточки с source
+    // из ['cub','tmdb'] — иначе каждый тайтл jut.su давал бы запрос к TMDB по несуществующему id.
+    function jutHistoryCard(slug, title, pv) {
+        if (!slug) return null;
+        return { id: 'jut:' + slug, source: 'jutsu', title: title || slug, img: jutPosterUrl(slug, pv) };
+    }
+    function jutSlugFromCardId(id) {
+        id = String(id === null || id === undefined ? '' : id);
+        return id.indexOf('jut:') === 0 ? id.slice(4) : '';
+    }
+
+    // Вход в jut-карточку из «Истории просмотров». Грид избранного жёстко зовёт
+    // router.call('full', card) — своего onEnter туда не подставить, поэтому ловим на
+    // Lampa.Activity.push, куда этот вызов в итоге и приходит (Activity в бандле — ОДИН
+    // объект-литерал, он же Lampa.Activity, то есть патч виден и внутренним вызовам).
+    // Всё остальное проходит насквозь.
+    function initHistoryRouting() {
+        if (window.__qdl_history_routing) return;
+        try {
+            var push = Lampa.Activity.push;
+            if (typeof push !== 'function') return;
+            window.__qdl_history_routing = true;
+            Lampa.Activity.push = function (object) {
+                try {
+                    var card = object && object.card;
+                    if (object && object.component === 'full' && card && card.source === 'jutsu') {
+                        var slug = jutSlugFromCardId(card.id);
+                        if (slug) return push.call(Lampa.Activity, {
+                            url: '', title: card.title || 'jut.su', component: 'jut_title', jut_slug: slug
+                        });
+                    }
+                } catch (e) {}
+                return push.apply(Lampa.Activity, arguments);
+            };
+        } catch (e) {}
+    }
+
     // ───────── Прогресс просмотра серий (штатный Lampa.Timeline, локально устройству) ─────────
     // Ключ стабилен до/после транскода: infohash сохраняется (маркер наследует hash),
     // база имени сохраняется (меняется только расширение mkv→mp4)
@@ -1169,19 +1265,25 @@
     // Список серий — своя активность (qdl_episodes), а не Select: см. ComponentEpisodes.
     // autoplay=true — сразу играть продолжаемую серию («Продолжить» с карточки): «назад»
     // из плеера при этом возвращает на экран серий, а не на карточку.
-    function chooseEpisode(hash, name, autoplay) {
+    // card — карточка тайтла для «Истории просмотров»: экран серий сам её не знает (activity
+    // здесь наша, а не полная карточка), а писать историю надо в момент старта серии.
+    function chooseEpisode(hash, name, autoplay, card) {
         Lampa.Activity.push({
             url: '', component: 'qdl_episodes', title: 'Серии — ' + (name || ''),
-            qdl_hash: hash, qdl_name: name || '', qdl_autoplay: !!autoplay
+            qdl_hash: hash, qdl_name: name || '', qdl_autoplay: !!autoplay, qdl_hcard: card || null
         });
     }
 
-    function watchByHash(hash, name) {
+    function watchByHash(hash, name, card) {
         fetchEpisodes(hash, function (files) {
             var vids = mergedVideoFiles(files);
-            if (vids.length > 1) chooseEpisode(hash, name);
-            else playLocal(vids.length ? srcHash(vids[0], hash) : hash, vids.length ? vids[0].index : -1, name, vids.length ? vids[0].name : null, vids.length ? vids[0] : null);
-        }, function () { playLocal(hash, -1, name); });
+            // сериал уходит на экран серий — историю там запишет play(), в момент старта конкретной серии
+            if (vids.length > 1) chooseEpisode(hash, name, false, card);
+            else {
+                noteHistory(card);
+                playLocal(vids.length ? srcHash(vids[0], hash) : hash, vids.length ? vids[0].index : -1, name, vids.length ? vids[0].name : null, vids.length ? vids[0] : null);
+            }
+        }, function () { noteHistory(card); playLocal(hash, -1, name); });
     }
 
     // гейт недокачанного: раздача с progress<1 — предупредить, что видна только скачанная часть.
@@ -1198,8 +1300,17 @@
         });
     }
 
-    function watch(item) {
-        confirmPartial(item, function () { watchByHash(item.hash, (item.meta && item.meta.title) || item.name); });
+    // card — настоящая TMDB-карточка, когда она под рукой (зелёная «Смотреть» на полной карточке):
+    // у самой загрузки меты может не быть вовсе — безымянная раздача, привязка ещё не доехала.
+    function watch(item, card) {
+        var hcard = card || item.meta;
+        // jut-маркер: TMDB id у него 0 (у аниме с jut.su его и не бывает), но слаг есть —
+        // историю ведём своей карточкой, иначе скачанное аниме в неё вообще не попадёт.
+        if ((!hcard || !hcard.id) && item && item.jut && item.jut.slug)
+            hcard = jutHistoryCard(item.jut.slug, item.jut.titleRu || item.name);
+        confirmPartial(item, function () {
+            watchByHash(item.hash, (item.meta && item.meta.title) || item.name, hcard);
+        });
     }
 
     // ───────── Открытие загрузки: НАСТОЯЩАЯ полная карточка (вся инфа), но в режиме «одна кнопка» ─────────
@@ -1306,6 +1417,9 @@
         var langBtn = null;
         var hash = object.qdl_hash;
         var name = object.qdl_name || '';
+        // карточка тайтла для «Истории просмотров»: приезжает с активностью (chooseEpisode), а если
+        // экран восстановили из истории активностей — добираем из предыдущей полной карточки.
+        var hcard = object.qdl_hcard || null;
 
         this.vids = [];
         this.audioOpts = [];
@@ -1400,6 +1514,7 @@
         this.play = function (i) {
             var vids = comp.vids, f = vids[i];
             if (!f) return;
+            noteHistory(hcard || activityCard());
             var go = function (audio) {
                 // озвучка выбрана для основной раздачи (vids[0]) — донорским файлам buildPlaylist даст дефолт
                 var playlist = buildPlaylist(hash, vids, audio, srcHash(vids[0], hash));
@@ -2636,7 +2751,7 @@
     // (недосмотренная серия или следующая после досмотренных). Прогресс — Lampa.Timeline (это устройство).
     // Кнопка живёт дольше одного захода на карточку, поэтому создание и ОБНОВЛЕНИЕ разведены:
     // подпись обязана меняться после просмотра, а узел при этом обязан оставаться тем же.
-    function addContinueButton(render, cont, hash, name, gateItem) {
+    function addContinueButton(render, cont, hash, name, gateItem, card) {
         fetchEpisodes(hash, function (files) {
             var vids = mergedVideoFiles(files);
             if (!vids.length) return;
@@ -2654,7 +2769,7 @@
             var b = $('<div class="full-start__button selector qdl-continue-btn">' + CONTINUE_ICON + '<span>' + esc(label) + '</span></div>');
             b.on('hover:enter', function () {
                 // через экран серий с автоплеем: «назад» из плеера вернёт в список серий
-                confirmPartial(gateItem, function () { chooseEpisode(hash, name, true); });
+                confirmPartial(gateItem, function () { chooseEpisode(hash, name, true, card || (gateItem && gateItem.meta)); });
             });
             cont.prepend(b);
             navAppend(cont, b);   // приехала async → в коллекции навигатора её ещё нет
@@ -2682,7 +2797,7 @@
                 if (!cont.length) return;
                 var movie = act.card || {};
                 addContinueButton(render, cont, hash, movie.title || movie.name || '',
-                                  { progress: (typeof act.qdl_progress === 'number' ? act.qdl_progress : 1) });
+                                  { progress: (typeof act.qdl_progress === 'number' ? act.qdl_progress : 1) }, movie);
             } catch (e) {}
         };
         try { Lampa.Listener.follow('activity', function (e) { if (e && e.type === 'start') sync(); }); } catch (e) {}
@@ -2723,7 +2838,7 @@
                     w.on('hover:enter', function () {
                         // progress прокинут из openDownload; нет поля (восстановленная активность) → fail-open
                         confirmPartial({ hash: active.qdl_hash, progress: (typeof active.qdl_progress === 'number' ? active.qdl_progress : 1) },
-                            function () { watchByHash(active.qdl_hash, movie.title || movie.name); });
+                            function () { watchByHash(active.qdl_hash, movie.title || movie.name, movie); });
                     });
                     // удержание (long-press) на кнопке → меню управления (следить/удалить) — для дискаверабилити
                     w.on('hover:long', function () {
@@ -2737,7 +2852,7 @@
                 }
                 // сериал с прогрессом просмотра → вторая кнопка «Продолжить: Серия N»
                 addContinueButton(render, cont, active.qdl_hash, movie.title || movie.name,
-                    { hash: active.qdl_hash, progress: (typeof active.qdl_progress === 'number' ? active.qdl_progress : 1) });
+                    { hash: active.qdl_hash, progress: (typeof active.qdl_progress === 'number' ? active.qdl_progress : 1) }, movie);
                 return;   // НЕ добавляем «Скачать», прочие кнопки скрыты
             }
 
@@ -2770,11 +2885,11 @@
                     if (!hit || $('.qdl-watch-btn', render).length) return;
 
                     var play = $('<div class="full-start__button selector qdl-watch-btn">' + WATCH_ICON + '<span>Смотреть</span></div>');
-                    play.on('hover:enter', function () { watch(hit); });
+                    play.on('hover:enter', function () { watch(hit, movie); });
                     cont.prepend(play);
                     navAppend(cont, play);   // приехала async → в коллекции навигатора её ещё нет
                     orderButtons(cont);
-                    addContinueButton(render, cont, hit.hash, (hit.meta && hit.meta.title) || hit.name, hit);
+                    addContinueButton(render, cont, hit.hash, (hit.meta && hit.meta.title) || hit.name, hit, movie);
                 });
             }
         } catch (err) { console.log('qdl: addButton', err); }
@@ -4081,6 +4196,10 @@
             '&season=' + e.season + '&ep=' + e.ep + '&kind=' + encodeURIComponent(e.kind === 'gameova' ? 'game-ova' : e.kind),
             function (r) {
                 if (!r || !r.ok) { Lampa.Noty.show(jutErrText(r)); return; }
+                // История просмотров — после успешного резолва: серия, которая не поднялась,
+                // в историю попадать не должна. Карточка своя (TMDB id у jut.su нет), вход
+                // из истории вернёт на jut_title через initHistoryRouting.
+                noteHistory(jutHistoryCard(slug, titleName));
                 var on = jutAutopilot();
                 // 🔴 uid дописываем В САМУ строку URL: поток открывает НАТИВНЫЙ плеер
                 // (VLC/ExoPlayer), заголовок или cookie туда не подложить, а история
@@ -4997,6 +5116,7 @@
         try { initTimelineMirror(); } catch (e) {}       // аварийный фолбэк зеркала (режим 'auto', см. qdl 2.18)
         try { initTimecodeBridge(); } catch (e) {}       // перерисовка экрана серий по pull серверных таймкодов
         try { initContinueRefresh(); } catch (e) {}      // «Продолжить» на полной карточке — свежая после возврата
+        try { initHistoryRouting(); } catch (e) {}       // вход в jut-карточку из «Истории просмотров»
         try { initJutAutopilot(); } catch (e) {}         // тумблер автопилота jut.su в хедере (видимость + синк)
         try { initJutSegmentsPrefetch(); } catch (e) {}  // сегменты следующей серии — заранее, к моменту переключения
         try { whenDmca(function () {}); } catch (e) {}   // прогрев DMCA-списка до первого открытия карточки

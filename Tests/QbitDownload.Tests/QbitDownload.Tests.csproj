@@ -92,6 +92,7 @@
     <Compile Include="..\..\Modules\QbitDownload\ReplicaSync.cs" Link="Module\ReplicaSync.cs" />
     <Compile Include="..\..\Modules\QbitDownload\ReplicaRotate.cs" Link="Module\ReplicaRotate.cs" />
     <Compile Include="..\..\Modules\QbitDownload\ReplicaHistory.cs" Link="Module\ReplicaHistory.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\HistoryBackfill.cs" Link="Module\HistoryBackfill.cs" />
 
     <!-- JacRed: линкуем ТОЛЬКО ProxyFallback.cs — он намеренно не обращается ни к ModInit, ни к
          BaseController, поэтому коллизии JacRed.ModInit / QbitDownload.ModInit не возникает.

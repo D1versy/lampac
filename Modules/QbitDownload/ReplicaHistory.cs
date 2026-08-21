@@ -1,9 +1,11 @@
 using Microsoft.Data.Sqlite;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace QbitDownload;
@@ -319,13 +321,30 @@ public partial class QbitController
 
                 if (local != null && !HistoryNewer(upd, local)) continue;
 
+                // Местную строку читаем ДО записи: с qdl 2.61 закладки/история перестали быть
+                // пустыми, и замена строки целиком стирала бы всё, что посмотрели через реплику.
+                string localData = null;
+                if (local != null)
+                {
+                    using var selData = db.CreateCommand();
+                    selData.Transaction = tx;
+                    selData.CommandText = "select data from bookmarks where user=$u limit 1";
+                    selData.Parameters.AddWithValue("$u", user);
+                    localData = selData.ExecuteScalar()?.ToString();
+                }
+
+                string merged = HistoryMergeBookmarks(localData, row.Value<string>("data"));
+
                 using var cmd = db.CreateCommand();
                 cmd.Transaction = tx;
                 cmd.CommandText = local == null
                     ? "insert into bookmarks(user, data, updated) values($u,$d,$up)"
                     : "update bookmarks set data=$d, updated=$up where user=$u";
                 cmd.Parameters.AddWithValue("$u", user);
-                cmd.Parameters.AddWithValue("$d", (object)row.Value<string>("data") ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$d", (object)merged ?? DBNull.Value);
+                // 🔴 Время пишем ДОМАШНЕЕ, а не now: со «своим» временем местная копия оказалась бы
+                // свежее дома, и следующий тик перестал бы привозить новые домашние тайтлы вообще
+                // (та же грабля, что уже закрыта для блобов — время правки переносится с содержимым).
                 cmd.Parameters.AddWithValue("$up", (object)upd ?? DBNull.Value);
                 cmd.ExecuteNonQuery();
                 n++;
@@ -336,6 +355,54 @@ public partial class QbitController
         catch (Exception ex) { Console.WriteLine("[QbitDownload] replica history bookmarks apply: " + ex.Message); }
 
         return n;
+    }
+
+    /// <summary>
+    /// Слияние домашней строки закладок с местной. Инвариант «реплика никогда не пишет в дом» цел:
+    /// поток по-прежнему односторонний, просто применение перестало быть разрушительным.
+    /// Порядок ведёт дом (он источник правды), местные хвосты дописываются следом.
+    /// Пустая/битая местная строка — берём домашнюю как есть.
+    /// </summary>
+    internal static string HistoryMergeBookmarks(string localJson, string remoteJson)
+    {
+        if (string.IsNullOrWhiteSpace(remoteJson)) return localJson;
+        if (string.IsNullOrWhiteSpace(localJson)) return remoteJson;
+
+        JObject local, remote;
+        try { local = JObject.Parse(localJson); remote = JObject.Parse(remoteJson); }
+        catch { return remoteJson; }
+
+        var res = (JObject)local.DeepClone();
+
+        foreach (var p in remote.Properties())
+        {
+            if (p.Name == "card") continue;                     // карточки — отдельным проходом ниже
+
+            if (p.Value is not JArray rv) { res[p.Name] = p.Value.DeepClone(); continue; }
+
+            var lv = res[p.Name] as JArray ?? new JArray();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var merged = new JArray();
+
+            foreach (var t in rv) { string k = t?.ToString(); if (string.IsNullOrEmpty(k) || !seen.Add(k)) continue; merged.Add(t.DeepClone()); }
+            foreach (var t in lv) { string k = t?.ToString(); if (string.IsNullOrEmpty(k) || !seen.Add(k)) continue; merged.Add(t.DeepClone()); }
+
+            res[p.Name] = merged;
+        }
+
+        if (remote["card"] is JArray rc)
+        {
+            var lc = res["card"] as JArray ?? new JArray();
+            var have = new HashSet<string>(StringComparer.Ordinal);
+            var cards = new JArray();
+
+            foreach (var c in rc.OfType<JObject>()) { string id = c["id"]?.ToString(); if (string.IsNullOrEmpty(id) || !have.Add(id)) continue; cards.Add(c.DeepClone()); }
+            foreach (var c in lc.OfType<JObject>()) { string id = c["id"]?.ToString(); if (string.IsNullOrEmpty(id) || !have.Add(id)) continue; cards.Add(c.DeepClone()); }
+
+            res["card"] = cards;
+        }
+
+        return res.ToString(Formatting.None);
     }
 
     /// <summary>
