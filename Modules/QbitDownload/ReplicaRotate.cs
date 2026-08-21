@@ -119,7 +119,7 @@ public partial class QbitController
 
             bool ok = cand.jut
                 ? ReplicaEvictLocal(cand.hash, myLocal[cand.hash])
-                : await ReplicaEvictTorrent(cand.hash, mine);
+                : (await ReplicaEvictTorrent(cand.hash, mine)).ok;
 
             if (!ok) continue;
 
@@ -202,7 +202,14 @@ public partial class QbitController
     /// надо в любом случае (иначе магнет без метаданных стучится в трекер вечно), а вот файлы
     /// без доказательства «они наши» не удаляем никогда.
     /// </param>
-    static async Task<bool> ReplicaEvictTorrent(string hash, Dictionary<string, JObject> mine, bool allowFiles = true, string tag = "бюджет")
+    /// <returns>
+    /// ok — снята ли раздача; filesDropped — были ли РЕАЛЬНО удалены файлы. Второе обязано
+    /// возвращаться наружу: решение про общую папку принимается здесь, внутри, а строку итога
+    /// пишет вызывающий. Пока его не было, журнал противоречил сам себе — «папка общая, файлы
+    /// оставлены», а следующей строкой «удалено … с файлами». Для аудита удалений на удалённой
+    /// машине это худший сорт вранья: по нему делают вывод, что данные потеряны.
+    /// </returns>
+    static async Task<(bool ok, bool filesDropped)> ReplicaEvictTorrent(string hash, Dictionary<string, JObject> mine, bool allowFiles = true, string tag = "бюджет")
     {
         try
         {
@@ -231,7 +238,7 @@ public partial class QbitController
                 new KeyValuePair<string, string>("deleteFiles", dropFiles ? "true" : "false")
             });
             var r = await c.PostAsync("/api/v2/torrents/delete", form);
-            if (!r.IsSuccessStatusCode) return false;
+            if (!r.IsSuccessStatusCode) return (false, false);
 
             if (shared) ReplicaEvictLog($"⚠️ {hash}: папка общая с другой раздачей — снят torrent, файлы оставлены", tag);
 
@@ -239,12 +246,12 @@ public partial class QbitController
             DropResolveCache(hash);
             ActivityRemove(hash);
             DropListCache();   // иначе грид до listCacheSeconds показывает уже снятую раздачу
-            return true;
+            return (true, dropFiles);
         }
         catch (Exception ex)
         {
             Console.WriteLine("[QbitDownload] replica evict " + hash + ": " + ex.Message);
-            return false;
+            return (false, false);
         }
     }
 
@@ -556,15 +563,15 @@ public partial class QbitController
     /// Зеркальный проход. Возвращает (сколько удалено, сколько ждёт подтверждения, что снесено).
     /// homeKnown == null → дом не отдал полный набор, проход не выполняется вовсе.
     /// </summary>
-    static async Task<(int done, int pending, HashSet<string> gone)> ReplicaMirrorDeletes(
+    static async Task<(int done, int pending, HashSet<string> gone, string brakeWhy)> ReplicaMirrorDeletes(
         Dictionary<string, JObject> mine,
         Dictionary<string, JObject> myLocal,
         HashSet<string> homeKnown)
     {
         var gone = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        if (ModInit.conf?.replicaMirrorDeletes != true) return (0, 0, gone);
-        if (homeKnown == null) return (0, 0, gone);   // причину печатает вызывающий
+        if (ModInit.conf?.replicaMirrorDeletes != true) return (0, 0, gone, null);
+        if (homeKnown == null) return (0, 0, gone, null);   // причину печатает вызывающий
 
         var cands = ReplicaOrphanCandidates(mine, myLocal, homeKnown);
 
@@ -572,9 +579,11 @@ public partial class QbitController
                 ModInit.conf.replicaOrphanMaxSharePercent, ModInit.conf.replicaOrphanBrakeMinCount,
                 out string stop))
         {
+            // 🔴 Вердикт здоровья НЕ ставим здесь: он ставится ОДНОЙ точкой в конце тика.
+            // Иначе три места (мало места на диске, нет known, этот тормоз) затирают друг
+            // друга, а успешный тик потом гасит чужое предупреждение вместе со своим.
             ReplicaEvictLog(stop, OrphanTag);
-            HealthState.Degraded(HealthState.Ids.Replica, stop);
-            return (0, cands.Count, gone);
+            return (0, cands.Count, gone, stop);
         }
 
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -665,26 +674,34 @@ public partial class QbitController
 
             if (rec != null && rec["hold"] != null) { rec.Remove("hold"); changed = true; }
 
-            string filesNote = filesOk ? "с файлами" : "без файлов";
             string ageNote = $"нет у дома {Math.Max(1, (now - since) / 60)} мин, тиков {misses}";
 
             if (dry)
             {
-                ReplicaEvictLog($"[dry-run] удалил бы «{name}» {Bytes(size)} {filesNote} ({ageNote})", OrphanTag);
+                // В dry-run про общую папку заранее не знаем — она выясняется только внутри
+                // удаления, поэтому здесь честное «файлы — по обстановке», а не обещание.
+                ReplicaEvictLog($"[dry-run] удалил бы «{name}» {Bytes(size)} ({(filesOk ? "файлы — если папка не общая" : "без файлов")}, {ageNote})", OrphanTag);
                 done++;
                 continue;
             }
 
             if (!filesOk) ReplicaEvictLog($"⚠️ {h}: {why}", OrphanTag);
 
-            bool ok = jut
-                ? ReplicaEvictLocal(h, myLocal[h], filesOk)
-                : await ReplicaEvictTorrent(h, mine, filesOk, OrphanTag);
+            bool ok, filesDropped;
+            if (jut)
+            {
+                ok = ReplicaEvictLocal(h, myLocal[h], filesOk);
+                filesDropped = ok && filesOk;
+            }
+            else
+            {
+                (ok, filesDropped) = await ReplicaEvictTorrent(h, mine, filesOk, OrphanTag);
+            }
 
             if (!ok) continue;
 
             ReplicaForgetArtifacts(h);
-            ReplicaEvictLog($"удалено «{name}» {Bytes(size)} {filesNote} ({ageNote})", OrphanTag);
+            ReplicaEvictLog($"удалено «{name}» {Bytes(size)} {(filesDropped ? "с файлами" : "БЕЗ файлов, они остались на диске")} ({ageNote})", OrphanTag);
 
             gone.Add(h);
             state.Remove(h);
@@ -701,6 +718,6 @@ public partial class QbitController
         if (dry && done > 0)
             Console.WriteLine($"[QbitDownload] replica: 🔸 зеркало в dry-run — удалил бы {done} шт. Журнал: {ReplicaEvictLogPath}. Боевой режим: replicaMirrorDryRun=false");
 
-        return (done, pending, gone);
+        return (done, pending, gone, null);
     }
 }

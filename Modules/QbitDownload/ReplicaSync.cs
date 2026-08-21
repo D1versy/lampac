@@ -301,6 +301,7 @@ public partial class QbitController
 
         // ── 5. добор недостающего ────────────────────────────────────────────────
         int added = 0, bridgePending = 0;
+        string lowDiskWhy = null;
         foreach (var it in target)
         {
             if (mine.ContainsKey(it.hash) || myLocal.ContainsKey(it.hash)) continue;
@@ -318,7 +319,7 @@ public partial class QbitController
             if (!ReplicaHasRoomFor(it.size))
             {
                 Console.WriteLine($"[QbitDownload] replica: нет места под «{it.name}» ({Bytes(it.size)}) — добор остановлен до следующего тика");
-                HealthState.Degraded(HealthState.Ids.Replica, "мало места на диске, добор приостановлен");
+                lowDiskWhy = "мало места на диске, добор приостановлен";
                 break;
             }
 
@@ -357,11 +358,13 @@ public partial class QbitController
         // набор не съёжился. Зеркало идёт ПЕРВЫМ — освобождённое им место часто уводит
         // занятость под верхнюю ватерлинию, и бюджетный проход не запускается вовсе.
         int evicted = 0, mirrored = 0, orphansPending = 0;
+        string brakeWhy = null;
         if (allowRotate)
         {
-            var (m, pend, gone) = await ReplicaMirrorDeletes(mine, myLocal, homeKnown);
+            var (m, pend, gone, brake) = await ReplicaMirrorDeletes(mine, myLocal, homeKnown);
             mirrored = m;
             orphansPending = pend;
+            brakeWhy = brake;
 
             evicted = await ReplicaRotate(mine, myLocal, targetSet, highMark, gone);
         }
@@ -391,9 +394,17 @@ public partial class QbitController
             + (historyNote != null ? "; " + historyNote : "");
         Console.WriteLine("[QbitDownload] replica: " + summary);
 
-        if (!allowRotate) HealthState.Degraded(HealthState.Ids.Replica, rotateBlockedWhy);
-        else if (knownWhy != null) HealthState.Degraded(HealthState.Ids.Replica, knownWhy);
-        else HealthState.Ok(HealthState.Ids.Replica);
+        // 🔴 Вердикт здоровья ставится РОВНО ЗДЕСЬ и больше нигде. Раньше его писали три места
+        // вразнобой, и это давало вечно висящее предупреждение: HealthState.Ok() фиксирует успех,
+        // но флаг деградации НЕ снимает (для этого есть OkDirect). Тормоз массовости однажды
+        // поставил Degraded — и строка «Репликация» осталась жёлтой навсегда, хотя тики давно
+        // проходили штатно. Обратная ошибка так же реальна: успешный тик не должен гасить чужое
+        // предупреждение (мало места), поэтому порядок веток — от самого серьёзного к мелкому.
+        string degradeWhy = !allowRotate ? rotateBlockedWhy
+            : knownWhy ?? brakeWhy ?? lowDiskWhy;
+
+        if (degradeWhy != null) HealthState.Degraded(HealthState.Ids.Replica, degradeWhy);
+        else HealthState.OkDirect(HealthState.Ids.Replica);
     }
 
     /// <summary>
