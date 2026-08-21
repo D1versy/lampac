@@ -2831,11 +2831,40 @@
     // Токен отменяет и «ушёл с экрана», и повторное нажатие: без него оставшийся жить setTimeout
     // через минуту открывал бы плеер поверх того, чем зритель уже занят.
     var liveDayToken = 0;
-    function liveDayCancel() { liveDayToken++; }
+    function liveDayCancel() { liveDayToken++; clearTimeout(liveWarmTimer); }
+
+    // ── Прогрев суток ──
+    // Первый же /qdl/live/day будит на регистраторе склейку ВСЕХ суток, поэтому наводка на камеру —
+    // уже достаточный повод его дёрнуть: пока зритель дочитывает строку и жмёт Enter, день чаще
+    // всего успевает домолоться целиком, и плеер получает полную ленту, а не готовый огрызок.
+    // Дебаунс обязателен: пультом фокус пробегает по всему списку, будить каждую камеру по пути —
+    // это лишний ремукс и лишние гигабайты кэша на регистраторе.
+    var liveWarmTimer = null, liveWarmed = {};
+
+    function liveWarmDay(cam, date) {
+        clearTimeout(liveWarmTimer);
+
+        var key = cam.id + ':' + (date || '');
+        if (liveWarmed[key]) return;
+
+        liveWarmTimer = setTimeout(function () {
+            liveWarmed[key] = 1;
+            req(API + '/qdl/live/day?camera=' + encodeURIComponent(cam.id) + (date ? '&date=' + encodeURIComponent(date) : ''),
+                function () {},
+                function () { delete liveWarmed[key]; });   // не вышло — пусть следующая наводка попробует снова
+        }, 700);
+    }
+
+    // Сколько ждём ПОЛНЫЕ сутки, прежде чем играть готовый префикс. Ремукс идёт ~113× реального
+    // времени, а прогрев выше обычно успевает раньше нажатия — так что ожидание чаще всего нулевое.
+    // Не дождались — играем то, что готово: плейлист всё равно самозавершённый, перемотка по нему
+    // работает, просто лента короче суток.
+    var LIVE_DAY_WAIT_MS = 20000;
 
     function livePlayDay(cam, date, label) {
         var my = ++liveDayToken;
         var tries = 0;
+        var started = Date.now();
 
         // Первый ответ обычно приходит быстро; сообщение показываем, только если готовка затянулась.
         setTimeout(function () {
@@ -2863,6 +2892,12 @@
                     // продолжение (Lampa не предлагает докрутку при percent ≥ 90). Позиция в секундах
                     // остаётся верной — пересчитываем процент от новой длины.
                     if (info.seconds && tl.time > 0) {
+                        // ⚠️ Позиция может оказаться ЗА концом того, что сейчас собрано: вчера день
+                        // досмотрели до конца, сегодня открыли его же, а префикс ещё короче. Плейлист
+                        // самозавершённый, и seek за ENDLIST — это seek за конец потока: плеер либо
+                        // сразу выкинет зрителя, либо встанет. Зажимаем.
+                        if (tl.time > info.seconds - 5) tl.time = Math.max(0, info.seconds - 5);
+
                         tl.duration = info.seconds;
                         tl.percent = Math.min(100, Math.round(tl.time / info.seconds * 100));
                     }
@@ -2880,12 +2915,19 @@
                     if (my !== liveDayToken) return;
                     if (!info || info.error) { stop((info && info.error) || 'Не вышло собрать запись'); return; }
                     if (info.empty) { stop('За этот день записей нет'); return; }
-                    if (info.ready > 0) { fire(info); return; }
+
                     // всё готово, но играть нечего — все куски битые
-                    if (info.complete) { stop('Записи за этот день не читаются'); return; }
+                    if (info.complete && !info.ready) { stop('Записи за этот день не читаются'); return; }
+
+                    // Сутки собраны целиком — обычный случай после прогрева.
+                    if (info.complete) { fire(info); return; }
+
+                    // Ещё домалываются. Ждём полную ленту, но не бесконечно: терпение вышло —
+                    // играем готовый префикс (раньше играли его сразу, и таймлайн был короче суток).
+                    if (info.ready > 0 && (Date.now() - started) >= LIVE_DAY_WAIT_MS) { fire(info); return; }
 
                     if (++tries > 45) { stop('Регистратор слишком долго готовит запись'); return; }
-                    if (tries % 10 === 0) Lampa.Noty.show('Ещё готовлю: ' + info.ready + ' из ' + info.total);
+                    if (tries % 5 === 0) Lampa.Noty.show('Готовлю запись: ' + info.ready + ' из ' + info.total);
                     setTimeout(poll, 2000);
                 },
                 function () {
@@ -3345,7 +3387,8 @@
             var img = el.find('img');
             img.attr('src', withUid(API + '/qdl/live/thumb?id=' + c.thumb));
             img.on('error', function () { this.src = './img/img_broken.svg'; });
-            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            // Наводка будит ремукс суток — к нажатию Enter день обычно уже готов целиком.
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); liveWarmDay(c, date); });
             // Обычный вход = весь день одной записью. Разбивка на куски осталась запасным путём
             // (долгое нажатие) — на случай, если склейка почему-то не собралась.
             el.on('hover:enter', function () { livePlayDay(c, date, currentLabel); });

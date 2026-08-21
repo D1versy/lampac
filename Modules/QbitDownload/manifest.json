@@ -14,6 +14,7 @@
     "FfWorker.cs",
     "TorrentScoring.cs",
     "EpisodeHunter.cs",
+    "LiveTs.cs",
     "Live.cs",
     "Warmup.cs",
     "CatalogWarmup.cs",

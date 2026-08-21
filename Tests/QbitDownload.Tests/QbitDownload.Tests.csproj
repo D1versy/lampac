@@ -56,6 +56,9 @@
     <Compile Include="..\..\Modules\QbitDownload\FfWorker.cs" Link="Module\FfWorker.cs" />
     <Compile Include="..\..\Modules\QbitDownload\TorrentScoring.cs" Link="Module\TorrentScoring.cs" />
     <Compile Include="..\..\Modules\QbitDownload\EpisodeHunter.cs" Link="Module\EpisodeHunter.cs" />
+    <!-- LiveTs.cs — чистая работа с байтами MPEG-TS, ни ModInit, ни BaseController: линкуется
+         (в отличие от Live.cs, который тянет за собой контроллер). -->
+    <Compile Include="..\..\Modules\QbitDownload\LiveTs.cs" Link="Module\LiveTs.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Warmup.cs" Link="Module\Warmup.cs" />
     <Compile Include="..\..\Modules\QbitDownload\AppReplace.cs" Link="Module\AppReplace.cs" />
     <Compile Include="..\..\Modules\QbitDownload\CatalogWarmup.cs" Link="Module\CatalogWarmup.cs" />

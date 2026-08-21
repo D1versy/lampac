@@ -503,7 +503,7 @@ public partial class QbitController
 
     sealed class LiveDayBuild
     {
-        // Плейлист хранится с плейсхолдером {d1v} в сегментных строках: ключ периметра у каждого
+        // Плейлист хранится с плейсхолдерами {?d1v}/{&d1v} в сегментных строках: ключ периметра у каждого
         // зрителя свой (и в LAN его нет), а кэш общий — подставляем на отдаче, не в кэше.
         public string playlist;
         public double seconds;      // длительность готовой части
@@ -561,6 +561,47 @@ public partial class QbitController
         }
 
         return segs;
+    }
+
+    // База PTS записи: первая метка её первого сегмента. Нужна, чтобы сдвинуть кусок ровно на его
+    // смещение в сутках (LiveTs). Кэш вечный и по записи, а не по дню: сегменты записи неизменны,
+    // ремукс детерминированный (-c copy), так что даже после уборки TTL-кэша регистратора и
+    // повторного ремукса метка будет та же. Запись — int → long?, реестр ничтожно мал.
+    // ⚠️ Отрицательный ответ кэшируем тоже, иначе битая запись переспрашивалась бы на каждой сборке.
+    static readonly ConcurrentDictionary<int, long?> _livePtsBase = new();
+
+    async Task<long?> LiveRecPtsBase(int rec, CancellationToken ct)
+    {
+        if (_livePtsBase.TryGetValue(rec, out var hit))
+            return hit;
+
+        long? pts = null;
+        try
+        {
+            // Тянем ПЕРВЫЕ 64 КБ: качать трёхмегабайтный сегмент ради одной метки незачем, а
+            // /hls/_vod/ регистратор отдаёт статикой через nginx с честным 206.
+            using var req = new HttpRequestMessage(HttpMethod.Get, LiveBase() + $"/hls/_vod/{rec}/seg_00000.ts");
+            req.Headers.TryAddWithoutValidation("Range", "bytes=0-65535");
+
+            await _liveGate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                using var resp = await _liveApi.SendAsync(req, ct).ConfigureAwait(false);
+                if (resp.IsSuccessStatusCode)
+                    pts = LiveTs.FirstPts(await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false));
+            }
+            finally { _liveGate.Release(); }
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            // Не кэшируем: сбой сети — не приговор записи, на следующей сборке переспросим.
+            Serilog.Log.Warning("[qdl/live] pts base {Rec}: {Error}", rec, ex.Message);
+            return null;
+        }
+
+        _livePtsBase[rec] = pts;
+        return pts;
     }
 
     /// <summary>Статус ремукса у регистратора: id записи → (готова, битая).</summary>
@@ -652,39 +693,62 @@ public partial class QbitController
             parts.Add(segs);
         }
 
+        // Смещение каждого куска в сутках + признак «его метки удастся сдвинуть». С ними сегменты
+        // отдаются уже приведёнными к сквозному времени дня, и разрыв (а с ним и EXT-X-DISCONTINUITY,
+        // на котором libVLC терял глобальную позицию) исчезает вовсе — разбор в LiveTs.cs.
         double maxSeg = 0, total = 0;
-        foreach (var p in parts)
+        var offsets = new double[parts.Count];
+        var shifted = new bool[parts.Count];
+
+        for (int i = 0; i < parts.Count; i++)
         {
-            foreach (var s in p)
+            offsets[i] = total;
+            foreach (var s in parts[i])
             {
                 if (s.dur > maxSeg) maxSeg = s.dur;
                 total += s.dur;
             }
+            shifted[i] = parts[i].Count > 0
+                && (await LiveRecPtsBase(parts[i][0].rec, ct).ConfigureAwait(false)) != null;
         }
 
         var sb = new StringBuilder();
         sb.Append("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-INDEPENDENT-SEGMENTS\n");
         sb.Append("#EXT-X-TARGETDURATION:").Append(Math.Max(12, (int)Math.Ceiling(maxSeg))).Append('\n');
         sb.Append("#EXT-X-MEDIA-SEQUENCE:0\n");
-        sb.Append("#EXT-X-PLAYLIST-TYPE:").Append(complete ? "VOD" : "EVENT").Append('\n');
 
-        // {d1v} — место под ключ периметра, подставляется на КАЖДОЙ отдаче (см. LiveSignDay).
-        // Нативные плееры (VLC) резолвят относительные URI без query базового URL (RFC 3986),
-        // поэтому снаружи ключ обязан стоять в самой сегментной строке — как в /qdl/hls.
+        // Плейлист ВСЕГДА самозавершённый, даже когда сутки ещё домалываются и внутри лежит только
+        // готовый префикс. EVENT без ENDLIST libVLC считает эфиром: length=0, ползунок схлопывается
+        // в 0..1, драг-скраб мёртв, а Android вдобавок ВЫБРАСЫВАЕТ позицию просмотра
+        // (finishWithResult требует pos>0 && dur>0). Ради «лента растёт сама» это слишком дорого;
+        // префикс догоняет сутки прогревом. Стабильность порядка сегментов между перечитываниями
+        // больше не нужна: VOD-плейлист плеер не перечитывает.
+        sb.Append("#EXT-X-PLAYLIST-TYPE:VOD\n");
+
+        // {?d1v} / {&d1v} — место под ключ периметра и айди устройства, подставляется на КАЖДОЙ
+        // отдаче (см. LiveSignDay). Нативные плееры (VLC) резолвят относительные URI без query
+        // базового URL (RFC 3986), поэтому снаружи ключ обязан стоять в самой сегментной строке.
+        // Плейсхолдера ДВА: у сдвинутых кусков в строке уже есть ?o=, и разделитель обязан стать
+        // амперсандом.
         for (int i = 0; i < parts.Count; i++)
         {
-            if (i > 0)
+            // Сдвинуть не вышло (кусок не разобрался) — честно возвращаем разрыв для ЭТОГО шва:
+            // деградация до прежнего поведения на одном стыке лучше, чем поехавший таймлайн.
+            if (i > 0 && !(shifted[i] && shifted[i - 1]))
                 sb.Append("#EXT-X-DISCONTINUITY\n");
+
+            string tail = shifted[i]
+                ? "?o=" + offsets[i].ToString("0.#####", CultureInfo.InvariantCulture) + "{&d1v}"
+                : "{?d1v}";
 
             foreach (var s in parts[i])
             {
                 sb.Append("#EXTINF:").Append(s.dur.ToString("0.#####", CultureInfo.InvariantCulture)).Append(",\n");
-                sb.Append("/qdl/live/seg/").Append(s.rec).Append('/').Append(s.name).Append("{d1v}\n");
+                sb.Append("/qdl/live/seg/").Append(s.rec).Append('/').Append(s.name).Append(tail).Append('\n');
             }
         }
 
-        if (complete)
-            sb.Append("#EXT-X-ENDLIST\n");
+        sb.Append("#EXT-X-ENDLIST\n");
 
         var build = new LiveDayBuild
         {
@@ -701,9 +765,17 @@ public partial class QbitController
     }
 
     /// <summary>Подставить query предъявителя в сегментные строки (в LAN без прав — просто убрать плейсхолдер).</summary>
+    /// <remarks>
+    /// 🔴 Плейсхолдера ДВА. У сдвинутых кусков в строке уже стоит ?o=&lt;смещение&gt;, и подстановка
+    /// через ? дала бы «?o=123?d1v=…»: второй знак вопроса ушёл бы в имя параметра, ключ периметра
+    /// не распознался бы, и снаружи каждый сегмент ловил бы 404.
+    /// </remarks>
     string LiveSignDay(string playlist)
     {
-        return playlist.Replace("{d1v}", LiveSegQuery());
+        string q = LiveSegQuery();                                   // "" | "?d1v=…&uid=…"
+        string amp = q.Length == 0 ? "" : "&" + q.Substring(1);
+
+        return playlist.Replace("{?d1v}", q).Replace("{&d1v}", amp);
     }
 
     /// <summary>
@@ -843,16 +915,82 @@ public partial class QbitController
 
     static readonly Regex _liveSegRx = new Regex(@"^seg_\d{1,6}\.ts$", RegexOptions.Compiled);
 
+    /// <param name="o">
+    /// Смещение куска в сутках, секунды. Есть — метки сегмента приводятся к сквозному времени дня
+    /// (LiveTs). Нет (-1) — старый путь байт-в-байт: так помечены швы, для которых базу PTS достать
+    /// не вышло, и там в плейлисте честно стоит EXT-X-DISCONTINUITY.
+    /// </param>
     [HttpGet, AllowAnonymous]
     [Route("qdl/live/seg/{rec:int}/{file}")]
-    async public Task<ActionResult> LiveSegment(int rec, string file)
+    async public Task<ActionResult> LiveSegment(int rec, string file, double o = -1)
     {
         if (LiveDenied(Perms.FeatureRec)) return NotFound();
 
         if (rec <= 0 || file == null || !_liveSegRx.IsMatch(file))
             return BadRequest();
 
-        return await LiveProxy($"/hls/_vod/{rec}/{file}", passRange: true, timeout: TimeSpan.FromSeconds(60)).ConfigureAwait(false);
+        string path = $"/hls/_vod/{rec}/{file}";
+
+        // Санация o: значение приходит из URL. Больше суток — заведомо не наш плейлист;
+        // сдвигать не станем, отдадим как есть (испортить этим можно только свой же таймлайн,
+        // но молчаливо принимать мусор незачем).
+        if (o < 0 || o > 172800 || double.IsNaN(o))
+            return await LiveProxy(path, passRange: true, timeout: TimeSpan.FromSeconds(60)).ConfigureAwait(false);
+
+        return await LiveSegmentShifted(path, rec, o).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Сегмент со сдвинутыми метками — кирпич «сквозного таймлайна суток».
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ Range здесь НЕ форвардим и не объявляем: тело переписывается целиком, и байтовые диапазоны
+    /// исходника к нему уже не относятся (отдать по чужому Range кусок переписанного файла — верный
+    /// способ получить рассыпающееся видео). Плееры TS-сегменты по Range и не берут, качают целиком
+    /// (~3 МБ), поэтому терять тут нечего.
+    /// ⚠️ Буферизуем ЦЕЛИКОМ, а не потоково: метка может лежать на границе пакетов, а разбирать TS
+    /// по кускам ради 3 МБ — сложность без выигрыша.
+    /// </remarks>
+    async Task<ActionResult> LiveSegmentShifted(string path, int rec, double offsetSec)
+    {
+        var ct = HttpContext.RequestAborted;
+
+        long? basePts;
+        byte[] body;
+        try
+        {
+            basePts = await LiveRecPtsBase(rec, ct).ConfigureAwait(false);
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(60));
+
+            using var resp = await _liveMedia.GetAsync(LiveBase() + path, cts.Token).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return StatusCode((int)resp.StatusCode);
+
+            body = await resp.Content.ReadAsByteArrayAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return new EmptyResult();   // ушёл клиент / перемотка оборвала запрос
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning("[qdl/live] seg {Path}: {Error}", path, ex.Message);
+            return StatusCode(502);
+        }
+
+        // База не достаётся (запись битая, ремукс снесли) — отдаём байт-в-байт: пусть таймлайн на
+        // этом куске поедет, но видео у зрителя не пропадёт.
+        if (basePts != null)
+            LiveTs.Shift(body, LiveTs.Delta(LiveTs.Ticks(offsetSec), basePts.Value));
+
+        Response.Headers["Accept-Ranges"] = "none";
+        // Кэшировать у клиента можно и нужно (URL содержит и запись, и смещение — байты по нему
+        // неизменны), но только приватно: в URL стоит айди устройства.
+        Response.Headers["Cache-Control"] = "private, max-age=3600";
+
+        return File(body, "video/mp2t");
     }
 
     #endregion
