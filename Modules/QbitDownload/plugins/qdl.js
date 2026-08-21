@@ -1518,8 +1518,17 @@
             var go = function (audio) {
                 // озвучка выбрана для основной раздачи (vids[0]) — донорским файлам buildPlaylist даст дефолт
                 var playlist = buildPlaylist(hash, vids, audio, srcHash(vids[0], hash));
-                Lampa.Player.play(playlist[i]);      // сам элемент плейлиста: его timeline пишет прогресс
-                Lampa.Player.playlist(playlist);
+                // 🔴 Играем ОТДЕЛЬНЫЙ объект, а не playlist[i]: плейлист обязан лежать НА объекте
+                // до play (нативная ветка сериализует data синхронно внутри Player.play, а
+                // Player.playlist() до нативов не доезжает — см. jutPlay), но item.playlist на
+                // элементе самого массива дал бы цикл и JSON.stringify бросил бы. url — ТА ЖЕ
+                // строка: нативы ищут текущий индекс точным сравнением. timeline — общий ref
+                // с элементом плейлиста: его и пишет прогресс (обратной ссылки в нём нет).
+                var item = { title: playlist[i].title, url: playlist[i].url };
+                if (playlist[i].timeline) item.timeline = playlist[i].timeline;
+                item.playlist = playlist;
+                Lampa.Player.play(item);
+                Lampa.Player.playlist(playlist);     // веб-плеер: ручное переключение серий остаётся
                 warmupNext(hash, vids, f);           // следующая серия — в page cache, пока смотрят эту
             };
             if (comp.audioReady) go(comp.audio); else askAudio(go);
@@ -4211,7 +4220,6 @@
                 // модуль Segments сам скипнет в режиме auto. duration_ms НЕ кладём — с ним
                 // бандл «подгоняет» метки, а наши секунды точны для этого файла.
                 if (on && r.segments) item.segments = r.segments;
-                if (!on) item.qdl_no_autonext = true;
 
                 try {
                     // Плейлист сезона — чтобы работал автопереход к следующей серии.
@@ -4240,7 +4248,6 @@
                             if (on) pi.segmentsUrl = API + '/qdl/jut/segments?t=' + encodeURIComponent(x.tok);
                         }
                         if (x.key === e.key && item.segments) pi.segments = item.segments;
-                        if (!on) pi.qdl_no_autonext = true;
                         return pi;
                     });
 
@@ -4249,8 +4256,9 @@
                     // андроид — наши оболочки всегда идут по ней) сериализует data синхронно
                     // внутри Player.play, а Player.playlist() отрабатывает уже после — до
                     // нативов список так и не доезжал, и автоперехода у них не было вовсе.
-                    // При выключенном автопилоте не кладём вовсе: это и есть гейт для нативов.
-                    if (on) item.playlist = plist;
+                    // С 2.62 кладём всегда: автопереход управляется штатным playlist_next
+                    // (как в «Загрузках»), автопилот («2 стрелочки») — только про опенинги.
+                    item.playlist = plist;
 
                     jutActivePlaylist = on ? plist : null;
                     Lampa.Player.play(item);

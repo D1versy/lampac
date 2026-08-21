@@ -121,7 +121,10 @@ test('hover:enter на строке играет соответствующий 
   const rows = rowsOf(m);
   m.r.$(rows[2]).trigger('hover:enter');
   assert.strictEqual(m.calls.plays.length, 1);
-  assert.strictEqual(m.calls.plays[0], m.calls.playlists[0][2], 'играется САМ элемент плейлиста');
+  // 2.62: играется ОТДЕЛЬНЫЙ объект с тем же url (на нём едет playlist для нативов;
+  // сам элемент массива дал бы цикл при сериализации) — сверяем по url, не по identity
+  assert.strictEqual(m.calls.plays[0].url, m.calls.playlists[0][2].url, 'играется 3-й элемент (тот же url)');
+  assert.notStrictEqual(m.calls.plays[0], m.calls.playlists[0][2], 'но отдельным объектом');
   assert.ok(m.calls.plays[0].url.indexOf('hash=dddd') !== -1, 'донорская серия — с донорского hash');
   assert.strictEqual(m.calls.selects.length, 0, 'одна дорожка/нет дорожек → без вопроса об озвучке');
 });
@@ -187,7 +190,7 @@ test('autoplay: играет продолжаемую серию и гаснет
     before: (lampa) => { lampa.Timeline.view(lampa.Utils.hash(HASH + ':Ep02')).percent = 40; },
   });
   assert.strictEqual(m.calls.plays.length, 1, 'плей стартовал сам');
-  assert.strictEqual(m.calls.plays[0], m.calls.playlists[0][1], 'играется продолжаемая (2-я)');
+  assert.strictEqual(m.calls.plays[0].url, m.calls.playlists[0][1].url, 'играется продолжаемая (2-я)');
   assert.strictEqual(m.obj.qdl_autoplay, false, 'флаг одноразовый');
 });
 
@@ -204,7 +207,7 @@ test('autoplay: продолжать нечего → первая НЕпрос�
   });
   // всё досмотрено → начинаем сначала, но это осознанный фолбэк
   assert.strictEqual(m.calls.plays.length, 1);
-  assert.strictEqual(m.calls.plays[0], m.calls.playlists[0][0], 'всё просмотрено → с начала');
+  assert.strictEqual(m.calls.plays[0].url, m.calls.playlists[0][0].url, 'всё просмотрено → с начала');
 });
 
 test('autoplay: пропущенная в середине серия важнее первой', () => {
@@ -216,7 +219,7 @@ test('autoplay: пропущенная в середине серия важне
       // 2-ю не смотрели, при этом 3-я досмотрена → chooseContinue пуст, но 1-я НЕ вариант
     },
   });
-  assert.strictEqual(m.calls.plays[0], m.calls.playlists[0][1], 'играем пропущенную 2-ю');
+  assert.strictEqual(m.calls.plays[0].url, m.calls.playlists[0][1].url, 'играем пропущенную 2-ю');
 });
 
 // ─────────────────────────────── обновление отметок ───────────────────────────────

@@ -170,15 +170,17 @@ test('автопилот ВКЛ: у соседних серий есть адр�
   assert.strictEqual(next.segments, undefined, 'разметка соседей приезжает префетчем/нативом');
 });
 
-test('автопилот ВЫКЛ: нативам плейлист не уходит, автонекст глушится флагом', () => {
+test('автопилот ВЫКЛ: автопереход остаётся, глушится только опенинг', () => {
+  // 2.62: тумблер развязан — плейлист кладётся всегда (автонекст управляется штатным
+  // playlist_next), автопилот отвечает только за разметку/пропуск опенингов.
   const seen = runPlay(false);
 
-  assert.strictEqual(seen.atPlay.playlist, undefined, 'это и есть гейт для нативных плееров');
+  assert.ok(Array.isArray(seen.atPlay.playlist), 'плейлист уходит нативам и без тумблера');
+  assert.strictEqual(seen.atPlay.playlist.length, 3);
   assert.strictEqual(seen.atPlay.segments, undefined, 'опенинг не пропускаем');
-  assert.strictEqual(seen.atPlay.qdl_no_autonext, true);
-  assert.ok(seen.playlistArg.every((x) => x.qdl_no_autonext === true),
-    'флаг нужен каждому элементу: при select он станет текущим');
-  assert.ok(seen.playlistArg.every((x) => x.segmentsUrl === undefined));
+  assert.strictEqual(seen.atPlay.qdl_no_autonext, undefined, 'флага-гейта больше не существует');
+  assert.ok(seen.atPlay.playlist.every((x) => x.segmentsUrl === undefined),
+    'разметку опенингов без тумблера не тянем');
   assert.strictEqual(seen.playlistArg.length, 3, 'ручное переключение серий остаётся');
 });
 

@@ -177,8 +177,13 @@ test('chooseEpisode: пушит экран серий (qdl_episodes), плеер
 
   inst.play(2);
   assert.ok(played && playlist, 'играем и плейлист передан');
-  assert.strictEqual(played, playlist[2], 'играется САМ элемент плейлиста (общий инстанс timeline)');
+  // 2.62: играется ОТДЕЛЬНЫЙ объект (несёт playlist для нативов, цикла нет),
+  // но timeline — общий инстанс с элементом плейлиста: прогресс пишется в одно место
+  assert.strictEqual(played.url, playlist[2].url, 'играется 3-й элемент (тот же url)');
+  assert.notStrictEqual(played, playlist[2], 'отдельным объектом');
+  assert.strictEqual(played.playlist, playlist, 'плейлист лежит на объекте — для нативов');
   assert.ok(played.timeline, 'у элемента есть timeline');
+  assert.strictEqual(played.timeline, playlist[2].timeline, 'timeline — общий инстанс');
   assert.strictEqual(played.timeline, lampa.Timeline.view(lampa.Utils.hash(h + ':Ep03')), 'timeline привязан к серии');
 });
 
