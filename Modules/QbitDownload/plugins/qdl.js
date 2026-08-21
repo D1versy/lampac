@@ -2955,6 +2955,38 @@
         Lampa.Player.playlist(playlist);
     }
 
+    // Список дней просим на всю глубину архива регистратора (30 суток), иначе сервер режет
+    // окно по liveDaysBack=14 — ровно это и выглядело как «записи только за текущий месяц».
+    var LIVE_DAYS_BACK = 31;
+
+    /// Выбор дня одним списком (используют и экран дня, и лента). onPick(dateKey).
+    function livePickDay(currentDate, onPick) {
+        var net = new Lampa.Reguest();
+        net.silent(withUid(API + '/qdl/live/days?back=' + LIVE_DAYS_BACK), function (r) {
+            var days = (r && r.days) || [];
+            if (!days.length) { Lampa.Noty.show('Список дней пуст'); return; }
+            Lampa.Select.show({
+                title: 'Какой день показать?',
+                items: days.map(function (d) {
+                    return {
+                        title: d.label + (d.count
+                            ? '   ·   ' + d.count + ' ' + livePlural(d.count, 'запись', 'записи', 'записей') + ' с ' + d.cameras + ' ' + livePlural(d.cameras, 'камеры', 'камер', 'камер')
+                            : '   ·   записей нет'),
+                        date: d.date,
+                        selected: d.date === currentDate
+                    };
+                }),
+                onSelect: function (a) { Lampa.Controller.toggle('content'); onPick(a.date); },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }, function () { Lampa.Noty.show('Видеорегистратор не отвечает'); });
+    }
+
+    /// Лента всех записей: свежие сверху, старые подтягиваются прокруткой.
+    function openRecFeed() {
+        Lampa.Activity.push({ url: '', title: 'Все записи', component: 'qdl_rec_feed', page: 1 });
+    }
+
     // ── D1versy Live: ЭФИР — сетка подключённых камер ──
     // Тайл = живой кадр (обновляется сам) + имя + статус. Enter — эфир камеры фуллскрином
     // в плеере (rolling-HLS через наш прокси /qdl/live/watch/*). Поток на регистраторе общий
@@ -3289,6 +3321,10 @@
 
             var bar = dayBar(r);
             body.append(bar);
+            // День переехал из средней кнопки сюда: сама кнопка теперь открывает ленту
+            // всех записей (жалоба «до прошлого месяца надо доклацывать стрелками»).
+            if (r.label || currentLabel)
+                body.append($('<div style="padding:.1em 1.6em .3em;font-size:1.35em;font-weight:600">' + esc(r.label || currentLabel) + '</div>'));
 
             if (r.error)
                 body.append(liveMsg('⚠️ ' + r.error));
@@ -3299,7 +3335,7 @@
                 if (!autoJumped && !userTouched && !object.qdl_date) {
                     autoJumped = true;
                     body.append(liveMsg('За сегодня записей нет — ищу последний день с записями…'));
-                    network.silent(withUid(API + '/qdl/live/days'), function (dr) {
+                    network.silent(withUid(API + '/qdl/live/days?back=' + LIVE_DAYS_BACK), function (dr) {
                         if (comp.destroyed) return;
                         var target = null;
                         ((dr && dr.days) || []).forEach(function (d) { if (!target && d.count > 0) target = d; });
@@ -3333,7 +3369,7 @@
             var canNext = !!(date && today && date < today);
             var bar = $('<div style="display:flex;align-items:center;gap:.7em;padding:1.2em 1.4em .5em"></div>');
             var prev = $('<div class="selector qdl-btn-focus" style="padding:.65em 1.1em;background:rgba(255,255,255,.08);border-radius:.6em;font-size:1.4em">◀</div>');
-            var day = $('<div class="selector qdl-btn-focus qdl-live-day" style="flex:1;text-align:center;padding:.65em 1.2em;background:rgba(255,255,255,.13);border-radius:.6em;font-size:1.5em;font-weight:600">📅 ' + esc(r.label || 'Выбрать день') + '</div>');
+            var day = $('<div class="selector qdl-btn-focus qdl-live-day" style="flex:1;text-align:center;padding:.65em 1.2em;background:rgba(255,255,255,.13);border-radius:.6em;font-size:1.5em;font-weight:600">📅 Все записи</div>');
             var next = $('<div class="selector qdl-btn-focus" style="padding:.65em 1.1em;background:rgba(255,255,255,' + (canNext ? '.08' : '.03') + ');border-radius:.6em;font-size:1.4em;opacity:' + (canNext ? '1' : '.35') + '">▶</div>');
 
             prev.on('hover:enter', function () { userTouched = true; date = liveShift(date || today, -1); reload(); });
@@ -3343,7 +3379,7 @@
                 date = liveShift(date, 1);
                 reload();
             });
-            day.on('hover:enter', function () { userTouched = true; pickDay(); });
+            day.on('hover:enter', function () { openRecFeed(); });
 
             [prev, day, next].forEach(function (el) {
                 el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
@@ -3353,24 +3389,7 @@
         }
 
         function pickDay() {
-            network.silent(withUid(API + '/qdl/live/days'), function (r) {
-                var days = (r && r.days) || [];
-                if (!days.length) { Lampa.Noty.show('Список дней пуст'); return; }
-                Lampa.Select.show({
-                    title: 'Какой день показать?',
-                    items: days.map(function (d) {
-                        return {
-                            title: d.label + (d.count
-                                ? '   ·   ' + d.count + ' ' + livePlural(d.count, 'запись', 'записи', 'записей') + ' с ' + d.cameras + ' ' + livePlural(d.cameras, 'камеры', 'камер', 'камер')
-                                : '   ·   записей нет'),
-                            date: d.date,
-                            selected: d.date === date
-                        };
-                    }),
-                    onSelect: function (a) { Lampa.Controller.toggle('content'); date = a.date; reload(); },
-                    onBack: function () { Lampa.Controller.toggle('content'); }
-                });
-            }, function () { Lampa.Noty.show('Видеорегистратор не отвечает'); });
+            livePickDay(date, function (d) { userTouched = true; date = d; reload(); });
         }
 
         function camRow(c) {
@@ -3536,6 +3555,167 @@
         this.pause = function () { liveDayCancel(); };
         this.stop = function () { liveDayCancel(); };
         this.destroy = function () { liveDayCancel(); network.clear(); scroll.destroy(); html.remove(); };
+    }
+
+    // ── D1versy Rec: СКВОЗНАЯ ЛЕНТА ЗАПИСЕЙ ──
+    // Жалоба владельца: «все записи отображаются только за текущий месяц, чтобы выбрать месяц
+    // назад надо руками стрелочки клацать». Навигация в Rec крутилась вокруг ОДНОГО дня
+    // (◀ день ▶), а список дней сервер резал окном liveDaysBack=14. Здесь — лента всех записей
+    // всех камер: свежие сверху, старые подтягиваются по мере прокрутки (сервер — /qdl/live/feed,
+    // один запрос на страницу). Выбор конкретного дня остался кнопкой в шапке.
+    //
+    // Механика бесконечной прокрутки — копия ComponentJutCatalog вместе с его граблями:
+    // ручной Lampa.Layer.visible (иначе картинки останутся заглушками) и activity.toggle()
+    // ТОЛЬКО на первой странице (иначе догрузка выбрасывает фокус в начало ленты).
+    function ComponentRecFeed(object) {
+        var comp = this;
+        var network = new Lampa.Reguest();
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+        var html = $('<div></div>');
+        var body = $('<div></div>');
+        var last, offset = 0, loading = false, hasNext = true, total = 0;
+        var seen = {};        // дедуп по id записи: пока зритель листает, сверху появляются новые
+        var lastDay = '';     // разделитель дня рисуем, когда дата сменилась
+        var LIMIT = 30;
+        var PREFETCH_AHEAD = 8;
+
+        this.create = function () {
+            if (!qdlAllowed('rec')) { denySection(); return this.render(); }
+
+            injectCss();   // фокус-стили: без них фокус на ТВ невидим (§AK.3)
+            this.activity.loader(true);
+            scroll.minus();
+            html.append(scroll.render());
+            scroll.body().append(body);
+            // Страховка для мыши/тача; на пульте раньше срабатывает prefetch по фокусу.
+            scroll.onEnd = function () { comp.load(false); };
+            body.append(headBar());
+            this.load(true);
+            return this.render();
+        };
+
+        function headBar() {
+            var bar = $('<div style="display:flex;align-items:center;gap:.7em;padding:1.2em 1.4em .5em"></div>');
+            var pick = $('<div class="selector qdl-btn-focus" style="padding:.65em 1.1em;background:rgba(255,255,255,.08);border-radius:.6em;font-size:1.4em">📅 Выбрать день</div>');
+            pick.on('hover:focus', function () { last = pick[0]; scroll.update(pick, true); });
+            pick.on('hover:enter', function () {
+                livePickDay('', function (d) {
+                    Lampa.Activity.push({ url: '', title: 'D1versy Rec', component: 'qdl_live', qdl_date: d, page: 1 });
+                });
+            });
+            return bar.append(pick);
+        }
+
+        this.load = function (first) {
+            if (loading || (!first && !hasNext)) return;
+            loading = true;
+            network.silent(withUid(API + '/qdl/live/feed?offset=' + offset + '&limit=' + LIMIT),
+                function (r) {
+                    if (comp.destroyed) return;
+                    loading = false;
+                    comp.activity.loader(false);
+                    r = r || {};
+                    if (r.error) { if (first) comp.empty('⚠️ ' + r.error); return; }
+
+                    hasNext = !!r.hasNext;
+                    var got = r.items || [];
+                    got.forEach(function (rec) {
+                        if (seen[rec.id]) return;
+                        seen[rec.id] = true;
+                        appendRec(rec);
+                        total++;
+                    });
+                    // Сдвигаем окно на то, что ОТДАЛ сервер, а не на то, что нарисовали:
+                    // иначе после дедупа страницы начали бы перекрываться бесконечно.
+                    offset += got.length;
+
+                    // 🔥 Обязательно: Scroll сам зовёт scrollEnded только когда экран не заполнен,
+                    // без этого первая страница осталась бы с заглушками вместо превью.
+                    try { Lampa.Layer.visible(scroll.render(true)); } catch (e) {}
+                    if (first && total === 0) comp.empty('Записей нет');
+                    // 🔥 toggle ТОЛЬКО на первой странице: на догрузке он через collectionFocus
+                    // ставит фокус на первый элемент и утаскивает скролл в начало ленты.
+                    if (first) comp.activity.toggle();
+                },
+                function () {
+                    if (comp.destroyed) return;
+                    loading = false;
+                    comp.activity.loader(false);
+                    if (first) comp.empty('Видеорегистратор не отвечает');
+                });
+        };
+
+        // Догружаем заранее — за несколько строк до конца, чтобы пульт не упирался в ожидание.
+        this.prefetch = function (el) {
+            if (loading || !hasNext) return;
+            var kids = body.children();
+            var i = kids.index(el);
+            if (i >= 0 && i >= kids.length - PREFETCH_AHEAD) comp.load(false);
+        };
+
+        function appendRec(rec) {
+            if (rec.day && rec.day !== lastDay) {
+                lastDay = rec.day;
+                body.append($('<div style="padding:.9em 1.6em .2em;font-size:1.35em;font-weight:600;opacity:.85">' + esc(rec.dayLabel || rec.day) + '</div>'));
+            }
+
+            var tl = liveTimeline(rec);
+            var pct = (tl && tl.percent) || 0;
+            var mark = pct >= 90 ? '✓ ' : (pct >= 5 ? '► ' + Math.round(pct) + '%   ·   ' : '');
+            var meta = [rec.cameraName, liveDur(rec.seconds), liveSize(rec.size),
+                        rec.trigger === 'motion' ? 'движение' : (rec.trigger === 'human' ? 'человек' : '')]
+                       .filter(Boolean).join('   ·   ');
+
+            var el = $(
+                '<div class="selector qdl-row-focus" style="display:flex;align-items:center;gap:1.2em;padding:.8em;margin:.4em 1.4em;background:rgba(255,255,255,.06);border-radius:.8em">' +
+                  '<img style="width:10em;height:5.65em;object-fit:cover;border-radius:.5em;background:#111;flex:none">' +
+                  '<div style="flex:1;min-width:0">' +
+                    '<div style="font-size:1.6em;font-weight:600">' + esc(mark + rec.start + ' – ' + rec.end) + '</div>' +
+                    '<div style="opacity:.7;font-size:1.2em;margin-top:.3em">' + esc(meta) + '</div>' +
+                  '</div>' +
+                  '<div style="opacity:.45;font-size:1.6em;padding-right:.4em">▶</div>' +
+                '</div>'
+            );
+            var img = el.find('img');
+            img.attr('src', withUid(API + '/qdl/live/thumb?id=' + rec.id));
+            img.on('error', function () { this.src = './img/img_broken.svg'; });
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); comp.prefetch(el); });
+            // На таче hover:focus не приходит вовсе — last остался бы пустым (грабля JutCatalog).
+            el.on('hover:touch', function () { last = el[0]; try { Navigator.focused(el[0]); } catch (e) {} });
+            el.on('hover:enter', function () {
+                livePlay({ id: rec.camera, name: rec.cameraName }, [rec], 0);
+            });
+            body.append(el);
+        }
+
+        this.empty = function (text) {
+            body.append(liveMsg(text));
+            comp.activity.loader(false);
+            comp.activity.toggle();
+        };
+
+        this.render = function () { return html; };
+
+        this.start = function () {
+            Lampa.Controller.add('content', {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(scroll.render());
+                    Lampa.Controller.collectionFocus(last || false, scroll.render());
+                },
+                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                right: function () { Navigator.move('right'); },
+                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
+                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
+                back: function () { Lampa.Activity.backward(); }
+            });
+            Lampa.Controller.toggle('content');
+        };
+
+        // Lampa на forward-навигации зовёт pause(), а не destroy(): висящий запрос обязан
+        // умереть здесь, иначе доживший ответ дорисует ленту поверх чужого экрана.
+        this.pause = function () { network.clear(); };
+        this.stop = function () { network.clear(); };
+        this.destroy = function () { network.clear(); scroll.destroy(); html.remove(); };
     }
 
     // Эфир (сетка камер) — D1versy Live
@@ -4797,6 +4977,7 @@
         Lampa.Component.add('qdl_notifications', ComponentNotifications);
         Lampa.Component.add('qdl_live', ComponentLive);
         Lampa.Component.add('qdl_live_camera', ComponentLiveCamera);
+        Lampa.Component.add('qdl_rec_feed', ComponentRecFeed);
         Lampa.Component.add('qdl_live_watch', ComponentLiveWatch);
         Lampa.Component.add('jut_catalog', ComponentJutCatalog);
         Lampa.Component.add('jut_title', ComponentJutTitle);

@@ -97,7 +97,10 @@ test('грид каталога раскладывается как штатны
 
 test('пустое сообщение получает width:100% (правило .cols--N > *)', () => {
   const src = H.qdlSource();
-  const i = src.indexOf('this.empty = function');
+  // Ищем ВНУТРИ ComponentJutCatalog: правило .cols--N > * — про его грид, а this.empty есть
+  // и у других компонентов (лента записей Rec объявлена в файле раньше).
+  const cat = src.indexOf('function ComponentJutCatalog');
+  const i = src.indexOf('this.empty = function', cat);
   const fn = src.slice(i, i + 300);
   assert.ok(fn.includes('width:100%'),
     'без width:100% сообщение сожмётся до ширины одной карточки');

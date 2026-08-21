@@ -481,6 +481,115 @@ public partial class QbitController
 
     #endregion
 
+    #region /qdl/live/feed — СКВОЗНАЯ лента: свежие записи сверху, старые подгружаются вниз
+
+    // Жалоба владельца: «записи видно только за текущий месяц, до прошлого надо доклацать
+    // стрелками по одному дню». Навигация в Rec крутилась вокруг ОДНОГО дня, а список дней
+    // (/qdl/live/days) сервер резал окном liveDaysBack=14. Лента снимает вопрос целиком:
+    // все записи всех камер подряд по убыванию времени, страницами.
+    //
+    // Регистратор такое уже умеет сам — `/api/recordings/?limit=&offset=` отдаёт
+    // ORDER BY start_time DESC (recordings.py:31-46, индекс ix_recordings_camera_start),
+    // так что это ОДИН запрос на страницу против 1 + 2×N у /qdl/live/cameras.
+
+    // Страница ленты живёт полминуты: прокрутка не должна долбить регистратор — его nginx
+    // режет /api/ лимитом rate=30r/s, на веере мы уже ловили 429. Ключ — offset|limit.
+    static readonly ConcurrentDictionary<string, (DateTime exp, JObject payload)> _liveFeedCache = new();
+
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/live/feed")]
+    async public Task<ActionResult> LiveFeed(int offset = 0, int limit = 30)
+    {
+        if (LiveDenied(Perms.FeatureRec)) return NotFound();
+
+        offset = Math.Max(0, offset);
+        limit = Math.Clamp(limit, 1, 100);
+
+        string key = offset + "|" + limit;
+        if (_liveFeedCache.TryGetValue(key, out var hit) && hit.exp > DateTime.Now)
+            return LiveJsonOut(hit.payload);
+
+        var tz = LiveTz();
+        var ct = HttpContext.RequestAborted;
+        var today = LiveToday(tz);
+
+        var recs = new List<LiveRec>();
+        List<KeyValuePair<int, string>> cams;
+        try
+        {
+            cams = await LiveCameraList(ct).ConfigureAwait(false);
+            // +1 запись сверх страницы — чтобы честно ответить hasNext, а не гадать по размеру.
+            if (await LiveApiJson($"/api/recordings/?limit={limit + 1}&offset={offset}", ct)
+                    .ConfigureAwait(false) is JArray arr)
+            {
+                foreach (var t in arr)
+                {
+                    var r = ParseLiveRec(t);
+                    if (r != null)
+                        recs.Add(r);
+                }
+            }
+        }
+        catch (OperationCanceledException) { return new EmptyResult(); }
+        catch (Exception ex)
+        {
+            // Не-2xx от регистратора — это «не смог спросить», а НЕ «записей нет»: молчаливый
+            // пустой список читался бы как «архив кончился» и обрывал ленту (грабля §AL).
+            Serilog.Log.Warning("[qdl/live] feed: {Error}", ex.Message);
+            return LiveErr("Регистратор недоступен");
+        }
+
+        bool hasNext = recs.Count > limit;
+        if (hasNext)
+            recs.RemoveRange(limit, recs.Count - limit);
+
+        // Порядок регистратора на веру не берём — сортируем сами.
+        recs.Sort((a, b) => b.startUtc.CompareTo(a.startUtc));
+
+        var names = new Dictionary<int, string>();
+        foreach (var kv in cams)
+            names[kv.Key] = kv.Value;
+
+        var items = new JArray();
+        foreach (var r in recs)
+        {
+            // Времена регистратора — наивный UTC (см. шапку файла): всё, что уходит клиенту,
+            // конвертируем через liveTimezone. День нужен, чтобы из ленты можно было провалиться
+            // в существующий экран дня — в JSON отдельной записи даты раньше не было вовсе.
+            var localDay = TimeZoneInfo.ConvertTimeFromUtc(r.startUtc, tz).Date;
+            items.Add(new JObject
+            {
+                ["id"] = r.id,
+                ["camera"] = r.camera,
+                ["cameraName"] = names.TryGetValue(r.camera, out var nm) ? nm : ("Камера " + r.camera),
+                ["day"] = LiveDayKey(localDay),
+                ["dayLabel"] = LiveDayLabel(localDay, today),
+                ["start"] = LiveTime(r.startUtc, tz),
+                ["end"] = LiveTime(r.startUtc.AddSeconds(r.seconds), tz),
+                ["seconds"] = r.seconds,
+                ["size"] = r.size,
+                ["trigger"] = r.trigger
+            });
+        }
+
+        var payload = new JObject
+        {
+            ["offset"] = offset,
+            ["limit"] = limit,
+            ["hasNext"] = hasNext,
+            ["today"] = LiveDayKey(today),
+            ["items"] = items
+        };
+
+        if (_liveFeedCache.Count > 64)
+            _liveFeedCache.Clear();   // ключей мало и они предсказуемы — чистим целиком, без LRU
+        _liveFeedCache[key] = (DateTime.Now.AddSeconds(30), payload);
+
+        return LiveJsonOut(payload);
+    }
+
+    #endregion
+
     #region /qdl/live/day — ВЕСЬ ДЕНЬ ОДНОЙ ЗАПИСЬЮ (склейка в один HLS, один таймлайн)
 
     // Регистратор умеет склейку сам (`/api/recordings/camera/{id}/stitched.m3u8`): каждая запись

@@ -122,9 +122,10 @@ test('withUid покрывает и превью, и эфир, и нативны
     "withUid(API + '/qdl/live/stream?id=",
     "withUid(API + info.path)",
     "withUid(API + '/qdl/live/watch')",
-    "withUid(API + '/qdl/live/days')",
+    "withUid(API + '/qdl/live/days?back='",
     "withUid(API + '/qdl/live/cameras'",
     "withUid(API + '/qdl/live/recordings?camera=",
+    "withUid(API + '/qdl/live/feed?offset='",
   ];
   for (const m of musts)
     assert.ok(src.includes(m), 'uid обязан дописываться: ' + m);
