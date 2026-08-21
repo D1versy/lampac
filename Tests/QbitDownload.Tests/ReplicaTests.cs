@@ -430,6 +430,43 @@ public class ReplicaTests
         Assert.Contains(H1, set);
     }
 
+    // ── тормоз массовости ─────────────────────────────────────────────────
+
+    [Fact]
+    public void Mass_brake_does_not_fire_on_a_small_set()
+    {
+        // 🔥 Боевой случай 21.08.2026: реплика держала 19 позиций, 6 из них — законные сироты
+        // (4 старых хеша после перекачки дома + 2 удалённых руками). 31% при пороге 25%
+        // блокировали проход целиком, и дубли не уходили. Один процент на десятках позиций
+        // не работает: нужен ещё и абсолютный пол.
+        Assert.False(QbitController.ReplicaOrphanBrake(6, 19, 25, 10, out _));
+    }
+
+    [Fact]
+    public void Mass_brake_still_catches_a_wrong_snapshot()
+    {
+        // а вот когда осиротел почти весь набор — это уже не хвост, а не тот снимок дома
+        Assert.True(QbitController.ReplicaOrphanBrake(19, 19, 25, 10, out string why));
+        Assert.Contains("остановлено", why);
+
+        Assert.True(QbitController.ReplicaOrphanBrake(30, 47, 25, 10, out _));
+    }
+
+    [Fact]
+    public void Mass_brake_needs_both_conditions()
+    {
+        Assert.False(QbitController.ReplicaOrphanBrake(9, 10, 25, 10, out _));   // доля есть, числа нет
+        Assert.False(QbitController.ReplicaOrphanBrake(10, 100, 25, 10, out _)); // число есть, доли нет
+        Assert.True(QbitController.ReplicaOrphanBrake(10, 20, 25, 10, out _));   // оба
+    }
+
+    [Fact]
+    public void Mass_brake_is_silent_when_there_is_nothing_to_delete()
+    {
+        Assert.False(QbitController.ReplicaOrphanBrake(0, 19, 25, 10, out _));
+        Assert.False(QbitController.ReplicaOrphanBrake(0, 0, 25, 10, out _));
+    }
+
     // ── подтверждение пропажи ─────────────────────────────────────────────
 
     static (List<string> ready, int pending) Confirm(JObject state, long now, params string[] missing)

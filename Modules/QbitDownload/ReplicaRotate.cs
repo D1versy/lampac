@@ -365,6 +365,34 @@ public partial class QbitController
     }
 
     /// <summary>
+    /// Тормоз массовости: нужны ОБА условия — и доля, и абсолютное число.
+    ///
+    /// 🔴 Один только процент здесь не работает, и это стоило боевого инцидента (21.08.2026):
+    /// реплика держит десятки позиций, а не сотни, поэтому 6 сирот из 19 дают 31% и гасят
+    /// совершенно нормальный хвост. А ПЕРВЫЙ запуск зеркалирования по определению несёт
+    /// накопленное за месяцы — то есть порог по доле убивал бы фичу ровно тогда, ради чего
+    /// она написана. Настоящая беда, от которой тормоз стоит (дом отдал валидный, но не тот
+    /// снимок), осиротила бы почти ВЕСЬ набор, и её ловит связка «доля И количество».
+    ///
+    /// Первые два пояса при этом никуда не делись: shrink-guard по счётчику манифеста и
+    /// санити-проверка покрытия known. Этот — третий.
+    /// </summary>
+    internal static bool ReplicaOrphanBrake(int orphans, int total, int sharePct, int minCount, out string why)
+    {
+        why = null;
+        if (orphans <= 0 || total <= 0) return false;
+
+        int pct = Math.Clamp(sharePct, 1, 100);
+        int floor = Math.Max(1, minCount);
+
+        if (orphans < floor) return false;
+        if (orphans * 100 <= total * pct) return false;
+
+        why = $"сирот {orphans} из {total} — зеркалирование остановлено (порог {pct}% и минимум {floor} шт)";
+        return true;
+    }
+
+    /// <summary>
     /// Кандидаты в сироты: есть у нас, но нет в known дома.
     /// 🔴 Вынесено чистой функцией ради регресса «есть у дома, но не в плане — это НЕ сирота».
     /// Перепутать targetSet (бюджетный план, 85% от 240 ГБ) с homeKnown (всё, что есть у дома,
@@ -540,14 +568,10 @@ public partial class QbitController
 
         var cands = ReplicaOrphanCandidates(mine, myLocal, homeKnown);
 
-        // Тормоз массовости. shrink-guard сравнивает СЧЁТЧИК манифеста с прошлым тиком, а этот —
-        // ПЕРЕСЕЧЕНИЕ нашего набора с домашним: валидный, но не тот снимок дома shrink пропустит,
-        // а здесь он виден сразу. Нормальный день — одна-три сироты.
-        int mineTotal = mine.Count + myLocal.Count;
-        int sharePct = Math.Clamp(ModInit.conf.replicaOrphanMaxSharePercent, 1, 100);
-        if (cands.Count > 0 && mineTotal > 0 && cands.Count * 100 > mineTotal * sharePct)
+        if (ReplicaOrphanBrake(cands.Count, mine.Count + myLocal.Count,
+                ModInit.conf.replicaOrphanMaxSharePercent, ModInit.conf.replicaOrphanBrakeMinCount,
+                out string stop))
         {
-            string stop = $"сирот {cands.Count} из {mineTotal} — зеркалирование остановлено (порог {sharePct}%)";
             ReplicaEvictLog(stop, OrphanTag);
             HealthState.Degraded(HealthState.Ids.Replica, stop);
             return (0, cands.Count, gone);
