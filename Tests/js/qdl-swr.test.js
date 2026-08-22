@@ -222,6 +222,30 @@ test('после выхода из ряда отложенная перестр�
   assert.strictEqual(r.qdl.swrState().pending[URL1], undefined);
 });
 
+test('верхний ряд при входе на экран обновляется, хотя фокус по умолчанию в нём', () => {
+  // 🔴 Без этого исключения фича была невидима: при открытии главной фокус стоит на первой
+  // карточке верхнего ряда, и самый заметный ряд обновлялся только после ухода из него.
+  const r = env({ Controller: { own: () => true, collectionSet() {}, listener: { follow() {} } } });
+  const line = makeLine(URL1, [1, 2, 3]);
+  line.active = 0;                       // зритель ещё не листал ряд
+  r.qdl.swrOnLine({ type: 'create', line });
+  r.qdl.swrOnRevalidate({ url: URL1, data: { results: [{ id: 9 }, { id: 1 }, { id: 2 }] } });
+
+  assert.strictEqual(line.scroll.cleared, 1, 'ряд перестроен');
+  assert.strictEqual(line.data.results[0].id, 9);
+});
+
+test('но стоит зрителю сдвинуться внутри ряда — перестройка снова откладывается', () => {
+  const r = env({ Controller: { own: () => true, collectionSet() {}, listener: { follow() {} } } });
+  const line = makeLine(URL1, [1, 2, 3]);
+  line.active = 2;                       // листает ряд — трогать нельзя
+  r.qdl.swrOnLine({ type: 'create', line });
+  r.qdl.swrOnRevalidate({ url: URL1, data: { results: [{ id: 9 }] } });
+
+  assert.strictEqual(line.scroll.cleared, 0);
+  assert.ok(r.qdl.swrState().pending[URL1]);
+});
+
 test('сфокусированная карточка внутри ряда (ТВ) тоже считается «зритель внутри»', () => {
   const r = env();
   const line = makeLine(URL1, [1, 2]);
@@ -249,6 +273,11 @@ test('троттлинг: короткий кеш, POST и наши собств
   assert.strictEqual(r.qdl.swrGate({ url: 'https://x/a', cache: { life: 5 } }), false, 'это не ряд каталога');
   assert.strictEqual(r.qdl.swrGate({ url: 'https://x/b', cache: { life: 999 }, post_data: {} }), false);
   assert.strictEqual(r.qdl.swrGate({ url: '{localhost}/qdl/list', cache: { life: 999 } }), false);
+  assert.strictEqual(r.qdl.swrGate({ url: '{localhost}/d1vision/hosts.json', cache: { life: 999 } }), false);
+  // 🔴 А вот ряды каталога идут через НАШ ЖЕ сервер — раньше фильтр «всё, что начинается с API»
+  // отсекал их разом, и фича молча не работала ни на одном ряду.
+  assert.strictEqual(r.qdl.swrGate({ url: '{localhost}/cub/tmdb./?sort=now_playing&page=1', cache: { life: 2880 } }), true);
+  assert.strictEqual(r.qdl.swrGate({ url: '{localhost}/tmdb/api/3/movie/popular', cache: { life: 2880 } }), true);
   assert.strictEqual(r.qdl.swrGate({ cache: { life: 999 } }), false);
 });
 

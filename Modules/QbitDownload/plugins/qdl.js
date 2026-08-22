@@ -1192,7 +1192,11 @@
             if (!u || typeof u !== 'string') return false;
             if (params.post_data) return false;                                    // догоняем только GET
             if (!params.cache || !(params.cache.life >= SWR_MIN_LIFE)) return false;
-            if (u.indexOf(API) === 0) return false;                                // наши ручки идут мимо этого кеша
+            // 🔴 Исключать «всё, что начинается с API», НЕЛЬЗЯ: ряды каталога тоже идут через
+            // наш сервер (/cub/tmdb./…, /tmdb/api/…) — такой фильтр отсекал ВСЕ ряды разом, и
+            // фича молча не работала. Отсекаем только служебные ручки модуля.
+            var path = u.indexOf(API) === 0 ? u.slice(API.length) : u;
+            if (path.indexOf('/qdl/') === 0 || path.indexOf('/d1vision/') === 0) return false;
             var now = Date.now();
             if (swrLast[u] && now - swrLast[u] < SWR_MIN_INTERVAL) return false;
             while (swrBudget.length && now - swrBudget[0] > SWR_BURST_WINDOW) swrBudget.shift();
@@ -1266,14 +1270,22 @@
 
     // Ряд, в котором СЕЙЧАС зритель. Признака три: владение контроллером (его регистрирует
     // сам ряд), сфокусированный элемент навигатора внутри ряда (мышь/десктоп) и класс .focus (ТВ).
+    //
+    // 🔴 Исключение (иначе фича невидима): при открытии экрана фокус ПО УМОЛЧАНИЮ стоит на первой
+    // карточке верхнего ряда — то есть самый заметный ряд оказывался «под курсором» всегда и
+    // обновлялся только после того, как зритель из него уйдёт. Пока он не листал ряд (active
+    // на первой карточке), перестройка безопасна: фокус остаётся на первой позиции, из-под пальца
+    // ничего не уезжает. Сдвинулся хоть на карточку — правило «не трогать» снова в силе.
     function swrBusyLine(line) {
-        try { if (Lampa.Controller.own(line)) return true; } catch (e) {}
+        var untouched = false;
+        try { untouched = !line.active; } catch (e) {}
+        try { if (Lampa.Controller.own(line)) return !untouched; } catch (e) {}
         try {
             var f = (typeof Navigator !== 'undefined')
                 ? (Navigator.getFocusedElement ? Navigator.getFocusedElement() : Navigator._focus) : null;
-            if (f && line.html && line.html.contains && line.html.contains(f)) return true;
+            if (f && line.html && line.html.contains && line.html.contains(f)) return !untouched;
         } catch (e) {}
-        try { if (line.html && line.html.querySelector && line.html.querySelector('.selector.focus')) return true; } catch (e) {}
+        try { if (line.html && line.html.querySelector && line.html.querySelector('.selector.focus')) return !untouched; } catch (e) {}
         return false;
     }
 
