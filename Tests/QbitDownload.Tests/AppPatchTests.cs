@@ -63,6 +63,17 @@ public class AppPatchTests
         encode = Utils$1.addUrlComponent(encode, 'origin=' + origin);
         return encode;
       }
+      cacheGet(params, function (cached, old) {
+        // Запомнить что есть старый кеш на случай ошибки что бы отдать его
+        cache_old = old;
+
+        if (cached) {
+          secuses(cached, true);
+        } else {
+          $.ajax(data);
+        }
+      });
+      need.timeout = 1000 * 30;
     ";
 
     [Fact]
@@ -82,6 +93,51 @@ public class AppPatchTests
         Assert.Contains("/*qdl-cut:splash-fade*/", result);
         Assert.Contains("/*qdl-cut:shots*/", result);
         Assert.Contains("/*qdl-cut:plugin-reset*/", result);
+        Assert.Contains("/*qdl-cut:swr*/", result);
+    }
+
+    static int Count(string s, string sub) => s.Split(sub).Length - 1;
+
+    [Fact]
+    public void PatchAppJs_Swr_RevalidatesCachedHit_WithoutTouchingMissOrFallback()
+    {
+        // Снимок отдаётся как раньше; ветка промаха и аварийный стале-фолбэк не тронуты.
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.Contains("secuses(cached, true);", result);        // штатная отдача снимка цела
+        Assert.Contains("cache_old = old;", result);              // фолбэк на ошибку цел
+        Assert.Contains("$.ajax(data);", result);                 // ветка промаха цела
+        Assert.Contains("cached.qdl_req = params.url", result);   // метка для связи ряд↔URL
+        Assert.Contains("cacheSet(params, fresh)", result);       // свежий ответ переписывает кеш
+        Assert.Contains("Lampa.Listener.send('request_revalidate'", result);
+        // 🔴 complite/secuses для свежего ответа звать нельзя: Progress в partNext досчитал бы
+        // задачу второй раз, а Main.build() не идемпотентен — ряды бы задвоились.
+        Assert.DoesNotContain("secuses(fresh", result);
+        Assert.Equal(1, Count(result, "cacheSet(params, fresh)"));
+    }
+
+    [Fact]
+    public void PatchAppJs_Swr_KillSwitchesReadableAtRuntime()
+    {
+        // Оба выключателя читаются в рантайме — второй патч бандла для отключения не нужен.
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.Contains("window.lampa_settings.qdl_swr !== false", result);   // серверный (lampainit-invc.js)
+        Assert.Contains("typeof window.qdl_swr === 'function'", result);      // OTA-предикат из qdl.js
+        Assert.Contains("window.qdl_swr(params)", result);                    // он же решает про троттлинг
+    }
+
+    [Fact]
+    public void PatchAppJs_Swr_Idempotent_SingleMarkerAndSingleAnchor()
+    {
+        // Замена содержит собственный якорь: без гарда Contains(replacement) второй проход
+        // вложил бы патч сам в себя (та же схема, что у menu-items).
+        string once = AppPatch.PatchAppJs(AllAnchors);
+        string twice = AppPatch.PatchAppJs(once);
+
+        Assert.Equal(once, twice);
+        Assert.Equal(1, Count(twice, "/*qdl-cut:swr*/"));
+        Assert.Equal(1, Count(twice, "secuses(cached, true);"));
     }
 
     [Fact]

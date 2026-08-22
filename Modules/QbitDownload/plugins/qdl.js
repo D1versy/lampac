@@ -1150,6 +1150,227 @@
         }, 500);
     }
 
+    // ───────── Свежесть рядов каталога: stale-while-revalidate (qdl 2.63) ─────────
+    // Жалоба владельца: главная показывает вчерашний каталог. 🔴 Причина не в нашем серверном
+    // кеше (он живёт минутами и свежий), а в клиентском: ряды лежат в IndexedDB со сроком
+    // 2–7 СУТОК, и пока запись живая, клиент в сеть не ходит ВООБЩЕ. Activity.refresh() не
+    // помогает — перечитывает те же записи.
+    // Кеш нужен ради мгновенной отрисовки, поэтому решение такое: снимок рисуется как раньше,
+    // а патч бандла (/*qdl-cut:swr*/ в AppReplace.cs) параллельно тихо дотягивает свежий ответ,
+    // переписывает им запись кеша и шлёт 'request_revalidate'. Патч намеренно тупой — вся
+    // политика здесь, чтобы менялась по воздуху (правка qdl.js доезжает без рестарта).
+    //
+    // Что делаем со свежим ответом: находим ЖИВОЙ ряд, построенный из того же URL, сверяем
+    // состав И ПОРЯДОК и, если разъехалось, перестраиваем ряд на месте.
+    // Чего НЕ делаем: не зовём заново Api.main (массив загрузчиков расходуемый — использованные
+    // затираются в false, повторный вызов продублировал бы ряды) и не зовём Main.build (он не
+    // идемпотентен, дописывает ряды). Поэтому НОВЫЙ ряд появится только на следующем старте.
+
+    var SWR_MIN_INTERVAL = 10 * 60 * 1000;   // один URL не догоняем чаще раза в 10 минут
+    var SWR_MIN_LIFE     = 60;               // только «длинные» кеши (life в МИНУТАХ) — это ряды каталога
+    var SWR_BURST        = 12;               // и не больше 12 догонов за 10 с: первый экран 6 рядов + дозагрузка
+    var SWR_BURST_WINDOW = 10000;
+    var SWR_MAX_PENDING  = 32;
+    var SWR_MAX_LINES    = 200;
+
+    var swrLines = [];        // живые ряды
+    var swrPending = {};      // url → свежий ответ, которому ещё не нашёлся ряд
+    var swrLast = {};         // url → когда догоняли последний раз
+    var swrBudget = [];       // таймстемпы догонов в окне SWR_BURST_WINDOW
+    var swrRebuilding = false;   // ре-энтранси: перестройка сама шлёт событие 'line'
+
+    function swrOff() {
+        try { return !!Lampa.Storage.get('qdl_swr_off', false); } catch (e) { return false; }
+    }
+
+    // Предикат, который зовёт ПАТЧ БАНДЛА: «этот попавший в кеш запрос стоит догнать?».
+    // Весь троттлинг живёт здесь — патч про него не знает и знать не должен.
+    function swrGate(params) {
+        try {
+            if (swrOff()) return false;
+            var u = params && params.url;
+            if (!u || typeof u !== 'string') return false;
+            if (params.post_data) return false;                                    // догоняем только GET
+            if (!params.cache || !(params.cache.life >= SWR_MIN_LIFE)) return false;
+            if (u.indexOf(API) === 0) return false;                                // наши ручки идут мимо этого кеша
+            var now = Date.now();
+            if (swrLast[u] && now - swrLast[u] < SWR_MIN_INTERVAL) return false;
+            while (swrBudget.length && now - swrBudget[0] > SWR_BURST_WINDOW) swrBudget.shift();
+            if (swrBudget.length >= SWR_BURST) return false;
+            if (Object.keys(swrLast).length > 400) swrLast = {};                   // долгая сессия: карту не растим вечно
+            swrLast[u] = now;
+            swrBudget.push(now);
+            return true;
+        } catch (e) { return false; }
+    }
+
+    // Ключ ряда — метка, которую патч поставил на тело ответа ДО того, как оно стало line.data.
+    // В самом line.data.url лежит МЕТОД ('?sort=now_playing'), полного адреса там нет.
+    function swrKey(line) {
+        try { return (line && line.data && line.data.qdl_req) || null; } catch (e) { return null; }
+    }
+
+    function swrDrop(line) {
+        for (var i = swrLines.length - 1; i >= 0; i--) if (swrLines[i].line === line) swrLines.splice(i, 1);
+    }
+
+    // Реестр живых рядов БЕЗ патча: каждый ряд шлёт Lampa.Listener('line').
+    // ⚠️ Обработчик обязан быть целиком в try: рассылка в бандле обёрнута ОДНИМ общим try —
+    // исключение отсюда оборвало бы остальных слушателей.
+    function swrOnLine(e) {
+        try {
+            if (swrRebuilding) return;                              // события от нашей же перестройки
+            var line = e && e.line;
+            if (!line || typeof line.emit !== 'function') return;   // deprecated InteractionLine — не наш случай
+            if (e.type === 'destroy') { swrDrop(line); return; }
+            if (e.type === 'create') {
+                if (!swrKey(line)) return;                          // ряд собран не из кешированного тела (персоны)
+                for (var i = 0; i < swrLines.length; i++) if (swrLines[i].line === line) return;
+                if (swrLines.length >= SWR_MAX_LINES) swrLines.shift();
+                swrLines.push({ line: line });
+            }
+            if (e.type === 'create' || e.type === 'visible' || e.type === 'toggle') swrFlush();
+        } catch (err) {}
+    }
+
+    // Свежий ответ от патча. Ряда может ещё не быть (батч ждёт все шесть частей) — тогда ответ
+    // ждёт в очереди и подхватится, когда ряд появится или освободится.
+    function swrOnRevalidate(e) {
+        try {
+            if (swrOff()) return;
+            var url = e && (e.url || (e.params && e.params.url));
+            var data = e && e.data;
+            if (!url || !data || !data.results || !data.results.length) return;   // пустой ответ ряд НЕ гасит
+            var keys = Object.keys(swrPending);
+            if (keys.length >= SWR_MAX_PENDING) delete swrPending[keys[0]];
+            swrPending[url] = data;
+            swrFlush();
+        } catch (err) {}
+    }
+
+    function swrIds(results, limit) {
+        var out = [];
+        for (var i = 0; i < results.length && i < limit; i++) {
+            var r = results[i] || {};
+            out.push(String(r.id != null ? r.id : (r.title || r.name || r.url || i)));
+        }
+        return out.join(',');
+    }
+
+    // Изменилось ли то, что показывает сервер: состав ИЛИ порядок. Сверяем с запасом за экран,
+    // чтобы поймать перестановку и в хвосте, который дозагрузится скроллом.
+    function swrChanged(oldResults, newResults) {
+        var n = Math.max(20, (oldResults || []).length);
+        return swrIds(oldResults || [], n) !== swrIds(newResults || [], n);
+    }
+
+    // Ряд, в котором СЕЙЧАС зритель. Признака три: владение контроллером (его регистрирует
+    // сам ряд), сфокусированный элемент навигатора внутри ряда (мышь/десктоп) и класс .focus (ТВ).
+    function swrBusyLine(line) {
+        try { if (Lampa.Controller.own(line)) return true; } catch (e) {}
+        try {
+            var f = (typeof Navigator !== 'undefined')
+                ? (Navigator.getFocusedElement ? Navigator.getFocusedElement() : Navigator._focus) : null;
+            if (f && line.html && line.html.contains && line.html.contains(f)) return true;
+        } catch (e) {}
+        try { if (line.html && line.html.querySelector && line.html.querySelector('.selector.focus')) return true; } catch (e) {}
+        return false;
+    }
+
+    // Поверх открыт селектбокс/настройки/модалка/плеер — коллекцию навигатора трогать нельзя.
+    function swrBusyScreen() {
+        // Сравнения строгие: hasClass у jQuery отдаёт булево, length — число. Мягкая проверка
+        // («если что-то вернулось») считала бы экран занятым всегда там, где $ подменён.
+        try {
+            var body = $('body');
+            if (body.hasClass('selectbox--open') === true || body.hasClass('settings--open') === true) return true;
+            var overlays = $('.modal, .player, .search-box');
+            if (overlays && typeof overlays.length === 'number' && overlays.length > 0) return true;
+        } catch (e) {}
+        return false;
+    }
+
+    // Часть загрузчиков главной проставляет стиль КАЖДОЙ карточке (UHD-ряд и «Трейлеры» — широкие),
+    // а свежий ответ сервера про это не знает: без переноса ряд молча стал бы обычным.
+    function swrCardStyle(results) {
+        try {
+            var f = results && results[0];
+            var n = f && f.params && f.params.style && f.params.style.name;
+            return (n && n !== 'default') ? n : null;
+        } catch (e) { return null; }
+    }
+
+    // Перестройка ряда НА МЕСТЕ: штатного line.update() в бандле нет, а Main.build() не идемпотентен.
+    // 🔴 Порядок важен: сперва destroy карточек (их onDestroy снимает подписки и обнуляет
+    // обработчики картинок — иначе утечка на каждой перестройке), и только потом очистка DOM.
+    function swrRebuild(line, fresh) {
+        var owned = false;
+        try { owned = Lampa.Controller.own(line); } catch (e) {}
+        var style = swrCardStyle(line.data.results);
+        if (style) fresh.results.forEach(function (c) {
+            if (!c.params) c.params = {};
+            if (!c.params.style) c.params.style = { name: style };
+        });
+        swrRebuilding = true;
+        try {
+            try { Lampa.Arrays.destroy(line.items); } catch (e) {}
+            line.items = [];
+            line.active = 0;
+            line.last = null;
+            line.more = null;                        // без сброса кнопка «ещё» больше не появится
+            try { line.scroll.clear(); line.scroll.reset(); } catch (e) {}
+            line.data.results = fresh.results;
+            if (fresh.total_pages) line.data.total_pages = fresh.total_pages;
+            var view = (line.params && line.params.items && line.params.items.view) || 7;
+            line.data.results.slice(0, view).forEach(function (el) { line.emit('createAndAppend', el); });
+            // передаём прокрутку ряда, а НЕ его корень: иначе пришьётся вторая кнопка «ещё»
+            try { Lampa.Layer.visible(line.scroll.render(true)); } catch (e) {}
+            if (owned) { try { Lampa.Controller.collectionSet(line.scroll.render(true)); } catch (e) {} }
+        } finally { swrRebuilding = false; }
+    }
+
+    function swrFlush() {
+        try {
+            if (swrRebuilding || swrOff()) return;
+            if (!Object.keys(swrPending).length) return;
+            if (swrBusyScreen()) return;
+            var done = {}, skipped = {};
+            for (var i = swrLines.length - 1; i >= 0; i--) {
+                var line = swrLines[i].line;
+                if (!line || !line.html || !line.html.parentNode) { swrLines.splice(i, 1); continue; }
+                var url = swrKey(line);
+                var fresh = url && swrPending[url];
+                if (!fresh) continue;
+                if (swrBusyLine(line)) { skipped[url] = 1; continue; }   // зритель внутри — отложили до выхода
+                if (swrChanged(line.data.results, fresh.results)) swrRebuild(line, fresh);
+                done[url] = 1;
+            }
+            Object.keys(done).forEach(function (u) { if (!skipped[u]) delete swrPending[u]; });
+        } catch (e) {}
+    }
+
+    function initSwr() {
+        if (window.__qdl_swr) return;              // повторная загрузка qdl.js → одна подписка
+        window.__qdl_swr = true;
+        window.qdl_swr = swrGate;                  // контракт с патчем бандла /*qdl-cut:swr*/
+        try { Lampa.Listener.follow('line', swrOnLine); } catch (e) {}
+        try { Lampa.Listener.follow('request_revalidate', swrOnRevalidate); } catch (e) {}
+        // возврат на страницу и любая смена контроллера (зритель вышел из ряда) — поводы дожать
+        try { Lampa.Listener.follow('activity', function (e) { if (e && e.type === 'start') swrFlush(); }); } catch (e) {}
+        try { Lampa.Controller.listener.follow('toggle', function () { swrFlush(); }); } catch (e) {}
+        // Диагностика: патч бандла мог не доехать (сменился tree / не чищен Staticache) — тогда
+        // события не будет никогда. Молчать нельзя, иначе фичу будут искать в qdl.js.
+        try {
+            var t = setTimeout(function () {
+                if (!swrBudget.length && !Object.keys(swrLast).length)
+                    console.warn('qdl swr: бандл ни разу не спросил window.qdl_swr — патч /*qdl-cut:swr*/ не доехал?');
+            }, 30000);
+            // в браузере setTimeout отдаёт число, в тестовой песочнице — таймер Node: без unref
+            // он держал бы прогон тестов лишние 30 секунд
+            if (t && typeof t.unref === 'function') t.unref();
+        } catch (e) {}
+    }
+
     // ТВ (нативный плеер) тянет оригинал (EAC3 ок), всё остальное (десктоп/мобайл-браузер) — HLS (звук→AAC).
     // ВАЖНО: Platform.is('browser') слишком узок (на Linux-десктопе platform='' → false). Берём инверсию tv().
     function isBrowser() {
@@ -5122,6 +5343,7 @@
         pollNotifications();
         try { initSelectFix(); } catch (e) {}            // фикс скролла селектбоксов (upstream mheight-баг)
         try { initTimelineMirror(); } catch (e) {}       // аварийный фолбэк зеркала (режим 'auto', см. qdl 2.18)
+        try { initSwr(); } catch (e) {}                  // свежесть рядов каталога поверх клиентского кеша (qdl 2.63)
         try { initTimecodeBridge(); } catch (e) {}       // перерисовка экрана серий по pull серверных таймкодов
         try { initContinueRefresh(); } catch (e) {}      // «Продолжить» на полной карточке — свежая после возврата
         try { initHistoryRouting(); } catch (e) {}       // вход в jut-карточку из «Истории просмотров»

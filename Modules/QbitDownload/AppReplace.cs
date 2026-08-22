@@ -18,6 +18,10 @@ namespace QbitDownload;
 //   splash-*    — 1000 мс + fadeOut 500 мс логотипа УЖЕ ПОСЛЕ готовности интерфейса;
 //   shots       — сторонний JS с cub.red каждый старт (services=false его не ловил);
 //   plugin-reset— reset=Math.random() у URL плагинов: кеш-бастер, бивший по внешним клиентам;
+//   swr         — stale-while-revalidate у клиентского кеша Request: попадание в ЖИВОЙ кеш
+//                 отдаётся как раньше, но параллельно тихо дотягивается свежий ответ — он
+//                 переписывает запись кеша и уходит событием 'request_revalidate'. Что и когда
+//                 перестраивать, решает qdl.js (чтобы политика менялась по воздуху);
 //   preroll     — рекламный преролл перед плеером: Preroll.show() тянет Google IMA SDK
 //                 (https://imasdk.googleapis.com/js/sdkloader/ima3.js) и крутит VAST из data.vast_url.
 //                 Штатного выключателя нет: disable_features.ads в текущем бандле не читается
@@ -116,6 +120,39 @@ public static class AppPatch
         new P("plugin-reset",
             "encode = Utils$1.addUrlComponent(encode, 'reset=' + Math.random());",
             "/*qdl-cut:plugin-reset*/"),
+        // ── qdl 2.63: stale-while-revalidate у клиентского кеша Request ────────────────────
+        // Ряды каталога лежат в IndexedDB со сроком 2–7 СУТОК (life: day*2 … day*7). Пока запись
+        // «живая», cacheGet отдаёт снимок и сети НЕ БЫВАЕТ ВООБЩЕ: появившийся на сервере фильм и
+        // новый порядок популярности клиент не увидит до протухания. Кеш при этом нужен — он и
+        // даёт мгновенную отрисовку. Требование владельца: рисовать быстро, но решать — серверу.
+        //
+        // 🔴 Патч НИЧЕГО не решает сам, вся политика — в qdl.js (меняется по воздуху). Снимок
+        // отдаётся ровно как раньше (secuses(cached, true) → fromcache=true → повторного cacheSet
+        // нет), ветка промаха и аварийный cache_old не тронуты. Добавлено ровно две вещи:
+        //   1) метка cached.qdl_req — по ней qdl.js связывает готовый ряд с URL. Иначе связать
+        //      нечем: в line.data.url лежит МЕТОД ('?sort=now_playing'), полный адрес туда не
+        //      попадает. В кеш метка не утекает: тело из кеша обратно не пишется.
+        //   2) тихий догон свежего ответа: переписывает запись кеша (cacheSet РОВНО ОДИН РАЗ) и
+        //      уходит событием 'request_revalidate'.
+        // 🔴 complite/secuses для свежего ответа звать НЕЛЬЗЯ: Progress в Api.partNext досчитал бы
+        // задачу второй раз, partLoaded ушёл бы повторно, а Main.build() не идемпотентен —
+        // ряды бы задвоились.
+        //
+        // Выключатели, оба читаются в рантайме (второй патч бандла не нужен):
+        //   • window.lampa_settings.qdl_swr = false — серверный, из lampainit-invc.js (образец: shots);
+        //   • window.qdl_swr(params) — предикат из qdl.js, там же троттлинг (образец: кука dev-wait).
+        // Якорь уникален (1 вхождение и в вендоренном, и в отдаваемом бандле). Смена tree → warn
+        // в лог, поведение возвращается к прежнему (мягкая деградация).
+        new P("swr",
+            "secuses(cached, true);",
+            "try { if (cached && typeof cached === 'object') cached.qdl_req = params.url; } catch (e) {} " +
+            "secuses(cached, true); " +
+            "try { if ((!window.lampa_settings || window.lampa_settings.qdl_swr !== false) && " +
+            "typeof window.qdl_swr === 'function' && window.qdl_swr(params)) { " +
+            "var qdl_swr_req = $.extend({}, data); " +
+            "qdl_swr_req.success = function (fresh) { if (!fresh) return; cacheSet(params, fresh); " +
+            "Lampa.Listener.send('request_revalidate', { params: params, url: params.url, data: fresh, cached: cached }); }; " +
+            "qdl_swr_req.error = function () {}; $.ajax(qdl_swr_req); } } catch (e) {}/*qdl-cut:swr*/"),
     };
 
     public static void Attach() => EventListener.AppReplace += OnAppReplace;

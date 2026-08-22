@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.62';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
+window.qdl_fork_version = '2.63';   // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
 // Лампа готова для использования
@@ -359,6 +359,12 @@ try {
   window.lampa_settings.socket_methods = false;
   window.lampa_settings.services = false;
 } catch (e) {}
+// ── Кил-свитч свежести рядов (qdl 2.63) ──
+// Раскомментировать → патч бандла /*qdl-cut:swr*/ перестанет догонять свежие ответы у ВСЕХ
+// клиентов сразу (ряды снова живут только из клиентского кеша, 2–7 суток). /lampainit.js
+// отдаётся без кеша, но с TTL 20 мин на Staticache — доедет рестартом контейнера.
+// Пер-девайсный выключатель, без правки файлов: Lampa.Storage.set('qdl_swr_off', true).
+// try { window.lampa_settings.qdl_swr = false; } catch (e) {}
 // ── ДО загрузки Lampa: выключение скринсейвера (qdl 2.19) ──
 // Скринсейвер включён ПО УМОЛЧАНИЮ (Params.trigger('screensaver', true), задержка 5 мин), и любой
 // его тип ходит наружу: 'aerial' (дефолт!) — raw.githubusercontent.com/OrangeJedi/Aerial/master/
