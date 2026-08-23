@@ -1,0 +1,24 @@
+<Project>
+
+  <!--
+    Локальные сборки: один драйвер Playwright вместо пяти.
+
+    Microsoft.Playwright копирует node-рантаймы в вывод КАЖДОГО проекта, а на Shared.csproj
+    ссылается почти каждый из ~120 проектов решения. Без этого пина Shared.csproj ставит
+    PlaywrightPlatform=all (см. таргет LampacPlaywrightPlatformLocalDev), и одна сборка
+    всего решения оставляет 119 копий .playwright по 567 МБ — 65 ГБ на диске из воздуха.
+    С пином копируется только win32_x64 (~89 МБ на проект).
+
+    Условие важно: пин действует ТОЛЬКО когда RID не задан, то есть при обычном
+    `dotnet build`/`dotnet test`. Сборка с -r (в том числе публикация) продолжает
+    работать по родной RID-логике Playwright и получает драйвер своей платформы.
+
+    Docker этим файлом не задет дважды: whitelist в .dockerignore не пускает корневые
+    файлы в контекст сборки, а Dockerfile и так передаёт -p:PlaywrightPlatform="$RID"
+    командной строкой, которая выигрывает у props.
+  -->
+  <PropertyGroup>
+    <PlaywrightPlatform Condition="'$(PlaywrightPlatform)' == '' and '$(RuntimeIdentifier)' == ''">win-x64</PlaywrightPlatform>
+  </PropertyGroup>
+
+</Project>

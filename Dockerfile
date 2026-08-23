@@ -15,9 +15,11 @@ ARG DOTNET_SDK_VERSION
 
 RUN mkdir -p /out
 
-WORKDIR /build
-
-COPY . .
+# ⚠️ Порядок слоёв здесь — не стиль, а цена каждой пересборки.
+# Раньше apt и весь блок загрузок стояли ПОД `COPY . .`, поэтому любая правка исходника
+# инвалидировала их: сборка заново качала SDK, runtime и ffmpeg (~300-400 МБ) и оставляла
+# ~3 ГБ кеша, который больше никогда не переиспользовался (за август так накопилось 255 ГБ).
+# Теперь всё, что не зависит от кода, стоит ВЫШЕ COPY и переживает правки.
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -27,6 +29,16 @@ RUN apt-get update \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
+# RID нужен и здесь, и в publish, а переменные оболочки между RUN не живут — кладём в файл.
+RUN case "$TARGETARCH" in \
+    arm64) echo "linux-arm64" > /rid ;; \
+    amd64) echo "linux-x64" > /rid ;; \
+    *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
+    esac
+
+# SDK — только для publish, в образ не едет (стадия builder выбрасывается целиком).
+# Распаковывается в /sdk, а не в /out: прежний `rm -rf /out/usr/share/dotnet` был нужен
+# ровно потому, что SDK и runtime делили один каталог.
 RUN case "$BUILDARCH" in \
     arm64) \
     DOTNET_SDK_URL="https://builds.dotnet.microsoft.com/dotnet/Sdk/${DOTNET_SDK_VERSION}/dotnet-sdk-${DOTNET_SDK_VERSION}-linux-arm64.tar.gz" \
@@ -36,40 +48,55 @@ RUN case "$BUILDARCH" in \
     ;; \
     *) echo "Unsupported BUILDARCH: $BUILDARCH" && exit 1 ;; \
     esac \
-    && case "$TARGETARCH" in \
+    && curl -fSL -o /tmp/dotnet-sdk.tar.gz "${DOTNET_SDK_URL}" \
+    && mkdir -p /sdk \
+    && tar -oxzf /tmp/dotnet-sdk.tar.gz -C /sdk \
+    && rm /tmp/dotnet-sdk.tar.gz
+
+# ASP.NET Core runtime — сразу на своё место в будущем образе.
+RUN case "$TARGETARCH" in \
     arm64) \
     DOTNET_RUNTIME_URL="https://builds.dotnet.microsoft.com/dotnet/aspnetcore/Runtime/${DOTNET_VERSION}/aspnetcore-runtime-${DOTNET_VERSION}-linux-arm64.tar.gz" \
-    FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linuxarm64-gpl.tar.xz" \
-    RID=linux-arm64 \
     ;; \
     amd64) \
     DOTNET_RUNTIME_URL="https://builds.dotnet.microsoft.com/dotnet/aspnetcore/Runtime/${DOTNET_VERSION}/aspnetcore-runtime-${DOTNET_VERSION}-linux-x64.tar.gz" \
-    FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" \
-    RID=linux-x64 \
     ;; \
     *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
     esac \
-    # SDK — required for dotnet publish
-    && curl -fSL -o /tmp/dotnet-sdk.tar.gz "${DOTNET_SDK_URL}" \
-    && mkdir -p /out/usr/share/dotnet \
-    && tar -oxzf /tmp/dotnet-sdk.tar.gz -C /out/usr/share/dotnet \
-    && rm /tmp/dotnet-sdk.tar.gz \
-    # Build the application
-    && DOTNET_CLI_TELEMETRY_OPTOUT=1 /out/usr/share/dotnet/dotnet publish --configuration Release --runtime "$RID" --output /out/lampac -p:PlaywrightPlatform="$RID" Core/Core.csproj \
-    # Replace SDK with ASP.NET Core runtime for the final image
-    && rm -rf /out/usr/share/dotnet \
     && mkdir -p /out/usr/share/dotnet \
     && curl -fSL -o /tmp/dotnet-runtime.tar.gz "${DOTNET_RUNTIME_URL}" \
     && tar -oxzf /tmp/dotnet-runtime.tar.gz -C /out/usr/share/dotnet \
-    && rm /tmp/dotnet-runtime.tar.gz \
-    # FFmpeg & FFprobe — binaries only
+    && rm /tmp/dotnet-runtime.tar.gz
+
+# FFmpeg & FFprobe — качаются здесь, копируются в /out уже после publish: каталог
+# /out/lampac/data создаёт именно publish.
+RUN case "$TARGETARCH" in \
+    arm64) \
+    FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linuxarm64-gpl.tar.xz" \
+    ;; \
+    amd64) \
+    FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" \
+    ;; \
+    *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
+    esac \
     && curl -fSL -o /tmp/ffmpeg.tar.xz "${FFMPEG_URL}" \
-    && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp \
+    && mkdir -p /ffmpeg \
+    && tar -xJf /tmp/ffmpeg.tar.xz -C /ffmpeg \
     --wildcards "*/bin/ffmpeg" "*/bin/ffprobe" \
     --strip-components=2 \
-    && mv /tmp/ffmpeg /tmp/ffprobe /out/lampac/data/ \
-    && chmod +x /out/lampac/data/ffmpeg /out/lampac/data/ffprobe \
-    && rm /tmp/ffmpeg.tar.xz \
+    && chmod +x /ffmpeg/ffmpeg /ffmpeg/ffprobe \
+    && rm /tmp/ffmpeg.tar.xz
+
+WORKDIR /build
+
+# 🔴 Точка инвалидации кеша. Всё, что выше, правку исходников переживает.
+COPY . .
+
+# Build the application
+RUN RID="$(cat /rid)" \
+    && DOTNET_CLI_TELEMETRY_OPTOUT=1 /sdk/dotnet publish --configuration Release --runtime "$RID" --output /out/lampac -p:PlaywrightPlatform="$RID" Core/Core.csproj \
+    && mkdir -p /out/lampac/data \
+    && cp /ffmpeg/ffmpeg /ffmpeg/ffprobe /out/lampac/data/ \
     && touch /out/lampac/isdocker
 
 # Runner — OS/arch of the published image (amd64 vs arm64)
