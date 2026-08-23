@@ -48,6 +48,8 @@
     "ReplicaRotate.cs",
     "ReplicaHistory.cs",
     "HistoryBackfill.cs",
+    "TestSandbox.cs",
+
     "Controller.cs"
   ]
 }

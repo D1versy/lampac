@@ -245,7 +245,14 @@ public class ModuleConf : ModuleBaseConf
     // отказ прав ломал бы боевые разделы, а конфиг перечитывается без рестарта контейнера.
     public bool permsEnabled { get; set; } = true;
 
+    // Песочница e2e (Perms.cs + TestSandbox.cs, qdl 2.64): безымянный headless-браузер не
+    // попадает в реестр устройств, а стенд ходит под одним стабильным айди d1v-test-… и
+    // убирает свои следы сам. false — КИЛЛСВИТЧ на лету: поведение как до 2.64 (headless снова
+    // обычное устройство), и уборка /admin/d1v/api/test-purge отказывает всем без исключения.
+    public bool testSandbox { get; set; } = true;
+
     // ── Заброшенная основная раздача: предложение переключиться на более полную ──
+
     public string watchAutoSwitch { get; set; } = "notify"; // off | notify (уведомление+подтверждение) | auto
     public int watchStaleChecks { get; set; } = 8;          // проверок без смены infohash (~2 суток при 6ч)
     public int watchSwitchCooldownDays { get; set; } = 7;   // не чаще одного переключения в неделю

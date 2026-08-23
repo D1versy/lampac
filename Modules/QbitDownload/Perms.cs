@@ -52,11 +52,25 @@ public static class Perms
     const int DeviceCap = 200;          // кап реестра; устройства С ГРАНТАМИ не вытесняются никогда
     const int TouchThrottleSec = 60;    // не чаще раза в минуту на uid обновляем last/ip
 
+    // ── песочница e2e (qdl 2.64) ──────────────────────────────────────────────────────────
+    // Прогон гейта поднимает 14 headless-браузеров, каждый со СВЕЖИМ профилем: Lampa генерит
+    // новый lampac_unic_id, первый же /qdl/features заводит «устройство», и в админке 74
+    // записи из 85 оказались прогонами тестов. Теперь у стенда один стабильный айди, а
+    // безымянный headless в реестр не попадает вообще.
+    public const string TestUidPrefix = "d1v-test-";     // договорённость со scripts/headless
+    public const string TestAutoName = "🧪 headless-тест";
+    const int TestCap = 3;              // тестовых строк держим не больше трёх — они эфемерны
+
     // ⚠️ Санация обязательна, а не гигиена: ValidateIdentity выключен, uid приходит из query без
     // единой проверки символов, а мы кладём его ключом в JSON и печатаем в админке.
     // Правила — те же, что у проверенного JutHistoryBucket (JutSuHistory.cs).
     static readonly Regex _uidRx = new Regex(@"[^a-z0-9\-_\.]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     static readonly Regex _platRx = new Regex(@"d1vision_(mac|ios|android|tizen|windows)/(\S+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Headless-браузер честно представляется сам: Chrome пишет HeadlessChrome/<версия>, Edge —
+    // аналогично. Ни один настоящий клиент D1Vision такого UA не шлёт.
+    static readonly Regex _headlessRx = new Regex("headless", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
 
     static readonly object _lock = new object();
     static readonly ConcurrentDictionary<string, DateTime> _touched = new(StringComparer.OrdinalIgnoreCase);
@@ -107,7 +121,85 @@ public static class Perms
 
     #endregion
 
+    #region классификатор тестовых устройств — КРАСНАЯ ЛИНИЯ
+
+    // 🔴 Здесь решается, какую запись уборке вообще позволено тронуть. Правило одно и оно
+    // строгое: сносится только ЗАВЕДОМО тестовое, всё остальное защищено навсегда.
+    //
+    //   d1v-test-…                                  → тестовое всегда (наш префикс стенда)
+    //   headless-UA И пустое имя И нет грантов      → тестовое (все три признака сразу)
+    //   есть имя ИЛИ есть гранты ИЛИ UA не headless → ПОЛЬЗОВАТЕЛЬ, не трогаем никогда
+    //
+    // Обратная сторона тоже важна: айди с нашим префиксом убирается даже с грантами — иначе
+    // упавший посреди прогона permsgate оставлял бы строку с правами гвоздём навсегда.
+
+    /// <summary>
+    /// Песочница включена? Киллсвитч <c>testSandbox: false</c> в init.conf возвращает поведение
+    /// до qdl 2.64: headless снова обычное устройство, а уборка отказывает всем без исключения.
+    /// </summary>
+    public static bool SandboxEnabled => ModInit.conf?.testSandbox != false;
+
+    /// <summary>Наш собственный префикс стенда. Такой айди тестовый безусловно.</summary>
+    public static bool IsTestUid(string uid)
+    {
+        string key = NormUid(uid);
+        return key != null && key.StartsWith(TestUidPrefix, StringComparison.Ordinal);
+    }
+
+    /// <summary>Headless-браузер представляется сам. Ни один настоящий клиент так не ходит.</summary>
+    public static bool IsHeadlessUa(string ua)
+        => !string.IsNullOrEmpty(ua) && _headlessRx.IsMatch(ua);
+
+    /// <summary>
+    /// 🔴 ЕДИНСТВЕННЫЙ вход для уборки: «эту запись сносить можно». Зовётся дважды — при сборе
+    /// списка и ещё раз внутри каждой операции удаления, непосредственно перед ней.
+    /// </summary>
+    public static bool IsTestDevice(string uid, JObject d)
+    {
+        if (!SandboxEnabled) return false;                                // киллсвитч: не трогаем ничего
+        if (IsTestUid(uid)) return true;
+
+        if (d == null) return false;                                      // нет записи — нет улик
+        if (!IsHeadlessUa((string)d["ua"])) return false;                 // не headless — пользователь
+        if (!string.IsNullOrWhiteSpace((string)d["name"])) return false;  // именованное — защищено
+        if (((d["grants"] as JArray)?.Count ?? 0) > 0) return false;      // с правами — защищено
+
+        return true;
+    }
+
+    /// <summary>Тестовое ли устройство по ТЕКУЩЕМУ состоянию реестра (второй замок уборки).</summary>
+    public static bool IsTestDevice(string uid)
+    {
+        string key = NormUid(uid);
+        if (key == null) return false;
+
+        try { return IsTestDevice(key, Load()["devices"]?[key] as JObject); }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] perms istest: " + ex.Message); return false; }
+    }
+
+    /// <summary>Полный список того, что уборке разрешено снести. Больше ничего она не видит.</summary>
+    public static List<string> TestDevices()
+    {
+        var list = new List<string>();
+        try
+        {
+            if (Load()["devices"] is not JObject devices) return list;
+
+            foreach (var p in devices.Properties())
+            {
+                if (IsTestDevice(p.Name, p.Value as JObject))
+                    list.Add(p.Name);
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] perms testdevices: " + ex.Message); }
+
+        return list;
+    }
+
+    #endregion
+
     #region чтение / запись реестра
+
 
     static JObject Load()
     {
@@ -161,7 +253,22 @@ public static class Perms
     static void Prune(JObject root)
     {
         var devices = (JObject)root["devices"];
+
+        // Тестовые сверх TestCap уходят первыми и независимо от общего капа: они эфемерны
+        // по определению, а держать их до 200 штук означало бы вернуть ровно ту проблему,
+        // ради которой песочница и появилась.
+        var stale = devices.Properties()
+            .Where(p => IsTestDevice(p.Name, p.Value as JObject))
+            .OrderByDescending(p => (DateTime?)p.Value["last"] ?? DateTime.MinValue)
+            .Skip(TestCap)
+            .Select(p => p.Name)
+            .ToList();
+
+        foreach (string name in stale)
+            devices.Remove(name);
+
         if (devices.Count <= DeviceCap) return;
+
 
         var victims = devices.Properties()
             .Where(p => ((p.Value["grants"] as JArray)?.Count ?? 0) == 0)
@@ -221,7 +328,16 @@ public static class Perms
         string uid = NormUid(req.user_uid);
         if (uid == null) return;
 
+        // 🔴 Единственная правка на горячем пути (qdl 2.64). Безымянный headless-браузер
+        // пользователем не считается: в реестр он не попадает ВООБЩЕ, и убирать потом нечего.
+        // Наш стенд (d1v-test-…) — исключение: ему строка нужна, чтобы permsgate мог выдать
+        // и отозвать право, и она уходит сама в конце прогона.
+        bool testUid = SandboxEnabled && IsTestUid(uid);
+        if (SandboxEnabled && !testUid && IsHeadlessUa(req.UserAgent))
+            return;
+
         var now = DateTime.UtcNow;
+
         if (!force && _touched.TryGetValue(uid, out var seen) && (now - seen).TotalSeconds < TouchThrottleSec)
             return;
 
@@ -245,7 +361,16 @@ public static class Perms
                     d["platform"] = platform;
                 if (!string.IsNullOrEmpty(client)) d["client"] = client;
 
+                if (testUid)
+                {
+                    d["test"] = true;
+                    // Имя проставляем сами: если прогон умрёт на середине и строка переживёт
+                    // ночь, владелец в админке сразу видит стенд, а не гадает про «ещё одного».
+                    if (string.IsNullOrWhiteSpace((string)d["name"])) d["name"] = TestAutoName;
+                }
+
                 Prune(root);
+
                 return null;
             });
         }
@@ -272,8 +397,10 @@ public static class Perms
                     ["ip"] = (string)v["ip"] ?? "",
                     ["first"] = v["first"],
                     ["last"] = v["last"],
+                    ["test"] = IsTestDevice(p.Name, v as JObject),
                     ["grants"] = (v["grants"] as JArray)?.DeepClone() ?? new JArray()
                 });
+
             }
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] perms list: " + ex.Message); }
@@ -291,7 +418,16 @@ public static class Perms
         return Mutate(root =>
         {
             var d = Device(root, key);
+
+            // Право, выданное стенду, не должно превращать его в «ещё одного пользователя».
+            if (SandboxEnabled && IsTestUid(key))
+            {
+                d["test"] = true;
+                if (string.IsNullOrWhiteSpace((string)d["name"])) d["name"] = TestAutoName;
+            }
+
             var g = d["grants"] as JArray ?? new JArray();
+
 
             var kept = new JArray(g.Where(x => !string.Equals((string)x, feature, StringComparison.OrdinalIgnoreCase)));
             if (on) kept.Add(feature.ToLowerInvariant());
@@ -316,8 +452,19 @@ public static class Perms
         });
     }
 
+    /// <summary>Есть ли такая строка в реестре. Нужна уборке, чтобы честно считать сухой прогон.</summary>
+    public static bool Known(string uid)
+    {
+        string key = NormUid(uid);
+        if (key == null) return false;
+
+        try { return Load()["devices"]?[key] is JObject; }
+        catch { return false; }
+    }
+
     public static bool Forget(string uid)
     {
+
         string key = NormUid(uid);
         if (key == null) return false;
 

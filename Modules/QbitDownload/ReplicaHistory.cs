@@ -41,7 +41,12 @@ public partial class QbitController
 {
     internal const int ReplicaHistoryVersion = 1;
 
-    static string DbDir => "database";
+    // Шов для тестов: в проде путь относительный (рабочий каталог контейнера — /lampac),
+    // а тестам нужен свой временный каталог, иначе уборка следов писала бы в БД сборки.
+    internal static string DbDirOverride;
+
+    static string DbDir => DbDirOverride ?? "database";
+
     static string TimeCodeDbPath => Path.Combine(DbDir, "TimeCode.sql");
     static string SyncDbPath => Path.Combine(DbDir, "Sync.sql");
     static string StorageDir => Path.Combine(DbDir, "storage");

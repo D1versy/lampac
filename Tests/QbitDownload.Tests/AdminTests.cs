@@ -324,4 +324,66 @@ public class AdminTests
         var result = await Controller(marker: false).HistoryBackfillApply();
         Assert.Equal(403, StatusOf(result));
     }
+
+    // ══ уборка следов тестовых устройств (qdl 2.64) ═══════════════════════
+
+    [Fact]
+    public void Test_purge_apply_requires_the_marker()
+    {
+        var result = Controller(marker: false)
+            .TestPurgeApply(new D1VAdminController.PurgeBody { all = true });
+
+        Assert.Equal(403, StatusOf(result));
+    }
+
+    [Fact]
+    public void Test_purge_apply_refuses_a_foreign_origin()
+    {
+        var result = Controller(origin: "http://evil.com")
+            .TestPurgeApply(new D1VAdminController.PurgeBody { all = true });
+
+        Assert.Equal(403, StatusOf(result));
+    }
+
+    [Fact]
+    public void Test_purge_apply_with_an_empty_body_deletes_nothing()
+    {
+        // 🔴 Умолчание не имеет права быть разрушительным: пустое тело — это ошибка,
+        // а не «убрать всё».
+        TestEnv.FreshCache();
+        var c = Controller();
+        var result = c.TestPurgeApply(new D1VAdminController.PurgeBody());
+
+        Assert.Equal(403, c.Response.StatusCode);
+        Assert.Contains("нужен uid", (result as ContentResult)?.Content ?? "");
+    }
+
+    [Fact]
+    public void Test_purge_refuses_a_device_that_is_not_a_test_one()
+    {
+        TestEnv.FreshCache();
+        Perms.Touch(new RequestModel { user_uid = "dueq3shm", UserAgent = "lampa_client d1vision_ios/1.0.13-524" },
+                    force: true);
+
+        var c = Controller();
+        c.TestPurgeApply(new D1VAdminController.PurgeBody { uid = "dueq3shm" });
+
+        Assert.Equal(403, c.Response.StatusCode);
+        Assert.True(Perms.Known("dueq3shm"));
+    }
+
+    [Fact]
+    public void Test_purge_preview_never_writes()
+    {
+        TestEnv.FreshCache();
+        Perms.Touch(new RequestModel { user_uid = Perms.TestUidPrefix + "ab12cd34", UserAgent = "HeadlessChrome/139" },
+                    force: true);
+
+        var c = Controller();
+        var json = (c.TestPurgePreview(null) as ContentResult)?.Content ?? "";
+
+        Assert.Contains("\"apply\":false", json);
+        Assert.True(Perms.Known(Perms.TestUidPrefix + "ab12cd34"));
+    }
 }
+

@@ -144,9 +144,59 @@ public class D1VAdminController : BaseController
 
     #endregion
 
+    #region уборка следов тестовых устройств (qdl 2.64)
+
+    // Прогон гейта поднимает 14 headless-браузеров и оставляет за собой следы в пяти
+    // хранилищах (см. TestSandbox.cs). Эти две ручки — то, чем он за собой убирает.
+    // 🔴 Обе умеют трогать ТОЛЬКО заведомо тестовые айди: решение принимает классификатор
+    // Perms.IsTestDevice, а не запрос. Именованное устройство и устройство с правами
+    // не убираются никогда — на любой запрос по ним ответ 403 и ноль удалений.
+
+    /// <summary>Сухой прогон: что и в каком хранилище нашлось. Не пишет ничего.</summary>
+    [HttpGet]
+    [Route("/admin/d1v/api/test-purge")]
+    public ActionResult TestPurgePreview(string uid)
+        => RunTestPurge(uid, string.IsNullOrWhiteSpace(uid), false);
+
+    /// <summary>
+    /// Применить. Тело {"uid":"…"} — один айди (так ходит гейт после каждого прогона),
+    /// {"all":true} — все тестовые сразу (разовая уборка руками, после сухого прогона).
+    /// Пустое тело — ошибка: умолчание не должно быть разрушительным.
+    /// </summary>
+    [HttpPost]
+    [Route("/admin/d1v/api/test-purge")]
+    public ActionResult TestPurgeApply([FromBody] PurgeBody body)
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        if (body == null) return BadRequest();
+
+        return RunTestPurge(body.uid, body.all, true);
+    }
+
+    ActionResult RunTestPurge(string uid, bool all, bool apply)
+    {
+        SetHeadersNoCache();
+
+        var report = QbitController.TestPurge(uid, all, apply);
+        string json = report.ToString(Newtonsoft.Json.Formatting.None);
+
+        // Отказ отдаём 403 вместе с причиной: гейту нужно не «не вышло», а что именно.
+        if (report["error"] != null)
+        {
+            HttpContext.Response.StatusCode = 403;
+            return Content(json, "application/json; charset=utf-8");
+        }
+
+        return Content(json, "application/json; charset=utf-8");
+    }
+
+    #endregion
+
     public class GrantBody { public string uid { get; set; } public string feature { get; set; } public bool on { get; set; } }
     public class NameBody { public string uid { get; set; } public string name { get; set; } }
     public class UidBody { public string uid { get; set; } }
+    public class PurgeBody { public string uid { get; set; } public bool all { get; set; } }
+
 
     ActionResult Done(bool success)
     {
