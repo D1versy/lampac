@@ -56,8 +56,7 @@
     <Compile Include="..\..\Modules\QbitDownload\FfWorker.cs" Link="Module\FfWorker.cs" />
     <Compile Include="..\..\Modules\QbitDownload\TorrentScoring.cs" Link="Module\TorrentScoring.cs" />
     <Compile Include="..\..\Modules\QbitDownload\EpisodeHunter.cs" Link="Module\EpisodeHunter.cs" />
-    <!-- LiveTs.cs — чистая работа с байтами MPEG-TS, ни ModInit, ни BaseController: линкуется
-         (в отличие от Live.cs, который тянет за собой контроллер). -->
+    <!-- LiveTs.cs — чистая работа с байтами MPEG-TS. -->
     <Compile Include="..\..\Modules\QbitDownload\LiveTs.cs" Link="Module\LiveTs.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Warmup.cs" Link="Module\Warmup.cs" />
     <Compile Include="..\..\Modules\QbitDownload\AppReplace.cs" Link="Module\AppReplace.cs" />
@@ -88,6 +87,7 @@
     <Compile Include="..\..\Modules\QbitDownload\Perms.cs" Link="Module\Perms.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Admin.cs" Link="Module\Admin.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Controller.cs" Link="Module\Controller.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\Live.cs" Link="Module\Live.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Replica.cs" Link="Module\Replica.cs" />
     <Compile Include="..\..\Modules\QbitDownload\ReplicaSync.cs" Link="Module\ReplicaSync.cs" />
     <Compile Include="..\..\Modules\QbitDownload\ReplicaRotate.cs" Link="Module\ReplicaRotate.cs" />
@@ -111,6 +111,11 @@
          BaseController, поэтому коллизии с QbitDownload.ModInit не возникает. Под тестами его
          два инварианта: «пишем только полный набор» и «не закрепляем массовый сбой». -->
     <Compile Include="..\..\Online\OnlineEventsCache.cs" Link="Online\OnlineEventsCache.cs" />
+
+    <!-- D1VPerimeter.cs — весь внешний периметр D1Vision. Зависит только от AspNetCore.Http +
+         Shared (RequestModel/CoreInit) + Serilog — всё уже подключено FrameworkReference’ом и ProjectReference’ом.
+         Тесты гоняют Invoke() на DefaultHttpContext, без подъёма Startup. -->
+    <Compile Include="..\..\Core\Middlewares\D1VPerimeter.cs" Link="Core\D1VPerimeter.cs" />
   </ItemGroup>
 
 </Project>

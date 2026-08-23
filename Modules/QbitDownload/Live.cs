@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
 using Shared;
@@ -1022,7 +1022,7 @@ public partial class QbitController
         return ContentTo(LiveSignDay(build.playlist), "application/vnd.apple.mpegurl");
     }
 
-    static readonly Regex _liveSegRx = new Regex(@"^seg_\d{1,6}\.ts$", RegexOptions.Compiled);
+    static readonly Regex _liveSegRx = new Regex(@"\Aseg_\d{1,6}\.ts\z", RegexOptions.Compiled);
 
     /// <param name="o">
     /// Смещение куска в сутках, секунды. Есть — метки сегмента приводятся к сквозному времени дня
@@ -1283,7 +1283,7 @@ public partial class QbitController
         return ContentTo(sb.ToString(), "application/vnd.apple.mpegurl");
     }
 
-    static readonly Regex _liveWatchSegRx = new Regex(@"^(seg_\d{1,10}\.(ts|m4s)|init\.mp4)$", RegexOptions.Compiled);
+    static readonly Regex _liveWatchSegRx = new Regex(@"\A(seg_\d{1,10}\.(ts|m4s)|init\.mp4)\z", RegexOptions.Compiled);
 
     [HttpGet, AllowAnonymous]
     [Route("qdl/live/watch/seg/{camera:int}/{file}")]

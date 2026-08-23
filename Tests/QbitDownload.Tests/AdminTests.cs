@@ -1,0 +1,327 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Newtonsoft.Json.Linq;
+using QbitDownload;
+using Shared;
+using Shared.Models.Base;
+using Xunit;
+
+namespace QbitDownload.Tests;
+
+/// <summary>
+/// Админка выдачи прав D1Vision (/admin/d1v) — единственное место, где скрытые разделы
+/// Live/Rec открываются конкретному устройству.
+///
+/// 🔴 Анти-CSRF здесь не украшение. ModHeaders зеркалит Origin и отдаёт
+/// Access-Control-Allow-Credentials:true, поэтому ЛЮБОЙ сайт, открытый в браузере внутри
+/// локалки, может дёрнуть эти ручки вместе с нашей кукой. Защита держится на двух вещах:
+/// обязательном заголовке X-D1V-Admin (простой form-POST его не поставит) и совпадении
+/// Origin с Host. До этого файла ни одна из них не проверялась тестом.
+/// </summary>
+public class AdminTests
+{
+    static D1VAdminController Controller(string origin = null, bool marker = true,
+                                         string host = "192.168.87.24:9118")
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Host = new HostString(host);
+        ctx.Request.Method = "POST";
+        ctx.Features.Set(new RequestModel { IP = "192.168.87.5", IsLocalRequest = true });
+
+        if (marker) ctx.Request.Headers["X-D1V-Admin"] = "1";
+        if (origin != null) ctx.Request.Headers["Origin"] = origin;
+
+        return new D1VAdminController { ControllerContext = new ControllerContext { HttpContext = ctx } };
+    }
+
+    static bool SameOrigin(D1VAdminController c) =>
+        (bool)typeof(D1VAdminController)
+            .GetMethod("SameOrigin", BindingFlags.NonPublic | BindingFlags.Instance)
+            .Invoke(c, null);
+
+    static int StatusOf(ActionResult r) => r switch
+    {
+        StatusCodeResult s => s.StatusCode,
+        ObjectResult o => o.StatusCode ?? 200,
+        ContentResult => 200,
+        _ => 200,
+    };
+
+    // ══ анти-CSRF ═════════════════════════════════════════════════════════
+
+    [Fact]
+    public void A_request_without_the_marker_header_is_refused()
+    {
+        // Простой form-POST с чужого сайта заголовок поставить не может — на этом всё и держится.
+        Assert.False(SameOrigin(Controller(marker: false)));
+    }
+
+    [Fact]
+    public void A_same_origin_request_passes()
+    {
+        Assert.True(SameOrigin(Controller(origin: "http://192.168.87.24:9118")));
+    }
+
+    [Fact]
+    public void A_request_without_Origin_passes_when_the_marker_is_present()
+    {
+        // Origin на POST шлют не все клиенты; маркера при этом достаточно.
+        Assert.True(SameOrigin(Controller(origin: null)));
+    }
+
+    [Theory]
+    [InlineData("http://evil.com")]
+    [InlineData("http://192.168.87.24:9119")]       // другой порт
+    [InlineData("http://192.168.87.25:9118")]       // другой хост
+    public void A_foreign_Origin_is_refused(string origin)
+    {
+        Assert.False(SameOrigin(Controller(origin: origin)));
+    }
+
+    [Fact]
+    public void Only_the_authority_is_compared_not_the_scheme()
+    {
+        // Сравнение идёт по authority: та же машина по https — та же машина.
+        // Периметр от схемы не зависит, а внутри локалки её вообще нет.
+        Assert.True(SameOrigin(Controller(origin: "https://192.168.87.24:9118")));
+    }
+
+    [Fact]
+    public void A_malformed_Origin_is_refused()
+    {
+        Assert.False(SameOrigin(Controller(origin: "не url")));
+    }
+
+    [Fact]
+    public void Origin_comparison_ignores_case()
+    {
+        Assert.True(SameOrigin(Controller(origin: "http://192.168.87.24:9118", host: "192.168.87.24:9118")));
+    }
+
+    // ══ мутации закрыты гардом ════════════════════════════════════════════
+
+    [Fact]
+    public void Grant_without_the_marker_is_403_and_changes_nothing()
+    {
+        TestEnv.FreshCache();
+        var c = Controller(marker: false);
+
+        var result = c.SetGrant(new D1VAdminController.GrantBody
+        {
+            uid = "device-1", feature = Perms.FeatureLive, on = true
+        });
+
+        Assert.Equal(403, StatusOf(result));
+        Assert.False(Perms.Allowed("device-1", Perms.FeatureLive));
+    }
+
+    [Fact]
+    public void Rename_without_the_marker_is_403()
+    {
+        var result = Controller(marker: false)
+            .SetName(new D1VAdminController.NameBody { uid = "device-1", name = "кухня" });
+
+        Assert.Equal(403, StatusOf(result));
+    }
+
+    [Fact]
+    public void Forget_without_the_marker_is_403()
+    {
+        var result = Controller(marker: false)
+            .ForgetDevice(new D1VAdminController.UidBody { uid = "device-1" });
+
+        Assert.Equal(403, StatusOf(result));
+    }
+
+    [Fact]
+    public void A_missing_body_is_a_bad_request_not_a_crash()
+    {
+        Assert.Equal(400, StatusOf(Controller().SetGrant(null)));
+        Assert.Equal(400, StatusOf(Controller().SetName(null)));
+        Assert.Equal(400, StatusOf(Controller().ForgetDevice(null)));
+    }
+
+    // ══ выдача и отзыв прав ═══════════════════════════════════════════════
+
+    [Fact]
+    public void Granting_a_feature_opens_it_for_that_device_only()
+    {
+        TestEnv.FreshCache();
+        var c = Controller();
+
+        c.SetGrant(new D1VAdminController.GrantBody
+        {
+            uid = "device-1", feature = Perms.FeatureLive, on = true
+        });
+
+        Assert.True(Perms.Allowed("device-1", Perms.FeatureLive));
+        Assert.False(Perms.Allowed("device-2", Perms.FeatureLive));
+    }
+
+    [Fact]
+    public void Features_are_granted_separately()
+    {
+        // «Эфир» не открывает «записи»: это разные разделы и разные решения владельца.
+        TestEnv.FreshCache();
+        var c = Controller();
+
+        c.SetGrant(new D1VAdminController.GrantBody
+        {
+            uid = "device-1", feature = Perms.FeatureLive, on = true
+        });
+
+        Assert.True(Perms.Allowed("device-1", Perms.FeatureLive));
+        Assert.False(Perms.Allowed("device-1", Perms.FeatureRec));
+    }
+
+    [Fact]
+    public void Revoking_closes_the_section_again()
+    {
+        TestEnv.FreshCache();
+        var c = Controller();
+        var body = new D1VAdminController.GrantBody
+        {
+            uid = "device-1", feature = Perms.FeatureRec, on = true
+        };
+
+        c.SetGrant(body);
+        Assert.True(Perms.Allowed("device-1", Perms.FeatureRec));
+
+        body.on = false;
+        c.SetGrant(body);
+        Assert.False(Perms.Allowed("device-1", Perms.FeatureRec));
+    }
+
+    [Fact]
+    public void An_unknown_feature_is_refused()
+    {
+        // Белый список вместо «всё кроме»: опечатка не должна создавать право-призрак.
+        TestEnv.FreshCache();
+        var c = Controller();
+
+        var result = c.SetGrant(new D1VAdminController.GrantBody
+        {
+            uid = "device-1", feature = "такого-нет", on = true
+        });
+
+        Assert.Contains("\"success\":false", ((ContentResult)result).Content);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("...")]
+    public void A_degenerate_uid_is_refused(string uid)
+    {
+        // 🔴 NormUid — не гигиена, а защита: «.» и «..» иначе уехали бы в путь файла прав.
+        TestEnv.FreshCache();
+        var c = Controller();
+
+        var result = c.SetGrant(new D1VAdminController.GrantBody
+        {
+            uid = uid, feature = Perms.FeatureLive, on = true
+        });
+
+        Assert.Contains("\"success\":false", ((ContentResult)result).Content);
+    }
+
+    [Fact]
+    public void Forgetting_a_device_revokes_everything_it_had()
+    {
+        TestEnv.FreshCache();
+        var c = Controller();
+        c.SetGrant(new D1VAdminController.GrantBody
+        {
+            uid = "device-1", feature = Perms.FeatureLive, on = true
+        });
+
+        c.ForgetDevice(new D1VAdminController.UidBody { uid = "device-1" });
+
+        Assert.False(Perms.Allowed("device-1", Perms.FeatureLive));
+    }
+
+    [Fact]
+    public void Forgetting_is_idempotent()
+    {
+        // headless-проверки зовут её и при старте (защитно), и при выходе.
+        TestEnv.FreshCache();
+        var c = Controller();
+
+        c.ForgetDevice(new D1VAdminController.UidBody { uid = "never-existed" });
+        var ex = Record.Exception(() => c.ForgetDevice(new D1VAdminController.UidBody { uid = "never-existed" }));
+
+        Assert.Null(ex);
+    }
+
+    // ══ список устройств ══════════════════════════════════════════════════
+
+    [Fact]
+    public void The_device_list_reports_the_killswitch_and_the_feature_set()
+    {
+        TestEnv.FreshCache();
+        var payload = JObject.Parse(((ContentResult)Controller().Devices()).Content);
+
+        Assert.True(payload["enabled"]!.Value<bool>());
+        var features = payload["features"]!.Select(f => (string)f).ToArray();
+        Assert.Contains(Perms.FeatureLive, features);
+        Assert.Contains(Perms.FeatureRec, features);
+    }
+
+    [Fact]
+    public void A_granted_device_shows_up_in_the_list()
+    {
+        TestEnv.FreshCache();
+        var c = Controller();
+        c.SetGrant(new D1VAdminController.GrantBody
+        {
+            uid = "device-1", feature = Perms.FeatureLive, on = true
+        });
+
+        var payload = JObject.Parse(((ContentResult)c.Devices()).Content);
+        string json = payload["devices"]!.ToString();
+
+        Assert.Contains("device-1", json);
+    }
+
+    [Fact]
+    public void The_device_list_is_never_cached()
+    {
+        // Админка обязана показывать текущее состояние: закешированный список
+        // выглядел бы как «право не выдалось».
+        var c = Controller();
+        c.Devices();
+
+        Assert.True(c.Response.Headers.ContainsKey("Cache-Control"));
+    }
+
+    // ══ бэкфилл истории ═══════════════════════════════════════════════════
+
+    [Fact]
+    public async Task History_backfill_is_refused_on_a_replica()
+    {
+        // 🔴 Запись на реплике поставила бы строке updated=now, и домашняя копия навсегда
+        // осталась бы «старее» — история дома перестала бы доезжать сюда вообще.
+        TestEnv.EnsureConf();
+        string prev = ModInit.conf.replicaRole;
+        try
+        {
+            ModInit.conf.replicaRole = "replica";
+            var result = await Controller().HistoryBackfillApply();
+            Assert.Equal(403, StatusOf(result));
+        }
+        finally { ModInit.conf.replicaRole = prev; }
+    }
+
+    [Fact]
+    public async Task History_backfill_apply_requires_the_marker()
+    {
+        var result = await Controller(marker: false).HistoryBackfillApply();
+        Assert.Equal(403, StatusOf(result));
+    }
+}
