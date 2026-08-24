@@ -1,4 +1,4 @@
-using Core.Middlewares;
+﻿using Core.Middlewares;
 using Core.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -353,4 +353,3 @@ public class Program
     }
     #endregion
 }
-// build-timing probe B
