@@ -258,8 +258,11 @@ namespace JacRed.Engine
         /// HTML через солвер с кешом и дедупом. <paramref name="warmup"/> ждётся ВНУТРИ фоновой
         /// задачи, до самого запроса: у rutracker это логин, и без него solve вернул бы
         /// разлогиненную страницу, которая осела бы в кеше на htmlCacheMinutes (см. Forget).
+        /// <paramref name="ttlMinutes"/> перекрывает общий htmlCacheMinutes: странице темы нужен
+        /// КОРОТКИЙ кеш — на ней живёт infohash, и по его смене мы узнаём о перерегистрации
+        /// раздачи. Часовой снимок спрятал бы это от слежения.
         /// </summary>
-        public static async Task<string> CachedHtml(FlareSolverrConf c, string cacheKey, string url, int budgetSeconds, Func<Task> warmup = null)
+        public static async Task<string> CachedHtml(FlareSolverrConf c, string cacheKey, string url, int budgetSeconds, Func<Task> warmup = null, int ttlMinutes = 0)
         {
             if (!Available(c)) return null;
 
@@ -282,7 +285,7 @@ namespace JacRed.Engine
 
                     var sol = await Get(c, url);
                     if (sol?.html != null)
-                        _cache[cacheKey] = (sol.html, Now().AddMinutes(Math.Max(1, c.htmlCacheMinutes)));
+                        _cache[cacheKey] = (sol.html, Now().AddMinutes(Math.Max(1, ttlMinutes > 0 ? ttlMinutes : c.htmlCacheMinutes)));
                     return sol?.html;
                 }
                 finally { _inflight.TryRemove(cacheKey, out Task<string> _); }

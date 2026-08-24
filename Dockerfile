@@ -89,12 +89,42 @@ RUN case "$TARGETARCH" in \
 
 WORKDIR /build
 
+# ── Слой восстановления зависимостей ─────────────────────────────────────────
+# Раньше restore жил ВНУТРИ publish, то есть ниже `COPY . .`, и пакеты NuGet качались
+# заново на каждую пересборку: правка одного .cs инвалидировала слой, а вместе с ним и
+# всё восстановление. Теперь restore — отдельный слой, зависящий ТОЛЬКО от файлов
+# проектов. Их правят редко, поэтому обычная правка исходника его не трогает вовсе.
+#
+# `--mount=type=cache` — второй рубеж, на случай когда файлы проектов всё-таки изменились:
+# каталог пакетов лежит у нас, вне образа и вне слоёв, и переживает инвалидацию слоя.
+# restore тогда отрабатывает заново, но по сети тянет только то, чего у нас ещё нет, —
+# то есть действительно новую версию пакета.
+# ⚠️ Кеш-маунты требуют BuildKit; он включён по умолчанию с Docker 23 (здесь 29.6).
+#
+# Публикуется только Core.csproj, а он ссылается ровно на Shared.csproj — поэтому и файлов
+# проектов нужно два. Остальные ~120 модулей сервер компилирует сам, Roslyn'ом, на старте.
+COPY Core/Core.csproj Core/
+COPY Shared/Shared.csproj Shared/
+
+RUN --mount=type=cache,target=/root/.nuget/packages,sharing=locked \
+    RID="$(cat /rid)" \
+    && DOTNET_CLI_TELEMETRY_OPTOUT=1 /sdk/dotnet restore --runtime "$RID" \
+    -p:Configuration=Release -p:PlaywrightPlatform="$RID" Core/Core.csproj
+
 # 🔴 Точка инвалидации кеша. Всё, что выше, правку исходников переживает.
 COPY . .
 
 # Build the application
-RUN RID="$(cat /rid)" \
-    && DOTNET_CLI_TELEMETRY_OPTOUT=1 /sdk/dotnet publish --configuration Release --runtime "$RID" --output /out/lampac -p:PlaywrightPlatform="$RID" Core/Core.csproj \
+# --no-restore: зависимости уже восстановлены слоем выше, второй раз графы не считаем.
+# Тот же кеш-маунт подключён и сюда — обязательно: пакеты лежат в кеше, а не в слое,
+# и без маунта publish их просто не найдёт.
+# ⚠️ Единственный способ это сломать — снести ИМЕННО кеш-маунт, не тронув слои
+# (`docker builder prune --filter type=exec.cachemount`): тогда restore-слой считается
+# готовым, а пакетов нет. Лечится `docker build --no-cache`. Обычный `docker builder prune`
+# сносит и слои, поэтому restore честно отработает заново.
+RUN --mount=type=cache,target=/root/.nuget/packages,sharing=locked \
+    RID="$(cat /rid)" \
+    && DOTNET_CLI_TELEMETRY_OPTOUT=1 /sdk/dotnet publish --no-restore --configuration Release --runtime "$RID" --output /out/lampac -p:PlaywrightPlatform="$RID" Core/Core.csproj \
     && mkdir -p /out/lampac/data \
     && cp /ffmpeg/ffmpeg /ffmpeg/ffprobe /out/lampac/data/ \
     && touch /out/lampac/isdocker

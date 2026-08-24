@@ -367,6 +367,29 @@ public class JacRedFlareSolverrTests : IDisposable
     }
 
     /// <summary>
+    /// Странице ТЕМЫ нужен короткий кеш: на ней живёт infohash, по смене которого слежение
+    /// узнаёт о перерегистрации раздачи. Общий htmlCacheMinutes (час) спрятал бы её от
+    /// CheckWatches, поэтому parseMagnet передаёт свой ttlMinutes.
+    /// </summary>
+    [Fact]
+    public async Task Per_call_ttl_overrides_the_common_one()
+    {
+        var c = Conf();
+        c.htmlCacheMinutes = 60;
+
+        await FlareSolverr.CachedHtml(c, "k5", "https://rutracker.org/forum/viewtopic.php?t=1", 30, ttlMinutes: 5);
+        int after = Count("request.get");
+
+        _now = _now.AddMinutes(4);                       // ещё внутри пяти минут — берём из кеша
+        await FlareSolverr.CachedHtml(c, "k5", "https://rutracker.org/forum/viewtopic.php?t=1", 30, ttlMinutes: 5);
+        Assert.Equal(after, Count("request.get"));
+
+        _now = _now.AddMinutes(2);                       // 6 минут — снимок протух, хотя общий TTL час
+        await FlareSolverr.CachedHtml(c, "k5", "https://rutracker.org/forum/viewtopic.php?t=1", 30, ttlMinutes: 5);
+        Assert.Equal(after + 1, Count("request.get"));
+    }
+
+    /// <summary>
     /// Forget возвращает ключ в работу: тот, кто по содержимому понял, что страница негодная
     /// (гостевая версия rutracker), обязан иметь возможность её выбросить.
     /// </summary>

@@ -32,6 +32,7 @@ public sealed class ScoreResult
 {
     public double score;
     public bool nameMiss;           // название карточки в title не найдено — не может быть ⭐
+    public bool nameGateOff;        // имя карточки нормализовалось в пустоту — сверять НЕЧЕМ, ⭐ запрещена
     public bool typeMiss;           // категория/вид явно не совпали с запросом
     public EpCoverage ep;           // распарсенное «N из M» (null если нет)
     public List<string> why = new List<string>();
@@ -163,7 +164,10 @@ public static class TorrentScoring
     // «Фрэнк Герберт - Дюна 4 (2021) MP3» и саундтреки набирали 42+ и лезли в середину
     // выдачи фильма. Категории тут не спасают: у 790 из 913 раздач cats пустые.
     static readonly Regex _nonVideoRx = new Regex(
-        @"(?i)(?<![a-z0-9])(mp3|flac|ape\b|wav\b|m4b|epub|fb2|mobi|djvu|pdf|аудиокниг\w*|дискограф\w*|саундтрек\w*|ost)(?![a-z0-9])",
+        // «МР3» здесь дважды: латиницей и КИРИЛЛИЦЕЙ (М U+041C, Р U+0420) — аудиокниги пишут его
+        // именно так, и латинский паттерн их не видел. В снимках поиска таких строк набралось 125;
+        // на карточках с коротким названием они доезжали до списка (в «Холоде» — 7 аудиокниг).
+        @"(?i)(?<![a-z0-9])(mp3|МР3|flac|ape\b|wav\b|m4b|epub|fb2|mobi|djvu|pdf|аудиокниг\w*|дискограф\w*|саундтрек\w*|ost)(?![a-z0-9])",
         RegexOptions.Compiled);
 
     // Видео-признак. Проверяем его ОБЯЗАТЕЛЬНО: иначе «Дюна (2021) BDRemux + OST» —
@@ -271,7 +275,20 @@ public static class TorrentScoring
         bool haveNames = !string.IsNullOrEmpty(ctx.titleNorm) || !string.IsNullOrEmpty(ctx.originalNorm);
         if (idMatch) { score += 40; r.why.Add("точное совпадение по TMDB"); }
         else if (!haveNames)
+        {
+            // 🔥 Сюда попадают карточки, чьё название после нормализации пусто: SearchNameTo
+            // оставляет только латиницу, кириллицу и цифры, поэтому иероглифы и бенгали дают
+            // пустую строку И в title, и в original. Гейт имени тогда не работает НИ ДЛЯ КОГО:
+            // nameMiss не выставляется никому, все получают одинаковые нейтральные +20, и ⭐
+            // достаётся тому, кто набрал больше по сидам и свежести, — то есть произвольному
+            // чужому тайтлу. Живой пример: карточка 英雄傳 (tmdb 1440599) рекомендовала «Как
+            // раздражать людей (1969)». Список показать можно, но ручаться за него нельзя —
+            // ⭐ запрещаем. Левая раздача под звездой хуже, чем её отсутствие.
+            // ⚠️ Раздачи, найденные по TMDB id (id_match), сюда не попадают — они уходят веткой
+            // выше и ⭐ получить могут: там тайтл гарантирован источником, а не именем.
             score += 20;   // без контекста имён скорить нечего — нейтрально
+            r.nameGateOff = true;
+        }
         else
         {
             string headNorm = SearchNameTo.Convert(TitleHead(title)) ?? "";
@@ -467,7 +484,7 @@ public static class TorrentScoring
 
         foreach (var (t, r) in ordered)
         {
-            if (r.nameMiss || r.typeMiss || (t.Value<int?>("sid") ?? 0) < recommendMinSeeds) continue;
+            if (r.nameMiss || r.nameGateOff || r.typeMiss || (t.Value<int?>("sid") ?? 0) < recommendMinSeeds) continue;
             t["rec"] = true;
             t["why"] = string.Join(" · ", r.why);
             break;   // ⭐ только у одной; никто не прошёл — списка без ⭐ достаточно

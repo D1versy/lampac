@@ -618,7 +618,13 @@ public partial class QbitController : BaseController
                     return Json(new { success = false, error = "bad link" });
 
                 using var rh = new HttpClientHandler { AllowAutoRedirect = false };
-                using var rc = new HttpClient(rh) { Timeout = TimeSpan.FromSeconds(15) };
+                // 🔥 45, а не 15 секунд. Резолв rutracker идёт через FlareSolverr, и живой замер
+                // дал 21.7 и 26.5 с — пятнадцати не хватало НИКОГДА, кнопка «Скачать» на любой
+                // раздаче rutracker падала в «internal error» ещё до qBittorrent. Плата за запас
+                // невелика: человек уже видит «Добавляю в загрузки…», а быстрые трекеры отвечают
+                // за доли секунды и таймаута не касаются. Повторный резолв того же топика теперь
+                // ещё и бесплатный — parseMagnet кеширует страницу на 5 минут.
+                using var rc = new HttpClient(rh) { Timeout = TimeSpan.FromSeconds(45) };
 
                 HttpResponseMessage resp = null;
                 try
@@ -3508,7 +3514,10 @@ public partial class QbitController : BaseController
         if (!Uri.TryCreate(link, UriKind.Absolute, out var u) || !IsLoopbackSelf(u)) return null;
 
         using var rh = new HttpClientHandler { AllowAutoRedirect = false };
-        using var rc = new HttpClient(rh) { Timeout = TimeSpan.FromSeconds(20) };
+        // 45 по той же причине, что и в /qdl/add: rutracker резолвится через солвер за 21-27 с.
+        // При двадцати CheckWatches получал null на КАЖДОЙ раздаче rutracker и молча уходил в
+        // continue («трекер лежит») — то есть перерегистрацию раздачи мы бы там не заметили.
+        using var rc = new HttpClient(rh) { Timeout = TimeSpan.FromSeconds(45) };
         HttpResponseMessage resp = null;
         try
         {

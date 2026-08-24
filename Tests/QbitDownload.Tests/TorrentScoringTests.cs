@@ -354,4 +354,53 @@ public class TorrentScoringTests
         Assert.Equal(12, sorted[0]["ep"].Value<int>("total"));
         Assert.True(sorted[0].Value<bool>("watchable"));
     }
+
+    // ── ⭐ и карточки, чьё имя нормализуется в пустоту ─────────────────────
+    // Боевой случай 25.08.2026: у карточки 英雄傳 (tmdb 1440599) и titleNorm, и originalNorm
+    // пусты, гейт имени выключается для ВСЕХ раздач сразу — и ⭐ уехала на «Как раздражать
+    // людей (1969)». Список показывать можно, ручаться за него нельзя.
+
+    [Fact]
+    public void NoStar_When_CardName_Normalizes_To_Nothing()
+    {
+        var ctx = new ScoreCtx { titleNorm = "", originalNorm = "", year = 2026, isSerial = false, now = new DateTime(2026, 8, 25) };
+
+        var res = TorrentScoring.SortAndMark(new JArray(
+            Tor("Как раздражать людей (1969) BDRip 1080p", 40),
+            Tor("Совсем другое кино (2024) WEB-DL 1080p", 30)), ctx, 5);
+
+        Assert.DoesNotContain(res.Children<JObject>(), t => t.Value<bool?>("rec") == true);
+    }
+
+    /// <summary>
+    /// А вот раздача, найденная ПО TMDB id, звезду получить обязана и на такой карточке:
+    /// за её тайтл ручается источник, а не совпадение имени.
+    /// </summary>
+    [Fact]
+    public void Star_Still_Allowed_For_IdMatch_On_Nameless_Card()
+    {
+        var ctx = new ScoreCtx { titleNorm = "", originalNorm = "", year = 2026, isSerial = false, now = new DateTime(2026, 8, 25) };
+
+        var byId = Tor("B.King.2026.1080p.WEB-DL.mkv", 12);
+        byId["id_match"] = true;
+
+        var res = TorrentScoring.SortAndMark(new JArray(
+            Tor("Как раздражать людей (1969) BDRip 1080p", 40), byId), ctx, 5);
+
+        var star = res.Children<JObject>().FirstOrDefault(t => t.Value<bool?>("rec") == true);
+        Assert.NotNull(star);
+        Assert.Equal("B.King.2026.1080p.WEB-DL.mkv", star.Value<string>("title"));
+    }
+
+    /// <summary>«МР3» кириллицей — так подписаны аудиокниги; латинский паттерн их не ловил.</summary>
+    [Theory]
+    [InlineData("Дмитрий Крам - S-T-I-K-S. Холод (2023) МР3")]
+    [InlineData("Сборник - Холод / Аудиокнига / МР3")]
+    public void IsNonVideo_Catches_Cyrillic_Mp3(string title)
+        => Assert.True(TorrentScoring.IsNonVideo(title));
+
+    /// <summary>А нормальный релиз с «МР3» в описании дорожки — всё ещё видео.</summary>
+    [Fact]
+    public void IsNonVideo_Cyrillic_Mp3_With_Video_Mark_Is_Video()
+        => Assert.False(TorrentScoring.IsNonVideo("Холод (2024) WEB-DL 1080p + МР3 дорожка"));
 }

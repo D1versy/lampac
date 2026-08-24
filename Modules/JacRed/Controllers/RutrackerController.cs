@@ -115,16 +115,36 @@ namespace JacRed.Controllers
             // что мы не уйдём за .torrent на dl.php: FlareSolverr умеет отдавать только текст,
             // бинарь через него не забрать. Здесь ждём полный бюджет — человек нажал «Скачать»
             // и ждёт осознанно, в отличие от открытия карточки.
+            //
+            // 🔥 Через CachedHtml, а НЕ через Get. Живой замер: резолв магнета занимал 21.7 и 26.5
+            // секунды, потому что каждый заход — отдельный solve. Ломалось из-за этого всё плечо
+            // скачивания: /qdl/add ждёт свой резолвер 45 секунд, но раньше 15 — и кнопка «Скачать»
+            // на ЛЮБОЙ раздаче rutracker падала в «internal error», до qBittorrent дело не доходило.
+            // Побочный вред был не меньше: Get держит единственный семафор солвера все эти секунды,
+            // и на это время rutracker выпадал из пользовательского поиска.
+            //
+            // ⚠️ Кеш КОРОТКИЙ (5 минут), а не общий часовой: на этой странице живёт infohash, по
+            // смене которого слежение узнаёт о перерегистрации раздачи. Часовой снимок спрятал бы
+            // её от CheckWatches. Пяти минут хватает ровно на то, чтобы «нажал → добавилось» и
+            // повторный клик не платили за solve заново.
             if (useFs)
             {
                 if (jackett.Rutracker.priority == "torrent")
                     Console.WriteLine("[FlareSolverr] rutracker: priority=torrent несовместим с солвером — иду за magnet");
 
                 await EnsureFsLogin(Math.Max(30, fs?.timeoutSeconds ?? 120));
-                var sol = await FlareSolverr.Get(fs, $"{jackett.Rutracker.host}/forum/viewtopic.php?t=" + id);
-                string m = sol?.html == null ? null
-                    : Regex.Match(sol.html, "href=\"(magnet:[^\"]+)\"").Groups[1].Value;
+                string html = await FlareSolverr.CachedHtml(fs, "fs:rutracker:topic:" + id,
+                    $"{jackett.Rutracker.host}/forum/viewtopic.php?t=" + id,
+                    Math.Max(30, fs?.timeoutSeconds ?? 120),
+                    warmup: () => EnsureFsLogin(Math.Max(30, fs?.timeoutSeconds ?? 120)),
+                    ttlMinutes: 5);
+
+                string m = html == null ? null : Regex.Match(html, "href=\"(magnet:[^\"]+)\"").Groups[1].Value;
                 if (!string.IsNullOrWhiteSpace(m)) return Redirect(System.Web.HttpUtility.HtmlDecode(m));
+
+                // Страница есть, а магнета в ней нет — снимок негодный (гостевая версия темы),
+                // держать его 5 минут незачем: следующий заход должен сходить заново.
+                if (html != null) FlareSolverr.Forget("fs:rutracker:topic:" + id);
                 return Content("error");
             }
 
@@ -149,7 +169,11 @@ namespace JacRed.Controllers
             {
                 string magnet = Regex.Match(fullNews, "href=\"(magnet:[^\"]+)\" class=\"(med )?med magnet-link\"").Groups[1].Value;
                 if (!string.IsNullOrWhiteSpace(magnet))
-                    return Redirect(magnet);
+                // HtmlDecode обязателен: в разметке параметры магнета разделены &amp;, и без
+                // декодирования SanitizeMagnet в qdl выбросит их как неизвестные — торрент
+                // останется без анонса трекера, на одном DHT. Солверная ветка это делала,
+                // а эта нет. Ветка сейчас мертва (useflaresolverr=true), но мина заряжена.
+                return Redirect(System.Web.HttpUtility.HtmlDecode(magnet));
             }
             #endregion
 

@@ -10,7 +10,18 @@ namespace JacRed.Controllers
         #region search
         public static Task<bool> search(string host, ConcurrentBag<TorrentDetails> torrents, string query, string[] cats)
         {
-            if (!jackett.BigFanGroup.enable || jackett.BigFanGroup.showdown)
+            // 🔥 Гейт по учётке — как у Toloka/Lostfilm/AnimeLayer. Гостю bigfangroup поиск НЕ отдаёт:
+            // страница приходит с формой входа (action="takelogin.php") и фиксированным тизером из
+            // четырёх раздач (id 186539, 236815, 238300, 263546), одним и тем же на ЛЮБОЙ запрос —
+            // проверено побайтово на «Дюна» и «Наруто». Маркер ok() (id="searchinput") на такой
+            // странице есть, поэтому парсер считал ответ валидным, и эта четвёрка молча уезжала в
+            // каждую выдачу. Три из них лежат в cat=11 → types="serial", то есть пролезали ещё и в
+            // сериальные поиски, где категорийный фильтр обычно отсекает мусор.
+            // ⚠️ Логина у этого трекера в коде нет вовсе (ни cookie, ни TakeLogin), поэтому гейт по
+            // факту выключает его до тех пор, пока логин не появится. Это осознанно: левые раздачи в
+            // карточке хуже, чем их отсутствие.
+            if (!jackett.BigFanGroup.enable || jackett.BigFanGroup.showdown
+                || string.IsNullOrEmpty(jackett.BigFanGroup.cookie ?? jackett.BigFanGroup.login?.u))
                 return Task.FromResult(false);
 
             return Joinparse(torrents, () => parsePage(host, query, cats));
