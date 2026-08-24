@@ -236,15 +236,16 @@ namespace JacRed.Controllers
                 #endregion
 
                 #region Данные раздачи
-                string title = Match("href=\"viewtopic.php\\?t=[0-9]+\">([^\n\r]+)</a>");
+                string title = Match(RutrackerRow.Title);
                 title = Regex.Replace(title, "<[^>]+>", "");
 
-                DateTime createTime = tParse.ParseCreateTime(Match("<p>([0-9]{2}-[^-<]+-[0-9]{2})</p>").Replace("-", " "), "dd.MM.yy");
-                string viewtopic = Match("href=\"viewtopic.php\\?t=([0-9]+)\"");
-                string tracker = Match("href=\"tracker.php\\?f=([0-9]+)");
-                string _sid = Match("class=\"seedmed\">([0-9]+)");
-                string _pir = Match("title=\"Личи\">([0-9]+)");
-                string sizeName = Match("href=\"dl.php\\?t=[0-9]+\">([^<]+) &#8595;</a>").Replace("&nbsp;", " ");
+                DateTime createTime = tParse.ParseCreateTime(Match(RutrackerRow.Created).Replace("-", " "), "dd.MM.yy");
+                string viewtopic = Match(RutrackerRow.Topic);
+                string tracker = Match(RutrackerRow.Forum);
+                string _sid = Match(RutrackerRow.Seeds);
+                string _pir = Match(RutrackerRow.Peers);
+                // Match() уже прогнал HtmlDecode, поэтому &nbsp; к этому моменту — символ U+00A0.
+                string sizeName = Match(RutrackerRow.Size).Replace("&nbsp;", " ").Replace('\u00A0', ' ');
 
                 if (string.IsNullOrWhiteSpace(viewtopic) || string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(tracker))
                     continue;

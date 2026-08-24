@@ -106,6 +106,10 @@
     <!-- FlareSolverr.cs — по тому же правилу: он сознательно не обращается к ModInit.conf и
          объявляет usings явно, а транспорт и часы подменяются швами Transport/Now.
          FlareSolverrConf нужен ему как аргумент и сам ни от чего не зависит. -->
+    <!-- RutrackerRow.cs — только паттерны разметки строки выдачи, без ModInit и BaseController.
+         Проверяются на реальном куске html: молчаливое расхождение с версткой трекера стоит
+         всех его раздач сразу (см. JacRedRutrackerRowTests). -->
+    <Compile Include="..\..\Modules\JacRed\Engine\RutrackerRow.cs" Link="JacRed\RutrackerRow.cs" />
     <Compile Include="..\..\Modules\JacRed\Engine\FlareSolverr.cs" Link="JacRed\FlareSolverr.cs" />
     <Compile Include="..\..\Modules\JacRed\Models\AppConf\FlareSolverrConf.cs" Link="JacRed\FlareSolverrConf.cs" />
 
