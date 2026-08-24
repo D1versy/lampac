@@ -488,11 +488,15 @@ public partial class QbitController
             content.Add(file, "torrents", it.hash + ".torrent");
             content.Add(new StringContent(ModInit.conf.downloadsPath), "savepath");
             content.Add(new StringContent(ModInit.conf.category), "category");
-            // 🔴 Реплика не сидирует: раздача публичного торрента с датацентрового адреса —
-            // abuse-письма и потеря площадки. Символический лимит вместо нуля: ноль в qBit
-            // означает «без ограничения».
-            content.Add(new StringContent(Math.Max(1, ModInit.conf.replicaSeedUpLimitKBps * 1024).ToString()), "upLimit");
-            content.Add(new StringContent("0"), "ratioLimit");
+            // Лимиты отдачи новой раздачи; историю решения см. в ModuleConf.replicaSeedUpLimitKBps
+            // (до 25.08.2026 реплика не сидировала вовсе — 1 КБ/с и остановка на финише).
+            // ⚠️ Ноль в upLimit у qBit означает «без ограничения», а не «не отдавать» —
+            // поэтому «не ограничивать» и передаётся нулём. Общий потолок ставится не тут,
+            // а в самом qBittorrent реплики, иначе лимит был бы на каждую раздачу отдельно.
+            int upKBps = ModInit.conf.replicaSeedUpLimitKBps;
+            content.Add(new StringContent((upKBps > 0 ? upKBps * 1024 : 0).ToString()), "upLimit");
+            content.Add(new StringContent(ModInit.conf.replicaSeedRatioLimit
+                .ToString(System.Globalization.CultureInfo.InvariantCulture)), "ratioLimit");
 
             var add = await c.PostAsync("/api/v2/torrents/add", content);
 
