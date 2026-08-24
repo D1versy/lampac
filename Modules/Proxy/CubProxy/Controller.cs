@@ -244,6 +244,15 @@ public class CubProxyController : BaseController
             if (HttpContext.Request.Headers.ContainsKey("token") || HttpContext.Request.Headers.ContainsKey("profile"))
             {
                 #region bypass
+                // 🔴 Ответ ПЕРСОНАЛЬНЫЙ, в общий кеш его класть нельзя (qdl 2.65). Ключ Staticache
+                // считается как Scheme+Host+Path+Query и заголовков не включает (Core/Middlewares/
+                // Staticache.cs), а роут помечен [Staticache(always: true, …)] — то есть без этой
+                // строки авторизованный ответ ложился под АНОНИМНЫМ ключом и раздавался всем
+                // клиентам (и реплике) до истечения TTL. Плюс ниже не фильтруется set-cookie.
+                // Сейчас не эксплуатируется — наши клиенты заголовок token не шлют (permit.access
+                // = token && account_use, аккаунта CUB у нас нет), но заряжено было.
+                HttpContext.Features.Set(new StatiCacheEntry(default, false));
+
                 var client = FriendlyHttp.MessageClient(
                     "proxyRedirect",
                     Http.HandlerOrNull(requri, proxy),

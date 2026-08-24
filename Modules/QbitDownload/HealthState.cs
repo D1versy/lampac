@@ -183,7 +183,12 @@ public static class HealthState
 
             return new Snap
             {
-                known = r.lastOk != null || r.lastFail != null,
+                // 🔥 degradedAt тоже наблюдение (qdl 2.65). Раньше запись, где была ТОЛЬКО
+                // деградация, считалась «нет данных» и рисовалась ⏸ вместо ⚠️. Достижимо не
+                // только у CUB (429 от прогрева): Shikimori и AniList на 429 зовут Degraded и
+                // выходят, не трогая ни Ok, ни Fail — их лимит частоты показывался как «с
+                // рестарта не обращались», хотя апстрим ответил.
+                known = r.lastOk != null || r.lastFail != null || r.degradedAt != null,
                 lastOk = r.lastOk,
                 lastFail = r.lastFail,
                 lastFailText = r.lastFailText,

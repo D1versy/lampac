@@ -254,8 +254,13 @@ public class ReplicaTests
     {
         TestEnv.FreshCache();
 
+        CatalogWarmup.ResetForTests();
+
+        // ⚠️ Фикстура — НАСТОЯЩИЕ ряды. До qdl 2.65 здесь стояли пути с /3/ (это детали, а не
+        // ряды): импорт их принимал, а Load() на ближайшем рестарте выбрасывал — тест закреплял
+        // поведение, которое система сама же отменяла.
         int n = CatalogWarmup.ImportRowPaths(
-            new[] { "/cub/tmdb.red/3/discover/movie?page=1", "/cub/tmdb.red/3/discover/tv?page=1" },
+            new[] { "/cub/tmdb.red/top/fire/movie?page=1", "/cub/tmdb.red/?sort=now_playing&page=1" },
             "https", "tv2.d1versy.com:9443");
 
         Assert.Equal(2, n);
@@ -263,8 +268,8 @@ public class ReplicaTests
         // Экспорт отдаёт ПУТИ без хоста — именно они и переносятся: ключ Staticache считается
         // из Scheme+Host+Path+Query, поэтому чужие файлы кеша бесполезны, а список — нет.
         var rows = CatalogWarmup.ExportRowPaths();
-        Assert.Contains("/cub/tmdb.red/3/discover/movie?page=1", rows);
-        Assert.Contains("/cub/tmdb.red/3/discover/tv?page=1", rows);
+        Assert.Contains("/cub/tmdb.red/top/fire/movie?page=1", rows);
+        Assert.Contains("/cub/tmdb.red/?sort=now_playing&page=1", rows);
     }
 
     // ── история просмотров: перенос дом → реплика ─────────────────────────
@@ -322,12 +327,22 @@ public class ReplicaTests
     public void Warm_rows_ignore_garbage()
     {
         TestEnv.FreshCache();
+        CatalogWarmup.ResetForTests();
 
-        // не путь (нет ведущего слэша) — молча пропускаем, а не сеем мусор в прогрев
-        int n = CatalogWarmup.ImportRowPaths(new[] { "http://evil/x", "", null, "/cub/ok?page=1" },
-            "https", "tv2.d1versy.com:9443");
+        // Молча пропускаем всё, что не ряд каталога, а не сеем мусор в прогрев реплики:
+        // не путь, не /cub/tmdb.*, деталь с /3/, поиск и мусорный URL (qdl 2.65).
+        int n = CatalogWarmup.ImportRowPaths(new[]
+        {
+            "http://evil/x", "", null,
+            "/cub/ok?page=1",                        // не /cub/tmdb.*
+            "/cub/tmdb.red/3/discover/movie?page=1", // деталь/passthrough
+            "/cub/tmdb.red/?query=dune",             // поиск — одноразовый URL
+            "/cub/tmdb.red/blocked&zzr=1",           // '&' в пути
+            "/cub/tmdb.red/top/fire/movie?page=1"    // ← единственный настоящий ряд
+        }, "https", "tv2.d1versy.com:9443");
 
         Assert.Equal(1, n);
+        Assert.Equal(new[] { "/cub/tmdb.red/top/fire/movie?page=1" }, CatalogWarmup.ExportRowPaths());
     }
 
     // ── зеркалирование удалений: отбор сирот ──────────────────────────────

@@ -64,6 +64,15 @@ public static class CatalogWarmup
         public string host { get; set; }
         public string pathQuery { get; set; }
         public DateTime lastSeen { get; set; }
+
+        // ── карантин мёртвых адресов (qdl 2.65) ─────────────────────────────────
+        // Поля АДДИТИВНЫЕ: в старом файле их нет, System.Text.Json оставит дефолты
+        // (fails=0, deadAt=null) — то есть «все ряды живые». Старый образ, наоборот,
+        // новые свойства молча проигнорирует. Значит откат образа НЕ требует отката
+        // данных, и ver файла остаётся 3 (Load ветвится по форме JSON, не по ver).
+        public int fails { get; set; }            // подряд «адреса не существует» (4xx кроме 408/429)
+        public int lastCode { get; set; }         // последний код — только для диагностики
+        public DateTime? deadAt { get; set; }     // когда похоронен И когда последний раз пробовали; null — живой
     }
 
     public readonly record struct Card(long id, bool tv, string poster, string backdrop);
@@ -90,6 +99,7 @@ public static class CatalogWarmup
     static Timer _timer;
     static int _ticking = 0;
     static bool _dirty;
+    static int _deadLogged = -1;   // сколько рядов было в карантине на прошлом логе (-1 — ещё не логировали)
 
     // курсоры ротации по стабильному ключу (последний обработанный), переживают рестарт
     static string _posterCur, _backdropCur, _cardCur;
@@ -187,6 +197,9 @@ public static class CatalogWarmup
         if (path == null || !path.StartsWith("/cub/tmdb.", StringComparison.OrdinalIgnoreCase))
             return false;
 
+        if (IsJunkUrl(path, query))
+            return false;
+
         if (path.Contains("/3/", StringComparison.Ordinal))
             return false;
 
@@ -194,6 +207,58 @@ public static class CatalogWarmup
             return false;   // поиск — одноразовые URL
 
         return true;
+    }
+
+    /// <summary>
+    /// URL, который КОРРЕКТНЫЙ клиент построить не может. Не «подозрительный», а невозможный.
+    ///
+    /// 🔥 Зачем (qdl 2.65). 23.08.2026 ручной прогон замеров с LAN налил в LRU 61 запись из 128:
+    /// адреса с shell-экранированием (`?sort=top\&amp;genre=27`) и кэш-бастером. Заголовка
+    /// X-QDL-Warmup он не слал, поэтому наблюдатель принял его за живого клиента. Половина
+    /// бюджета прогрева ушла в мусор, настоящие ряды вытеснялись по LRU, а два адреса из этой
+    /// пачки апстрим отдавал 404 вечно — и держали строку «CUB каталог» красной.
+    ///
+    /// Правила ТОЛЬКО структурные. Белый список ключей query сознательно отвергнут: бандл
+    /// добавляет параметры динамически (params.filter), и первый же новый фильтр во фронте
+    /// молча выключил бы прогрев целого класса рядов. Денилист по «zzr» — тоже: магическая
+    /// строка под один инцидент.
+    /// </summary>
+    public static bool IsJunkUrl(string path, string query)
+    {
+        // 1. литеральный '\' — след shell-экранирования. Легальный клиент прислал бы %5C.
+        // 3. управляющие символы — в URL их быть не может ни в пути, ни в query.
+        if (HasJunkChars(path) || HasJunkChars(query))
+            return true;
+
+        // 2. '&' или '=' В ПУТИ: разделитель query, попавший в путь. Ловит "/blocked&zzr=1".
+        //    Бандл строит query через add$7 — первый параметр всегда через '?', остальные
+        //    через '&', так что в путь разделитель попасть не может.
+        //    ⚠️ Легальный "/cub/tmdb.cub.rip/blocked" (qdl.js, апстрим 200) правило не трогает.
+        if (path != null && (path.Contains('&') || path.Contains('=')))
+            return true;
+
+        return false;
+    }
+
+    static bool HasJunkChars(string s)
+    {
+        if (s == null) return false;
+        foreach (char c in s)
+            if (c == '\\' || c < ' ') return true;
+        return false;
+    }
+
+    /// <summary>
+    /// IsRowUrl для склеенной строки «путь+query» — в LRU и в файле состояния лежит именно она.
+    /// Отдельный вход нужен, потому что Load() исторически звал IsRowUrl(SplitPath(pq), null),
+    /// то есть query в фильтр не попадал вовсе и правила по нему к сохранённым рядам не применялись.
+    /// </summary>
+    internal static bool IsRowPathQuery(string pathQuery)
+    {
+        if (string.IsNullOrEmpty(pathQuery)) return false;
+        int q = pathQuery.IndexOf('?');
+        return q < 0 ? IsRowUrl(pathQuery, null)
+                     : IsRowUrl(pathQuery.Substring(0, q), pathQuery.Substring(q));
     }
 
     // Деталь карточки: /tmdb/api/3/movie/<id> | /3/tv/<id> (форма клиента после XHR-патча)
@@ -239,6 +304,10 @@ public static class CatalogWarmup
 
         // ?query= — поиск, к карточке не привязан
         if (query.Contains("query=", StringComparison.OrdinalIgnoreCase)) return null;
+
+        // Мусорный URL в ШАБЛОНЕ дороже мусорного ряда: ряд реплеится раз в тик, а шаблон —
+        // до catalogWarmupCardBudget (16) раз, по разу на каждую греемую карточку.
+        if (IsJunkUrl(path, query)) return null;
 
         string kind, form;
 
@@ -437,7 +506,7 @@ public static class CatalogWarmup
         return cards;
     }
 
-    static void Note(string scheme, string host, string pathQuery)
+    internal static void Note(string scheme, string host, string pathQuery)
     {
         if (string.IsNullOrEmpty(host) || string.IsNullOrEmpty(pathQuery)) return;
 
@@ -447,21 +516,78 @@ public static class CatalogWarmup
             _ => { added = true; return new Entry { scheme = scheme, host = host, pathQuery = pathQuery, lastSeen = DateTime.UtcNow }; },
             (_, en) => { en.lastSeen = DateTime.UtcNow; return en; });
 
+        // 🔥 _dirty ставится и на ОБНОВЛЕНИИ (qdl 2.65). Раньше ранний return уходил выше него,
+        // и подвинутый lastSeen не доезжал до диска: после падения по питанию (~23 раза в месяц)
+        // прунинг мог выкинуть ряд, которым клиенты активно пользуются. Плюс без этого не
+        // переживало рестарт снятие карантина «клиент попросил снова» (см. Quarantined).
+        // Стоимость нулевая: Save() зовётся раз в конце тика, а не на запрос.
+        _dirty = true;
+
         if (!added)
             return;
 
         int cap = Math.Max(8, ModInit.conf != null && ModInit.conf.catalogWarmupMaxUrls > 0 ? ModInit.conf.catalogWarmupMaxUrls : 128);
         while (_rows.Count > cap)
         {
-            string oldest = null;
-            DateTime oldestAt = DateTime.MaxValue;
-            foreach (var kv in _rows)
-                if (kv.Value.lastSeen < oldestAt) { oldestAt = kv.Value.lastSeen; oldest = kv.Key; }
-            if (oldest == null || !_rows.TryRemove(oldest, out _))
+            // карантинные уходят ПЕРВЫМИ: мёртвый адрес не должен вытеснять живой ряд по возрасту
+            string victim = OldestKey(dead: true) ?? OldestKey(dead: false);
+            if (victim == null || !_rows.TryRemove(victim, out _))
                 break;
         }
-        _dirty = true;
     }
+
+    /// <summary>Ключ самого давнего ряда; dead:true — только среди карантинных (null, если таких нет).</summary>
+    static string OldestKey(bool dead)
+    {
+        string oldest = null;
+        DateTime oldestAt = DateTime.MaxValue;
+        foreach (var kv in _rows)
+        {
+            if (dead && kv.Value.deadAt == null) continue;
+            if (kv.Value.lastSeen < oldestAt) { oldestAt = kv.Value.lastSeen; oldest = kv.Key; }
+        }
+        return oldest;
+    }
+
+    // ── карантин мёртвых рядов (qdl 2.65) ───────────────────────────────────────
+
+    /// <summary>
+    /// «Адреса не существует» против «сервису плохо». 4xx — приговор АДРЕСУ: повторять
+    /// бессмысленно (404 — нет эндпоинта, 400 — кривой запрос, 401/403 — закрыто навсегда).
+    /// Исключения: 408 (таймаут) и 429 (лимит) — временные, ряд в них не виноват.
+    /// 5xx и code == 0 (не дошли / таймаут клиента) — тоже не про адрес.
+    /// 3xx сюда не попадает как «мёртвый»: AllowAutoRedirect=false, редирект приходит как не-успех.
+    /// </summary>
+    internal static bool IsPermanentUrlError(int code)
+        => code >= 400 && code < 500 && code != 408 && code != 429;
+
+    /// <summary>
+    /// Переход состояния карантина. Чистая функция над примитивами — Entry наружу не светим.
+    /// deadAfter ≤ 0 — карантин выключен (киллсвитч из init.conf, без пересборки и рестарта):
+    /// счётчик всё равно ведём, чтобы после включения не начинать с нуля.
+    /// </summary>
+    internal static (int fails, bool dead) RowQuarantine(int fails, bool dead, bool ok, int code, int deadAfter)
+    {
+        if (ok) return (0, false);                              // ответил — живой, карантин снят
+        if (!IsPermanentUrlError(code)) return (fails, dead);   // 5xx/таймаут/429/408 — ряд ни при чём
+
+        int n = fails + 1;
+        if (deadAfter <= 0) return (n, dead);
+        return (n, n >= deadAfter);
+    }
+
+    /// <summary>
+    /// Пропускать ли ряд в этом тике. «Полуоткрытый» выключатель без лишних полей: deadAt значит
+    /// сразу и «когда похоронен», и «когда последний раз пробовали».
+    ///   • клиент попросил снова → Note() двигает lastSeen за deadAt → ровно ОДНА проба
+    ///     в ближайшем тике; провалилась → deadAt = now, и условие снова закрыто.
+    ///     Клиент, долбящий битый адрес, шума не создаёт: одна проба на его обращение, не на тик;
+    ///   • плановая перепроверка раз в retryHours — вдруг апстрим вернул эндпоинт к жизни.
+    /// </summary>
+    static bool Quarantined(Entry en, DateTime now, int retryHours)
+        => en.deadAt is DateTime d
+           && en.lastSeen <= d
+           && (now - d) < TimeSpan.FromHours(Math.Max(1, retryHours));
 
     // ── Засев рядов на сервер-реплику ───────────────────────────────────────────
     // Файлы Staticache между серверами непереносимы: ключ считается как Scheme+Host+Path+Query
@@ -470,9 +596,13 @@ public static class CatalogWarmup
     // scheme/host и наполнит собственный кеш правильными ключами, сходив за телами напрямую
     // (её канал, домашний аплинк не участвует).
 
-    /// <summary>Пути рядов (без scheme/host) для передачи на реплику, свежие вперёд.</summary>
+    /// <summary>
+    /// Пути рядов (без scheme/host) для передачи на реплику, свежие вперёд.
+    /// Карантинные не отдаём: незачем засевать реплике адреса, которые у нас уже мертвы.
+    /// </summary>
     internal static List<string> ExportRowPaths()
-        => _rows.Values.OrderByDescending(e => e.lastSeen)
+        => _rows.Values.Where(e => e.deadAt == null)
+                       .OrderByDescending(e => e.lastSeen)
                        .Select(e => e.pathQuery)
                        .Where(p => !string.IsNullOrEmpty(p))
                        .Distinct()
@@ -491,6 +621,12 @@ public static class CatalogWarmup
         foreach (var pq in pathQueries)
         {
             if (string.IsNullOrEmpty(pq) || !pq.StartsWith("/", StringComparison.Ordinal)) continue;
+
+            // 🔥 Тот же фильтр, что и в Load() (qdl 2.65). Раньше импорт принимал ЛЮБОЙ путь
+            // на '/', и не-ряды (детали с /3/, мусор) оседали в LRU до первого рестарта —
+            // Load их выбрасывал, а реплика тратила на них тик за тиком всё это время.
+            if (!IsRowPathQuery(pq)) continue;
+
             Note(scheme ?? "http", host, pq);
             n++;
         }
@@ -516,6 +652,8 @@ public static class CatalogWarmup
             if (conf?.catalogWarmupEnabled != true)
                 return;
 
+            _tickHealth.Clear();   // агрегат «упало ВСЁ» живёт ровно один тик
+
             int pruneDays = Math.Max(1, conf.catalogWarmupPruneDays);
             foreach (var kv in _rows)
                 if ((DateTime.UtcNow - kv.Value.lastSeen).TotalDays > pruneDays)
@@ -530,10 +668,20 @@ public static class CatalogWarmup
             int backdropsPerRow = Math.Max(0, conf.catalogWarmupBackdropsPerRow);
             int cardBudget = Math.Max(0, conf.catalogWarmupCardBudget);
 
+            int deadAfter = Math.Max(0, conf.catalogWarmupDeadAfter);
+            int deadRetryHours = Math.Max(1, conf.catalogWarmupDeadRetryHours);
+
             // свежие ряды первыми: их карточки первыми попадут под бюджеты постеров/фонов
             var rows = _rows.Values.OrderByDescending(e => e.lastSeen).ToArray();
 
-            int miss = 0, fail = 0;
+            // 🔴 Предохранитель от «карантин съел всё»: если мёртвых больше половины — это уже
+            // не кривые адреса, а сервис (CUB забанил IP и отдаёт 403 на всё). Без этого мы бы
+            // перестали ходить наружу, наблюдений не стало бы, и Verdict завис бы на последнем
+            // «ok» — зелёный экран при мёртвом апстриме, ровно то враньё, что чиним.
+            int deadCount = rows.Count(e => e.deadAt != null);
+            bool ignoreQuarantine = deadCount * 2 > rows.Length;
+
+            int miss = 0, fail = 0, deadSkipped = 0;
             var posters = new List<(string key, string host, string scheme, string path)>();
             var backdrops = new List<(string key, string host, string scheme, string path)>();
             var cards = new List<WarmCard>();
@@ -543,7 +691,22 @@ public static class CatalogWarmup
 
             foreach (var en in rows)
             {
-                var (ok, wasMiss, body, contentType) = await Fetch(port, en.scheme, en.host, en.pathQuery);
+                var now = DateTime.UtcNow;
+                if (!ignoreQuarantine && Quarantined(en, now, deadRetryHours)) { deadSkipped++; continue; }
+
+                var (ok, wasMiss, code, body, contentType) = await Fetch(port, en.scheme, en.host, en.pathQuery);
+
+                var (f, d) = RowQuarantine(en.fails, en.deadAt != null, ok, code, deadAfter);
+                if (f != en.fails || d != (en.deadAt != null) || d)
+                {
+                    en.fails = f;
+                    en.lastCode = code;
+                    // d && уже мёртв → освежаем метку пробы, иначе полуоткрытая проба
+                    // повторялась бы каждый тик до конца retryHours
+                    en.deadAt = d ? now : (DateTime?)null;
+                    _dirty = true;
+                }
+
                 if (!ok) { fail++; continue; }
                 if (wasMiss) miss++;
 
@@ -580,8 +743,16 @@ public static class CatalogWarmup
             int backdropMiss = await WarmList(port, backdrops, backdropBudget, _backdropCur, v => _backdropCur = v);
             var (cardsDone, cardUrls, cardMiss) = await WarmCards(port, cards, cardBudget);
 
-            if (miss > 0 || fail > 0 || posterMiss > 0 || backdropMiss > 0 || cardMiss > 0)
-                Console.WriteLine($"[QbitDownload] catalog warmup: rows {rows.Length} (miss {miss}, fail {fail}), posters {Math.Min(posters.Count, posterBudget)}/{posters.Count} (miss {posterMiss}), backdrops {Math.Min(backdrops.Count, backdropBudget)}/{backdrops.Count} (miss {backdropMiss}), cards {cardsDone}/{cards.Count} ({cardUrls} url, miss {cardMiss}), tmpl {_tmpl.Count}");
+            // карантин в тригере по ИЗМЕНЕНИЮ, а не по факту: иначе строка про dead N печаталась бы
+            // каждые 15 минут вечно. Пересчитываем после цикла — в нём состояние могло поменяться.
+            int deadNow = _rows.Values.Count(e => e.deadAt != null);
+            bool deadChanged = deadNow != _deadLogged;
+            _deadLogged = deadNow;
+
+            if (miss > 0 || fail > 0 || posterMiss > 0 || backdropMiss > 0 || cardMiss > 0 || deadChanged)
+                Console.WriteLine($"[QbitDownload] catalog warmup: rows {rows.Length} (miss {miss}, fail {fail}, dead {deadNow}, skip {deadSkipped}{(ignoreQuarantine ? ", карантин отключён — мёртвых больше половины" : "")}), posters {Math.Min(posters.Count, posterBudget)}/{posters.Count} (miss {posterMiss}), backdrops {Math.Min(backdrops.Count, backdropBudget)}/{backdrops.Count} (miss {backdropMiss}), cards {cardsDone}/{cards.Count} ({cardUrls} url, miss {cardMiss}), tmpl {_tmpl.Count}");
+
+            FlushTickHealth(Math.Max(1, conf.healthAllFailMinSamples));
 
             if (_dirty) { _dirty = false; Save(); }
         }
@@ -620,7 +791,7 @@ public static class CatalogWarmup
                 if (t.form.Contains("{s}", StringComparison.Ordinal)) continue;   // отложим до вычисления сезона
 
                 string p = Instantiate(t.form, card.tv, card.id, 0);
-                var (ok, wasMiss, body, _) = await Fetch(port, card.scheme, card.host, p);
+                var (ok, wasMiss, _, body, _) = await Fetch(port, card.scheme, card.host, p);
                 urls++;
                 if (ok && wasMiss) missCount++;
 
@@ -638,7 +809,7 @@ public static class CatalogWarmup
                     if (!t.form.Contains("{s}", StringComparison.Ordinal)) continue;
 
                     string p = Instantiate(t.form, card.tv, card.id, season);
-                    var (ok, wasMiss, _, _) = await Fetch(port, card.scheme, card.host, p);
+                    var (ok, wasMiss, _, _, _) = await Fetch(port, card.scheme, card.host, p);
                     urls++;
                     if (ok && wasMiss) missCount++;
                     await Task.Delay(100);
@@ -713,7 +884,7 @@ public static class CatalogWarmup
         for (int i = 0; i < todo; i++)
         {
             var it = list[(start + i) % list.Count];
-            var (ok, wasMiss, _, _) = await Fetch(port, it.scheme, it.host, it.path, readBody: true);
+            var (ok, wasMiss, _, _, _) = await Fetch(port, it.scheme, it.host, it.path, readBody: true);
             if (ok && wasMiss) missCount++;
             saveCursor(it.key);
             await Task.Delay(100);
@@ -721,7 +892,7 @@ public static class CatalogWarmup
         return missCount;
     }
 
-    static async Task<(bool ok, bool miss, byte[] body, string contentType)> Fetch(int port, string scheme, string host, string pathQuery, bool readBody = true)
+    static async Task<(bool ok, bool miss, int code, byte[] body, string contentType)> Fetch(int port, string scheme, string host, string pathQuery, bool readBody = true)
     {
         try
         {
@@ -739,12 +910,12 @@ public static class CatalogWarmup
                 ? rs.Content.Headers.ContentType.MediaType : null;
 
             NoteHealth(pathQuery, rs.IsSuccessStatusCode, (int)rs.StatusCode, miss);
-            return (rs.IsSuccessStatusCode, miss, body, contentType);
+            return (rs.IsSuccessStatusCode, miss, (int)rs.StatusCode, body, contentType);
         }
         catch
         {
             NoteHealth(pathQuery, false, 0, true);   // до апстрима не дошли — наблюдение честное
-            return (false, false, null, null);
+            return (false, false, 0, null, null);
         }
     }
 
@@ -752,27 +923,148 @@ public static class CatalogWarmup
     /// Пассивный хелс-чек внешних метаданных (HealthState.cs): прогрев регулярно тянет ряды,
     /// детали и постеры, поэтому отдельные пробы ради экрана не нужны.
     ///
-    /// 🔥 Считаем ТОЛЬКО MISS. Запрос идёт на НАШ /tmdb/*|/cub/* на loopback, и HIT в Staticache
-    /// отвечает 200, вообще не ходя наружу — засчитывать его как «TMDB работает» значило бы
-    /// повторить ровно ту ложную зелень, из-за которой пробы и переделывались.
+    /// Два правила, симметричных друг другу:
+    ///  • 🔥 считаем ТОЛЬКО MISS. Запрос идёт на НАШ /tmdb/*|/cub/* на loopback, и HIT в Staticache
+    ///    отвечает 200, вообще не ходя наружу — засчитывать его как «TMDB работает» значило бы
+    ///    повторить ровно ту ложную зелень, из-за которой пробы и переделывались;
+    ///  • 🔥 4xx НЕ красит сервис (qdl 2.65) — это свойство адреса, а не апстрима; см. ClassifyHealth.
     /// </summary>
-    static void NoteHealth(string pathQuery, bool ok, int code, bool miss)
+    internal static void NoteHealth(string pathQuery, bool ok, int code, bool miss)
     {
-        if (!miss || string.IsNullOrEmpty(pathQuery)) return;
+        if (string.IsNullOrEmpty(pathQuery)) return;
         try
         {
-            string id = pathQuery.StartsWith("/tmdb/img/", StringComparison.OrdinalIgnoreCase) ? HealthState.Ids.TmdbImg
-                      : pathQuery.StartsWith("/tmdb/api/", StringComparison.OrdinalIgnoreCase) ? HealthState.Ids.TmdbApi
-                      : pathQuery.StartsWith("/cub/tmdb.", StringComparison.OrdinalIgnoreCase)
-                            ? (pathQuery.Contains("/3/", StringComparison.Ordinal) ? HealthState.Ids.TmdbApi : HealthState.Ids.Cub)
-                      : null;
+            string id = HealthIdFor(pathQuery);
             if (id == null) return;
 
-            if (ok) HealthState.Ok(id);
-            else HealthState.Fail(id, code > 0 ? "http " + code : "не ответил");
+            switch (ClassifyHealth(ok, code, miss))
+            {
+                case HealthOutcome.Ok:
+                    // OkDirect, а не Ok: Degraded липкий и снимается только ClearDegraded —
+                    // на эти грабли уже наступали в 2.58 (ReplicaSync).
+                    HealthState.OkDirect(id);
+                    Tally(id, ok: 1);
+                    break;
+
+                case HealthOutcome.Fail:
+                    HealthState.Fail(id, code > 0 ? "http " + code : "не ответил");
+                    Tally(id, hard: 1);
+                    break;
+
+                case HealthOutcome.Degraded:
+                    HealthState.Degraded(id, "http " + code + " — лимит апстрима");
+                    Tally(id, soft: 1);
+                    break;
+
+                default:
+                    // 4xx: здоровье сервиса молчит, но исход идёт в агрегат тика —
+                    // «упало ВСЁ» это уже не адреса
+                    if (miss && !ok) Tally(id, soft: 1);
+                    break;
+            }
         }
         catch { }
     }
+
+    // public, как и соседние чистые предикаты: тип фигурирует в сигнатуре тестов ([Theory] с ним
+    // в параметрах), а internal-enum в public-методе теста даёт CS0051.
+    public enum HealthOutcome { Skip, Ok, Fail, Degraded }
+
+    /// <summary>
+    /// Как ОДИН исход прогрева отражается на здоровье СЕРВИСА. Чистая функция.
+    ///
+    /// 🔥 Симметрия к правилу «считаем только MISS» (qdl 2.65). HIT не доказывает, что сервис
+    /// работает, — и ровно так же 4xx на конкретном адресе не доказывает, что сервис сломан.
+    /// «Не найден ОДИН URL» — это дефект нашего списка рядов (его лечит карантин), а не авария
+    /// CUB/TMDB. До 2.65 один вечный 404 держал строку «CUB каталог» красной месяцами: живые
+    /// ряды лежат в Staticache 3 часа и дают HIT (в хелс не попадают вовсе), а 404 кешируется
+    /// на минуту и потому каждый тик приходит как свежий MISS+fail.
+    ///
+    /// Fail-open здесь не возникает: массовый 4xx (отозванный api_key, бан по IP) ловит
+    /// агрегат тика FlushTickHealth.
+    /// </summary>
+    internal static HealthOutcome ClassifyHealth(bool ok, int code, bool miss)
+    {
+        if (!miss) return HealthOutcome.Skip;                   // HIT — апстрима не касались
+        if (ok) return HealthOutcome.Ok;
+        if (code == 0) return HealthOutcome.Fail;               // не дошли вовсе / таймаут
+        if (code == 408 || code == 429) return HealthOutcome.Degraded;
+        if (code >= 500) return HealthOutcome.Fail;
+        return HealthOutcome.Skip;                              // 3xx и 4xx — свойство АДРЕСА
+    }
+
+    internal static string HealthIdFor(string pathQuery)
+        => pathQuery == null ? null
+         : pathQuery.StartsWith("/tmdb/img/", StringComparison.OrdinalIgnoreCase) ? HealthState.Ids.TmdbImg
+         : pathQuery.StartsWith("/tmdb/api/", StringComparison.OrdinalIgnoreCase) ? HealthState.Ids.TmdbApi
+         : pathQuery.StartsWith("/cub/tmdb.", StringComparison.OrdinalIgnoreCase)
+               ? (pathQuery.Contains("/3/", StringComparison.Ordinal) ? HealthState.Ids.TmdbApi : HealthState.Ids.Cub)
+         : null;
+
+    // Исходы MISS текущего тика по id хелса; живёт ровно один тик (Clear в начале Tick).
+    static readonly ConcurrentDictionary<string, (int ok, int soft, int hard)> _tickHealth = new();
+
+    static void Tally(string id, int ok = 0, int soft = 0, int hard = 0)
+        => _tickHealth.AddOrUpdate(id, (ok, soft, hard),
+            (_, v) => (v.ok + ok, v.soft + soft, v.hard + hard));
+
+    /// <summary>
+    /// 🔴 Антидот fail-open. Если за тик по сервису НЕ БЫЛО ни одного успеха и ни одного жёсткого
+    /// сбоя, а мягких (4xx) набралось minSamples и больше — «не найден один адрес» превращается
+    /// в «сервис отвечает отказом на всё». Порог нужен, чтобы пара кривых URL в тихом тике не
+    /// выдавалась за аварию. Карантинные ряды сюда не попадают: их не запрашивают.
+    /// </summary>
+    internal static void FlushTickHealth(int minSamples)
+    {
+        int need = Math.Max(1, minSamples);
+        foreach (var kv in _tickHealth)
+        {
+            var (ok, soft, hard) = kv.Value;
+            if (ok == 0 && hard == 0 && soft >= need)
+                HealthState.Fail(kv.Key, "http 4xx на всех " + soft + " "
+                    + HealthState.Plural(soft, "запросе", "запросах", "запросах") + " прогрева");
+        }
+        _tickHealth.Clear();
+    }
+
+    #region тестовый доступ
+    // Статика класса течёт между кейсами (в тест-проекте параллелизм отключён, но не изоляция),
+    // а Entry наружу не светим — поэтому узкие хелперы вместо публикации внутренностей.
+    // Тот же приём, что у HealthState.ResetForTests.
+
+    internal static void ResetForTests()
+    {
+        _rows.Clear();
+        _tmpl.Clear();
+        _cardIds.Clear();
+        _cardFirstSeen.Clear();
+        _tickHealth.Clear();
+        _posterCur = _backdropCur = _cardCur = null;
+        _dirty = false;
+        _deadLogged = -1;
+    }
+
+    internal static bool DirtyForTests { get => _dirty; set => _dirty = value; }
+
+    /// <summary>Пути рядов в LRU, включая карантинные (ExportRowPaths их отфильтровывает).</summary>
+    internal static List<string> RowPathsForTests()
+        => _rows.Values.Select(e => e.pathQuery).OrderBy(p => p, StringComparer.Ordinal).ToList();
+
+    /// <summary>Отправить ряд в карантин вручную — для тестов вытеснения и round-trip персиста.</summary>
+    internal static bool MarkDeadForTests(string scheme, string host, string pathQuery, DateTime deadAt, int fails = 3)
+    {
+        if (!_rows.TryGetValue(scheme + "|" + host + "|" + pathQuery, out var en)) return false;
+        en.deadAt = deadAt;
+        en.fails = fails;
+        return true;
+    }
+
+    /// <summary>Состояние карантина ряда: (есть ли запись, в карантине ли, сколько провалов).</summary>
+    internal static (bool found, bool dead, int fails) RowStateForTests(string scheme, string host, string pathQuery)
+        => _rows.TryGetValue(scheme + "|" + host + "|" + pathQuery, out var en)
+            ? (true, en.deadAt != null, en.fails)
+            : (false, false, 0);
+    #endregion
 
     #region persist
     // v3-формат: объект со всем состоянием. v2 был голым массивом рядов — читаем и его, иначе
@@ -789,7 +1081,7 @@ public static class CatalogWarmup
         public Dictionary<string, long> firstSeen { get; set; }
     }
 
-    static void Load()
+    internal static void Load()
     {
         try
         {
@@ -826,21 +1118,18 @@ public static class CatalogWarmup
                 }
             }
 
+            // v1-файлы могли содержать детали, а прогон замеров 23.08.2026 — мусорные адреса.
+            // IsRowPathQuery, а не IsRowUrl(SplitPath(...), null): второй терял query, поэтому
+            // правила по query к УЖЕ НАКОПЛЕННЫМ рядам не применялись. Теперь накопленный мусор
+            // отсеивается на первом же старте нового образа, без ручной хирургии по тому.
             foreach (var en in rows ?? new List<Entry>())
-                if (!string.IsNullOrEmpty(en?.host) && !string.IsNullOrEmpty(en.pathQuery)
-                    && IsRowUrl(SplitPath(en.pathQuery), null))   // v1-файлы могли содержать детали — отсеять
+                if (!string.IsNullOrEmpty(en?.host) && IsRowPathQuery(en.pathQuery))
                     _rows.TryAdd((en.scheme ?? "http") + "|" + en.host + "|" + en.pathQuery, en);
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] catalog warmup load: " + ex.Message); }
     }
 
-    static string SplitPath(string pathQuery)
-    {
-        int q = pathQuery.IndexOf('?');
-        return q < 0 ? pathQuery : pathQuery.Substring(0, q);
-    }
-
-    static void Save()
+    internal static void Save()
     {
         try
         {

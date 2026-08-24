@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Shared;
 using Newtonsoft.Json.Linq;
 using Xunit;
 
@@ -39,6 +40,13 @@ public class HealthTests
     static JObject Find(JArray arr, string id) => arr.OfType<JObject>().FirstOrDefault(x => x.Value<string>("id") == id);
 
     static HealthState.Snap Snap(string id, DateTime now, int flap = 60) => HealthState.Get(id, now, flap);
+
+    /// <summary>Сброс и реестра, и накопителя тика: обе статики общие на весь прогон.</summary>
+    static void FreshHealth()
+    {
+        HealthState.ResetForTests();
+        CatalogWarmup.ResetForTests();   // чистит в том числе _tickHealth
+    }
 
     #region форма записи
     [Fact]
@@ -483,6 +491,233 @@ public class HealthTests
         QbitController.AddSearchChecks(arr, StateWithRun(T0.AddMinutes(-5), ("indexer", "ok", 0), ("tracker:rutor", "ok", 0)), T0);
 
         Assert.All(arr.OfType<JObject>(), x => Assert.Equal("Поиск раздач", x.Value<string>("group")));
+    }
+    #endregion
+
+    #region NoteHealth: что исход прогрева говорит о ЗДОРОВЬЕ сервиса (qdl 2.65)
+    // Инцидент: строка «CUB каталог» месяцами висела ❌ «http 404 · N ошибок подряд», хотя CUB
+    // был полностью жив. Причина — 4 мёртвых адреса из 119 в списке прогрева: живые ряды лежат
+    // в Staticache 3 часа и приходят HIT-ами (в хелс не попадают вовсе), а 404 кешируется на
+    // минуту и потому каждый тик даёт свежий MISS+fail, а Verdict держит сбой липким.
+
+    [Theory]
+    [InlineData(true, 200, false, CatalogWarmup.HealthOutcome.Skip)]   // HIT — апстрима не касались
+    [InlineData(false, 404, false, CatalogWarmup.HealthOutcome.Skip)]
+    [InlineData(true, 200, true, CatalogWarmup.HealthOutcome.Ok)]
+    [InlineData(false, 404, true, CatalogWarmup.HealthOutcome.Skip)]   // 🔴 свойство АДРЕСА, не сервиса
+    [InlineData(false, 400, true, CatalogWarmup.HealthOutcome.Skip)]
+    [InlineData(false, 403, true, CatalogWarmup.HealthOutcome.Skip)]
+    [InlineData(false, 302, true, CatalogWarmup.HealthOutcome.Skip)]
+    [InlineData(false, 408, true, CatalogWarmup.HealthOutcome.Degraded)]
+    [InlineData(false, 429, true, CatalogWarmup.HealthOutcome.Degraded)]
+    [InlineData(false, 500, true, CatalogWarmup.HealthOutcome.Fail)]
+    [InlineData(false, 503, true, CatalogWarmup.HealthOutcome.Fail)]
+    [InlineData(false, 0, true, CatalogWarmup.HealthOutcome.Fail)]     // не дошли вовсе / таймаут
+    public void ClassifyHealth_Table(bool ok, int code, bool miss, CatalogWarmup.HealthOutcome expected)
+        => Assert.Equal(expected, CatalogWarmup.ClassifyHealth(ok, code, miss));
+
+    [Theory]
+    [InlineData("/tmdb/img/t/p/w300/a.jpg", "tmdb-img")]
+    [InlineData("/tmdb/api/3/movie/550?api_key=k", "tmdb-api")]
+    [InlineData("/cub/tmdb./3/movie/550?api_key=k", "tmdb-api")]   // tmdb-passthrough через CubProxy
+    [InlineData("/cub/tmdb./top/fire/movie?page=1", "cub")]
+    [InlineData("/cub/red/api/reactions/get/movie_550", null)]     // не наблюдаем
+    [InlineData("/qdl/list", null)]
+    public void NoteHealth_RoutesIds(string pathQuery, string expected)
+        => Assert.Equal(expected, CatalogWarmup.HealthIdFor(pathQuery));
+
+    [Fact]
+    public void NoteHealth_Hit_IsIgnored()
+    {
+        // Правило «считаем только MISS» до 2.65 не было под тестом вообще.
+        FreshHealth();
+        CatalogWarmup.NoteHealth("/cub/tmdb./top/fire/movie?page=1", ok: true, code: 200, miss: false);
+
+        Assert.False(Snap("cub", DateTime.UtcNow).known);
+    }
+
+    [Fact]
+    public void NoteHealth_404_DoesNotPaintTheService()
+    {
+        // 🔴 Суть жалобы владельца: мёртвый адрес не смеет красить сервис.
+        FreshHealth();
+        var now = DateTime.UtcNow;
+
+        CatalogWarmup.NoteHealth("/cub/tmdb./trailers/short/trailers/added?page=1", ok: false, code: 404, miss: true);
+        Assert.False(Snap("cub", now).known);
+
+        // …а после успеха живого ряда строка обязана быть чистой зелёной, без следов 404
+        CatalogWarmup.NoteHealth("/cub/tmdb./top/fire/movie?page=1", ok: true, code: 200, miss: true);
+        var (status, _) = HealthState.Verdict(Snap("cub", now), now);
+        Assert.Equal("ok", status);
+    }
+
+    [Fact]
+    public void NoteHealth_500_PaintsTheService()
+    {
+        FreshHealth();
+        var now = DateTime.UtcNow;
+
+        CatalogWarmup.NoteHealth("/cub/tmdb./top/fire/movie?page=1", ok: false, code: 503, miss: true);
+
+        var (status, detail) = HealthState.Verdict(Snap("cub", now), now);
+        Assert.Equal("fail", status);
+        Assert.Contains("http 503", detail);
+    }
+
+    [Fact]
+    public void NoteHealth_NotAnswered_PaintsTheService()
+    {
+        FreshHealth();
+        var now = DateTime.UtcNow;
+
+        CatalogWarmup.NoteHealth("/tmdb/api/3/movie/550", ok: false, code: 0, miss: true);
+
+        var (status, detail) = HealthState.Verdict(Snap("tmdb-api", now), now);
+        Assert.Equal("fail", status);
+        Assert.Contains("не ответил", detail);
+    }
+
+    [Fact]
+    public void NoteHealth_429_IsWarnNotFail()
+    {
+        FreshHealth();
+        var now = DateTime.UtcNow;
+
+        CatalogWarmup.NoteHealth("/cub/tmdb./top/fire/movie?page=1", ok: false, code: 429, miss: true);
+
+        var (status, detail) = HealthState.Verdict(Snap("cub", now), now);
+        Assert.Equal("warn", status);
+        Assert.Contains("лимит апстрима", detail);
+    }
+
+    [Fact]
+    public void NoteHealth_SuccessClearsDegradation()
+    {
+        // OkDirect, а не Ok: Degraded липкий и снимается только ClearDegraded (грабля 2.58).
+        FreshHealth();
+        var now = DateTime.UtcNow;
+
+        CatalogWarmup.NoteHealth("/cub/tmdb./top/fire/movie?page=1", ok: false, code: 429, miss: true);
+        CatalogWarmup.NoteHealth("/cub/tmdb./top/fire/movie?page=1", ok: true, code: 200, miss: true);
+
+        Assert.Null(Snap("cub", now).degradedAt);
+    }
+    #endregion
+
+    #region агрегат тика: антидот fail-open карантина
+    // Карантин перестаёт дёргать мёртвые адреса — и если бы 4xx нигде не учитывался, бан по IP
+    // (403 на всё) за 45 минут увёл бы ВСЕ ряды в карантин, наблюдения бы кончились, а Verdict
+    // завис на последнем «ok». Зелёный экран при мёртвом апстриме — то же враньё, только зеркальное.
+
+    [Fact]
+    public void TickHealth_AllFourXX_AboveThreshold_IsServiceFailure()
+    {
+        FreshHealth();
+        var now = DateTime.UtcNow;
+
+        for (int i = 0; i < 3; i++)
+            CatalogWarmup.NoteHealth("/cub/tmdb./collections/" + i, ok: false, code: 403, miss: true);
+
+        CatalogWarmup.FlushTickHealth(3);
+
+        var (status, detail) = HealthState.Verdict(Snap("cub", now), now);
+        Assert.Equal("fail", status);
+        Assert.Contains("4xx на всех 3", detail);
+    }
+
+    [Fact]
+    public void TickHealth_BelowThreshold_StaysSilent()
+    {
+        FreshHealth();
+
+        CatalogWarmup.NoteHealth("/cub/tmdb./collections/1", ok: false, code: 404, miss: true);
+        CatalogWarmup.FlushTickHealth(3);
+
+        Assert.False(Snap("cub", DateTime.UtcNow).known);
+    }
+
+    [Fact]
+    public void TickHealth_AnySuccess_SuppressesAggregate()
+    {
+        FreshHealth();
+        var now = DateTime.UtcNow;
+
+        for (int i = 0; i < 5; i++)
+            CatalogWarmup.NoteHealth("/cub/tmdb./collections/" + i, ok: false, code: 404, miss: true);
+        CatalogWarmup.NoteHealth("/cub/tmdb./top/fire/movie", ok: true, code: 200, miss: true);
+
+        CatalogWarmup.FlushTickHealth(3);
+
+        Assert.Equal("ok", HealthState.Verdict(Snap("cub", now), now).status);
+    }
+
+    [Fact]
+    public void TickHealth_HardFailWins_NoDoubleCounting()
+    {
+        // Уже покрашено 5xx — агрегат не должен добавлять второй, менее точный вердикт поверх.
+        FreshHealth();
+        var now = DateTime.UtcNow;
+
+        CatalogWarmup.NoteHealth("/cub/tmdb./collections/1", ok: false, code: 500, miss: true);
+        for (int i = 0; i < 3; i++)
+            CatalogWarmup.NoteHealth("/cub/tmdb./collections/x" + i, ok: false, code: 404, miss: true);
+
+        CatalogWarmup.FlushTickHealth(3);
+
+        Assert.Contains("http 500", HealthState.Verdict(Snap("cub", now), now).detail);
+    }
+
+    [Fact]
+    public void TickHealth_IsResetBetweenFlushes()
+    {
+        FreshHealth();
+
+        for (int i = 0; i < 3; i++)
+            CatalogWarmup.NoteHealth("/cub/tmdb./collections/" + i, ok: false, code: 404, miss: true);
+        CatalogWarmup.FlushTickHealth(3);
+
+        FreshHealth();
+        CatalogWarmup.FlushTickHealth(3);          // счётчики прошлого тика уже обнулены
+
+        Assert.False(Snap("cub", DateTime.UtcNow).known);
+    }
+    #endregion
+
+    #region подпись строки CUB
+    [Fact]
+    public void PassiveRow_Cub_ShowsUpstreamDomain_NotMirror()
+    {
+        // 🔴 Строка обязана называть хост, куда мы РЕАЛЬНО ходим: CubProxy режет
+        // /cub/tmdb.<что угодно>/… по первой точке и идёт на tmdb.<cub.domain>.
+        // Показывали cub.mirror — владелец открыл в браузере живой cub.best и не понял претензии.
+        TestEnv.EnsureConf();
+        CoreInit.conf.cub.domain = "cub.red";
+        CoreInit.conf.cub.mirror = "cub.best";
+
+        var arr = new JArray();
+        QbitController.AddPassiveChecks(arr, DateTime.UtcNow, 60);
+
+        string name = Find(arr, "cub").Value<string>("name");
+        Assert.Contains("tmdb.cub.red", name);
+        Assert.DoesNotContain("cub.best", name);
+    }
+
+    [Fact]
+    public void PassiveRow_Cub_NoCubConf_DoesNotThrow()
+    {
+        TestEnv.EnsureConf();
+        var saved = CoreInit.conf.cub;
+        try
+        {
+            CoreInit.conf.cub = null;
+
+            var arr = new JArray();
+            QbitController.AddPassiveChecks(arr, DateTime.UtcNow, 60);
+
+            Assert.Contains("tmdb.cub.red", Find(arr, "cub").Value<string>("name"));
+        }
+        finally { CoreInit.conf.cub = saved; }
     }
     #endregion
 }

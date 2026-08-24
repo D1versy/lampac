@@ -167,10 +167,16 @@ public partial class QbitController
     #endregion
 
     #region внешние сервисы — пассивные наблюдения (ноль сети)
-    static void AddPassiveChecks(JArray arr, DateTime now, int flap)
+    internal static void AddPassiveChecks(JArray arr, DateTime now, int flap)
     {
-        string cubMirror = "cub.rip";
-        try { cubMirror = CoreInit.conf.cub?.mirror ?? "cub.rip"; } catch { }
+        // 🔥 Подписываем строку ТЕМ ЖЕ хостом, куда реально ходим (qdl 2.65). Показывали
+        // cub.mirror — и это врало: mirror (cub.best) живёт в подстановке cub_domain в бандл
+        // (LampaWeb/ApiController.cs) и в imagetmdb./apitmdb. у DLNA/BaseENG, а ряды каталога
+        // идут через CubProxy на tmdb.<cub.domain> (= tmdb.cub.red), потому что GetDomain режет
+        // /cub/tmdb.<что угодно>/… по ПЕРВОЙ точке. Владелец открыл в браузере живой cub.best,
+        // увидел 200 и не понял претензии — строку надо уметь проверить копипастой.
+        string cubHost = "tmdb.cub.red";
+        try { cubHost = "tmdb." + (CoreInit.conf.cub?.domain ?? "cub.red"); } catch { }
 
         // ── Репликация ── только на реплике: возраст последнего успешного манифеста, блокировки
         // удаления, недоступность дома или своего qBit.
@@ -183,7 +189,7 @@ public partial class QbitController
         // ── Метаданные ── наблюдаются прогревом каталога (CatalogWarmup.Fetch) и качалкой постеров
         AddPassiveRow(arr, HealthState.Ids.TmdbApi, "TMDB API", GrpMeta, now, flap);
         AddPassiveRow(arr, HealthState.Ids.TmdbImg, "TMDB картинки", GrpMeta, now, flap);
-        AddPassiveRow(arr, HealthState.Ids.Cub, "CUB каталог (" + cubMirror + ")", GrpMeta, now, flap);
+        AddPassiveRow(arr, HealthState.Ids.Cub, "CUB каталог (" + cubHost + ")", GrpMeta, now, flap);
 
         // ── Поиск раздач ── живые поиски пользователя + канарейки идут через FetchIndexer
         AddPassiveRow(arr, HealthState.Ids.Indexer, "Индексатор (живые поиски)", GrpSearch, now, flap);
