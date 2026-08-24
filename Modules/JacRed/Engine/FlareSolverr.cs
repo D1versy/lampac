@@ -254,7 +254,12 @@ namespace JacRed.Engine
         /// budgetSeconds. Не дождались → null, трекер просто не участвует в ЭТОЙ выдаче,
         /// а следующий поиск того же тайтла возьмёт готовый HTML из кеша.
         /// </summary>
-        public static async Task<string> CachedHtml(FlareSolverrConf c, string cacheKey, string url, int budgetSeconds)
+        /// <summary>
+        /// HTML через солвер с кешом и дедупом. <paramref name="warmup"/> ждётся ВНУТРИ фоновой
+        /// задачи, до самого запроса: у rutracker это логин, и без него solve вернул бы
+        /// разлогиненную страницу, которая осела бы в кеше на htmlCacheMinutes (см. Forget).
+        /// </summary>
+        public static async Task<string> CachedHtml(FlareSolverrConf c, string cacheKey, string url, int budgetSeconds, Func<Task> warmup = null)
         {
             if (!Available(c)) return null;
 
@@ -266,6 +271,15 @@ namespace JacRed.Engine
             {
                 try
                 {
+                    // ⚠️ Порядок «сначала логин, потом запрос» гарантируется только здесь.
+                    // Снаружи EnsureFsLogin и этот Get — две независимые задачи за один семафор,
+                    // и гонку выигрывал то один, то другой: в бою поиск ушёл на 11 секунд раньше
+                    // логина и на час закешировал страницу гостя.
+                    if (warmup != null)
+                    {
+                        try { await warmup(); } catch { }
+                    }
+
                     var sol = await Get(c, url);
                     if (sol?.html != null)
                         _cache[cacheKey] = (sol.html, Now().AddMinutes(Math.Max(1, c.htmlCacheMinutes)));
@@ -277,6 +291,17 @@ namespace JacRed.Engine
             if (budgetSeconds <= 0) return null;   // фон уже запущен, ждать не станем
             var done = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(budgetSeconds)));
             return done == task ? task.Result : null;
+        }
+
+        /// <summary>
+        /// Выкинуть запись из кеша HTML. Нужна тому, кто по СОДЕРЖИМОМУ понимает, что solve
+        /// удался, а страница негодная (rutracker: пришла гостевая версия). Без этого негодный
+        /// html жил бы htmlCacheMinutes и трекер молча отдавал бы ноль раздач весь этот час.
+        /// </summary>
+        public static void Forget(string cacheKey)
+        {
+            if (!string.IsNullOrEmpty(cacheKey))
+                _cache.TryRemove(cacheKey, out _);
         }
 
         /// <summary>

@@ -164,14 +164,19 @@ namespace JacRed.Controllers
             var proxyManager = new ProxyManager("rutracker", jackett.Rutracker);
 
             string html;
+            string fsKey = "fs:rutracker:search:" + query;
 
             if (useFs)
             {
                 // Через солвер: логин живёт в его сессии, кука нам не нужна.
+                // Логин запускаем здесь (пользователя не задерживает, FsBudget обычно 0), а ЖДЁМ
+                // его внутри фоновой задачи солвера — иначе запрос поиска обгоняет логин и
+                // приносит гостевую страницу.
                 await EnsureFsLogin(FsBudget());
-                html = await FlareSolverr.CachedHtml(fs, "fs:rutracker:search:" + query,
+                html = await FlareSolverr.CachedHtml(fs, fsKey,
                     $"{jackett.Rutracker.host}/forum/tracker.php?nm=" + HttpUtility.UrlEncode(query),
-                    FsBudget());
+                    FsBudget(),
+                    warmup: () => EnsureFsLogin(Math.Max(30, fs?.timeoutSeconds ?? 180)));
             }
             else
             {
@@ -207,6 +212,11 @@ namespace JacRed.Controllers
                 bool fsPending = useFs && html == null && FsBudget() == 0;
                 if (!fsPending)
                     consoleErrorLog("rutracker", html == null ? "no html" : "not logged in");
+
+                // Гостевую страницу в кеше не держим: solve формально удался, и без этого она
+                // пролежала бы htmlCacheMinutes (час), а rutracker весь этот час отдавал бы ноль.
+                if (useFs && html != null)
+                    FlareSolverr.Forget(fsKey);
                 if (!useFs) proxyManager.Refresh();
                 return null;
             }

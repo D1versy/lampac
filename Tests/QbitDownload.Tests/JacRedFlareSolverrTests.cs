@@ -300,4 +300,87 @@ public class JacRedFlareSolverrTests : IDisposable
         Assert.Null(await FlareSolverr.Get(c, "https://rutracker.org/"));
         Assert.Empty(_calls);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Кеш HTML: логин прежде запроса и выброс негодной страницы
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Боевой случай 24.08.2026: логин и запрос поиска — две независимые задачи за один семафор,
+    /// и запрос выиграл гонку. Solve вернул гостевую страницу, она осела в кеше на час, rutracker
+    /// весь этот час отдавал ноль раздач. warmup обязан отработать ДО обращения к солверу.
+    /// </summary>
+    [Fact]
+    public async Task Warmup_runs_before_the_request()
+    {
+        var c = Conf();
+        bool warmed = false;
+        bool warmedFirst = false;
+
+        FlareSolverr.Transport = (url, json, timeout) =>
+        {
+            var body = JObject.Parse(json);
+            string cmd = body.Value<string>("cmd");
+            _calls.Add((cmd, body.Value<string>("session"), body));
+
+            if (cmd == "request.get")
+                warmedFirst = warmed;
+
+            return Task.FromResult(cmd switch
+            {
+                "sessions.create" => _createReply,
+                "sessions.destroy" => _destroyReply,
+                _ => _solveReply
+            });
+        };
+
+        string html = await FlareSolverr.CachedHtml(c, "k1", "https://rutracker.org/forum/tracker.php", 30,
+                                                    warmup: async () => { await Task.Yield(); warmed = true; });
+
+        Assert.Equal("<html>tracker</html>", html);
+        Assert.True(warmedFirst, "запрос ушёл раньше логина");
+    }
+
+    /// <summary>Упавший warmup не должен ронять сам запрос: логин мог не пройти, поиск всё равно нужен.</summary>
+    [Fact]
+    public async Task Warmup_failure_does_not_break_the_request()
+    {
+        var c = Conf();
+
+        string html = await FlareSolverr.CachedHtml(c, "k2", "https://rutracker.org/forum/tracker.php", 30,
+                                                    warmup: () => throw new InvalidOperationException("логин упал"));
+
+        Assert.Equal("<html>tracker</html>", html);
+    }
+
+    /// <summary>Второй заход берёт HTML из кеша — солвер не трогаем.</summary>
+    [Fact]
+    public async Task CachedHtml_serves_second_call_from_cache()
+    {
+        var c = Conf();
+
+        Assert.NotNull(await FlareSolverr.CachedHtml(c, "k3", "https://rutracker.org/", 30));
+        int after = Count("request.get");
+
+        Assert.NotNull(await FlareSolverr.CachedHtml(c, "k3", "https://rutracker.org/", 30));
+        Assert.Equal(after, Count("request.get"));
+    }
+
+    /// <summary>
+    /// Forget возвращает ключ в работу: тот, кто по содержимому понял, что страница негодная
+    /// (гостевая версия rutracker), обязан иметь возможность её выбросить.
+    /// </summary>
+    [Fact]
+    public async Task Forget_makes_next_call_refetch()
+    {
+        var c = Conf();
+
+        await FlareSolverr.CachedHtml(c, "k4", "https://rutracker.org/", 30);
+        int after = Count("request.get");
+
+        FlareSolverr.Forget("k4");
+
+        await FlareSolverr.CachedHtml(c, "k4", "https://rutracker.org/", 30);
+        Assert.Equal(after + 1, Count("request.get"));
+    }
 }
