@@ -124,7 +124,8 @@ public class TestSandboxTests
 
         var row = Perms.List().Single(x => (string)x["uid"] == TestUid);
         Assert.True((bool)row["test"]);
-        Assert.Equal(Perms.TestAutoName, (string)row["name"]);
+        Assert.Equal("🧪 тест (headless)", (string)row["name"]);
+
     }
 
     [Fact]
@@ -149,7 +150,97 @@ public class TestSandboxTests
         Assert.Equal("ios", (string)row["platform"]);
     }
 
+    // ══ разные стенды под одним префиксом: headless, мак, iOS ═════════════════
+
+    [Theory]
+    [InlineData("d1v-test-55f581ba")]        // headless-обвязка (scripts/headless)
+    [InlineData("d1v-test-mac-7f427180")]    // дев-запуск D1Vision из Xcode (D1V_TEST=1)
+    [InlineData("d1v-test-ios-7f427180")]
+    [InlineData("d1v-test-android-1")]
+    public void Тестовым_считается_любой_айди_с_нашим_префиксом(string uid)
+    {
+        // 🔴 Опознание ПРЕФИКСНОЕ, формат хвоста роли не играет. Ужесточи это до
+        // «префикс + 8 hex» — и маковская дев-строка выпадет из песочницы: её не пометят
+        // тестовой и не уберут, она осядет в админке навсегда как живой пользователь.
+        Assert.True(Perms.IsTestUid(uid));
+        Assert.True(Perms.IsTestDevice(uid, null));
+    }
+
+    [Theory]
+    [InlineData("d1vtest-mac-1")]
+    [InlineData("d1v-testing-1")]   // дефис в префиксе не даёт зацепить чужое имя
+    [InlineData("test-mac-1")]
+    [InlineData("dueq3shm")]
+    public void Похожий_но_чужой_айди_тестовым_не_считается(string uid)
+        => Assert.False(Perms.IsTestUid(uid));
+
+    [Theory]
+    [InlineData("d1v-test-55f581ba", "🧪 тест (headless)")]
+    [InlineData("d1v-test-mac-7f427180", "🧪 тест (mac)")]
+    [InlineData("d1v-test-ios-7f427180", "🧪 тест (ios)")]
+    public void Имя_тестовой_строки_называет_платформу(string uid, string expected)
+        => Assert.Equal(expected, Perms.TestNameFor(uid));
+
+    [Fact]
+    public void Дев_запуск_мака_заводится_помеченным_и_убирается_уборкой()
+    {
+        // UA у него НАСТОЯЩИЙ (d1vision_mac/…) — правило про headless его не ловит, ловит
+        // префикс. Проверяем весь путь: завёлся → помечен → снесён вместе со следами.
+        const string MacUa = "Mozilla/5.0 (Macintosh) lampa_client d1vision_mac/1.0.13-523";
+        const string MacUid = Perms.TestUidPrefix + "mac-7f427180";
+
+        string cache = FreshEnv();
+        Perms.Touch(Req(MacUid, MacUa), force: true);
+        SeedJut(cache, MacUid);
+        SeedSql(cache, MacUid, bookmarks: 1, timecodes: 4);
+
+        var row = Perms.List().Single(x => (string)x["uid"] == MacUid);
+        Assert.True((bool)row["test"]);
+        Assert.Equal("🧪 тест (mac)", (string)row["name"]);
+        Assert.Equal("mac", (string)row["platform"]);
+
+        var report = QbitController.TestPurge(MacUid, all: false, apply: true);
+
+        Assert.Null(report["error"]);
+        Assert.False(Perms.Known(MacUid));
+        Assert.False(File.Exists(JutPath(cache, MacUid)));
+        Assert.Equal(0, Rows(cache, "TimeCode.sql", "timecodes", MacUid));
+    }
+
+    [Fact]
+    public void Забытая_тестовая_строка_протухает_сама()
+    {
+        // Дев-запуск мака не убирает НИКТО: run-all чистит только свой айди. Без срока
+        // годности такая строка осталась бы в админке навсегда — и вернула бы ровно ту
+        // жалобу, с которой всё началось.
+        string cache = FreshEnv();
+        string macOld = Perms.TestUidPrefix + "mac-old";
+
+        var devices = new JObject { [macOld] = Dev(RealUa, "🧪 тест (mac)"), ["dueq3shm"] = Dev(RealUa, "Живой") };
+        devices[macOld]["last"] = DateTime.UtcNow.AddHours(-30);
+        devices["dueq3shm"]["last"] = DateTime.UtcNow.AddDays(-90);   // живой не протухает НИКОГДА
+
+        JsonStore.WriteNow(Path.Combine(cache, "access.json"),
+                           new JObject { ["ver"] = 1, ["devices"] = devices });
+
+        Perms.Touch(Req("inoxvjis", RealUa), force: true);   // любая запись в реестр зовёт Prune
+
+        Assert.False(Perms.Known(macOld));
+        Assert.True(Perms.Known("dueq3shm"));
+    }
+
+    [Fact]
+    public void Свежая_тестовая_строка_не_протухает()
+    {
+        FreshEnv();
+        Perms.Touch(Req(TestUid, HeadlessUa), force: true);
+        Perms.Touch(Req("dueq3shm", RealUa), force: true);
+
+        Assert.True(Perms.Known(TestUid));
+    }
+
     // ══ классификатор: кого уборке трогать НЕЛЬЗЯ ═════════════════════════════
+
 
     [Fact]
     public void Именованное_устройство_защищено_даже_с_headless_UA()

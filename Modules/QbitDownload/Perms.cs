@@ -57,9 +57,18 @@ public static class Perms
     // новый lampac_unic_id, первый же /qdl/features заводит «устройство», и в админке 74
     // записи из 85 оказались прогонами тестов. Теперь у стенда один стабильный айди, а
     // безымянный headless в реестр не попадает вообще.
-    public const string TestUidPrefix = "d1v-test-";     // договорённость со scripts/headless
-    public const string TestAutoName = "🧪 headless-тест";
+    // 🔴 Опознание — строго ПРЕФИКСНОЕ, формат хвоста роли не играет. Под этим префиксом ходят
+    // разные стенды: headless-обвязка (d1v-test-<хеш хоста>) и дев-запуск Apple-клиента из Xcode
+    // (d1v-test-mac-<хеш>, d1v-test-ios-<хеш>). Ужесточение до «префикс + 8 hex» молча выкинуло бы
+    // мак из песочницы, и его дев-строка осела бы в админке навсегда как живой пользователь.
+    public const string TestUidPrefix = "d1v-test-";     // договорённость со scripts/headless и mac-app
     const int TestCap = 3;              // тестовых строк держим не больше трёх — они эфемерны
+    const int TestTtlHours = 24;        // и протухают: см. Prune
+
+    // Платформа для имени тестовой строки — из самого айди. Одно имя на всех врало бы в
+    // интерфейсе ровно там, где владелец решает, чьё это устройство.
+    static readonly string[] _testPlatforms = { "mac", "ios", "android", "windows", "tizen", "web", "headless" };
+
 
     // ⚠️ Санация обязательна, а не гигиена: ValidateIdentity выключен, uid приходит из query без
     // единой проверки символов, а мы кладём его ключом в JSON и печатаем в админке.
@@ -149,6 +158,27 @@ public static class Perms
     /// <summary>Headless-браузер представляется сам. Ни один настоящий клиент так не ходит.</summary>
     public static bool IsHeadlessUa(string ua)
         => !string.IsNullOrEmpty(ua) && _headlessRx.IsMatch(ua);
+
+    /// <summary>
+    /// Имя тестовой строки в админке: «🧪 тест (mac)». Платформу берём из хвоста айди, чтобы
+    /// дев-запуск мака не подписывался «headless» — по этой подписи владелец и понимает,
+    /// откуда взялась строка, если прогон умер и она пережила ночь.
+    /// </summary>
+    public static string TestNameFor(string uid)
+    {
+        string key = NormUid(uid) ?? "";
+        string tail = key.StartsWith(TestUidPrefix, StringComparison.Ordinal)
+            ? key.Substring(TestUidPrefix.Length)
+            : "";
+
+        string token = tail.Split('-')[0];
+        string plat = _testPlatforms.Contains(token, StringComparer.OrdinalIgnoreCase)
+            ? token.ToLowerInvariant()
+            : "headless";
+
+        return "🧪 тест (" + plat + ")";
+    }
+
 
     /// <summary>
     /// 🔴 ЕДИНСТВЕННЫЙ вход для уборки: «эту запись сносить можно». Зовётся дважды — при сборе
@@ -249,7 +279,13 @@ public static class Perms
         return fresh;
     }
 
+    /// <summary>Когда устройство видели. DateTimeOffset, а не DateTime: у разобранного JSON
+    /// Kind бывает Local, и разница «сколько прошло» уезжала бы на часовой пояс.</summary>
+    static DateTimeOffset Seen(JToken d)
+        => (DateTimeOffset?)d["last"] ?? DateTimeOffset.MinValue;
+
     /// <summary>Вытеснение: только самые старые и только БЕЗ грантов. Устройство с правами вечно.</summary>
+
     static void Prune(JObject root)
     {
         var devices = (JObject)root["devices"];
@@ -257,15 +293,26 @@ public static class Perms
         // Тестовые сверх TestCap уходят первыми и независимо от общего капа: они эфемерны
         // по определению, а держать их до 200 штук означало бы вернуть ровно ту проблему,
         // ради которой песочница и появилась.
-        var stale = devices.Properties()
+        var tests = devices.Properties()
             .Where(p => IsTestDevice(p.Name, p.Value as JObject))
-            .OrderByDescending(p => (DateTime?)p.Value["last"] ?? DateTime.MinValue)
-            .Skip(TestCap)
+            .OrderByDescending(p => Seen(p.Value))
+            .ToList();
+
+        // 🔴 И протухают. Гейт убирает за собой сам, но дев-запуск Apple-клиента
+        // (d1v-test-mac-…) не убирает НИКТО: run-all чистит только свой айди. Без срока
+        // годности такая строка осталась бы в админке навсегда. Активное устройство не
+        // протухает никогда — last обновляется на каждом запросе.
+        var now = DateTimeOffset.UtcNow;
+        var stale = tests
+            .Where(p => (now - Seen(p.Value)).TotalHours > TestTtlHours)
+            .Concat(tests.Skip(TestCap))
             .Select(p => p.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         foreach (string name in stale)
             devices.Remove(name);
+
 
         if (devices.Count <= DeviceCap) return;
 
@@ -366,8 +413,9 @@ public static class Perms
                     d["test"] = true;
                     // Имя проставляем сами: если прогон умрёт на середине и строка переживёт
                     // ночь, владелец в админке сразу видит стенд, а не гадает про «ещё одного».
-                    if (string.IsNullOrWhiteSpace((string)d["name"])) d["name"] = TestAutoName;
+                    if (string.IsNullOrWhiteSpace((string)d["name"])) d["name"] = TestNameFor(uid);
                 }
+
 
                 Prune(root);
 
@@ -423,8 +471,9 @@ public static class Perms
             if (SandboxEnabled && IsTestUid(key))
             {
                 d["test"] = true;
-                if (string.IsNullOrWhiteSpace((string)d["name"])) d["name"] = TestAutoName;
+                if (string.IsNullOrWhiteSpace((string)d["name"])) d["name"] = TestNameFor(key);
             }
+
 
             var g = d["grants"] as JArray ?? new JArray();
 
