@@ -903,8 +903,9 @@ public partial class QbitController : BaseController
                 {
                     var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var it in result) seen.Add(it.Value<string>("hash") ?? "");
-                    // подписки jut.su — один раз на весь список, не на карточку
+                    // подписки jut.su и XSMART — один раз на весь список, не на карточку
                     var jutModes = JutWatchModes();
+                    var xsModes = XsmartWatchModes();
                     foreach (var lf in JsonStore.List(localDir, "*.json"))
                     {
                         string h = Path.GetFileNameWithoutExtension(lf);
@@ -942,6 +943,9 @@ public partial class QbitController : BaseController
                         // Режим подписки — в JutDecorateListItem (JutSuWatch.cs): вынесен туда,
                         // чтобы контракт проверялся тестом, этот экшен в тестах не собрать.
                         JutDecorateListItem(item, loc, jutModes);
+                        // XSMART: то же самое и по той же причине — карточка локальная, торрентная
+                        // ветка гейтится по !local, и пункт «Следить» иначе неоткуда показать.
+                        XsmartDecorateListItem(item, loc, xsModes);
                         // строго ПОСЛЕ декорации: слаг для jut-обложки берётся из item["jut"] (§BV)
                         DecorateListPoster(item);
                         // без Touch activity == added → финализированный транскод позицию не меняет (§AG)
@@ -1233,6 +1237,10 @@ public partial class QbitController : BaseController
                 // карточку и папку: «удалил, а оно вернулось».
                 string jutSlug = (loc["jut"] as JObject)?.Value<string>("slug");
                 if (!string.IsNullOrEmpty(jutSlug)) JutForgetOnDelete(jutSlug);
+
+                // XSMART: та же история — свой файл подписок, о котором PurgeCache не знает.
+                string xsRef = (loc["xsmart"] as JObject)?.Value<string>("ref");
+                if (!string.IsNullOrEmpty(xsRef)) XsmartForgetOnDelete(xsRef);
 
                 if (deleteFiles) DeleteLocalFiles(loc);
                 try { using var c2 = await Qbit(); await DeleteDonorsOf(c2, hash); } catch { }   // хвосты охоты, если были
@@ -4723,7 +4731,9 @@ public partial class QbitController : BaseController
     }
 
     // один файл локального маркера (после транскода)
-    sealed class LocalFile { public int index; public string name; public string path; public long size; }
+    // tl — ключ таймлайна, заданный маркером ЯВНО (не-торрентные источники). Гадать его по
+    // имени файла нельзя: у XSMART в имени порядковые номера, а в ключе — id серии.
+    sealed class LocalFile { public int index; public string name; public string path; public long size; public string tl; }
 
     // Нормализация обоих форматов маркера: старый {name,path,size,added} → один файл (index 0),
     // новый {files:[{index,name,path,size}],...} → как есть. Существование на диске НЕ проверяется.
@@ -4742,7 +4752,8 @@ public partial class QbitController : BaseController
                     index = f.Value<int?>("index") ?? res.Count,
                     name = f.Value<string>("name") ?? Path.GetFileName(p),
                     path = p,
-                    size = f.Value<long?>("size") ?? 0
+                    size = f.Value<long?>("size") ?? 0,
+                    tl = f.Value<string>("tl")
                 });
             }
         }

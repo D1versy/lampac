@@ -19,6 +19,7 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _jutTimer;      // jut.su: слежение за сезоном (раз в сутки)
     static System.Threading.Timer _jutWarmTimer;  // jut.su: прогрев кеша тайтлов (2 раза в сутки)
     static System.Threading.Timer _jutCatTimer;   // jut.su: снапшот-индекс каталога (сид/голова/ресид)
+    static System.Threading.Timer _xsTimer;       // XSMART: слежение за сезоном (раз в сутки)
     static System.Threading.Timer _healthTimer;   // пассивные хелс-чеки: сброс реестра на диск
     static System.Threading.Timer _onlineWarmTimer; // прогрев кнопок «Онлайн» (три полосы, постепенно)
     static System.Threading.Timer _replicaTimer;    // цикл репликации (только при replicaRole=replica)
@@ -198,6 +199,21 @@ public class ModInit : IModuleLoaded
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut watch timer: " + ex); }
         }, null, System.TimeSpan.FromMinutes(jutOverdue ? 6 : 35), System.TimeSpan.FromHours(jutHours));
 
+        // ── XSMART: слежение за новыми сериями (раз в сутки, решение владельца) ──
+        // Первый тик на 50-й минуте — ПОСЛЕ jut-тика (@35) и его прогрева (@45): контуры
+        // независимы (разные источники), но делят диск и очередь скачивания, и толкаться
+        // на старте контейнера им незачем.
+        _xsTimer?.Dispose();
+        _xsTimer = new System.Threading.Timer(async _ =>
+        {
+            try
+            {
+                if (conf?.xsmartEnable != true) return;   // выключатель проверяется В НАЧАЛЕ тика
+                await QbitController.XsmartWatchTick();
+            }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] xsmart watch timer: " + ex); }
+        }, null, System.TimeSpan.FromMinutes(50), System.TimeSpan.FromHours(24));
+
         // ── jut.su: прогрев кеша тайтлов (решение владельца — 2 раза в сутки) ──
         // Промах TTL заставляет ПЕРВОГО открывшего карточку ждать полный обход: для хаб-тайтла
         // это 1 + до 24 последовательных запроса к сайту по ~1.1 с (живой замер naruuto — 3.58 с).
@@ -300,6 +316,12 @@ public class ModInit : IModuleLoaded
             try { await QbitController.JutReconcile(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut reconcile: " + ex); }
 
+            // XSMART: маркер по факту диска + недокачанное обратно в очередь. Контейнер
+            // перезапускают часто (Roslyn-сборка модуля), и без этого прохода начатый фильм
+            // лежал бы мёртвым набором сегментов до следующего ручного «Скачать».
+            try { await QbitController.XsmartReconcile(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] xsmart reconcile: " + ex); }
+
             // Апгрейд постеров у уже скачанного: в каталоге этих тайтлов может не быть,
             // а карточка в «Загрузках» иначе навсегда останется с квадратом 186×186.
             try { QbitController.JutPosterSeedDownloads(); }
@@ -355,6 +377,8 @@ public class ModInit : IModuleLoaded
         _replicaTimer = null;
         _jutTimer?.Dispose();
         _jutTimer = null;
+        _xsTimer?.Dispose();
+        _xsTimer = null;
         _jutWarmTimer?.Dispose();
         _jutWarmTimer = null;
         _jutCatTimer?.Dispose();

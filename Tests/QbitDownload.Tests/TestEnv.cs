@@ -43,6 +43,7 @@ public static class TestEnv
             // Снимок «что уже скачано» держится 10 с, а тесты меняют каталог загрузок
             // быстрее — без сброса следующий тест читал бы снимок предыдущего.
             QbitController.JutDropAllDiskKeys();
+            QbitController.XsmartDropAllDiskKeys();
             return dir;
         }
     }

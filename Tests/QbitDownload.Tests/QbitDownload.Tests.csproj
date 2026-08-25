@@ -82,6 +82,9 @@
     <Compile Include="..\..\Modules\QbitDownload\JutSuGrab.cs" Link="Module\JutSuGrab.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuWatch.cs" Link="Module\JutSuWatch.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuCatalogIndex.cs" Link="Module\JutSuCatalogIndex.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\Xsmart.cs" Link="Module\Xsmart.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\XsmartGrab.cs" Link="Module\XsmartGrab.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\XsmartWatch.cs" Link="Module\XsmartWatch.cs" />
     <Compile Include="..\..\Modules\QbitDownload\TorrentHash.cs" Link="Module\TorrentHash.cs" />
     <Compile Include="..\..\Modules\QbitDownload\MetaHeal.cs" Link="Module\MetaHeal.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Perms.cs" Link="Module\Perms.cs" />

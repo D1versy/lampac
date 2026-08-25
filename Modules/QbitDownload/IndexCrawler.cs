@@ -39,6 +39,15 @@ public partial class QbitController
     #region источники тайтлов
     // 1) «Загрузки» и сериалы на слежении — полные метаданные лежат у нас на диске,
     //    внешних запросов не требуется вообще.
+    /// <summary>
+    /// Источники, за которыми в торренты ходить нельзя. Множество, а не сравнение с одной
+    /// строкой: каждый новый не-торрентный раздел обязан попадать сюда, иначе обходчик тихо
+    /// начнёт искать его тайтлы на трекерах.
+    /// </summary>
+    internal static bool NonTorrentSource(string source)
+        => string.Equals(source, "jutsu", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(source, "xsmart", StringComparison.OrdinalIgnoreCase);
+
     static List<CrawlTarget> TargetsFromMeta()
     {
         var res = new List<CrawlTarget>();
@@ -55,10 +64,11 @@ public partial class QbitController
                     string title = m.Value<string>("title");
                     if (string.IsNullOrWhiteSpace(title)) continue;
 
-                    // 🔴 ПОЯС 2 изоляции jut.su: за сериями оттуда в торренты не ходим вообще
-                    // (требование владельца). Обходчик иначе подхватил бы jut-мету и начал
-                    // дёргать по ней ВСЕ трекеры. См. JutSuWatch.cs и claude/jut/02-architecture.md §9.
-                    if (string.Equals(m.Value<string>("source"), "jutsu", StringComparison.OrdinalIgnoreCase))
+                    // 🔴 ПОЯС 2 изоляции не-торрентных источников: за сериями оттуда в торренты
+                    // не ходим вообще (требование владельца). Обходчик иначе подхватил бы такую
+                    // мету и начал дёргать по ней ВСЕ трекеры.
+                    // См. JutSuWatch.cs, XsmartWatch.cs и claude/jut/02-architecture.md §9.
+                    if (NonTorrentSource(m.Value<string>("source")))
                         continue;
 
                     string date = m.Value<string>("release_date") ?? m.Value<string>("first_air_date") ?? "";

@@ -483,6 +483,36 @@ public class ModuleConf : ModuleBaseConf
     public bool jutWatchSeasonSwitch { get; set; } = true; // вышел новый сезон → переключить слежение на него
 
     // ─────────────────────────────────────────────────────────────────────────
+    // XSMART (Xsmart.cs, XsmartGrab.cs, XsmartWatch.cs) — скачивание раздела в «Загрузки».
+    // Устройство и контракт прокси: E:\Media-server\xsmart\service\CONTRACT.md
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Выключатель ТОЛЬКО скачивания и слежения. Онлайн-просмотр раздела он не трогает —
+    // тот живёт целиком в контейнере xsmart-proxy и гасится docker compose stop.
+    public bool xsmartEnable { get; set; } = true;
+
+    // Адрес контейнера ВНУТРИ сети media. Наружу этот адрес не попадает никогда.
+    public string xsmartApi { get; set; } = "http://xsmart-proxy:9140";
+
+    // ⚠️ Путь обязан быть смонтирован rw в docker-compose.yml. Корень /downloads примонтирован
+    // :ro, писать можно только в явно перечисленные подпапки (как /downloads/jutsu).
+    public string xsmartDownloadsPath { get; set; } = "/downloads/xsmart";
+
+    public int xsmartGrabRetries { get; set; } = 5;
+    public int xsmartGrabIdleSec { get; set; } = 60;       // обрыв «нет данных от CDN» (0 = выключить)
+    public int xsmartGrabPaceMs { get; set; } = 0;         // мягкий кап скорости (>0 = пауза между чанками)
+    // Фильм 1080p ≈ 4 ГБ, 4K HDR ≈ 30+ ГБ. На том же диске живут торренты и записи
+    // регистратора, поэтому резерв здесь больше, чем у аниме.
+    public int xsmartMinFreeGb { get; set; } = 30;
+    public bool xsmartNotifyAggregate { get; set; } = true;
+    public int xsmartNotifyCoalesceSec { get; set; } = 300;
+
+    // Дефолт ТОЛЬКО для подписок без явного режима (curl, старый клиент): UI режим передаёт
+    // сам — карточка тайтла autoGrab=0, «Загрузки» autoGrab=1.
+    public bool xsmartWatchAutoGrab { get; set; } = true;
+    public bool xsmartWatchSeasonSwitch { get; set; } = true;  // вышел новый сезон → переключить слежение
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Реплика (Replica.cs) — маленький бекап-сервер на второй площадке.
     // Канон: E:\D1vision-replica\claude\, план — claude/ этого репозитория.
     // ─────────────────────────────────────────────────────────────────────────

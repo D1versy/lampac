@@ -1920,7 +1920,13 @@ public partial class QbitController
                         }
                     }
 
-                    if (epkey != null) { o["epkey"] = epkey; o["tl"] = (jutTl ?? sk) + ":" + epkey; }
+                    if (epkey != null) o["epkey"] = epkey;
+                    // 🔴 Явный ключ из маркера ПОБЕЖДАЕТ вычисленный. У XSMART имя файла несёт
+                    // порядковые номера (s01e05), а ключ таймлайна — идентификаторы серии
+                    // (s32215e524438), и вывести один из другого нельзя в принципе. Собрали бы
+                    // ключ по имени — прогресс скачанной копии разошёлся бы с онлайн-просмотром.
+                    if (!string.IsNullOrEmpty(f.tl)) o["tl"] = f.tl;
+                    else if (epkey != null) o["tl"] = (jutTl ?? sk) + ":" + epkey;
                     rows.Add((kindRank, sn, en, f.name ?? "", o));
                 }
 
