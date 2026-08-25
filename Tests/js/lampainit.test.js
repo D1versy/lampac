@@ -225,6 +225,30 @@ test('lampainit 2.68: снаружи плагин XSMART грузится с т�
   assert.strictEqual(scripts[2][0], 'https://tv.d1versy.com:9443/xsmart/xsmart.js?v={version}');
 });
 
+// 🔴 Развилка решается по АДРЕСУ, а не по схеме: иначе внешний вход держался бы на том,
+// что lampac видит запрос как https (X-Forwarded-Proto → KnownProxies → UseForwardedHeaders).
+// Порвись цепочка — внешние клиенты молча ушли бы на http://…:9140 (мёртвый адрес плюс
+// mixed content), и дома при этом всё было бы зелёным.
+test('lampainit 2.69: неизвестный хост остаётся тем же origin (fail-safe, без :9140)', () => {
+  const scripts = [];
+  const lampa = H.makeLampa({ Utils: { putScriptAsync: (a) => scripts.push(a) } });
+  const { mod } = H.loadLampaInit({ lampa, host: 'http://tv.d1versy.com:9443' });
+  mod.appload();
+  assert.strictEqual(scripts[2][0], 'http://tv.d1versy.com:9443/xsmart/xsmart.js?v={version}');
+});
+
+test('lampainit 2.69: домашние адреса всех приватных диапазонов уходят на :9140', () => {
+  for (const host of ['http://192.168.87.24:9118', 'http://10.0.0.5:9118',
+    'http://172.16.4.2:9118', 'http://localhost:9118', 'http://127.0.0.1:9118']) {
+    const scripts = [];
+    const lampa = H.makeLampa({ Utils: { putScriptAsync: (a) => scripts.push(a) } });
+    const { mod } = H.loadLampaInit({ lampa, host });
+    mod.appload();
+    const expected = host.replace(/:\d+$/, '') + ':9140/xsmart/xsmart.js?v={version}';
+    assert.strictEqual(scripts[2][0], expected, host);
+  }
+});
+
 test('lampainit: appload calls Lampa.Lang.add with the neutral strings', () => {
   const added = [];
   const lampa = H.makeLampa({ Lang: { add: (obj) => added.push(obj) } });

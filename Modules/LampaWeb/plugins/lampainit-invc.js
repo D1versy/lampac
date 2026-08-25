@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.68';
+window.qdl_fork_version = '2.69';
    // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
@@ -28,9 +28,17 @@ lampainit_invc.appload = function appload() {
   // рестартом xsmart-proxy, без пересборки lampac.
   // Откат = убрать блок + рестарт; остановленный контейнер и так гасит раздел (putScriptAsync
   // тихо падает, пункт меню не появляется, остальная Lampa работает).
+  // 🔴 Развилку решаем по АДРЕСУ, а не по схеме. Соблазн проверять `https:` выглядит короче,
+  // но он завязан на то, что lampac видит запрос как https, — а это держится на цепочке
+  // «Caddy шлёт X-Forwarded-Proto → его IP в KnownProxies → UseForwardedHeaders включён».
+  // Порвётся любое звено — и внешние клиенты молча получат http://…:9140: несуществующий
+  // адрес плюс mixed content, причём дома всё останется зелёным. Здесь же неизвестный хост
+  // деградирует в «тот же origin», что для любого пути через Caddy верно (fail-safe).
+  // Правило намеренно то же, что isLanHost() в самом плагине, — одно понятие «дом» на систему.
   (function () {
     var L = '{localhost}';
-    var base = /^https:/i.test(L) ? L : L.replace(/:\d+$/, '') + ':9140';
+    var lan = /^https?:\/\/(localhost|127\.0\.0\.1|\[?::1\]?|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(L);
+    var base = lan ? L.replace(/:\d+$/, '') + ':9140' : L;
     Lampa.Utils.putScriptAsync([base + '/xsmart/xsmart.js?v={version}']);
   })();
   // qdl 2.50: десктоп-адаптации ТОЛЬКО для windows/mac (плавный скролл колесом, ранняя
