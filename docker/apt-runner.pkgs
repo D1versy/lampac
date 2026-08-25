@@ -1,0 +1,22 @@
+# Пакеты финального образа. Google Chrome ставится не отсюда, а отдельным .deb
+# (у его URL нет версии в имени) — но его зависимости apt считает сам.
+# Один файл — один источник правды: отсюда их берёт и установка, и стадия сбора
+# локального хранилища (assets-harvest). Пустые строки и «#» игнорируются.
+ca-certificates
+curl
+fontconfig
+gstreamer1.0-libav
+gstreamer1.0-plugins-bad
+gstreamer1.0-plugins-base
+gstreamer1.0-plugins-base-apps
+gstreamer1.0-plugins-good
+gstreamer1.0-plugins-ugly
+gstreamer1.0-tools
+imagemagick
+libgstreamer-plugins-base1.0-0
+libgstreamer1.0-0
+libicu76
+libjpeg-dev
+libnspr4
+libpng-dev
+libwebp-dev

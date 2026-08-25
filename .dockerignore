@@ -17,6 +17,9 @@
 !Shared/**
 !certs/
 !certs/**
+!docker/
+!docker/**
+!certs/**
 
 # Build outputs
 **/bin/

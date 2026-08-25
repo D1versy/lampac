@@ -63,7 +63,11 @@
 - **Tizen-виджет** `Modules/LampaWeb/widgets/samsung/` (index.html + loader.js + config.xml + вендоренный app.js) — теперь наш кастом: бренд D1Vision + мульти-хост перебор + кэш hosts.json/app.js в localStorage. Сервер собирает и подписывает `.wgt` по `GET /samsung.wgt` (нужен флаг `widgets.samsung: true` в `init.conf`, секция LampaWeb).
 
 ## Сборка / деплой / синк
-- Билд: `docker build -t lampac-custom:latest .` → образ подхватит медиасервер (`docker compose up -d lampac`).
+- Билд: **`E:\Media-server\scripts\build-image.ps1 -Context E:\lampac -Tag lampac-custom:latest`** (или сразу `sync-lampac-fork.ps1 -BuildOnly` — он же плюс перезапуск). Правка одного `.cs` — **~20 с и ноль обращений в сеть**.
+  Голый `docker build -t lampac-custom:latest .` тоже работает (Dockerfile самодостаточен), но качает зависимости из интернета и жмёт слои гзипом — вдвое дольше.
+  Скрипт добавляет три вещи: контекст `assets` (локальное хранилище зависимостей — образ `lampac-assets:latest`, собирается `Media-server\scripts\build-assets.ps1`), `zstd` вместо `gzip` на экспорте слоёв и `--provenance=false --sbom=false`. Разбор с замерами — `Media-server\claude\06` §CG.
+  - ⚠️ Правишь `docker/apt-*.pkgs` или `ARG DOTNET_*` — пересобери хранилище (`build-assets.ps1`), иначе сборка честно упадёт: при подключённом хранилище тихого ухода в сеть нет (`ARG ASSETS_STRICT`).
+  - ⚠️ Стадии сбора хранилища стоят ВЫШЕ `runner`: `docker build` без `--target` собирает ПОСЛЕДНЮЮ стадию файла.
 - Синк с upstream делать **из репо медиасервера**: `E:\Media-server\scripts\sync-lampac-fork.ps1`. Страховочный паттерн (бэкап-ветка + бэкап-тег образа + тесты между ребейзом и билдом + headless-проверки) — `claude/06` §AP; после ребейза пушить `--force-with-lease`.
 - При rebase конфликты вероятны только в наших точках правок upstream: `lampainit-invc.js` — оставить наши ДВЕ строки `putScriptAsync` (`{localhost}/qdl.js` и `{localhost}/music.js`); `Modules/Music/manifest.json` — оставить наш `"enable": true`; `Core/plugins/invc-rch_nws.js` — оставить строку с `/*qdl-cut:rch-cors*/` (upstream может вернуть пробу github.com **тихо**, без конфликта — ловит `Tests/js/rch-cors.test.js`, который синк-скрипт гоняет между ребейзом и билдом).
 
