@@ -1,7 +1,12 @@
 'use strict';
 // Real-DOM tests (jsdom + real jQuery) for ensureMenu(): наши пункты левого меню
-// (Загрузки → Уведомления → D1versy Live → D1versy Rec → jut.su) вставляются по одному разу,
-// дубликаты от прошлых версий/двойных вставок самоисцеляются (dedupe), порядок держится.
+// (Загрузки → Уведомления → XSMART → jut.su → D1versy Live → D1versy Rec) вставляются по одному
+// разу, дубликаты от прошлых версий/двойных вставок самоисцеляются (dedupe), порядок держится.
+//
+// qdl 2.70: якорь — «Лента» (data-action="feed"), а не «Персоны»; порядок и место задал владелец.
+// Плюс СЛОТ-ПРОХОДНИК 'xsmart-menu': пункт XSMART строит ЧУЖОЙ плагин (контейнер xsmart-proxy),
+// мы его только держим на позиции. Без слота наш цикл вырывал бы jut.su на его место, чужой
+// плагин вставлял бы пункт назад — и меню мигало бы бесконечно.
 //
 // qdl 2.54: D1versy Live/Rec гейтятся правами устройства (сервер, /qdl/features). Здесь же —
 // главный инвариант новой цепочки якорей: дырка в середине (право не выдано) НЕ должна уносить
@@ -11,12 +16,17 @@ const test = require('node:test');
 const assert = require('node:assert');
 const H = require('./harness');
 
-const ALL = ['qdl-menu', 'qdl-noti-menu', 'qdl-watch-menu', 'qdl-live-menu', 'qdl-jut-menu'];
+// Пункты, которые строит САМ qdl.js (xsmart-menu сюда не входит — он чужой, см. слот).
+const ALL = ['qdl-menu', 'qdl-noti-menu', 'qdl-jut-menu', 'qdl-watch-menu', 'qdl-live-menu'];
+
+/** Готовый пункт XSMART — ровно такой, каким его вставляет плагин из контейнера xsmart-proxy. */
+const XSMART_LI = '<li class="menu__item selector xsmart-menu"><div class="menu__text">XSMART</div></li>';
 
 function menuHtml(extraItems) {
   return (
     '<div class="menu"><div class="menu__case"><ul class="menu__list">' +
       '<li class="menu__item selector" data-action="main">Главная</li>' +
+      '<li class="menu__item selector" data-action="feed">Лента</li>' +
       '<li class="menu__item selector" data-action="myperson">Персоны</li>' +
       (extraItems || '') +
       '<li class="menu__item selector" data-action="settings">Настройки</li>' +
@@ -33,25 +43,25 @@ function load(perms, extraItems) {
 
 function ourOrder(doc) {
   return Array.from(doc.querySelectorAll('.menu__item'))
-    .map((e) => e.getAttribute('data-action') || e.className.match(/qdl-[a-z-]+/)?.[0])
+    .map((e) => e.getAttribute('data-action') || e.className.match(/(?:qdl|xsmart)-[a-z-]+/)?.[0])
     .filter(Boolean);
 }
 
-/** Наши пункты подряд, начиная с «Персоны». */
+/** Наши пункты подряд, начиная с «Ленты». */
 function chain(doc, count) {
   const order = ourOrder(doc);
-  const i = order.indexOf('myperson');
+  const i = order.indexOf('feed');
   return order.slice(i, i + count + 1);
 }
 
-test('ensureMenu builds all five items once, in order after «Персоны»', () => {
+test('ensureMenu builds all five items once, in order after «Лента»', () => {
   const { doc, qdl } = load();
   qdl.ensureMenu();
 
   for (const cls of ALL)
     assert.strictEqual(doc.querySelectorAll('.' + cls).length, 1, cls);
 
-  assert.deepStrictEqual(chain(doc, 5), ['myperson'].concat(ALL));
+  assert.deepStrictEqual(chain(doc, 5), ['feed'].concat(ALL));
 });
 
 test('ensureMenu is idempotent across re-renders', () => {
@@ -77,7 +87,7 @@ test('ensureMenu self-heals pre-existing duplicates down to one of each', () => 
     assert.strictEqual(doc.querySelectorAll('.' + cls).length, 1, cls);
   assert.strictEqual(doc.querySelectorAll('.qdl-noti-badge').length, 1);
 
-  assert.deepStrictEqual(chain(doc, 5), ['myperson'].concat(ALL));
+  assert.deepStrictEqual(chain(doc, 5), ['feed'].concat(ALL));
 });
 
 test('dedupe removes extras and returns a single-element set', () => {
@@ -96,21 +106,21 @@ test('без прав: ни Live, ни Rec — но Загрузки/Уведо�
 
   assert.strictEqual(doc.querySelectorAll('.qdl-watch-menu').length, 0, 'D1versy Live не должен появиться');
   assert.strictEqual(doc.querySelectorAll('.qdl-live-menu').length, 0, 'D1versy Rec не должен появиться');
-  assert.deepStrictEqual(chain(doc, 3), ['myperson', 'qdl-menu', 'qdl-noti-menu', 'qdl-jut-menu']);
+  assert.deepStrictEqual(chain(doc, 3), ['feed', 'qdl-menu', 'qdl-noti-menu', 'qdl-jut-menu']);
 });
 
-test('только live: Rec нет, jut.su не уехал (главный баг старой цепочки якорей)', () => {
+test('только live: Rec нет, пункты ниже не уехали (главный баг старой цепочки якорей)', () => {
   const { doc, qdl } = load({ live: true, rec: false });
   qdl.ensureMenu();
 
-  assert.deepStrictEqual(chain(doc, 4), ['myperson', 'qdl-menu', 'qdl-noti-menu', 'qdl-watch-menu', 'qdl-jut-menu']);
+  assert.deepStrictEqual(chain(doc, 4), ['feed', 'qdl-menu', 'qdl-noti-menu', 'qdl-jut-menu', 'qdl-watch-menu']);
 });
 
 test('только rec: Rec встаёт на место Live, порядок остальных цел', () => {
   const { doc, qdl } = load({ live: false, rec: true });
   qdl.ensureMenu();
 
-  assert.deepStrictEqual(chain(doc, 4), ['myperson', 'qdl-menu', 'qdl-noti-menu', 'qdl-live-menu', 'qdl-jut-menu']);
+  assert.deepStrictEqual(chain(doc, 4), ['feed', 'qdl-menu', 'qdl-noti-menu', 'qdl-jut-menu', 'qdl-live-menu']);
 });
 
 test('право отозвали — пункт снимается на следующем проходе', () => {
@@ -122,7 +132,7 @@ test('право отозвали — пункт снимается на сле�
   qdl.ensureMenu();
 
   assert.strictEqual(doc.querySelectorAll('.qdl-watch-menu').length, 0, 'снятое право убирает пункт');
-  assert.deepStrictEqual(chain(doc, 4), ['myperson', 'qdl-menu', 'qdl-noti-menu', 'qdl-live-menu', 'qdl-jut-menu']);
+  assert.deepStrictEqual(chain(doc, 4), ['feed', 'qdl-menu', 'qdl-noti-menu', 'qdl-jut-menu', 'qdl-live-menu']);
 });
 
 test('право выдали на живом клиенте — пункт встаёт в своё место, а не в конец', () => {
@@ -132,7 +142,7 @@ test('право выдали на живом клиенте — пункт вс
   qdl.setPerms({ live: true, rec: true });
   qdl.ensureMenu();
 
-  assert.deepStrictEqual(chain(doc, 5), ['myperson'].concat(ALL));
+  assert.deepStrictEqual(chain(doc, 5), ['feed'].concat(ALL));
 });
 
 test('права не пришли (сервер молчит) — читаем кеш Lampa.Storage, но только его', () => {
@@ -143,4 +153,93 @@ test('права не пришли (сервер молчит) — читаем 
 
   assert.strictEqual(doc.querySelectorAll('.qdl-watch-menu').length, 1, 'кеш даёт мгновенную отрисовку');
   assert.strictEqual(doc.querySelectorAll('.qdl-live-menu').length, 0, 'чего нет в кеше — не рисуем');
+});
+
+// ───────── qdl 2.70: якорь «Лента» и слот-проходник XSMART ─────────
+
+/** Меню с произвольным набором штатных пунктов — для проверки фолбэков якоря. */
+function menuHtmlCustom(stdItems) {
+  return (
+    '<div class="menu"><div class="menu__case"><ul class="menu__list">' +
+      stdItems +
+      '<li class="menu__item selector" data-action="settings">Настройки</li>' +
+    '</ul></div></div>'
+  );
+}
+
+test('слот XSMART: чужой пункт переезжает между «Уведомления» и jut.su', () => {
+  // плагин xsmart-proxy вставил свой пункт РАНЬШЕ нас и не туда — держать место обязаны мы
+  const { doc, qdl } = load(undefined, XSMART_LI);
+  qdl.ensureMenu();
+
+  assert.deepStrictEqual(chain(doc, 6), [
+    'feed', 'qdl-menu', 'qdl-noti-menu', 'xsmart-menu', 'qdl-jut-menu', 'qdl-watch-menu', 'qdl-live-menu',
+  ]);
+});
+
+test('слот XSMART: сам пункт мы НЕ создаём — его хозяин чужой плагин', () => {
+  const { doc, qdl } = load();
+  qdl.ensureMenu();
+
+  assert.strictEqual(doc.querySelectorAll('.xsmart-menu').length, 0, 'qdl.js не строит чужой пункт');
+  // и дырка на месте слота не разрывает цепочку — jut.su встаёт сразу за «Уведомлениями»
+  assert.deepStrictEqual(chain(doc, 5), ['feed'].concat(ALL));
+});
+
+test('слот XSMART: повторные проходы не двигают пункт (нет пинг-понга с чужим плагином)', () => {
+  const { doc, qdl } = load(undefined, XSMART_LI);
+  qdl.ensureMenu();
+  const after1 = chain(doc, 6);
+  qdl.ensureMenu();
+  qdl.ensureMenu();
+
+  assert.strictEqual(doc.querySelectorAll('.xsmart-menu').length, 1);
+  assert.deepStrictEqual(chain(doc, 6), after1);
+});
+
+test('переезд с 2.69: пункты стояли под «Персонами» в старом порядке — перестраиваются под «Ленту»', () => {
+  const stale =
+    '<li class="menu__item selector qdl-menu"><div class="menu__text">Загрузки</div></li>' +
+    '<li class="menu__item selector qdl-noti-menu"><div class="menu__text">Уведомления</div></li>' +
+    '<li class="menu__item selector qdl-watch-menu"><div class="menu__text">D1versy Live</div></li>' +
+    '<li class="menu__item selector qdl-live-menu"><div class="menu__text">D1versy Rec</div></li>' +
+    '<li class="menu__item selector qdl-jut-menu"><div class="menu__text">jut.su</div></li>' +
+    XSMART_LI;
+  const { doc, qdl } = load(undefined, stale);
+  qdl.ensureMenu();
+
+  for (const cls of ALL) assert.strictEqual(doc.querySelectorAll('.' + cls).length, 1, cls);
+  assert.strictEqual(doc.querySelectorAll('.xsmart-menu').length, 1);
+  assert.deepStrictEqual(chain(doc, 6), [
+    'feed', 'qdl-menu', 'qdl-noti-menu', 'xsmart-menu', 'qdl-jut-menu', 'qdl-watch-menu', 'qdl-live-menu',
+  ]);
+});
+
+test('якорь: «Ленту» спрятали настройкой Lampa — встаём под «Главную»', () => {
+  const ctx = H.loadQdlDom({ bodyHtml: menuHtmlCustom(
+    '<li class="menu__item selector" data-action="main">Главная</li>' +
+    '<li class="menu__item selector" data-action="myperson">Персоны</li>') });
+  ctx.qdl.setPerms({ live: true, rec: true });
+  ctx.qdl.ensureMenu();
+
+  const order = ourOrder(ctx.doc);
+  assert.deepStrictEqual(order.slice(order.indexOf('main'), order.indexOf('main') + 6), ['main'].concat(ALL));
+});
+
+test('якорь: нет ни «Ленты», ни «Главной» — последний фолбэк «Персоны»', () => {
+  const ctx = H.loadQdlDom({ bodyHtml: menuHtmlCustom(
+    '<li class="menu__item selector" data-action="myperson">Персоны</li>') });
+  ctx.qdl.setPerms({ live: true, rec: true });
+  ctx.qdl.ensureMenu();
+
+  const order = ourOrder(ctx.doc);
+  assert.deepStrictEqual(order.slice(0, 6), ['myperson'].concat(ALL));
+});
+
+test('якорь: меню ещё не отрисовано — не вставляем ничего и не падаем', () => {
+  const ctx = H.loadQdlDom({ bodyHtml: '<div class="menu"><div class="menu__case"><ul class="menu__list"></ul></div></div>' });
+  ctx.qdl.setPerms({ live: true, rec: true });
+  ctx.qdl.ensureMenu();
+
+  assert.strictEqual(ctx.doc.querySelectorAll('.menu__item').length, 0, 'ждём следующего тика, а не рисуем в пустоту');
 });

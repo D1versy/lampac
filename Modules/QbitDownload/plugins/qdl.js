@@ -4173,15 +4173,35 @@
         { cls: 'qdl-menu',       build: function () { return buildMenuItem(); },      show: function () { return true; } },
         { cls: 'qdl-noti-menu',  build: function () { return buildNotiMenuItem(); },  show: function () { return true; },
           onAdd: function () { setTimeout(pollNotifications, 200); } },   // подтянуть бейдж сразу после появления пункта
+        // СЛОТ-ПРОХОДНИК. Пункт «XSMART» строит ЧУЖОЙ плагин (xsmart.js из контейнера
+        // xsmart-proxy) — мы его только ДЕРЖИМ на позиции. 🔴 Без этой строки наш цикл
+        // «держим строго после якоря» вырывал бы jut.su на место XSMART, xsmart.js по MutationObserver
+        // вставлял бы свой пункт назад — и пункты запрыгали бы вечно. build:null читается как
+        // «узел есть — держим и делаем якорем; узла нет — пропускаем, не разрывая цепочку».
+        { cls: 'xsmart-menu',    build: null,                                          show: function () { return true; } },
+        { cls: 'qdl-jut-menu',   build: function () { return buildJutMenuItem(); },   show: function () { return true; } },
         { cls: 'qdl-watch-menu', build: function () { return buildWatchMenuItem(); }, show: function () { return qdlAllowed('live'); } },
-        { cls: 'qdl-live-menu',  build: function () { return buildLiveMenuItem(); },  show: function () { return qdlAllowed('rec'); } },
-        { cls: 'qdl-jut-menu',   build: function () { return buildJutMenuItem(); },   show: function () { return true; } }
+        { cls: 'qdl-live-menu',  build: function () { return buildLiveMenuItem(); },  show: function () { return qdlAllowed('rec'); } }
     ];
+
+    // Якорь наших пунктов — «Лента» (data-action="feed", решение владельца: все наши разделы
+    // стоят сразу под ней). Фолбэк-цепочка обязательна: пункты штатного меню Lampa прячутся
+    // настройкой, а пропавший якорь означал бы, что наших пунктов нет вовсе.
+    // Конец списка в фолбэки НЕ берём осознанно: ни одного из трёх пунктов нет только
+    // пока меню ещё не отрисовано — тогда честнее подождать следующего тика, чем вставить
+    // пункты в полуготовый список.
+    function menuAnchor() {
+        var a = $('.menu .menu__item[data-action="feed"]').first();
+        if (a.length) return a;
+        a = $('.menu .menu__item[data-action="main"]').first();
+        if (a.length) return a;
+        return $('.menu .menu__item[data-action="myperson"]').first();
+    }
 
     function ensureMenu() {
         try {
-            var anchor = $('.menu .menu__item[data-action="myperson"]').first();
-            if (!anchor.length) return;                 // «Персоны» ещё не отрисованы — ждём
+            var anchor = menuAnchor();
+            if (!anchor.length) return;                 // меню ещё не отрисовано — ждём
 
             for (var i = 0; i < MENU_ORDER.length; i++) {
                 var spec = MENU_ORDER[i];
@@ -4191,6 +4211,8 @@
                 if (!spec.show()) { if (node.length) node.remove(); continue; }
 
                 if (!node.length) {
+                    // Слот-проходник — пункт не наш: ждём, пока его вставит хозяин.
+                    if (!spec.build) continue;
                     anchor.after(spec.build());
                     node = dedupe('.menu .' + spec.cls);
                     if (spec.onAdd) spec.onAdd();

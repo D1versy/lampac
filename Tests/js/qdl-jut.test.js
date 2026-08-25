@@ -18,12 +18,13 @@ test('пункт меню называется ровно «jut.su» (решен
     'пункт «Аниме» — остаток раннего черновика, его быть не должно');
 });
 
-test('пункт меню идёт последним в MENU_ORDER, сразу за «D1versy Rec» (.qdl-live-menu)', () => {
+test('пункт меню стоит между слотом XSMART и «D1versy Live» (порядок владельца, qdl 2.70)', () => {
   const { qdl } = H.loadQdl();
   // Array.from — массив из vm-песочницы живёт в другом realm, и deepStrictEqual ловит чужой прототип
   const order = Array.from(qdl.MENU_ORDER, (x) => x.cls);
-  assert.deepStrictEqual(order.slice(-2), ['qdl-live-menu', 'qdl-jut-menu'],
-    'jut.su стоит сразу после «D1versy Rec» (имена классов обманчивы: .qdl-live-menu = Rec/записи)');
+  assert.deepStrictEqual(order, [
+    'qdl-menu', 'qdl-noti-menu', 'xsmart-menu', 'qdl-jut-menu', 'qdl-watch-menu', 'qdl-live-menu',
+  ], 'Загрузки → Уведомления → XSMART → jut.su → Live → Rec (имена обманчивы: .qdl-live-menu = Rec/записи)');
 });
 
 test('jut.su не зависит от прав на Live/Rec — иначе чужой гейт уносил бы вкладку', () => {
