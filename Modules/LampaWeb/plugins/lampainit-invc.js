@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.67';
+window.qdl_fork_version = '2.68';
    // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
@@ -22,6 +22,17 @@ lampainit_invc.appload = function appload() {
   lampainit_invc._apploaded = true;
   Lampa.Utils.putScriptAsync(["{localhost}/qdl.js?v={version}"]);  // QbitDownload: кнопка «Скачать» + раздел «Загрузки» ({version} = cache-buster, подставляет сервер)
   Lampa.Utils.putScriptAsync(["{localhost}/music.js?v={version}"]);  // Music (upstream 1.45, manifest enable:true — наш флип): раздел «Музыка»; откат = убрать строку + рестарт
+  // XSMART: раздел живёт в ОТДЕЛЬНОМ контейнере (xsmart-proxy), поэтому адрес зависит от того,
+  // откуда пришёл клиент: снаружи /xsmart/* разводит Caddy на том же origin (9443), а дома
+  // контейнер слушает свой порт 9140. Плагин отдаёт сам контейнер — его правки применяются
+  // рестартом xsmart-proxy, без пересборки lampac.
+  // Откат = убрать блок + рестарт; остановленный контейнер и так гасит раздел (putScriptAsync
+  // тихо падает, пункт меню не появляется, остальная Lampa работает).
+  (function () {
+    var L = '{localhost}';
+    var base = /^https:/i.test(L) ? L : L.replace(/:\d+$/, '') + ':9140';
+    Lampa.Utils.putScriptAsync([base + '/xsmart/xsmart.js?v={version}']);
+  })();
   // qdl 2.50: десктоп-адаптации ТОЛЬКО для windows/mac (плавный скролл колесом, ранняя
   // подгрузка, ресинк фокуса) — ТВ/мобилка файл даже не скачивают; откат = убрать строку
   if (window.d1vision_platform === 'windows' || window.d1vision_platform === 'mac')

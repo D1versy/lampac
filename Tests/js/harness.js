@@ -204,7 +204,10 @@ function loadQdl(opts) {
  */
 function loadLampaInit(opts) {
   opts = opts || {};
-  const src = fs.readFileSync(LAMPAINIT, 'utf8');
+  // opts.host — подставить {localhost}, как это делает сервер (ApiController.LamInit).
+  // Нужен там, где проверяется адрес, вычисленный ИЗ хоста запроса (загрузка плагина XSMART).
+  let src = fs.readFileSync(LAMPAINIT, 'utf8');
+  if (opts.host) src = src.split('{localhost}').join(opts.host);
   const localStorage = opts.localStorage || makeStorage();
   const lampa = opts.lampa || makeLampa();
   const sandbox = {

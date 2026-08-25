@@ -188,19 +188,41 @@ test('lampainit: appload torrserver_url следует за origin (извне �
   assert.strictEqual(lampa.Storage.get('torrserver_url'), 'https://tv.d1versy.com:9443/ts');
 });
 
-test('lampainit: appload calls Lampa.Utils.putScriptAsync for qdl.js and music.js', () => {
+test('lampainit: appload calls Lampa.Utils.putScriptAsync for qdl.js, music.js and xsmart', () => {
   const scripts = [];
   const lampa = H.makeLampa({ Utils: { putScriptAsync: (a) => scripts.push(a) } });
   const { mod } = H.loadLampaInit({ lampa });
   mod.appload();
-  // 2.13: два вызова — наш qdl.js и music.js (модуль Music upstream, включён флипом манифеста)
-  assert.strictEqual(scripts.length, 2);
+  // 2.13: qdl.js + music.js (модуль Music upstream, включён флипом манифеста);
+  // 2.68: третьим — плагин раздела XSMART, его отдаёт отдельный контейнер xsmart-proxy.
+  assert.strictEqual(scripts.length, 3);
   // NB: array is created inside the vm sandbox (different realm's Array),
   // so deepStrictEqual on the array object rejects it — compare contents instead.
   assert.strictEqual(scripts[0].length, 1);
   // URL carries the {version} cache-buster token (the server replaces it with a per-start stamp).
   assert.strictEqual(scripts[0][0], '{localhost}/qdl.js?v={version}');
   assert.strictEqual(scripts[1][0], '{localhost}/music.js?v={version}');
+  assert.ok(/\/xsmart\/xsmart\.js\?v=\{version\}$/.test(scripts[2][0]), scripts[2][0]);
+});
+
+// 🔴 Адрес контейнера XSMART вычисляется ИЗ хоста запроса, и обе ветки обязаны быть верными:
+// дома клиент идёт на отдельный порт 9140, а снаружи /xsmart/* разводит Caddy на том же
+// origin. Ошибка в любой из веток = раздел не грузится ровно на половине клиентов, причём
+// на второй половине всё выглядит исправным.
+test('lampainit 2.68: в LAN плагин XSMART грузится с порта 9140', () => {
+  const scripts = [];
+  const lampa = H.makeLampa({ Utils: { putScriptAsync: (a) => scripts.push(a) } });
+  const { mod } = H.loadLampaInit({ lampa, host: 'http://192.168.87.24:9118' });
+  mod.appload();
+  assert.strictEqual(scripts[2][0], 'http://192.168.87.24:9140/xsmart/xsmart.js?v={version}');
+});
+
+test('lampainit 2.68: снаружи плагин XSMART грузится с того же origin (через Caddy)', () => {
+  const scripts = [];
+  const lampa = H.makeLampa({ Utils: { putScriptAsync: (a) => scripts.push(a) } });
+  const { mod } = H.loadLampaInit({ lampa, host: 'https://tv.d1versy.com:9443' });
+  mod.appload();
+  assert.strictEqual(scripts[2][0], 'https://tv.d1versy.com:9443/xsmart/xsmart.js?v={version}');
 });
 
 test('lampainit: appload calls Lampa.Lang.add with the neutral strings', () => {
