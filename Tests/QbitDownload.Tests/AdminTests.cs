@@ -271,6 +271,27 @@ public class AdminTests
         var features = payload["features"]!.Select(f => (string)f).ToArray();
         Assert.Contains(Perms.FeatureLive, features);
         Assert.Contains(Perms.FeatureRec, features);
+        // qdl 2.67: по этому списку админка рисует галочки. Не отдать «manage» — значит
+        // получить право, которое живёт в коде, но выдать его владельцу нечем.
+        Assert.Contains(Perms.FeatureManage, features);
+    }
+
+    [Fact]
+    public void Granting_manage_opens_the_management_actions_for_that_device()
+    {
+        // 🔴 Единственный штатный вход в право «Управление» (удаление с файлами, транскод,
+        // коллекции). Второй — кука владельца, но её у приложений нет и быть не может.
+        TestEnv.FreshCache();
+        var c = Controller();
+
+        c.SetGrant(new D1VAdminController.GrantBody
+        {
+            uid = "device-1", feature = Perms.FeatureManage, on = true
+        });
+
+        Assert.True(Perms.Allowed("device-1", Perms.FeatureManage));
+        Assert.False(Perms.Allowed("device-2", Perms.FeatureManage));
+        Assert.False(Perms.Allowed("device-1", Perms.FeatureLive));   // соседние разделы не открылись
     }
 
     [Fact]

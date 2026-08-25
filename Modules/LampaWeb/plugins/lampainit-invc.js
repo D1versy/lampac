@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.66';
+window.qdl_fork_version = '2.67';
    // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
 
@@ -77,17 +77,34 @@ lampainit_invc.appload = function appload() {
         // тогда CSS прячет уцелевший upstream-колокольчик и пункты меню Релизы/Расписание/Подписки
         + '.head__action.notice--icon{display:none!important}'
         + '.menu__item[data-action="relise"],.menu__item[data-action="timetable"],.menu__item[data-action="subscribes"]{display:none!important}';
+      st.textContent = css;
+      document.head.appendChild(st);
+
       // qdl 2.39: служебные входы Lampa скрыты У ВСЕХ (и в вебе тоже) — открывает кука qdl_unlock=1,
       // владелец сетит её скриптом в консоли браузера (рецепт: медиасервер claude/04-operations.md).
-      // Приложения куку не имеют → у них этих пунктов нет. Платформенных веток здесь сознательно НЕТ.
       // display:none безопасен для пульта: navigator Lampa пропускает скрытые элементы.
       // Тот же однострочник продублирован в qdl.js (qdlUnlocked) — общего кода между файлами нет.
       // 2.40: сюда же «Консоль» (нижний блок меню, рядом с «Настройки» и уже скрытым «О проекте»).
-      if (!/(?:^|;\s*)qdl_unlock=1/.test(document.cookie || ''))
-        css += '.head__action.open--settings{display:none!important}'
-             + '.menu__item[data-action="settings"],.menu__item[data-action="console"]{display:none!important}';
-      st.textContent = css;
-      document.head.appendChild(st);
+      //
+      // 🔴 2.67: правила живут в ОТДЕЛЬНОМ узле, а не строкой в #qdl-hide-extras — из общего блока
+      // их потом не вынуть. Теперь замок открывает ещё и право «Управление» (админка /admin/d1v),
+      // и снимает узел целиком qdl.js (applySettingsLock), когда права приезжают с сервера.
+      // Права здесь НЕ запрашиваем: мгновенным обязано быть только сокрытие (иначе шестерёнка
+      // моргнёт у того, кому не положена), а появиться она может и через долю секунды — зато
+      // владелец у этого CSS остаётся ровно один, без второй копии логики и второго запроса.
+    }
+
+    // 🔴 Узел замка создаётся ВНЕ гарда #qdl-hide-extras (это два независимых узла): иначе при
+    // уже существующем общем блоке — повторный appload, чужой узел с тем же id — замок не
+    // создался бы вовсе, и шестерёнка светилась бы до первого applySettingsLock() из qdl.js.
+    if (!/(?:^|;\s*)qdl_unlock=1/.test(document.cookie || '') && !document.getElementById('qdl-hide-settings')) {
+      var stg = document.createElement('style');
+      stg.id = 'qdl-hide-settings';
+      stg.textContent = '.head__action.open--settings{display:none!important}'
+                      + '.menu__item[data-action="settings"],.menu__item[data-action="console"]{display:none!important}'
+                      // плитка раздела «Хелс-чеки»: снять компонент Lampa не умеет, прячем правилом
+                      + '[data-component="qdl_health"]{display:none!important}';
+      document.head.appendChild(stg);
     }
 
     // фолбэк для браузеров без :has (напр. старый Tizen-ТВ) — прячем пункты с замком вручную

@@ -90,6 +90,11 @@
       Разделы <b>D1versy Live</b> (эфир камер) и <b>D1versy Rec</b> (записи регистратора) отдаются только
       тем устройствам, которым выдано право здесь. Устройство появляется в списке само — при первом же
       запуске приложения. Свой айди пользователь видит в самом низу ленты «Уведомления».
+      <br><b>Управление</b> — опасные и служебные действия: транскодирование в MP4, удаление загрузки
+      с файлами, коллекции (добавить / убрать / переименовать / обложка / расформировать), а также
+      вход в настройки Lampa, пункт «Консоль» и экран «Хелс-чеки». Без этого права их не видно и
+      сервер отказывает; в браузере то же самое открывает кука <code>qdl_unlock=1</code>.
+      Клиент перечитывает права раз в минуту — перезапускать приложение не нужно.
     </div>
     <div class="warn" id="killswitch" style="display:none">
       ⚠️ Проверка прав <b>выключена</b> (<code>permsEnabled: false</code> в init.conf) — разделы сейчас
@@ -111,7 +116,7 @@
       <table>
         <thead><tr>
           <th>Устройство</th><th>Платформа</th><th>Айди</th><th>IP</th><th>Видели</th>
-          <th>Live</th><th>Rec</th><th></th>
+          <th>Live</th><th>Rec</th><th>Управление</th><th></th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
@@ -257,6 +262,7 @@
         '<td class="dim">' + esc(ago(d.last)) + '</td>' +
         '<td><label class="sw"><input type="checkbox" data-f="live"' + (grants.indexOf('live') >= 0 ? ' checked' : '') + '>эфир</label></td>' +
         '<td><label class="sw"><input type="checkbox" data-f="rec"' + (grants.indexOf('rec') >= 0 ? ' checked' : '') + '>записи</label></td>' +
+        '<td><label class="sw"><input type="checkbox" data-f="manage"' + (grants.indexOf('manage') >= 0 ? ' checked' : '') + '>действия</label></td>' +
         '<td><button class="kill">Забыть</button></td>';
 
       tr.querySelectorAll('input[type=checkbox]').forEach(function (cb) {

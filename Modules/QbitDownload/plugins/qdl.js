@@ -91,6 +91,10 @@
     }
 
     function post(url, data, cb, err) {
+        // 🔴 uid обязателен и здесь: RequestInfo.getuid читает ТОЛЬКО query, а мутации коллекций
+        // (colPost) с 2.67 закрыты правом «Управление» — без этой строки сервер отказал бы 403
+        // даже устройству с грантом. withUid сам гейтится по префиксу API, чужие URL не трогает.
+        url = withUid(url);
         try {
             var body = Object.keys(data).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(data[k]); }).join('&');
             fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
@@ -1401,13 +1405,43 @@
         if (mode === 'always') return true;
         return window.d1vision_platform === 'ios' && window.d1vision_network === 'cellular';
     }
-    // Скрытый функционал (настройки Lampa, транскод/удаление в карточке, экран «Хелс-чеки»)
-    // виден только при куке qdl_unlock=1 — владелец сетит её один раз скриптом в консоли
-    // браузера (рецепт: медиасервер claude/04-operations.md). Приложения куку не имеют →
-    // скрыто у всех по умолчанию, включая веб. Тот же однострочник продублирован
-    // в lampainit-invc.js (CSS-гейт шестерёнки/пункта меню) — общего кода между файлами нет.
+    // Кука qdl_unlock=1 — мастер-ключ владельца в браузере: он сеет её один раз скриптом в консоли
+    // (рецепт: медиасервер claude/04-operations.md). Приложения куку не имеют и иметь не могут,
+    // поэтому с 2.67 те же действия выдаются устройству правом «Управление» в /admin/d1v — см.
+    // qdlManage() ниже, это и есть точка, которую надо звать в UI. Тот же однострочник
+    // продублирован в lampainit-invc.js (CSS-гейт шестерёнки) — общего кода между файлами нет.
     function qdlUnlocked() {
         try { return /(?:^|;\s*)qdl_unlock=1/.test(document.cookie || ''); } catch (e) { return false; }
+    }
+
+    // qdl 2.67: то же самое, но ЕЩЁ и по праву «Управление», выданному устройству в /admin/d1v.
+    // Кука осталась вторым ключом — она страховка от самозапирания, если потеряется access.json.
+    // 🔴 Это по-прежнему только отрисовка: настоящий замок стоит на сервере (ManageDenied → 403),
+    // поэтому подделка localStorage даёт максимум видимый пункт, который откажет при нажатии.
+    function qdlManage() { return qdlUnlocked() || qdlAllowed('manage'); }
+
+    // Замок служебных входов Lampa (шестерёнка «Настройки», пункт «Консоль»). Узел
+    // <style id="qdl-hide-settings"> создаёт СИНХРОННО lampainit-invc.js — мгновенным обязано быть
+    // именно СОКРЫТИЕ, иначе шестерёнка моргнёт у того, кому она не положена. Здесь узел только
+    // снимается/возвращается: права приезжают асинхронно и перечитываются раз в минуту, так что
+    // и выдача, и отзыв доезжают до открытого клиента сами. Владелец узла один — этот файл.
+    function applySettingsLock() {
+        try {
+            var node = document.getElementById('qdl-hide-settings');
+            // ⚠️ Через node.parentNode.removeChild() нельзя: у отсоединённого узла parentNode === null,
+            // вылет молча съел бы try/catch — и замок остался бы висеть вообще без диагностики.
+            if (qdlManage()) { if (node && node.parentNode) node.parentNode.removeChild(node); return; }
+            if (node) return;
+            node = document.createElement('style');
+            node.id = 'qdl-hide-settings';
+            node.textContent = '.head__action.open--settings{display:none!important}'
+                + '.menu__item[data-action="settings"],.menu__item[data-action="console"]{display:none!important}'
+                // 🔴 Плитка «Хелс-чеки» — тем же замком. Lampa.SettingsApi снять компонент не умеет,
+                // а гард window.qdl_health_settings стоит навсегда: без этого правила отозванное
+                // право прятало шестерёнку, но раздел доживал до перезапуска (поймано permsgate).
+                + '[data-component="qdl_health"]{display:none!important}';
+            document.head.appendChild(node);
+        } catch (e) {}
     }
     // audio: 'o' (ориг) | 'eN' (встроенная) | 'd<id>' (озвучка по студии). Внешняя → ВСЕГДА HLS (домешиваем).
     function streamUrl(hash, index, audio) {
@@ -2089,7 +2123,9 @@
 
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:enter', function () { openCollection(c.col); });
-            el.on('hover:long', function () { collectionMenu(c.col, c.items); });
+            // без «Управления» меню коллекции вырождается в один пункт «Открыть», который
+            // дублирует обычное нажатие — тогда long-press просто не вешаем
+            if (qdlManage()) el.on('hover:long', function () { collectionMenu(c.col, c.items); });
 
             body.append(el);
         };
@@ -2511,7 +2547,9 @@
     function colPost(url, data, ok) {
         post(API + url, data, function (r) {
             if (r && r.success) { touchCollections(); ok(r); }
-            else Lampa.Noty.show('Не получилось — попробуй ещё раз');
+            // 2.67: мутации коллекций закрыты правом «Управление» — сервер отвечает 403 с причиной.
+            // Показываем ЕЁ, а не общее «не получилось»: иначе отозванный грант выглядит как поломка.
+            else Lampa.Noty.show((r && r.error) ? r.error : 'Не получилось — попробуй ещё раз');
         }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
     }
 
@@ -2636,7 +2674,7 @@
                 else if (r.files > 1) Lampa.Noty.show('🎬 Транскодирование запущено (' + r.files + ' серий) — сообщу о прогрессе');
                 else Lampa.Noty.show('🎬 Транскодирование запущено — это займёт заметное время, сообщу о прогрессе');
                 pollTranscode(t.hash, title);
-            }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
+            }, function () { Lampa.Noty.show('Транскодирование недоступно — нет права или сервер недоступен'); });
         };
         if (!t.watched) { run(null); return; }
         req(API + '/qdl/files?hash=' + t.hash, function (files) {
@@ -2660,7 +2698,7 @@
             { title: '▶ Смотреть (оффлайн)', act: 'play' },
             { title: '🔊 Озвучка', act: 'audio' }
         ];
-        if (canTranscode(t) && qdlUnlocked()) items.push({ title: '🎬 Транскодировать в MP4 (для браузера)', act: 'mp4' });
+        if (canTranscode(t) && qdlManage()) items.push({ title: '🎬 Транскодировать в MP4 (для браузера)', act: 'mp4' });
         // Слежение: у торрентов — по infohash, у jut.su — по slug в своём контуре.
         // ⚠️ Торрентная ветка гейтится по !local (ей нужен живой торрент и links/<hash>.json),
         // а jut-карточка ВСЕГДА local — из-за этого пункт был не виден вообще (жалоба владельца).
@@ -2677,10 +2715,13 @@
         }
         else if (!t.local && t.state !== 'local')
             items.push({ title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'watch' });
-        // в под-гриде коллекции — «Убрать», в общем гриде/карточке — «Добавить»
-        if (ctx && ctx.collection) items.push({ title: '📁 Убрать из коллекции', act: 'uncol' });
-        else items.push({ title: '📁 Добавить в коллекцию', act: 'addcol' });
-        if (qdlUnlocked()) items.push({ title: '🗑 Удалить (с файлами)', act: 'del' });
+        // в под-гриде коллекции — «Убрать», в общем гриде/карточке — «Добавить».
+        // qdl 2.67: коллекции — тоже «Управление» (решение владельца), сервер их мутации гейтит.
+        if (qdlManage()) {
+            if (ctx && ctx.collection) items.push({ title: '📁 Убрать из коллекции', act: 'uncol' });
+            else items.push({ title: '📁 Добавить в коллекцию', act: 'addcol' });
+            items.push({ title: '🗑 Удалить (с файлами)', act: 'del' });
+        }
 
         Lampa.Select.show({
             title: (t.meta && t.meta.title) || t.name,
@@ -2756,6 +2797,10 @@
                                 dropEpCache(t.hash);     // и кеш списка серий
                                 Lampa.Noty.show('Удалено');
                                 Lampa.Activity.replace();
+                            }, function () {
+                                // 2.67: сюда приходит и 403 «нет права управления» (протухший клиент
+                                // или отозванный грант). Без колбэка экран молча ничего не делал.
+                                Lampa.Noty.show('Не удалось удалить — нет права или сервер недоступен');
                             });
                         },
                         onBack: function () { Lampa.Controller.toggle('content'); }
@@ -2850,7 +2895,7 @@
                 }),
                 onSelect: function (a) {
                     Lampa.Controller.toggle('content');
-                    if (qdlUnlocked() && (a.t.codec === 'hevc' || a.t.codec === 'av1'))
+                    if (qdlManage() && (a.t.codec === 'hevc' || a.t.codec === 'av1'))
                         Lampa.Noty.show(a.t.codec.toUpperCase() + ': в браузере без транскода не заиграет (после загрузки — долгое нажатие → «Транскодировать в MP4»)');
                     var q = a.t.magnet
                         ? ('magnet=' + encodeURIComponent(a.t.magnet))
@@ -5319,7 +5364,11 @@
         });
     }
     function registerHealthSettings() {
-        if (window.qdl_health_settings || !qdlUnlocked()) return;   // гард от двойной регистрации (паттерн Transcoding/backup)
+        // Гард от двойной регистрации (паттерн Transcoding/backup). ⚠️ Он же делает регистрацию
+        // НЕОБРАТИМОЙ: при отзыве права на живом клиенте замок вернётся, а уже добавленный раздел
+        // из настроек не исчезнет до перезапуска. Мирится с этим сознательно — вход в сами настройки
+        // к тому моменту уже скрыт, а Lampa.SettingsApi снятия компонента не умеет.
+        if (window.qdl_health_settings || !qdlManage()) return;
         if (!window.Lampa || !Lampa.SettingsApi || !Lampa.SettingsApi.addComponent) return;
         window.qdl_health_settings = true;
         Lampa.SettingsApi.addComponent({ component: 'qdl_health', icon: HEALTH_ICON, name: 'Хелс-чеки' });
@@ -5344,14 +5393,24 @@
         Lampa.Component.add('jut_episodes', ComponentJutEpisodes);
         Lampa.Component.add('jut_search', ComponentJutSearch);
         Lampa.Listener.follow('full', addButton);
+        // Всё, что зависит от прав, перестраивается ОДНОЙ функцией — и на старте, и на каждом
+        // перечитывании раз в минуту. 🔴 registerHealthSettings обязан быть именно здесь, а не
+        // только в start(): там он отрабатывает ДО приезда прав, и устройство с грантом не увидело
+        // бы раздел «Хелс-чеки» до перезапуска приложения (свой гард делает повтор безопасным).
+        var onFeatures = function () {
+            try { ensureMenu(); } catch (e) {}
+            try { applySettingsLock(); } catch (e) {}
+            try { registerHealthSettings(); } catch (e) {}
+        };
         // Права тянем ДО первой отрисовки меню, но не ждём ответа: стартовый проход рисует по кешу
         // (мгновенно и без мигания), а пришедший ответ перестраивает меню — в том числе снимает
         // пункт, если право отозвали.
-        loadFeatures(function () { try { ensureMenu(); } catch (e) {} });
+        try { applySettingsLock(); } catch (e) {}   // по кешу прав — до ответа сервера
+        loadFeatures(onFeatures);
         startMenuWatcher();
         startHeaderNotiWatcher();
         startPlayerFsWatcher();
-        try { registerHealthSettings(); } catch (e) {}   // «Хелс-чеки» в настройках (только при куке qdl_unlock)
+        try { registerHealthSettings(); } catch (e) {}   // «Хелс-чеки» — по куке или праву «Управление» (повтор в onFeatures)
         pollNotifications();
         try { initSelectFix(); } catch (e) {}            // фикс скролла селектбоксов (upstream mheight-баг)
         try { initTimelineMirror(); } catch (e) {}       // аварийный фолбэк зеркала (режим 'auto', см. qdl 2.18)
@@ -5365,7 +5424,7 @@
         try { setInterval(pollNotifications, 90000); } catch (e) {}   // фолбэк: основной путь — пуш по 'lwsEvent' (qdl 2.19)
         // Права перечитываем на живом клиенте: владелец выдаёт их в админке, пока аппка уже открыта.
         // Заодно это пульс устройства — по нему свежая строка всплывает в списке /admin/d1v.
-        try { setInterval(function () { loadFeatures(function () { try { ensureMenu(); } catch (e) {} }); }, 60000); } catch (e) {}
+        try { setInterval(function () { loadFeatures(onFeatures); }, 60000); } catch (e) {}
     }
 
     if (window.appready) start();

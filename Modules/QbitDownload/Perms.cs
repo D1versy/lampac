@@ -46,7 +46,20 @@ public static class Perms
     public const string FeatureLive = "live";   // эфир камер (D1versy Live)
     public const string FeatureRec = "rec";     // записи регистратора (D1versy Rec)
 
-    public static readonly string[] Features = { FeatureLive, FeatureRec };
+    // qdl 2.67: «Управление» — транскод в MP4, удаление, коллекции и служебные входы Lampa
+    // (шестерёнка «Настройки», пункт «Консоль», экран «Хелс-чеки»). До этого всё перечисленное
+    // открывала ТОЛЬКО кука qdl_unlock=1, которой у приложений нет и быть не может, — то есть из
+    // mac/iOS/Android/Windows эти действия были недоступны в принципе. Теперь их выдают устройству
+    // галочкой в /admin/d1v, а кука остаётся вторым ключом (см. QbitController.ManageDenied).
+    //
+    // ⚠️ ЧЕСТНАЯ ГРАНИЦА ФИЧИ. Серверным замком закрыты семь ДЕЙСТВИЙ (delete, transcode и пять
+    // мутаций коллекций). Служебные ЭКРАНЫ право только показывает: GET /qdl/health намеренно
+    // остаётся открытым, потому что его тянет сама админка /admin/d1v запросом без uid, и гейт
+    // положил бы её вкладку. Секретов там нет по построению (в detail только коды и версии), но
+    // «право закрывает хелс-чеки от чтения» — неверное прочтение: оно закрывает их от показа.
+    public const string FeatureManage = "manage";
+
+    public static readonly string[] Features = { FeatureLive, FeatureRec, FeatureManage };
 
     const int UidMaxLen = 48;
     const int DeviceCap = 200;          // кап реестра; устройства С ГРАНТАМИ не вытесняются никогда
@@ -608,4 +621,36 @@ public partial class QbitController
         SetHeadersNoCache();
         return ContentTo(card.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
     }
+
+    #region гейт «Управления» (qdl 2.67)
+
+    /// <summary>
+    /// Мастер-ключ владельца — та же кука qdl_unlock=1, что открывает эти пункты в браузере с 2.39.
+    /// 🔴 Оставлена сознательно и это НЕ дыра, а страховка: гейт удаления, до которого нельзя
+    /// добраться, потеряв access.json, был бы хуже прежнего состояния (ручки были открыты всем).
+    /// Куку ставит только тот, у кого есть консоль браузера на нашем origin; снаружи браузер
+    /// вообще не проходит периметр D1Vision.
+    /// </summary>
+    bool ManageCookie()
+    {
+        try { return Request?.Cookies["qdl_unlock"] == "1"; }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// null = действие разрешено. Иначе 403 с причиной.
+    ///
+    /// 403, а не 404 как в Live.cs: прятать нечего (кнопка и так не нарисована), а клиенту нужен
+    /// повод показать внятный тост вместо тихого ничего. Киллсвитч permsEnabled:false и пустой uid
+    /// обрабатывает сам Perms.Allowed — отдельных веток здесь не нужно.
+    /// </summary>
+    internal ActionResult ManageDenied()
+    {
+        if (ManageCookie()) return null;
+        if (Perms.Allowed(requestInfo?.user_uid, Perms.FeatureManage)) return null;
+
+        return StatusCode(403, new { success = false, error = "нет права управления" });
+    }
+
+    #endregion
 }

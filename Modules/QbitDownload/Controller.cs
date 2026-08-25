@@ -1215,6 +1215,12 @@ public partial class QbitController : BaseController
         // 🔴 На реплике удаление — привилегия ротации, и только своей. Ручка [AllowAnonymous]
         // и доступна снаружи за ключом периметра: спрятать кнопку в UI защитой не является.
         var ro = ReplicaReadOnlyDeny(); if (ro != null) return ro;
+        // 🔴 qdl 2.67: удаление — по праву «manage» (админка /admin/d1v) или по куке владельца.
+        // Раньше ручка была открыта всем, а «замком» служило сокрытие пункта в UI.
+        // ⚠️ Гейт закрывает ручку ЦЕЛИКОМ, а не только ветку deleteFiles=true: снятие раздачи без
+        // файлов — такое же управление, а единственный клиентский вызов и так идёт с файлами.
+        // Проверка стоит ПОСЛЕ реплики: там ответ «только чтение» не должен зависеть от грантов.
+        var mg = ManageDenied(); if (mg != null) return mg;
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
@@ -2716,6 +2722,7 @@ public partial class QbitController : BaseController
     async public Task<ActionResult> Transcode(string hash, string mode = null)
     {
         var ro = ReplicaReadOnlyDeny(); if (ro != null) return ro;   // на реплике транскода нет вовсе
+        var mg = ManageDenied(); if (mg != null) return mg;   // право «manage» или кука (2.67)
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
@@ -4388,6 +4395,7 @@ public partial class QbitController : BaseController
     [Route("qdl/collections/create")]
     public ActionResult CollectionsCreate(string title = null, string hashes = null)
     {
+        var mg = ManageDenied(); if (mg != null) return mg;   // право «manage» или кука (2.67)
         try
         {
             var col = ColCreate(title, (hashes ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries));
@@ -4406,6 +4414,7 @@ public partial class QbitController : BaseController
     [Route("qdl/collections/add")]
     public ActionResult CollectionsAdd(string id, string hash)
     {
+        var mg = ManageDenied(); if (mg != null) return mg;   // право «manage» или кука (2.67)
         if (!ValidColId(id)) return BadRequest(new { error = "invalid id" });
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try { return Json(new { success = ColAdd(id, hash) }); }
@@ -4420,6 +4429,7 @@ public partial class QbitController : BaseController
     [Route("qdl/collections/remove")]
     public ActionResult CollectionsRemove(string id, string hash)
     {
+        var mg = ManageDenied(); if (mg != null) return mg;   // право «manage» или кука (2.67)
         if (!ValidColId(id)) return BadRequest(new { error = "invalid id" });
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
@@ -4438,6 +4448,7 @@ public partial class QbitController : BaseController
     [Route("qdl/collections/update")]
     public ActionResult CollectionsUpdate(string id, string title = null, string cover = null)
     {
+        var mg = ManageDenied(); if (mg != null) return mg;   // право «manage» или кука (2.67)
         if (!ValidColId(id)) return BadRequest(new { error = "invalid id" });
         try { return Json(new { success = ColUpdate(id, title, cover) }); }
         catch (Exception ex)
@@ -4451,6 +4462,7 @@ public partial class QbitController : BaseController
     [Route("qdl/collections/dissolve")]
     public ActionResult CollectionsDissolve(string id)
     {
+        var mg = ManageDenied(); if (mg != null) return mg;   // право «manage» или кука (2.67)
         if (!ValidColId(id)) return BadRequest(new { error = "invalid id" });
         try { return Json(new { success = ColDissolve(id) }); }
         catch (Exception ex)

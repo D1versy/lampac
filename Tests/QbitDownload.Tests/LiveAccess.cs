@@ -117,4 +117,10 @@ public static class LiveAccess
     public static string LiveSegQuery(QbitController c) => (string)CallOn(c, "LiveSegQuery");
     public static string LiveSignDay(QbitController c, string playlist) => (string)CallOn(c, "LiveSignDay", playlist);
     public static bool LiveDenied(QbitController c, string feature) => (bool)CallOn(c, "LiveDenied", feature);
+
+    // ── гейт «Управления» (qdl 2.67) ──────────────────────────────────────
+    // ManageDenied/ManageCookie объявлены в Perms.cs, но это тот же partial QbitController и те же
+    // приватные инстанс-методы — шлюз общий, отдельный заводить незачем.
+    public static ActionResult ManageDenied(QbitController c) => (ActionResult)CallOn(c, "ManageDenied");
+    public static bool ManageCookie(QbitController c) => (bool)CallOn(c, "ManageCookie");
 }
