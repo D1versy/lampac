@@ -623,6 +623,20 @@
         return PX1;
     }
 
+    // Фон под фокусом карточки — ровно то, что делает родной экран Lampa:
+    //     Card.create() → hover:focus → onFocus → Background.change(Utils.cardImgBackground(data))
+    // Всё остальное живёт ВНУТРИ Background.change и дублировать это у себя не надо: выключенный
+    // фон (Storage 'background'), light_version, дебаунс 1000 мс, расчёт палитры и кроссфейд.
+    // Utils.cardImgBackground здесь не зовём осознанно: у наших карточек на тайтл ровно ОДНА
+    // картинка, и обе её ветки («простой фон» / «изображение») вернули бы один и тот же URL.
+    // ⚠️ jut.su красим ПОСТЕРОМ, а не backdrop'ом: /qdl/jut/backdrop для НЕ открытого тайтла
+    // лезет на jut.su за страницей тайтла и качает кадр 2560×1440 — прогулка фокусом по каталогу
+    // стала бы десятками походов на источник. Постер уже в кеше клиента (ленивая загрузка).
+    function bgFocus(url) {
+        if (!url || url === PX1) return;   // прозрачный пиксель-заглушка стёр бы фон в пустоту
+        try { Lampa.Background.change(url); } catch (e) {}
+    }
+
     // Постер строки уведомления. Решает СЕРВЕР (n.posterUrl, qdl 2.46): только он знает, лежит ли
     // файл на диске, есть ли апгрейженная обложка и какой хеш у раздачи СЕЙЧАС. У jut-уведомления
     // hash ПСЕВДО (sha1("jutsu:"+slug)), и файла img/<hash>.jpg для НЕ скачанного тайтла не бывает —
@@ -2123,6 +2137,8 @@
 
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:enter', function () { openCollection(c.col); });
+            // Фон под фокусом (bgFocus): hover:focus — пульт, hover:hover — мышь десктопа.
+            el.on('hover:focus hover:hover', function () { bgFocus(posterUrl(c.cover)); });
             // без «Управления» меню коллекции вырождается в один пункт «Открыть», который
             // дублирует обычное нажатие — тогда long-press просто не вешаем
             if (qdlManage()) el.on('hover:long', function () { collectionMenu(c.col, c.items); });
@@ -2150,6 +2166,9 @@
 
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:enter', function () { openDownload(t); });
+            // Фон под фокусом (bgFocus): hover:focus — пульт, hover:hover — мышь десктопа.
+            // ⚠️ posterUrl(t) — в момент фокуса: enrich() дописывает t.posterUrl уже ПОСЛЕ сборки карточки.
+            el.on('hover:focus hover:hover', function () { bgFocus(posterUrl(t)); });
             el.on('hover:long', function () { quickMenu(t, ctx); });
 
             body.append(el);
@@ -4818,6 +4837,13 @@
             el.on('hover:enter', function () {
                 Lampa.Activity.push({ url: '', title: c.title || c.slug, component: 'jut_title', jut_slug: c.slug, jut_card: c });
             });
+            // Фон под фокусом — как на родных экранах Lampa (см. bgFocus выше). hover:hover нужен
+            // ОТДЕЛЬНО от hover:focus: десктопным клиентам lampainit-invc.js форсит
+            // navigation_type='mouse', а в этом режиме mouseenter шлёт ТОЛЬКО hover:hover —
+            // без второй ветки на Windows/Mac фон не менялся бы вовсе. hover:touch намеренно НЕ
+            // вешаем: на таче родная Lampa фон тоже не красит, а touchstart во время пальцевого
+            // скролла красил бы случайные карточки.
+            el.on('hover:focus hover:hover', function () { bgFocus(psrc); });
             el.on('hover:long', function () { jutDownloadMenu(c.slug, null, 0); });
 
             body.append(el);
@@ -5277,6 +5303,8 @@
                 last = el[0];
                 try { Navigator.focused(el[0]); } catch (e) {}
             });
+            // Фон под фокусом (bgFocus): hover:focus — пульт, hover:hover — мышь десктопа.
+            el.on('hover:focus hover:hover', function () { bgFocus(psrc); });
             el.on('hover:enter', function () {
                 Lampa.Activity.push({ url: '', title: c.title || c.slug, component: 'jut_title', jut_slug: c.slug, jut_card: c });
             });
