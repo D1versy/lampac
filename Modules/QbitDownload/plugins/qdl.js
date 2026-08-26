@@ -4192,13 +4192,15 @@
         { cls: 'qdl-menu',       build: function () { return buildMenuItem(); },      show: function () { return true; } },
         { cls: 'qdl-noti-menu',  build: function () { return buildNotiMenuItem(); },  show: function () { return true; },
           onAdd: function () { setTimeout(pollNotifications, 200); } },   // подтянуть бейдж сразу после появления пункта
-        // СЛОТ-ПРОХОДНИК. Пункт «XSMART» строит ЧУЖОЙ плагин (xsmart.js из контейнера
-        // xsmart-proxy) — мы его только ДЕРЖИМ на позиции. 🔴 Без этой строки наш цикл
-        // «держим строго после якоря» вырывал бы jut.su на место XSMART, xsmart.js по MutationObserver
-        // вставлял бы свой пункт назад — и пункты запрыгали бы вечно. build:null читается как
-        // «узел есть — держим и делаем якорем; узла нет — пропускаем, не разрывая цепочку».
-        { cls: 'xsmart-menu',    build: null,                                          show: function () { return true; } },
+        // 🔴 Здесь был СЛОТ-ПРОХОДНИК 'xsmart-menu': пункт строит чужой плагин (xsmart.js из
+        // контейнера xsmart-proxy), и пока он стоял ВНУТРИ нашей цепочки, слот был обязателен —
+        // иначе наш цикл «держим строго после якоря» вырывал бы jut.su на его место, xsmart.js
+        // вставлял бы свой пункт назад, и пункты прыгали бы вечно.
+        // Теперь «xSmart» переехал НАД «Лентой» (сразу под «Главную», решение владельца), то есть
+        // выше точки, с которой начинается наша цепочка, — держать его нам больше не нужно и
+        // нельзя: слот тянул бы пункт обратно вниз. Ровно та же война, только зеркальная.
         { cls: 'qdl-jut-menu',   build: function () { return buildJutMenuItem(); },   show: function () { return true; } },
+
         { cls: 'qdl-watch-menu', build: function () { return buildWatchMenuItem(); }, show: function () { return qdlAllowed('live'); } },
         { cls: 'qdl-live-menu',  build: function () { return buildLiveMenuItem(); },  show: function () { return qdlAllowed('rec'); } }
     ];

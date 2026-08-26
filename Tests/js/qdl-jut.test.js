@@ -18,14 +18,22 @@ test('пункт меню называется ровно «jut.su» (решен
     'пункт «Аниме» — остаток раннего черновика, его быть не должно');
 });
 
-test('пункт меню стоит между слотом XSMART и «D1versy Live» (порядок владельца, qdl 2.70)', () => {
+test('🔴 в цепочке нет чужих пунктов: xSmart переехал НАД «Лентой» (qdl 2.73)', () => {
   const { qdl } = H.loadQdl();
   // Array.from — массив из vm-песочницы живёт в другом realm, и deepStrictEqual ловит чужой прототип
   const order = Array.from(qdl.MENU_ORDER, (x) => x.cls);
   assert.deepStrictEqual(order, [
-    'qdl-menu', 'qdl-noti-menu', 'xsmart-menu', 'qdl-jut-menu', 'qdl-watch-menu', 'qdl-live-menu',
-  ], 'Загрузки → Уведомления → XSMART → jut.su → Live → Rec (имена обманчивы: .qdl-live-menu = Rec/записи)');
+    'qdl-menu', 'qdl-noti-menu', 'qdl-jut-menu', 'qdl-watch-menu', 'qdl-live-menu',
+  ], 'Загрузки → Уведомления → jut.su → Live → Rec (имена обманчивы: .qdl-live-menu = Rec/записи)');
+
+  // Пункт «xSmart» строит чужой плагин (xsmart.js из контейнера xsmart-proxy) и с 2.73 стоит
+  // сразу под «Главной» — то есть ВЫШЕ нашего якоря («Лента»). Слот-проходник на него был
+  // нужен, пока он сидел ВНУТРИ цепочки; оставь мы слот теперь — цикл «держим строго после
+  // якоря» тянул бы пункт обратно вниз, а xsmart.js возвращал бы наверх. Меню бы мигало.
+  assert.ok(!order.includes('xsmart-menu'),
+    'держать чужой пункт, стоящий выше нашего якоря, — значит объявить ему войну за позицию');
 });
+
 
 test('jut.su не зависит от прав на Live/Rec — иначе чужой гейт уносил бы вкладку', () => {
   // 🔴 Регресс qdl 2.54: до переписывания цепочки якорей jut.su цеплялся ЗА .qdl-live-menu,

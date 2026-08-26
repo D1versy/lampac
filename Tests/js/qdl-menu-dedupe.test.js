@@ -1,12 +1,13 @@
 'use strict';
 // Real-DOM tests (jsdom + real jQuery) for ensureMenu(): наши пункты левого меню
-// (Загрузки → Уведомления → XSMART → jut.su → D1versy Live → D1versy Rec) вставляются по одному
+// (Загрузки → Уведомления → jut.su → D1versy Live → D1versy Rec) вставляются по одному
 // разу, дубликаты от прошлых версий/двойных вставок самоисцеляются (dedupe), порядок держится.
 //
 // qdl 2.70: якорь — «Лента» (data-action="feed"), а не «Персоны»; порядок и место задал владелец.
-// Плюс СЛОТ-ПРОХОДНИК 'xsmart-menu': пункт XSMART строит ЧУЖОЙ плагин (контейнер xsmart-proxy),
-// мы его только держим на позиции. Без слота наш цикл вырывал бы jut.su на его место, чужой
-// плагин вставлял бы пункт назад — и меню мигало бы бесконечно.
+// qdl 2.73: чужой пункт «xSmart» (его строит плагин из контейнера xsmart-proxy) переехал под
+// «Главную» — ВЫШЕ нашего якоря. Слот-проходник на него убран: держать пункт, стоящий вне нашей
+// цепочки, значит воевать с его хозяином за позицию. Здесь это закреплено тестом.
+
 //
 // qdl 2.54: D1versy Live/Rec гейтятся правами устройства (сервер, /qdl/features). Здесь же —
 // главный инвариант новой цепочки якорей: дырка в середине (право не выдано) НЕ должна уносить
@@ -167,14 +168,28 @@ function menuHtmlCustom(stdItems) {
   );
 }
 
-test('слот XSMART: чужой пункт переезжает между «Уведомления» и jut.su', () => {
-  // плагин xsmart-proxy вставил свой пункт РАНЬШЕ нас и не туда — держать место обязаны мы
-  const { doc, qdl } = load(undefined, XSMART_LI);
+/** Меню, где чужой пункт xSmart уже стоит на своём месте — сразу под «Главной» (qdl 2.73). */
+function loadWithXsmartOnTop() {
+  const ctx = H.loadQdlDom({ bodyHtml: menuHtmlCustom(
+    '<li class="menu__item selector" data-action="main">Главная</li>' +
+    XSMART_LI +
+    '<li class="menu__item selector" data-action="feed">Лента</li>' +
+    '<li class="menu__item selector" data-action="myperson">Персоны</li>',
+  ) });
+  ctx.qdl.setPerms({ live: true, rec: true });
+  return ctx;
+}
+
+test('🔴 чужой пункт xSmart стоит ВЫШЕ нашего якоря — мы его не трогаем', () => {
+  // С 2.73 «xSmart» живёт сразу под «Главной», то есть до «Ленты», с которой начинается наша
+  // цепочка. Раньше мы держали его слотом внутри цепочки; сохранись слот — цикл «держим строго
+  // после якоря» утянул бы пункт вниз, чужой плагин вернул бы наверх, и меню замигало бы.
+  const { doc, qdl } = loadWithXsmartOnTop();
   qdl.ensureMenu();
 
-  assert.deepStrictEqual(chain(doc, 6), [
-    'feed', 'qdl-menu', 'qdl-noti-menu', 'xsmart-menu', 'qdl-jut-menu', 'qdl-watch-menu', 'qdl-live-menu',
-  ]);
+  assert.deepStrictEqual(ourOrder(doc).slice(0, 2), ['main', 'xsmart-menu'],
+    'чужой пункт обязан остаться сразу под «Главной»');
+  assert.deepStrictEqual(chain(doc, 5), ['feed'].concat(ALL), 'наша цепочка идёт своим чередом');
 });
 
 test('слот XSMART: сам пункт мы НЕ создаём — его хозяин чужой плагин', () => {
@@ -182,20 +197,20 @@ test('слот XSMART: сам пункт мы НЕ создаём — его х�
   qdl.ensureMenu();
 
   assert.strictEqual(doc.querySelectorAll('.xsmart-menu').length, 0, 'qdl.js не строит чужой пункт');
-  // и дырка на месте слота не разрывает цепочку — jut.su встаёт сразу за «Уведомлениями»
   assert.deepStrictEqual(chain(doc, 5), ['feed'].concat(ALL));
 });
 
-test('слот XSMART: повторные проходы не двигают пункт (нет пинг-понга с чужим плагином)', () => {
-  const { doc, qdl } = load(undefined, XSMART_LI);
+test('🔴 повторные проходы не двигают чужой пункт (нет пинг-понга с xsmart.js)', () => {
+  const { doc, qdl } = loadWithXsmartOnTop();
   qdl.ensureMenu();
-  const after1 = chain(doc, 6);
+  const after1 = ourOrder(doc);
   qdl.ensureMenu();
   qdl.ensureMenu();
 
   assert.strictEqual(doc.querySelectorAll('.xsmart-menu').length, 1);
-  assert.deepStrictEqual(chain(doc, 6), after1);
+  assert.deepStrictEqual(ourOrder(doc), after1, 'позиция обязана быть неподвижной точкой');
 });
+
 
 test('переезд с 2.69: пункты стояли под «Персонами» в старом порядке — перестраиваются под «Ленту»', () => {
   const stale =
@@ -209,11 +224,11 @@ test('переезд с 2.69: пункты стояли под «Персона�
   qdl.ensureMenu();
 
   for (const cls of ALL) assert.strictEqual(doc.querySelectorAll('.' + cls).length, 1, cls);
+  // Чужой пункт из старой раскладки мы не переставляем — его вернёт наверх сам xsmart.js.
   assert.strictEqual(doc.querySelectorAll('.xsmart-menu').length, 1);
-  assert.deepStrictEqual(chain(doc, 6), [
-    'feed', 'qdl-menu', 'qdl-noti-menu', 'xsmart-menu', 'qdl-jut-menu', 'qdl-watch-menu', 'qdl-live-menu',
-  ]);
+  assert.deepStrictEqual(chain(doc, 5), ['feed'].concat(ALL));
 });
+
 
 test('якорь: «Ленту» спрятали настройкой Lampa — встаём под «Главную»', () => {
   const ctx = H.loadQdlDom({ bodyHtml: menuHtmlCustom(
