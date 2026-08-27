@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -87,6 +87,7 @@ static class JutWatchAccess
         Queued().Clear();
         var jobs = F("_jutJobs").GetValue(null);
         jobs.GetType().GetMethod("Clear").Invoke(jobs, null);
+        DownloadWants.Jut.Reset(flush: false);
     }
 
     /// <summary>

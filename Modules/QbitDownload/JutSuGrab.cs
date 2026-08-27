@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
 using System;
@@ -40,6 +40,9 @@ public partial class QbitController
         public string titleRu;
         public volatile bool cancel;
         public int gen;                            // поколение отмены на момент постановки (см. JutStale)
+        // >0 → перекачка ради качества: файл на диске есть, но хуже. Меняет отсев «уже скачано»
+        // (JutWantsPut) и включает уборку старой копии в JutFinishFile.
+        public int upgradeTo;
     }
 
     sealed class JutGrabJob
@@ -286,6 +289,43 @@ public partial class QbitController
     /// </summary>
     static bool JutHaveFile(string slug, JutEp e) => JutDiskKeys(slug).Contains(JutEpKey(slug, e));
 
+    // Качество из имени файла — единственное ПОЭПИЗОДНОЕ место, где оно живёт. Поле quality
+    // в маркере относится к последнему записанному файлу тайтла, а серии бывают разного.
+    static readonly Regex _jutNameQRx = new Regex(@"\.(\d{3,4})p$", RegexOptions.Compiled);
+
+    /// <summary>Высота из имени. 0 = суффикса нет.</summary>
+    internal static int JutQualityFromName(string baseNoExt)
+    {
+        var m = _jutNameQRx.Match(baseNoExt ?? "");
+        return m.Success && int.TryParse(m.Groups[1].Value, out int q) ? q : 0;
+    }
+
+    /// <summary>
+    /// Какое качество этой серии уже лежит. -1 = файла нет, int.MaxValue = файл без суффикса
+    /// (такой апгрейду не подлежит: сравнивать не с чем).
+    /// </summary>
+    internal static int JutDiskQualityOf(string slug, JutEp ep)
+    {
+        int best = -1;
+        string want = JutEpKey(slug, ep);
+        try
+        {
+            string dir = JutTitleDir(slug);
+            if (!Directory.Exists(dir)) return -1;
+            foreach (string f in Directory.EnumerateFiles(dir, "*.mp4"))
+            {
+                string b = Path.GetFileNameWithoutExtension(f);
+                var e = JutEpFromFileName(b);
+                if (e == null || !string.Equals(JutEpKey(slug, e), want, StringComparison.OrdinalIgnoreCase)) continue;
+                int q = JutQualityFromName(b);
+                if (q == 0) return int.MaxValue;
+                if (q > best) best = q;
+            }
+        }
+        catch { }
+        return best;
+    }
+
     #endregion
 
     #region постановка в очередь
@@ -405,24 +445,28 @@ public partial class QbitController
         string freeErr = JutCheckSpace(toGrab.Count + _jutQueue.Count, slug);
         if (freeErr != null) return JutErr("NO_SPACE", freeErr);
 
+        // 🔴 ФАЗА 1: намерение на диск ДО того, как ключ попадёт в _jutQueued (см. DownloadWants.cs).
+        JutWantsCommit(slug, t.titleRu, toGrab, "manual");
+
         int queued = 0;
-        int gen = JutGenOf(slug);
         // ⚠️ Job НЕ создаём заранее. GetOrAdd до цикла оставлял фантом: у тайтла, где всё уже
         // скачано, в /qdl/jut/download/status появлялась запись state="queued" с filesTotal=0,
         // и статус врал про работу, которой нет.
         JutGrabJob job = null;
-        foreach (var e in toGrab)
+        // ФАЗА 2. Enqueue внутри лока: с фазовым коммитом разрыв становится несущим.
+        lock (_jutEnqLock)
         {
-            lock (_jutEnqLock)
+            int gen = JutGenOf(slug);
+            foreach (var e in toGrab)
             {
                 if (!_jutQueued.Add(JutQueueKey(slug, e.epkey))) { duplicate++; continue; }
+                _jutQueue.Enqueue(new JutGrabItem
+                {
+                    slug = slug, season = e.season, ep = e.num, kind = JutKindParam(e.kind),
+                    epkey = e.epkey, titleRu = t.titleRu, gen = gen
+                });
+                queued++;
             }
-            _jutQueue.Enqueue(new JutGrabItem
-            {
-                slug = slug, season = e.season, ep = e.num, kind = JutKindParam(e.kind),
-                epkey = e.epkey, titleRu = t.titleRu, gen = gen
-            });
-            queued++;
         }
 
         if (queued > 0)
@@ -525,14 +569,31 @@ public partial class QbitController
         if (!string.IsNullOrEmpty(slug))
         {
             if (!_jutJobs.TryGetValue(slug, out var j))
-                return JutJson(new JObject { ["ok"] = true, ["state"] = "idle", ["pending"] = 0 });
+            {
+                // ⚠️ «Нет job» ≠ «нечего качать»: после рестарта _jutJobs пуст, а долг на диске
+                // жив. Отвечать idle значило бы врать ровно в тот момент, ради которого весь
+                // персистентный слой и делался.
+                var (owed, parked, perr) = DownloadWants.Jut.Stat(slug);
+                if (owed + parked == 0)
+                    return JutJson(new JObject { ["ok"] = true, ["state"] = "idle", ["pending"] = 0 });
+                return JutJson(new JObject
+                {
+                    ["ok"] = true, ["slug"] = slug,
+                    ["state"] = owed > 0 ? "queued" : "error",
+                    ["pending"] = owed, ["wants"] = owed, ["stuck"] = parked,
+                    ["stuckError"] = perr, ["restored"] = true
+                });
+            }
             return JutJson(JutJobJson(slug, j));
         }
         var arr = new JArray(_jutJobs.Select(kv => JutJobJson(kv.Key, kv.Value)));
         return JutJson(new JObject { ["ok"] = true, ["queue"] = _jutQueue.Count, ["jobs"] = arr });
     }
 
-    static JObject JutJobJson(string slug, JutGrabJob j) => new JObject
+    static JObject JutJobJson(string slug, JutGrabJob j)
+    {
+        var (owed, parked, _) = DownloadWants.Jut.Stat(slug);
+        return new JObject
     {
         ["ok"] = true,
         ["slug"] = slug,
@@ -547,8 +608,12 @@ public partial class QbitController
         // первого» неотличимо от «ничего не добавилось».
         ["pending"] = JutPendingFor(slug),
         ["queueTotal"] = _jutQueue.Count,
+        // Долг переживает рестарт, а job — нет. Оба числа честнее одного.
+        ["wants"] = owed,
+        ["stuck"] = parked,
         ["error"] = j.error
     };
+    }
 
     [HttpGet, AllowAnonymous]
     [Route("qdl/jut/download/cancel")]
@@ -563,6 +628,9 @@ public partial class QbitController
             _jutGen[slug] = JutGenOf(slug) + 1;
             foreach (string k in _jutQueued.Where(x => x.StartsWith(slug + ":", StringComparison.Ordinal)).ToList())
                 _jutQueued.Remove(k);
+            // 🔴 И намерения — здесь же, под тем же локом: снаружи осталось бы окно, в котором
+            // свип успевает поставить только что отменённое обратно.
+            JutWantsDropTitle(slug);
         }
         foreach (var it in _jutQueue) if (it.slug == slug) it.cancel = true;
         if (_jutJobs.TryGetValue(slug, out var j)) { j.canceled = true; j.state = "canceled"; j.touched = DateTime.UtcNow; }
@@ -625,6 +693,17 @@ public partial class QbitController
     /// </summary>
     static void JutDoneWith(JutGrabItem it)
     {
+        // 🔴 Намерение здесь НЕ снимается — только JutFinishFile, по факту готового файла.
+        // Через эту точку проходят и «сдался после ретраев», и «EnsureLink вернул error
+        // с первой попытки» (ретраев у резолва нет); сняв запись тут, мы получили бы снимок
+        // очереди со всеми его потерями. Устаревший элемент неудачей не считаем: его тайтл
+        // отменён, долга уже нет.
+        if (!JutStale(it) && DownloadWants.Jut.Has(it.slug, it.epkey))
+        {
+            string err = _jutJobs.TryGetValue(it.slug, out var jb) ? jb.error : null;
+            JutWantsFail(it.slug, it.epkey, err);
+        }
+
         JutForget(it);
         if (JutPendingFor(it.slug) == 0 && _jutJobs.TryGetValue(it.slug, out var job))
             JutNotifyTitleDone(it, job);
@@ -908,9 +987,40 @@ public partial class QbitController
         JutPosterEnqueue(slug, t.titleRu, t.titleOrig, t.years, t.poster);
     }
 
+    /// <summary>
+    /// Убрать прежние копии той же серии после успешного апгрейда качества.
+    /// 🔴 Строго ПОСЛЕ переименования нового файла в dst: обрыв на 90% обязан оставить старую
+    /// копию целой. Удалять приходится явно — качество входит в ИМЯ, поэтому File.Delete(dst)
+    /// в качалке старый «.720p.mp4» не трогает, и на диске остались бы обе копии.
+    /// </summary>
+    static List<string> JutDropOldCopies(JutGrabItem it, string dst)
+    {
+        var killed = new List<string>();
+        if (it.upgradeTo <= 0) return killed;
+        try
+        {
+            string keep = Path.GetFullPath(dst);
+            var self = new JutEp { slug = it.slug, kind = JutKindFromString(it.kind), season = it.season, num = it.ep };
+            string want = JutEpKey(it.slug, self);
+            foreach (string f in Directory.EnumerateFiles(JutTitleDir(it.slug), "*.mp4"))
+            {
+                if (string.Equals(Path.GetFullPath(f), keep, StringComparison.OrdinalIgnoreCase)) continue;
+                var e = JutEpFromFileName(Path.GetFileNameWithoutExtension(f));
+                if (e == null || !string.Equals(JutEpKey(it.slug, e), want, StringComparison.OrdinalIgnoreCase)) continue;
+                try { System.IO.File.Delete(f); killed.Add(f.Replace('\\', '/')); }
+                catch (Exception ex) { JutNet.Log("grab", "старая копия " + Path.GetFileName(f) + ": " + ex.Message); }
+            }
+            if (killed.Count > 0)
+                JutNet.Log("grab", it.slug + " " + it.epkey + ": апгрейд, убрано копий — " + killed.Count);
+        }
+        catch (Exception ex) { JutNet.Log("grab", "апгрейд-уборка: " + ex.Message); }
+        return killed;
+    }
+
     static async Task JutFinishFile(JutGrabItem it, string dst, int quality)
     {
         string hash = JutNet.Hash(it.slug);
+        var killed = JutDropOldCopies(it, dst);
         try
         {
             // 🔥 Инкрементально. Раньше здесь на КАЖДУЮ докачанную серию заново перечислялся
@@ -932,6 +1042,9 @@ public partial class QbitController
                 foreach (string f in Directory.EnumerateFiles(JutTitleDir(it.slug), "*.mp4"))
                     try { known[f.Replace('\\', '/')] = new FileInfo(f).Length; } catch { }
             }
+            // Удалённые апгрейдом копии выкидываем из известного списка: файла уже нет,
+            // а маркер строится инкрементально и иначе тащил бы мёртвый путь вечно.
+            foreach (string k in killed) known.Remove(k);
             try { known[dst.Replace('\\', '/')] = new FileInfo(dst).Length; } catch { }
 
             var files = new JArray();
@@ -974,7 +1087,12 @@ public partial class QbitController
         // ⚠️ Обязательно: иначе /qdl/stream продолжит отдавать по устаревшему пути
         try { DropResolveCache(hash); } catch { }
 
-        JutNotifyDone(it, hash);
+        // 🔴 ЕДИНСТВЕННАЯ точка снятия намерения по успеху — по факту готового файла.
+        JutWantsDone(it.slug, it.epkey);
+
+        // ⚠️ Апгрейд не звонит как «скачана новая серия»: это дубли уже виденных серий.
+        // Итог пачки апгрейда пишется одной строкой в JutNotifyTitleDone.
+        if (it.upgradeTo <= 0) JutNotifyDone(it, hash);
     }
 
     static void JutNotifyStart(string slug, string title, int count)
@@ -1069,9 +1187,11 @@ public partial class QbitController
                 title = it.titleRu ?? it.slug,
                 season = -1, episode = -1,
                 kind = "TITLE",
-                epkey = "batch-" + DateTime.UtcNow.Ticks,
+                epkey = (it.upgradeTo > 0 ? "up-" : "batch-") + DateTime.UtcNow.Ticks,
                 // Недокачанное честно видно: отмена и «сдался после ретраев» дают N < M
-                label = done < total ? $"Скачано серий: {done} из {total}" : $"Скачано серий: {done}",
+                label = it.upgradeTo > 0
+                        ? $"Качество улучшено: {done} серий (до {it.upgradeTo}p)"
+                        : done < total ? $"Скачано серий: {done} из {total}" : $"Скачано серий: {done}",
                 created = DateTime.UtcNow, read = false
             });
             db.SaveChanges();
@@ -1234,22 +1354,39 @@ public partial class QbitController
                 if (!JutSuParse.IsValidSlug(slug)) continue;
 
                 bool freshBatch = JutPendingFor(slug) == 0;
+                // titleRu берём из маркера, а не из slug: подставленный слаг переезжал
+                // в local/<hash>.json и карточка навсегда получала имя вида «solo-leveling».
+                // (У XSMART реконсиляция так и делает — выравниваемся.)
+                string titleRu = LoadLocal(JutNet.Hash(slug))?["jut"]?.Value<string>("titleRu") ?? slug;
+                var diskKeys = JutDiskKeys(slug);
                 int q = 0;
                 foreach (string part in Directory.EnumerateFiles(dir, "*.part"))
                 {
                     var e = JutEpFromFileName(Path.GetFileNameWithoutExtension(part));
                     if (e == null) continue;
+                    // Готовый .mp4 рядом с залипшим .part — не повод качать заново
+                    // (у XSMART эта проверка есть, у jut её не было).
+                    if (diskKeys.Contains(JutEpKey(slug, e))) continue;
+
+                    // Намерение тоже фиксируем: хвост мог остаться от пачки, поставленной
+                    // ещё до появления персистентного слоя.
+                    JutWantsCommit(slug, titleRu, new[] { e }, "reconcile");
+
+                    bool put;
                     lock (_jutEnqLock)
                     {
-                        if (!_jutQueued.Add(JutQueueKey(slug, e.epkey))) continue;
+                        // Дедуп общим ключом разводит эту ветку с восстановлением намерений:
+                        // серия, уже поднятая JutWantsRestore, сюда не пройдёт.
+                        put = _jutQueued.Add(JutQueueKey(slug, e.epkey));
+                        if (put)
+                            _jutQueue.Enqueue(new JutGrabItem
+                            {
+                                slug = slug, season = e.season, ep = e.num,
+                                kind = JutKindParam(e.kind), epkey = e.epkey, titleRu = titleRu,
+                                gen = JutGenOf(slug)
+                            });
                     }
-                    _jutQueue.Enqueue(new JutGrabItem
-                    {
-                        slug = slug, season = e.season, ep = e.num,
-                        kind = JutKindParam(e.kind), epkey = e.epkey, titleRu = slug,
-                        gen = JutGenOf(slug)
-                    });
-                    q++;
+                    if (put) q++;
                 }
                 // Один .part (обычный случай — качался ровно один файл) уведомит как серия,
                 // несколько — одной строкой на тайтл. Без job у добора не было бы и статуса.

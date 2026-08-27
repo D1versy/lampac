@@ -1,4 +1,4 @@
-{
+﻿{
   "enable": true,
   "dynamic": true,
   "references": [
@@ -8,6 +8,8 @@
     "ModuleConf.cs",
     "ModInit.cs",
     "SqlContext.cs",
+    "DownloadWants.cs",
+    "QualityUpgrade.cs",
     "JsonStore.cs",
     "HttpCache.cs",
     "Bitmagnet.cs",

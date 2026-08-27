@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.IO;
 using System.Linq;
@@ -82,6 +82,7 @@ static class JutGrabAccess
         Queued().Clear();
         Jobs().Clear();
         Gens().Clear();
+        DownloadWants.Jut.Reset(flush: false);
     }
 }
 
@@ -488,8 +489,12 @@ public class JutSuGrabQueueTests
         // UNIQUE noti(seriesKey, epkey): совпадение ключей схлопнуло бы разные события в одно.
         var rx = new System.Text.RegularExpressions.Regex(@"^(s\d+e\d+|film\d+|ova\d+|new-|season-|nospace-|start-)");
         string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
-        Assert.Contains("epkey = \"batch-\" + DateTime.UtcNow.Ticks", src);
+        // Префиксов теперь два: обычная пачка и пачка апгрейда качества. Разводить их
+        // обязательно — иначе UNIQUE(seriesKey, epkey) схлопнул бы «скачано» и «улучшено»,
+        // случись они в одну минуту.
+        Assert.Contains("(it.upgradeTo > 0 ? \"up-\" : \"batch-\") + DateTime.UtcNow.Ticks", src);
         Assert.DoesNotMatch(rx, "batch-638000000000000000");
+        Assert.DoesNotMatch(rx, "up-638000000000000000");
     }
 
     [Fact]

@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Shared.Models.Events;
 using Shared.Models.Module;
 using Shared.Models.Module.Interfaces;
@@ -23,6 +23,8 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _healthTimer;   // пассивные хелс-чеки: сброс реестра на диск
     static System.Threading.Timer _onlineWarmTimer; // прогрев кнопок «Онлайн» (три полосы, постепенно)
     static System.Threading.Timer _replicaTimer;    // цикл репликации (только при replicaRole=replica)
+    static System.Threading.Timer _wantsTimer;      // свип долгов скачивания (оба контура, без сети)
+    static System.Threading.Timer _qualityTimer;    // апгрейд качества уже скачанного (по умолчанию выключен)
     static System.TimeSpan _huntPeriod = System.TimeSpan.FromHours(4);
 
     // Ранний повтор охоты (EpisodeHunter): индексатор не дал кандидатов → следующий тик раньше срока.
@@ -207,6 +209,15 @@ public class ModInit : IModuleLoaded
         // Первый тик на 50-й минуте — ПОСЛЕ jut-тика (@35) и его прогрева (@45): контуры
         // независимы (разные источники), но делят диск и очередь скачивания, и толкаться
         // на старте контейнера им незачем.
+        // ⚠️ Догон — такой же обязательный, как у jut, и до 2.77 его тут не было вовсе:
+        // при суточном такте каждый рестарт сдвигал проверку на новые сутки, а рестарт здесь
+        // событие штатное. Догонный тик на 8-й минуте, а не на 6-й как у jut, — чтобы два
+        // контура не полезли в сеть одновременно.
+        int xsHours = System.Math.Max(1, conf?.xsmartWatchIntervalHours ?? 24);
+        bool xsOverdue = QbitController.XsmartWatchOverdue(System.TimeSpan.FromHours(xsHours), out var xsSince);
+        if (xsOverdue)
+            System.Console.WriteLine($"[QbitDownload] xsmart/watch: пропущено {xsSince.TotalHours:F1} ч — первый тик через 8 мин");
+
         _xsTimer?.Dispose();
         _xsTimer = new System.Threading.Timer(async _ =>
         {
@@ -216,7 +227,40 @@ public class ModInit : IModuleLoaded
                 await QbitController.XsmartWatchTick();
             }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] xsmart watch timer: " + ex); }
-        }, null, System.TimeSpan.FromMinutes(50), System.TimeSpan.FromHours(24));
+        }, null, System.TimeSpan.FromMinutes(xsOverdue ? 8 : 50), System.TimeSpan.FromHours(xsHours));
+
+        // ── Свип долгов скачивания (оба контура) ──────────────────────────────
+        // Восстановления на старте мало: серия, упавшая через 10 секунд после запуска (прокси
+        // ещё поднимался), иначе ждала бы следующего рестарта — резолв ретраев не делает вовсе.
+        // Проход идёт по журналу намерений в РАМ и НЕ ходит в сеть; на спокойном сервере
+        // он выходит после одной проверки счётчика.
+        int sweepMin = conf?.wantsSweepMinutes ?? 5;
+        _wantsTimer?.Dispose();
+        _wantsTimer = null;
+        if (sweepMin > 0)
+        {
+            _wantsTimer = new System.Threading.Timer(_ =>
+            {
+                try { QbitController.XsmartWantsSweep(); }
+                catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] xsmart wants sweep: " + ex); }
+                try { QbitController.JutWantsSweep(); }
+                catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut wants sweep: " + ex); }
+            }, null, System.TimeSpan.FromMinutes(4), System.TimeSpan.FromMinutes(sweepMin));
+        }
+
+        // ── Апгрейд качества уже скачанного (оба контура) ─────────────────────
+        // Первый тик на 70-й минуте — последним из всех контуров: работа низкоприоритетная
+        // и ходит в те же порталы, что слежение. Гейт по qualityTarget проверяется В НАЧАЛЕ
+        // тика, чтобы включение не требовало рестарта; при target=0 не делается ничего.
+        int qHours = System.Math.Max(1, conf?.qualityIntervalHours ?? 24);
+        _qualityTimer?.Dispose();
+        _qualityTimer = QbitController.ReplicaMode ? null : new System.Threading.Timer(async _ =>
+        {
+            try { await QbitController.XsmartQualitySweep(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] xsmart quality: " + ex); }
+            try { await QbitController.JutQualitySweep(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut quality: " + ex); }
+        }, null, System.TimeSpan.FromMinutes(70), System.TimeSpan.FromHours(qHours));
 
         // ── jut.su: прогрев кеша тайтлов (решение владельца — 2 раза в сутки) ──
         // Промах TTL заставляет ПЕРВОГО открывшего карточку ждать полный обход: для хаб-тайтла
@@ -317,6 +361,19 @@ public class ModInit : IModuleLoaded
             }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jsonstore warm: " + ex); }
 
+            // 🔴 Восстановление намерений — СТРОГО ДО реконсиляций. Три причины:
+            //   1. Дедуп бесплатен и в нужную сторону: оба .part-сканера используют
+            //      _xsQueued/_jutQueued.Add как ворота и сами пропустят те же серии.
+            //   2. Payload намерения качественнее: настоящий titleRu, sid/eid, source.
+            //      У .part-сканера XSMART без кеша карточки докачка вообще невозможна.
+            //   3. Счётчики job сходятся: реконсиляция зовёт JobForBatch с freshBatch по
+            //      пустой очереди и иначе затирала бы прогресс на каждом .part.
+            try { QbitController.JutWantsRestore(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut wants restore: " + ex); }
+
+            try { QbitController.XsmartWantsRestore(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] xsmart wants restore: " + ex); }
+
             try { await QbitController.JutReconcile(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] jut reconcile: " + ex); }
 
@@ -391,7 +448,15 @@ public class ModInit : IModuleLoaded
         _healthTimer = null;
         _onlineWarmTimer?.Dispose();
         _onlineWarmTimer = null;
+        _wantsTimer?.Dispose();
+        _wantsTimer = null;
+        _qualityTimer?.Dispose();
+        _qualityTimer = null;
         try { HealthState.FlushIfDirty(); } catch { }
+        // ⚠️ ПЕРЕД JsonStore.Flush(): журнал намерений пишется через него, значит горячий
+        // слой обязан флашиться последним. Метод статический не случайно — Core/Startup.cs
+        // создаёт для Dispose НОВЫЙ экземпляр ModInit, и всё состояние обязано быть static.
+        try { DownloadWants.Flush(); } catch { }
         // Грязное из горячего слоя обязано доехать до диска: иначе выгрузка модуля
         // теряет ещё не записанные маркер/activity (окно дебаунса — 200 мс).
         try { JsonStore.Flush(); } catch { }
@@ -415,6 +480,9 @@ public class ModInit : IModuleLoaded
             if (!string.Equals(prevCache, conf?.cachePath, System.StringComparison.Ordinal))
             {
                 JsonStore.ResetForConfigReload();
+                // Журнал намерений живёт файлами внутри cachePath — порядок тот же:
+                // сперва довести грязное до диска, потом забыть.
+                try { DownloadWants.ResetForConfigReload(); } catch { }
                 // Снапшот каталога живёт файлом внутри cachePath — РАМ-копия относится
                 // к прежнему пути и обязана быть забыта (перечитается лениво с нового).
                 QbitController.JutIdxReset();

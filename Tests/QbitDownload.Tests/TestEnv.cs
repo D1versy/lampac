@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using Shared;
 using QbitDownload;
@@ -38,6 +38,15 @@ public static class TestEnv
             // Без сброса следующий тест читал бы РАМ и готовый ответ предыдущего.
             // В проде это делает updateConf при смене cachePath.
             JsonStore.ResetForConfigReload();
+            // ⚠️ Журнал намерений тоже статический. Сбрасываем БЕЗ флаша: запись уронила бы
+            // состояние прошлого кейса в новый временный cachePath. Без этого ключи вида
+            // «3-102:s1e3» повторяются от теста к тесту, и долг предыдущего кейса воскресал
+            // в следующем — 20 красных на пустом месте.
+            // Сейчас это ВТОРОЙ пояс: те же сбросы стоят в XsAccess/JutGrabAccess/JutWatchAccess,
+            // и негативный прогон снятия только этой строки уже не краснеет. Оставлено намеренно —
+            // сеть для будущих тестов, которые берут FreshCache, но не трогают харнессы очереди.
+            DownloadWants.ResetForTests();
+            QualityCaches.ResetForTests();   // кеш решений об апгрейде — тоже статика
             Perms.ResetForConfigReload();   // троттлинг «когда видели» относился к прежнему cachePath
             QbitController.DropListCache();
             // Снимок «что уже скачано» держится 10 с, а тесты меняют каталог загрузок

@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
 using System;
@@ -330,6 +330,8 @@ public partial class QbitController
                 _jutGen[slug] = JutGenOf(slug) + 1;
                 foreach (string k in _jutQueued.Where(x => x.StartsWith(slug + ":", StringComparison.Ordinal)).ToList())
                     _jutQueued.Remove(k);
+                // 🔴 И намерения — иначе восстановление на старте вернуло бы удалённое.
+                JutWantsDropTitle(slug);
             }
             foreach (var it in _jutQueue) if (it.slug == slug) it.cancel = true;
             _jutJobs.TryRemove(slug, out _);
@@ -360,6 +362,8 @@ public partial class QbitController
             if (!Directory.Exists(dir)) return;
             foreach (string f in Directory.EnumerateFiles(dir, "*.part*"))
                 try { System.IO.File.Delete(f); } catch { }
+            // Хвосты убрали — снимаем и намерения: иначе свип поставил бы их заново.
+            JutWantsDropTitle(slug);
             if (!Directory.EnumerateFileSystemEntries(dir).Any())
                 try { Directory.Delete(dir); } catch { }
             JsonStore.ForgetDir(dir);
@@ -415,6 +419,10 @@ public partial class QbitController
         using var bg = JutNet.BackgroundScope();
         try
         {
+            // Свип долгов — до цикла и без единого сетевого запроса. Страховка на случай,
+            // когда воркер умер тихо, а до следующего рестарта далеко.
+            try { res["swept"] = JutWantsSweep(); } catch { }
+
             var arr = JutLoadWatch();
             var recs = arr.OfType<JObject>().ToList();
             if (recs.Count == 0) { res["watched"] = 0; return res; }
@@ -439,7 +447,12 @@ public partial class QbitController
                 int knownCount = rec.Value<JObject>("known")?.Value<int?>("count") ?? 0;
                 bool mustProbe = !ongoingOk                            // список не получили — проверяем сами
                                  || !ongoing.TryGetValue(slug, out int now)
-                                 || now != knownCount;
+                                 || now != knownCount
+                                 // ⚠️ Непогашенный долг опрашиваем всегда: совпадение счётчика
+                                 // с baseline не значит, что серия доехала до диска. Свип
+                                 // покрывает этот случай и без сети, но гейт, который в принципе
+                                 // не может увидеть долг, — мина под будущую правку.
+                                 || JutWantsHas(slug);
 
                 if (!mustProbe) continue;
                 if (probed >= budget) break;
@@ -495,21 +508,41 @@ public partial class QbitController
                 // Directory.EnumerateFiles на каждую серию — O(N×M) на каждом тике, и так
                 // для каждого из 30 тайтлов бюджета.
                 var diskKeys = JutDiskKeys(slug);
-                var toGrab = inSeason
-                    .Where(e => !diskKeys.Contains(JutEpKey(slug, e)) && !knownKeys.Contains(e.epkey))
+
+                // Режим гейтит ТОЛЬКО скачивание: уведомления уходят в обоих режимах,
+                // «только уведомления» — это и есть весь смысл подписки с карточки тайтла.
+                bool auto = JutModeOf(rec) == "grab";
+
+                // 🔴 НЕПОГАШЕННЫЙ ДОЛГ. Комментарий выше декларировал diff(сайт, ДИСК), но код
+                // ниже фильтровал ещё и `!knownKeys.Contains(...)` — то есть сверку с диском
+                // обезвреживал сам же фильтр: серия, попавшая в baseline (а туда её кладут СРАЗУ
+                // после постановки, независимо от того, доехала она до файла), в toGrab больше
+                // не попадала НИКОГДА. Условие снято, а чтобы вместе с ним не поехал бэклог
+                // (у тайтла, где скачаны 2 сезона из 5, сверка с диском потянула бы всё),
+                // добор берётся ИСКЛЮЧИТЕЛЬНО из журнала намерений: бэклога там нет
+                // по построению — записи создаёт только владелец или прошлый тик.
+                var owedKeys = auto
+                    ? new HashSet<string>(JutWantsOwedEps(slug).Select(x => x.epkey), StringComparer.Ordinal)
+                    : new HashSet<string>(StringComparer.Ordinal);
+                var toGrab = fresh
+                    .Concat(inSeason.Where(e => owedKeys.Contains(e.epkey)))
+                    .GroupBy(e => e.epkey, StringComparer.Ordinal).Select(g => g.First())
+                    .Where(e => !diskKeys.Contains(JutEpKey(slug, e)))
                     .ToList();
 
-                if (fresh.Count > 0)
+                if (fresh.Count > 0 || (auto && toGrab.Count > 0))
                 {
-                    changed++;
-                    rec["lastChange"] = DateTime.UtcNow;
+                    if (fresh.Count > 0)
+                    {
+                        changed++;
+                        rec["lastChange"] = DateTime.UtcNow;
+                    }
 
-                    // Режим гейтит ТОЛЬКО скачивание: уведомления уходят в обоих режимах,
-                    // «только уведомления» — это и есть весь смысл подписки с карточки тайтла.
-                    bool auto = JutModeOf(rec) == "grab";
                     // «качаю» в тексте — только про серии, которые ДЕЙСТВИТЕЛЬНО поедут в очередь:
                     // серия, уже лежащая на диске, в toGrab не попадает, и обещать по ней
                     // скачивание было бы врать.
+                    // ⚠️ Уведомляем ТОЛЬКО о fresh: долг уже уведомляли при первой постановке,
+                    // повтор означал бы строку в ленте каждые сутки, пока сайт лежит.
                     var grabKeys = new HashSet<string>(toGrab.Select(x => x.epkey), StringComparer.Ordinal);
                     foreach (var e in fresh)
                         JutNotifyNewEpisode(slug, t.titleRu, e, auto && grabKeys.Contains(e.epkey));
@@ -532,21 +565,27 @@ public partial class QbitController
                         {
                             // счётчик ЭТОГО тайтла: общий queued растёт по всем, и на нём мета
                             // писалась бы соседнему тайтлу, ничего не поставившему в очередь
+                            // 🔴 ФАЗА 1 — намерение на диск ДО постановки и ДО сдвига baseline.
+                            // Тогда после падения либо намерение на диске (восстановимо), либо
+                            // baseline не сдвинулся и следующий тик снова увидит серию как fresh.
+                            JutWantsCommit(slug, t.titleRu, toGrab, "watch");
+
                             bool freshBatch = JutPendingFor(slug) == 0;
                             int q = 0;
-                            foreach (var e in toGrab)
+                            lock (_jutEnqLock)
                             {
-                                lock (_jutEnqLock)
+                                int gen = JutGenOf(slug);
+                                foreach (var e in toGrab)
                                 {
                                     if (!_jutQueued.Add(JutQueueKey(slug, e.epkey))) continue;
+                                    _jutQueue.Enqueue(new JutGrabItem
+                                    {
+                                        slug = slug, season = e.season, ep = e.num,
+                                        kind = JutKindParam(e.kind), epkey = e.epkey, titleRu = t.titleRu,
+                                        gen = gen
+                                    });
+                                    q++;
                                 }
-                                _jutQueue.Enqueue(new JutGrabItem
-                                {
-                                    slug = slug, season = e.season, ep = e.num,
-                                    kind = JutKindParam(e.kind), epkey = e.epkey, titleRu = t.titleRu,
-                                    gen = JutGenOf(slug)
-                                });
-                                q++;
                             }
                             queued += q;
                             // Job у автокачки раньше не заводился вовсе — /qdl/jut/download/status
@@ -556,7 +595,9 @@ public partial class QbitController
                         }
                     }
 
-                    if (!baselineHold)
+                    // Baseline двигаем только когда было что двигать: проход, вызванный одним
+                    // лишь непогашенным долгом, состояние источника не менял.
+                    if (!baselineHold && fresh.Count > 0)
                         rec["known"] = new JObject
                         {
                             ["count"] = inSeason.Count,

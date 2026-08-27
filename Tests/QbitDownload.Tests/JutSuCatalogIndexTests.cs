@@ -331,7 +331,11 @@ public class JutSuCatalogIndexTests
             "..", "..", "..", "..", "..", "Modules", "QbitDownload", "ModInit.cs"));
         int i = src.IndexOf("JsonStore.ResetForConfigReload();", StringComparison.Ordinal);
         Assert.True(i > 0);
-        Assert.Contains("JutIdxReset();", src.Substring(i, Math.Min(400, src.Length - i)));
+        string block = src.Substring(i, Math.Min(700, src.Length - i));
+        Assert.Contains("JutIdxReset();", block);
+        // Журнал намерений живёт файлами внутри cachePath — сбрасывается там же и по той же
+        // причине: ключ записи это путь, и старый долг «переехал» бы в новый каталог.
+        Assert.Contains("DownloadWants.ResetForConfigReload();", block);
     }
 
     [Fact]

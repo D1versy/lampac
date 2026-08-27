@@ -49,6 +49,9 @@ public partial class QbitController
         // Отмены «поштучно» тут нет намеренно: единственный механизм — поколение (см. XsmartStale).
         // Два способа отменить одно и то же расходятся между собой раньше, чем успевают пригодиться.
         public int gen;                            // поколение отмены на момент постановки
+        // >0 → это перекачка ради качества: серия на диске уже есть, но хуже. Меняет две вещи —
+        // отсев «уже скачано» (см. XsmartWantsPut) и уборку старой копии в XsmartFinishFile.
+        public int upgradeTo;
     }
 
     sealed class XsmartGrabJob
@@ -197,6 +200,42 @@ public partial class QbitController
         => TryParseXsmartFileName(baseNoExt, out var k, out int s, out int n)
            ? (k == XsmartKind.Film ? "film" : "s" + s + "e" + n)
            : null;
+
+    // Качество из имени. 🔴 Единственное ПОЭПИЗОДНОЕ и авторитетное место, где оно живёт:
+    // поле quality в маркере — это качество ПОСЛЕДНЕГО записанного файла тайтла, а серии
+    // одного тайтла бывают разного качества (портал выкладывает свежие раньше, чем
+    // дотранскодит высокие дорожки).
+    static readonly Regex _xsNameQRx = new(@"\.(\d{3,4})p$", RegexOptions.Compiled);
+
+    /// <summary>Высота из имени файла. 0 = суффикса нет, то есть «Авто»/мастер-плейлист.</summary>
+    internal static int XsmartQualityFromName(string baseNoExt)
+    {
+        var m = _xsNameQRx.Match(baseNoExt ?? "");
+        return m.Success && int.TryParse(m.Groups[1].Value, out int q) ? q : 0;
+    }
+
+    /// <summary>
+    /// Какое качество этой серии лежит на диске. -1 = файла нет.
+    /// ⚠️ 0 (файл без суффикса, «Авто») апгрейду не подлежит НИКОГДА: сравнивать не с чем,
+    /// иначе каждый такой файл выглядел бы вечно апгрейдируемым.
+    /// </summary>
+    internal static int XsmartDiskQualityOf(string sref, string epkey)
+    {
+        int best = -1;
+        try
+        {
+            foreach (string f in Directory.EnumerateFiles(XsmartTitleDir(sref), "*.mp4"))
+            {
+                string b = Path.GetFileNameWithoutExtension(f);
+                if (XsmartKeyFromName(b) != epkey) continue;
+                int q = XsmartQualityFromName(b);
+                if (q == 0) return int.MaxValue;      // «Авто» считаем потолком
+                if (q > best) best = q;
+            }
+        }
+        catch { }
+        return best;
+    }
 
     // Снимок «что уже лежит на диске» — чтобы не делать Directory.Enumerate на каждую единицу
     // при постановке всего сериала (сотни серий = сотни обходов каталога).
@@ -420,21 +459,28 @@ public partial class QbitController
         string freeErr = XsmartCheckSpace(toGrab.Count + _xsQueue.Count, sref);
         if (freeErr != null) return XsmartErr("NO_SPACE", freeErr);
 
+        // 🔴 ФАЗА 1: намерение на диск ДО того, как ключ попадёт в _xsQueued. Падение после
+        // этой строки восстановимо (см. DownloadWants.cs), падение до неё не теряет ничего —
+        // намерения ещё не было, и пользователь получит ошибку запроса.
+        XsmartWantsCommit(sref, cat, id, t.source, t.title, toGrab, "manual");
+
         int queued = 0;
-        int gen = XsmartGenOf(sref);
         XsmartGrabJob job = null;
-        foreach (var e in toGrab)
+        // ФАЗА 2. Enqueue стоит ВНУТРИ лока: сам по себе разрыв безвреден, но с фазовым
+        // коммитом он становится несущим, а ConcurrentQueue.Enqueue под локом стоит наносекунды.
+        lock (_xsEnqLock)
         {
-            lock (_xsEnqLock)
+            int gen = XsmartGenOf(sref);
+            foreach (var e in toGrab)
             {
                 if (!_xsQueued.Add(XsmartQueueKey(sref, e.epkey))) { duplicate++; continue; }
+                _xsQueue.Enqueue(new XsmartGrabItem
+                {
+                    cat = cat, id = id, sref = sref, source = t.source,
+                    ep = e, titleRu = t.title, gen = gen
+                });
+                queued++;
             }
-            _xsQueue.Enqueue(new XsmartGrabItem
-            {
-                cat = cat, id = id, sref = sref, source = t.source,
-                ep = e, titleRu = t.title, gen = gen
-            });
-            queued++;
         }
 
         if (queued > 0)
@@ -520,14 +566,31 @@ public partial class QbitController
         {
             string sref = XsmartNet.Ref(cat, id);
             if (!_xsJobs.TryGetValue(sref, out var j))
-                return XsmartJson(new JObject { ["ok"] = true, ["state"] = "idle", ["pending"] = 0 });
+            {
+                // ⚠️ «Нет job» ≠ «нечего качать». После рестарта _xsJobs пуст, а долг на диске
+                // жив — отвечать idle значило бы врать ровно в тот момент, ради которого весь
+                // персистентный слой и делался.
+                var (owed, parked, perr) = DownloadWants.Xsmart.Stat(sref);
+                if (owed + parked == 0)
+                    return XsmartJson(new JObject { ["ok"] = true, ["state"] = "idle", ["pending"] = 0 });
+                return XsmartJson(new JObject
+                {
+                    ["ok"] = true, ["ref"] = sref,
+                    ["state"] = owed > 0 ? "queued" : "error",
+                    ["pending"] = owed, ["wants"] = owed, ["stuck"] = parked,
+                    ["stuckError"] = perr, ["restored"] = true
+                });
+            }
             return XsmartJson(XsmartJobJson(sref, j));
         }
         var arr = new JArray(_xsJobs.Select(kv => XsmartJobJson(kv.Key, kv.Value)));
         return XsmartJson(new JObject { ["ok"] = true, ["queue"] = _xsQueue.Count, ["jobs"] = arr });
     }
 
-    static JObject XsmartJobJson(string sref, XsmartGrabJob j) => new JObject
+    static JObject XsmartJobJson(string sref, XsmartGrabJob j)
+    {
+        var (owed, parked, _) = DownloadWants.Xsmart.Stat(sref);
+        return new JObject
     {
         ["ok"] = true,
         ["ref"] = sref,
@@ -545,8 +608,12 @@ public partial class QbitController
                      : j.total > 0 ? Math.Round((double)j.done / j.total, 3) : 0,
         ["pending"] = XsmartPendingFor(sref),
         ["queueTotal"] = _xsQueue.Count,
+        // Долг переживает рестарт, а job — нет. Оба числа честнее одного.
+        ["wants"] = owed,
+        ["stuck"] = parked,
         ["error"] = j.error
     };
+    }
 
     [HttpGet, AllowAnonymous]
     [Route("qdl/xsmart/download/cancel")]
@@ -561,6 +628,10 @@ public partial class QbitController
             _xsGen[sref] = XsmartGenOf(sref) + 1;
             var drop = _xsQueued.Where(k => k.StartsWith(sref + ":", StringComparison.Ordinal)).ToList();
             foreach (string k in drop) _xsQueued.Remove(k);
+            // 🔴 Намерения снимаем ЗДЕСЬ ЖЕ, под тем же локом. Пропустить эту точку —
+            // значит получить «отменил, а после рестарта оно вернулось»; а снять вне лока —
+            // окно, в котором свип успевает поставить только что отменённое обратно.
+            XsmartWantsDropTitle(sref);
         }
         if (_xsJobs.TryGetValue(sref, out var job))
         {
@@ -623,6 +694,17 @@ public partial class QbitController
     /// </summary>
     static void XsmartDoneWith(XsmartGrabItem it)
     {
+        // 🔴 Намерение здесь НЕ снимается — снимает его только XsmartFinishFile, по факту
+        // готового файла. Через эту точку проходят и «сдался после ретраев», и «резолв
+        // ответил UPSTREAM_DOWN с первой же попытки» (ретраев у резолва нет вовсе); сняв
+        // запись тут, мы получили бы ровно снимок очереди со всеми его потерями.
+        // Устаревший элемент не считаем неудачей: его тайтл отменён, долга уже нет.
+        if (!XsmartStale(it) && DownloadWants.Xsmart.Has(it.sref, it.ep.epkey))
+        {
+            string err = _xsJobs.TryGetValue(it.sref, out var jb) ? jb.error : null;
+            XsmartWantsFail(it.sref, it.ep.epkey, err);
+        }
+
         XsmartForget(it);
         if (XsmartPendingFor(it.sref) == 0 && _xsJobs.TryGetValue(it.sref, out var job))
             XsmartNotifyTitleDone(it, job);
@@ -1328,9 +1410,38 @@ public partial class QbitController
         catch { }
     }
 
+    /// <summary>
+    /// Убрать прежние копии той же серии после успешного апгрейда качества.
+    /// 🔴 Строго ПОСЛЕ того, как новый файл переименован в dst: обрыв на 90% обязан оставить
+    /// старую копию целой. И удалять приходится явно — качество входит в ИМЯ, поэтому
+    /// File.Delete(dst) в качалке старый «.360p.mp4» не трогает, и на диске оказались бы обе
+    /// копии с одинаковым ключом таймлайна.
+    /// </summary>
+    static List<string> XsmartDropOldCopies(XsmartGrabItem it, string dst)
+    {
+        var killed = new List<string>();
+        if (it.upgradeTo <= 0) return killed;
+        try
+        {
+            string keep = Path.GetFullPath(dst);
+            foreach (string f in Directory.EnumerateFiles(XsmartTitleDir(it.sref), "*.mp4"))
+            {
+                if (string.Equals(Path.GetFullPath(f), keep, StringComparison.OrdinalIgnoreCase)) continue;
+                if (XsmartKeyFromName(Path.GetFileNameWithoutExtension(f)) != it.ep.epkey) continue;
+                try { System.IO.File.Delete(f); killed.Add(f.Replace('\\', '/')); }
+                catch (Exception ex) { XsmartNet.Log("grab", "старая копия " + Path.GetFileName(f) + ": " + ex.Message); }
+            }
+            if (killed.Count > 0)
+                XsmartNet.Log("grab", it.sref + " " + it.ep.epkey + ": апгрейд, убрано копий — " + killed.Count);
+        }
+        catch (Exception ex) { XsmartNet.Log("grab", "апгрейд-уборка: " + ex.Message); }
+        return killed;
+    }
+
     static async Task XsmartFinishFile(XsmartGrabItem it, string dst, int quality)
     {
         string hash = XsmartNet.Hash(it.cat, it.id);
+        var killed = XsmartDropOldCopies(it, dst);
         try
         {
             // 🔥 Инкрементально: полный обход каталога на КАЖДУЮ серию — это O(N²) за прогон
@@ -1359,6 +1470,10 @@ public partial class QbitController
                     };
                 }
             }
+
+            // Удалённые апгрейдом копии выкидываем из известного списка: файла уже нет,
+            // а маркер строится инкрементально и иначе тащил бы мёртвый путь вечно.
+            foreach (string k in killed) known.Remove(k);
 
             known[dst.Replace('\\', '/')] = new JObject
             {
@@ -1404,6 +1519,9 @@ public partial class QbitController
         }
         catch (Exception ex) { XsmartNet.Log("grab", "маркер: " + ex.Message); }
 
+        // 🔴 ЕДИНСТВЕННАЯ точка снятия намерения по успеху — здесь, по факту готового файла.
+        XsmartWantsDone(it.sref, it.ep.epkey);
+
         // ⚠️ Обязательно: иначе /qdl/stream продолжит отдавать по устаревшему пути
         try { DropResolveCache(hash); } catch { }
 
@@ -1416,7 +1534,9 @@ public partial class QbitController
             // оставался бы "running", пока качается второй.
             XsmartSetState(job, XsmartPendingFor(it.sref) <= 1 ? "done" : "running");
         }
-        XsmartNotifyDone(it, hash);
+        // ⚠️ Апгрейд не звонит как «скачана новая серия»: владелец увидел бы четыре дубля
+        // уже виденных серий. Итог пачки апгрейда пишется одной строкой в XsmartNotifyTitleDone.
+        if (it.upgradeTo <= 0) XsmartNotifyDone(it, hash);
     }
 
     static long SafeLen(string p)
@@ -1531,9 +1651,11 @@ public partial class QbitController
                 title = it.titleRu ?? it.sref,
                 season = -1, episode = -1,
                 kind = "TITLE",
-                epkey = "batch-" + DateTime.UtcNow.Ticks,
+                epkey = (it.upgradeTo > 0 ? "up-" : "batch-") + DateTime.UtcNow.Ticks,
                 // Недокачанное честно видно: отмена и «сдался после ретраев» дают N < M
-                label = done < total ? $"Скачано серий: {done} из {total}" : $"Скачано серий: {done}",
+                label = it.upgradeTo > 0
+                        ? $"Качество улучшено: {done} серий (до {it.upgradeTo}p)"
+                        : done < total ? $"Скачано серий: {done} из {total}" : $"Скачано серий: {done}",
                 created = DateTime.UtcNow, read = false
             });
             db.SaveChanges();
@@ -1686,15 +1808,24 @@ public partial class QbitController
                     var ep = t.items.FirstOrDefault(x => x.epkey == key);
                     if (ep == null) continue;
 
+                    // Намерение на всякий случай тоже фиксируем: хвост .part мог остаться
+                    // от пачки, поставленной ещё до появления персистентного слоя.
+                    XsmartWantsCommit(sref, cat, id, t.source, t.title, new[] { ep }, "reconcile");
+
+                    bool put;
                     lock (_xsEnqLock)
                     {
-                        if (!_xsQueued.Add(XsmartQueueKey(sref, key))) continue;
+                        // Дедуп общим ключом разводит эту ветку с восстановлением намерений:
+                        // серия, уже поднятая XsmartWantsRestore, сюда просто не пройдёт.
+                        put = _xsQueued.Add(XsmartQueueKey(sref, key));
+                        if (put)
+                            _xsQueue.Enqueue(new XsmartGrabItem
+                            {
+                                cat = cat, id = id, sref = sref, source = t.source,
+                                ep = ep, titleRu = t.title, gen = XsmartGenOf(sref)
+                            });
                     }
-                    _xsQueue.Enqueue(new XsmartGrabItem
-                    {
-                        cat = cat, id = id, sref = sref, source = t.source,
-                        ep = ep, titleRu = t.title, gen = XsmartGenOf(sref)
-                    });
+                    if (!put) continue;
                     XsmartJobForBatch(sref, XsmartPendingFor(sref) <= 1, 1);
                     XsmartNet.Log("reconcile", "докачиваю " + sref + " " + key);
                 }

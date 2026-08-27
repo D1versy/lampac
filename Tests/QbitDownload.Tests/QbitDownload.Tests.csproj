@@ -51,6 +51,8 @@
     <Compile Include="..\..\Modules\QbitDownload\ModuleConf.cs" Link="Module\ModuleConf.cs" />
     <Compile Include="..\..\Modules\QbitDownload\ModInit.cs" Link="Module\ModInit.cs" />
     <Compile Include="..\..\Modules\QbitDownload\SqlContext.cs" Link="Module\SqlContext.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\DownloadWants.cs" Link="Module\DownloadWants.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\QualityUpgrade.cs" Link="Module\QualityUpgrade.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JsonStore.cs" Link="Module\JsonStore.cs" />
     <Compile Include="..\..\Modules\QbitDownload\HttpCache.cs" Link="Module\HttpCache.cs" />
     <Compile Include="..\..\Modules\QbitDownload\FfWorker.cs" Link="Module\FfWorker.cs" />

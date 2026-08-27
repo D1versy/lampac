@@ -103,22 +103,30 @@ public partial class QbitController
     internal static void XsmartForgetOnDelete(string sref)
     {
         if (string.IsNullOrEmpty(sref)) return;
+
+        // ⚠️ Снятие подписки условное, а уборка очереди — НЕТ. Раньше здесь стоял ранний
+        // return по «подписки нет», и у тайтла без подписки (обычный случай: скачали руками,
+        // следить не просили) удаление карточки не снимало ни ключей очереди, ни поколения.
+        // С персистентным журналом это стало дороже: пачка воскресала после рестарта —
+        // ровно тот «удалил, а оно вернулось», ради которого метод и написан.
+        bool had;
         lock (_xsWatchLock)
         {
             var arr = XsmartLoadWatch();
             var rec = XsmartFindWatch(arr, sref);
-            if (rec == null) return;
-            rec.Remove();
-            XsmartSaveWatch(arr);
+            had = rec != null;
+            if (had) { rec.Remove(); XsmartSaveWatch(arr); }
         }
         lock (_xsEnqLock)
         {
             _xsGen[sref] = XsmartGenOf(sref) + 1;   // всё поставленное этим тайтлом — устарело
             foreach (string k in _xsQueued.Where(k => k.StartsWith(sref + ":", StringComparison.Ordinal)).ToList())
                 _xsQueued.Remove(k);
+            // 🔴 И намерения тоже — иначе восстановление на старте вернуло бы удалённое.
+            XsmartWantsDropTitle(sref);
         }
         XsmartDropDiskKeys(sref);
-        XsmartNet.Log("watch", "подписка снята вместе с загрузкой: " + sref);
+        if (had) XsmartNet.Log("watch", "подписка снята вместе с загрузкой: " + sref);
     }
 
     #endregion
@@ -362,6 +370,10 @@ public partial class QbitController
 
         try
         {
+            // Свип долгов — до цикла и без единого сетевого запроса. Страховка на случай,
+            // когда воркер умер тихо, а до следующего рестарта далеко.
+            try { res["swept"] = XsmartWantsSweep(); } catch { }
+
             var arr = XsmartLoadWatch();
             var recs = arr.OfType<JObject>().ToList();
             if (recs.Count == 0) { res["watched"] = 0; return res; }
@@ -430,33 +442,61 @@ public partial class QbitController
                     (rec.Value<JObject>("known")?["keys"] as JArray ?? new JArray())
                         .Select(x => x.Value<string>()).Where(x => x != null), StringComparer.Ordinal);
 
-                var fresh = eps.Where(e => !knownKeys.Contains(e.epkey)).ToList();
-                if (fresh.Count == 0) continue;
-                changed++;
+                bool grab = XsmartModeOf(rec) == "grab";
 
-                // 🔥 Что КАЧАТЬ — это diff(источник, ДИСК), а не diff с baseline: рестарт между
-                // постановкой в очередь и завершением файла иначе терял бы серию навсегда.
+                var fresh = eps.Where(e => !knownKeys.Contains(e.epkey)).ToList();
+
+                // 🔴 НЕПОГАШЕННЫЙ ДОЛГ — вторая причина не выходить отсюда. Гейт «нет новых →
+                // выходим» существует, чтобы бэклог не поехал в очередь, и снимать его нельзя:
+                // у сериала, где скачаны 2 сезона из 5, сверка с диском потянула бы всё.
+                // Но серия, поставленная прошлым тиком и потерянная рестартом, уже сидит
+                // в baseline и в fresh не попадёт НИКОГДА — до этой правки она пропадала молча.
+                // Долг берём ИСКЛЮЧИТЕЛЬНО из журнала намерений: бэклога там нет по построению,
+                // записи создаются только явным действием владельца или прошлым тиком.
+                var owed = grab ? XsmartWantsOwedEps(sref) : new List<XsmartEp>();
+                if (fresh.Count == 0 && owed.Count == 0) continue;
+                if (fresh.Count > 0) changed++;
+
                 // Снимок диска берём ОДИН раз на тайтл.
                 var diskKeys = XsmartDiskKeys(sref);
-                bool grab = XsmartModeOf(rec) == "grab";
                 var toGrab = grab
-                    ? fresh.Where(e => e.playable && !diskKeys.Contains(e.epkey)).ToList()
+                    ? fresh.Concat(owed)
+                           .GroupBy(e => e.epkey, StringComparer.Ordinal).Select(g => g.First())
+                           .Where(e => e.playable && !diskKeys.Contains(e.epkey)).ToList()
                     : new List<XsmartEp>();
 
-                XsmartNotifyNew(sref, cat, id, titleRu, fresh, grab);
+                // ⚠️ Уведомляем ТОЛЬКО о fresh. Долг уже уведомляли при первой постановке —
+                // повтор означал бы строку в ленте каждые сутки, пока портал лежит.
+                if (fresh.Count > 0) XsmartNotifyNew(sref, cat, id, titleRu, fresh, grab);
 
+                bool baselineHold = false;
                 if (toGrab.Count > 0)
                 {
                     string spaceErr = XsmartCheckSpace(toGrab.Count + _xsQueue.Count, sref);
-                    if (spaceErr != null) XsmartNotifyNoSpace(sref, cat, id, titleRu, spaceErr);
+                    if (spaceErr != null)
+                    {
+                        XsmartNotifyNoSpace(sref, cat, id, titleRu, spaceErr);
+                        // 🔴 Baseline НЕ двигаем. Раньше он уезжал вперёд и здесь: серия
+                        // исключалась из fresh навсегда, в очередь не попадала, .part на диске
+                        // не оставляла — и терялась насовсем. У jut это давно закрыто, у XSMART
+                        // канал был открыт.
+                        baselineHold = true;
+                    }
                     else queued += XsmartEnqueueWatched(cat, id, sref, source, titleRu, toGrab);
                 }
 
                 // Baseline двигаем в ОБОИХ режимах и ПОСЛЕ постановки: иначе «только уведомляю»
                 // сообщал бы об одной и той же серии каждые сутки.
-                rec["known"] = XsmartBaseline(eps);
-                rec["lastChange"] = DateTime.UtcNow;
+                if (!baselineHold)
+                {
+                    rec["known"] = XsmartBaseline(eps);
+                    rec["lastChange"] = DateTime.UtcNow;
+                }
             }
+
+            // ⚠️ Штамп прохода — только если хоть один тайтл реально опросили. Безусловный
+            // превратил бы «сеть лежит» в «новых серий нет» и убил бы догон (см. JutWatchOverdue).
+            if (probed > 0) XsmartStampRun(arr);
 
             XsmartSaveWatch(arr);
             res["watched"] = recs.Count;
@@ -484,24 +524,60 @@ public partial class QbitController
         ["keys"] = new JArray(eps.Select(e => e.epkey))
     };
 
+    /// <summary>Отметка «проход состоялся». Единственный источник данных для догона.</summary>
+    static void XsmartStampRun(JArray arr)
+    {
+        var now = DateTime.UtcNow;
+        foreach (var rec in arr.OfType<JObject>()) rec["lastRun"] = now;
+    }
+
+    /// <summary>
+    /// Догон пропущенных тиков — копия JutWatchOverdue. При суточном такте это обязательно:
+    /// без него каждый рестарт контейнера сдвигает проверку на новые сутки, и при частых
+    /// рестартах слежение не срабатывает вообще. У XSMART этого не было вовсе, а вместе
+    /// с ним не было и самого поля lastRun.
+    /// </summary>
+    internal static bool XsmartWatchOverdue(TimeSpan period, out TimeSpan since)
+    {
+        since = TimeSpan.Zero;
+        try
+        {
+            DateTime? last = null;
+            foreach (var rec in XsmartLoadWatch().OfType<JObject>())
+            {
+                var v = rec.Value<DateTime?>("lastRun");
+                if (v != null && (last == null || v > last)) last = v;
+            }
+            if (last == null) return false;
+            since = DateTime.UtcNow - last.Value;
+            return since > period * 1.5;
+        }
+        catch { return false; }
+    }
+
     static int XsmartEnqueueWatched(int cat, string id, string sref, string source, string titleRu,
                                     List<XsmartEp> toGrab)
     {
+        // 🔴 ФАЗА 1 — намерение на диск ДО постановки и, что важнее, ДО сдвига baseline.
+        // Тогда после падения либо намерение на диске (восстановимо), либо baseline не
+        // сдвинулся и следующий тик снова увидит серию как fresh. Третьего состояния нет.
+        XsmartWantsCommit(sref, cat, id, source, titleRu, toGrab, "watch");
+
         bool freshBatch = XsmartPendingFor(sref) == 0;
         int put = 0;
-        int gen = XsmartGenOf(sref);
-        foreach (var e in toGrab)
+        lock (_xsEnqLock)
         {
-            lock (_xsEnqLock)
+            int gen = XsmartGenOf(sref);
+            foreach (var e in toGrab)
             {
                 if (!_xsQueued.Add(XsmartQueueKey(sref, e.epkey))) continue;
+                _xsQueue.Enqueue(new XsmartGrabItem
+                {
+                    cat = cat, id = id, sref = sref, source = source,
+                    ep = e, titleRu = titleRu, gen = gen
+                });
+                put++;
             }
-            _xsQueue.Enqueue(new XsmartGrabItem
-            {
-                cat = cat, id = id, sref = sref, source = source,
-                ep = e, titleRu = titleRu, gen = gen
-            });
-            put++;
         }
         if (put > 0)
         {

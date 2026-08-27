@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -58,6 +58,8 @@ static class XsAccess
 
         var queued = F("_xsQueued").GetValue(null);
         queued.GetType().GetMethod("Clear").Invoke(queued, null);
+        // Журнал намерений — тоже статика, и без сброса долг одного кейса воскресает в другом.
+        DownloadWants.Xsmart.Reset(flush: false);
     }
 
     /// <summary>Воркер «занят»: постановка в очередь не поднимет реальную качалку.</summary>
