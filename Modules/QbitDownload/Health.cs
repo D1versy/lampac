@@ -109,7 +109,10 @@ public partial class QbitController
                       () => ProbePg("pg-bitmagnet", "Postgres bitmagnet (DHT-индекс)", ModInit.conf?.bitmagnetConnection)),
                 Guard("pg-index", "Postgres свой индекс", GrpInfra,
                       () => ProbePg("pg-index", "Postgres свой индекс", ModInit.conf?.localIndexConnection)),
-                Guard("ipcam", "IPCamLive (регистратор)", GrpInfra, ProbeIpcam)
+                Guard("ipcam", "IPCamLive (регистратор)", GrpInfra, ProbeIpcam),
+                // xsmart-proxy — такой же свой контейнер в сети media. Спрашиваем его ручку здоровья,
+                // а не портал: сессию она не трогает (логин из фона роняет подписку — см. ProbeXsmart).
+                Guard("xsmart", "XSMART (портал)", GrpInfra, ProbeXsmart)
             };
 
             foreach (var o in await Task.WhenAll(tasks))
@@ -367,6 +370,140 @@ public partial class QbitController
                 : Svc(id, name, GrpInfra, "warn", sw.ElapsedMilliseconds, "регистратор отвечает, но камер нет");
         }
         catch (Exception ex) { return Svc(id, name, GrpInfra, "fail", sw.ElapsedMilliseconds, ShortErr(ex)); }
+    }
+
+    /// <summary>
+    /// XSMART — свой контейнер xsmart-proxy в сети media. Спрашиваем ЕГО ручку здоровья: она
+    /// отвечает из памяти процесса и наружу не ходит вообще.
+    ///
+    /// 🔴 Логин отсюда невозможен по построению, и это принципиально: каждый логин в портал
+    /// РОТИРУЕТ key_check, а XSMART считает такое «устройством пользуются вдвоём» и роняет
+    /// подписку до Free. Поэтому фоновый путь сервиса не логинится никогда (xsmart/service/
+    /// CONTRACT.md §3.3), а /xsmart/health сессию не трогает — только показывает.
+    ///
+    /// 🔴 Судить по HTTP-коду здесь НЕЛЬЗЯ: ручка намеренно всегда 200 (иначе autoheal крутил бы
+    /// полностью исправный контейнер каждый раз, когда лежит сам портал). Вердикт — по полям.
+    /// </summary>
+    internal async static Task<JObject> ProbeXsmart()
+    {
+        const string id = "xsmart", name = "XSMART (портал)";
+
+        // ⚠️ Сырой конфиг, а не XsmartNet.Api: тот подставляет дефолтный адрес вместо пустого, и
+        // явный киллсвитч (пустая строка на реплике, где раздел выключен профилем compose)
+        // превратился бы в пробу в никуда — вечное красное вместо честного ⏸.
+        // ⚠️ xsmartEnable здесь не смотрим сознательно: он гасит только скачивание и слежение,
+        // а онлайн-раздел живёт целиком в контейнере и работает независимо от него.
+        string url = ModInit.conf?.xsmartApi;
+        if (string.IsNullOrWhiteSpace(url)) return Svc(id, name, GrpInfra, "off", 0, "не настроено");
+
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            using var cts = new CancellationTokenSource(2500);
+            using var resp = await _healthHttp.GetAsync(NoSlash(url) + "/xsmart/health", cts.Token);
+            string txt = await resp.Content.ReadAsStringAsync(cts.Token);
+            sw.Stop();
+
+            if (!resp.IsSuccessStatusCode)
+                return Svc(id, name, GrpInfra, "fail", sw.ElapsedMilliseconds, "http " + (int)resp.StatusCode);
+
+            var (status, detail) = XsmartVerdict(JObject.Parse(txt));
+            return Svc(id, name, GrpInfra, status, sw.ElapsedMilliseconds, detail);
+        }
+        catch (Exception ex) { return Svc(id, name, GrpInfra, "fail", sw.ElapsedMilliseconds, ShortErr(ex)); }
+    }
+
+    /// <summary>
+    /// Вердикт по телу /xsmart/health. Чистая функция: живая проба только приносит JSON.
+    /// Порядок проверок = порядок важности, первое совпадение и есть вердикт.
+    /// </summary>
+    internal static (string status, string detail) XsmartVerdict(JObject b)
+    {
+        if (b == null) return ("fail", "пустой ответ");
+        if (b.Value<bool?>("ok") == false) return ("fail", "сервис сообщает о сбое");
+
+        string ver = b.Value<string>("version");
+        string tail = string.IsNullOrEmpty(ver) ? "" : " · v" + ver;
+
+        if (b.Value<bool?>("configured") == false)
+        {
+            // Это ИМЕНА переменных окружения (XSMART_UUID и соседи), а не их значения — светить можно.
+            var miss = (b["missing"] as JArray)?.Select(x => (string)x).Where(s => !string.IsNullOrEmpty(s)).ToArray();
+            return ("fail", miss != null && miss.Length > 0 ? "не настроены креды: " + string.Join(", ", miss) : "не настроены креды");
+        }
+
+        if (b["session"] is not JObject s) return ("fail", "ответ без session");
+
+        if (s.Value<bool?>("banned") == true) return ("fail", "устройство заблокировано XSMART");
+
+        // Последний поход наверх. 🔴 Это ЕДИНСТВЕННЫЙ надёжный датчик живости портала в теле:
+        // lastError сбрасывается в null на каждом успешном запросе, то есть непустой = «прямо
+        // сейчас не отвечает». Соблазнительный на вид session.consecutiveFailures сюда не годится:
+        // сервис инкрементит его и тут же обнуляет на втором сбое (переезд на другую реплику), а
+        // упавший ЛОГИН до него не доходит вовсе — снаружи поле бывает только 0 или 1, причём
+        // ровно наоборот: устойчивый сбой даёт 0, а один моргнувший запрос — 1.
+        var up = b["upstream"] as JObject;
+        string err = up?.Value<string>("lastError");
+        bool broken = !string.IsNullOrEmpty(err);
+
+        if (s.Value<bool?>("authorized") != true)
+        {
+            // 🔴 «Сессии нет» само по себе НЕ сбой: её поднимает только живой зритель, фон не
+            // логинится никогда (логин ротирует key_check → портал роняет подписку до Free).
+            // Но ровно так же выглядит и ЛЁГШИЙ портал: логин не проходит → keyHash пуст. Отличаем
+            // по статистике: пока наверх не ходили ни разу, её просто нет.
+            bool everWentUp = broken || up?["lastOkAt"]?.Type is not (null or JTokenType.Null)
+                                     || up?["lastErrorAt"]?.Type is not (null or JTokenType.Null);
+            if (!everWentUp) return ("ok", "сессии нет — поднимет первый зритель" + tail);
+
+            if (!broken) return ("ok", "сессия сброшена — поднимет следующий запрос" + tail);
+
+            // 404 от контентной ручки = «ключ больше не признают»; сервис сам перелогинится
+            // следующим же вызовом, красить это в сбой было бы враньём.
+            return err == "http 404"
+                ? ("warn", "ключ протух — сессия встанет следующим запросом" + tail)
+                : ("fail", "сессия не поднимается: портал не отвечает" + XsmartErrNote(up) + tail);
+        }
+
+        string tier = s.Value<string>("tier");
+        if (!string.IsNullOrEmpty(tier) && !string.Equals(tier, "Premium", StringComparison.OrdinalIgnoreCase))
+            return ("warn", "тариф " + tier + " — ожидается Premium (портал понизил подписку)" + tail);
+
+        if (broken)
+            return ("warn", "последний запрос наверх упал" + XsmartErrNote(up) + XsmartErrAge(up) + tail);
+
+        int logins = up?.Value<int?>("logins") ?? 0;
+        // Норма — один логин на весь срок жизни процесса. Порог с запасом: законный релогин бывает
+        // (протух ключ, переезд на другую реплику портала), а вот их череда — уже симптом.
+        if (logins > 3)
+            return ("warn", "перелогинов с рестарта: " + logins + " — сессия хлопает, key_check ротируется" + tail);
+
+        int age = s.Value<int?>("ageSec") ?? 0;
+        return ("ok", (string.IsNullOrEmpty(tier) ? "авторизован" : tier)
+                    + (age > 0 ? " · сессия " + HealthState.Ago(TimeSpan.FromSeconds(age)) : "")
+                    + (logins > 1 ? " · логинов: " + logins : "") + tail);
+    }
+
+    /// <summary>
+    /// Последняя ошибка апстрима — только если она из закрытого списка кодов. Принцип файла:
+    /// наружу код или имя, никогда message (у сервиса туда попадает текст исключения fetch с хостами).
+    /// </summary>
+    static string XsmartErrNote(JObject up)
+    {
+        string e = up?.Value<string>("lastError");
+        if (string.IsNullOrEmpty(e)) return "";
+        bool safe = e == "timeout" || e == "не JSON"
+                 || (e.Length == 8 && e.StartsWith("http ", StringComparison.Ordinal) && e.Skip(5).All(char.IsDigit));
+        return safe ? " (" + e + ")" : "";
+    }
+
+    /// <summary>Возраст последнего сбоя: по нему видно «упало сейчас» против «висит со вчера».</summary>
+    static string XsmartErrAge(JObject up)
+    {
+        long? ms = up?.Value<long?>("lastErrorAt");   // epoch мс, как отдаёт Date.now() сервиса
+        if (ms == null || ms <= 0) return "";
+        var at = DateTimeOffset.FromUnixTimeMilliseconds(ms.Value).UtcDateTime;
+        return " · " + HealthState.Ago(DateTime.UtcNow - at);
     }
     #endregion
 

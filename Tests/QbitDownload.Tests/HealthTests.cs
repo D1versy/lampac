@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -491,6 +491,251 @@ public class HealthTests
         QbitController.AddSearchChecks(arr, StateWithRun(T0.AddMinutes(-5), ("indexer", "ok", 0), ("tracker:rutor", "ok", 0)), T0);
 
         Assert.All(arr.OfType<JObject>(), x => Assert.Equal("Поиск раздач", x.Value<string>("group")));
+    }
+    #endregion
+
+    #region XSMART: вердикт по телу /xsmart/health (qdl 2.75)
+    // Контейнер xsmart-proxy отвечает по этой ручке ВСЕГДА 200 — иначе autoheal крутил бы исправный
+    // сервис каждый раз, когда лежит сам портал. Значит вся правда в полях, и здесь она под тестами.
+
+    /// <summary>Тело /xsmart/health: по умолчанию — здоровый Premium с живой сессией.</summary>
+    static JObject Xs(Action<JObject> tweak = null)
+    {
+        var b = new JObject
+        {
+            ["ok"] = true,
+            ["version"] = "1.4.0",
+            ["configured"] = true,
+            ["missing"] = new JArray(),
+            ["session"] = new JObject
+            {
+                ["authorized"] = true,
+                ["server"] = "f.xsmart.tv",
+                ["tier"] = "Premium",
+                ["banned"] = false,
+                ["ageSec"] = 7200,
+                ["keyCheckPresent"] = true,
+                ["consecutiveFailures"] = 0
+            },
+            ["upstream"] = new JObject
+            {
+                ["logins"] = 1,
+                ["lastOkAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ["lastErrorAt"] = null,
+                ["lastError"] = null
+            }
+        };
+        tweak?.Invoke(b);
+        return b;
+    }
+
+    /// <summary>Сервис только поднялся: наверх ещё не ходили ни разу, сессии нет.</summary>
+    static JObject XsCold(Action<JObject> tweak = null) => Xs(b =>
+    {
+        b["session"]["authorized"] = false;
+        b["session"]["ageSec"] = 0;
+        b["upstream"] = new JObject
+        {
+            ["logins"] = 0,
+            ["lastOkAt"] = null,
+            ["lastErrorAt"] = null,
+            ["lastError"] = null
+        };
+        tweak?.Invoke(b);
+    });
+
+    [Fact]
+    public void XsmartVerdict_Healthy_IsOkWithTierAndAge()
+    {
+        var (status, detail) = QbitController.XsmartVerdict(Xs());
+
+        Assert.Equal("ok", status);
+        Assert.Contains("Premium", detail);
+        Assert.Contains("2 ч назад", detail);   // возраст сессии: видно «висит давно» против «только логинились»
+        Assert.Contains("v1.4.0", detail);
+    }
+
+    [Fact]
+    public void XsmartVerdict_NotConfigured_IsFailAndNamesMissingVars()
+    {
+        var (status, detail) = QbitController.XsmartVerdict(Xs(b =>
+        {
+            b["configured"] = false;
+            b["missing"] = new JArray("XSMART_UUID", "XSMART_SERIAL");
+        }));
+
+        Assert.Equal("fail", status);
+        Assert.Contains("XSMART_UUID", detail);       // имена переменных, не значения — светить можно
+        Assert.Contains("XSMART_SERIAL", detail);
+    }
+
+    [Fact]
+    public void XsmartVerdict_Banned_IsFail()
+    {
+        var (status, detail) = QbitController.XsmartVerdict(Xs(b => b["session"]["banned"] = true));
+
+        Assert.Equal("fail", status);
+        Assert.Contains("заблокировано", detail);
+    }
+
+    /// <summary>
+    /// 🔴 Главное правило строки: «сессии ещё не было» — это НОРМА, а не сбой. Сессию поднимает
+    /// только живой зритель, фоновый путь не логинится никогда. Красное здесь толкало бы «починить»
+    /// логином — то есть ровно к ротации key_check, которая и роняет подписку до Free.
+    /// </summary>
+    [Fact]
+    public void XsmartVerdict_ColdStart_IsOkNotFail()
+    {
+        var (status, detail) = QbitController.XsmartVerdict(XsCold());
+
+        Assert.Equal("ok", status);
+        Assert.Contains("первый зритель", detail);
+    }
+
+    /// <summary>Тариф читаем только у ЖИВОЙ сессии: до логина сервис держит там оптимистичный дефолт.</summary>
+    [Fact]
+    public void XsmartVerdict_ColdStart_IgnoresStaleTier()
+    {
+        var (status, _) = QbitController.XsmartVerdict(XsCold(b => b["session"]["tier"] = "Free"));
+
+        Assert.Equal("ok", status);
+    }
+
+    /// <summary>
+    /// 🔴 Дефект, который ловит этот тест: у ЛЁГШЕГО портала сессии тоже нет — логин не проходит,
+    /// keyHash остаётся пустым. Судить только по authorized значило бы красить полностью мёртвый
+    /// раздел зелёным «поднимет первый зритель» — ровно тот ложный ok, ради которого хелс-чеки
+    /// переписывали в 2.44. Отличаем по статистике походов наверх.
+    /// </summary>
+    [Fact]
+    public void XsmartVerdict_PortalDown_IsFailNotOk()
+    {
+        var (status, detail) = QbitController.XsmartVerdict(XsCold(b =>
+        {
+            b["upstream"]["lastError"] = "http 502";
+            b["upstream"]["lastErrorAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            b["upstream"]["logins"] = 12;          // каждый заход зрителя пробует логин заново
+        }));
+
+        Assert.Equal("fail", status);
+        Assert.Contains("портал не отвечает", detail);
+        Assert.Contains("http 502", detail);
+    }
+
+    /// <summary>Протухший ключ сервис лечит сам следующим же вызовом — это жёлтое, а не красное.</summary>
+    [Fact]
+    public void XsmartVerdict_StaleKey_IsWarn()
+    {
+        var (status, detail) = QbitController.XsmartVerdict(XsCold(b =>
+        {
+            b["upstream"]["lastError"] = "http 404";
+            b["upstream"]["lastErrorAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            b["upstream"]["lastOkAt"] = DateTimeOffset.UtcNow.AddMinutes(-3).ToUnixTimeMilliseconds();
+        }));
+
+        Assert.Equal("warn", status);
+        Assert.Contains("протух", detail);
+    }
+
+    /// <summary>Сессию сбросили, а наверх с тех пор не ходили: ошибок нет — значит и красить нечего.</summary>
+    [Fact]
+    public void XsmartVerdict_SessionDroppedWithoutErrors_IsOk()
+    {
+        var (status, detail) = QbitController.XsmartVerdict(XsCold(b =>
+            b["upstream"]["lastOkAt"] = DateTimeOffset.UtcNow.AddMinutes(-10).ToUnixTimeMilliseconds()));
+
+        Assert.Equal("ok", status);
+        Assert.Contains("следующий запрос", detail);
+    }
+
+    [Fact]
+    public void XsmartVerdict_FreeTier_IsWarn()
+    {
+        var (status, detail) = QbitController.XsmartVerdict(Xs(b => b["session"]["tier"] = "Free"));
+
+        Assert.Equal("warn", status);
+        Assert.Contains("Free", detail);
+        Assert.Contains("Premium", detail);
+    }
+
+    /// <summary>
+    /// Сессия жива, но последний поход наверх упал — жёлтое с кодом и возрастом.
+    /// 🔴 Судим по lastError (он обнуляется на КАЖДОМ успехе), а не по session.consecutiveFailures:
+    /// снаружи тот бывает только 0 или 1, причём наоборот — устойчивый сбой обнуляет его в ноль.
+    /// </summary>
+    [Fact]
+    public void XsmartVerdict_LastRequestFailed_IsWarnWithCode()
+    {
+        var (status, detail) = QbitController.XsmartVerdict(Xs(b =>
+        {
+            b["session"]["consecutiveFailures"] = 0;   // именно так и выглядит устойчивый сбой
+            b["upstream"]["lastError"] = "http 502";
+            b["upstream"]["lastErrorAt"] = DateTimeOffset.UtcNow.AddMinutes(-4).ToUnixTimeMilliseconds();
+        }));
+
+        Assert.Equal("warn", status);
+        Assert.Contains("http 502", detail);
+        Assert.Contains("4 мин назад", detail);
+    }
+
+    /// <summary>Секреты не светим: произвольный message апстрима (там всплывают хосты) в строку не идёт.</summary>
+    [Fact]
+    public void XsmartVerdict_RawUpstreamMessage_IsNotLeaked()
+    {
+        var (status, detail) = QbitController.XsmartVerdict(Xs(b =>
+            b["upstream"]["lastError"] = "fetch failed https://f.xsmart.tv/api/?key=deadbeef"));
+
+        Assert.Equal("warn", status);
+        Assert.DoesNotContain("xsmart.tv", detail);
+        Assert.DoesNotContain("deadbeef", detail);
+    }
+
+    [Fact]
+    public void XsmartVerdict_LoginStorm_IsWarn()
+    {
+        var (status, detail) = QbitController.XsmartVerdict(Xs(b => b["upstream"]["logins"] = 7));
+
+        Assert.Equal("warn", status);
+        Assert.Contains("key_check", detail);
+    }
+
+    /// <summary>Один законный релогин (протух ключ, переезд на другую реплику портала) экран не красит.</summary>
+    [Fact]
+    public void XsmartVerdict_SecondLogin_IsStillOk()
+    {
+        var (status, detail) = QbitController.XsmartVerdict(Xs(b => b["upstream"]["logins"] = 2));
+
+        Assert.Equal("ok", status);
+        Assert.Contains("логинов: 2", detail);
+    }
+
+    [Fact]
+    public void XsmartVerdict_BrokenBody_IsFail()
+    {
+        Assert.Equal("fail", QbitController.XsmartVerdict(null).status);
+        Assert.Equal("fail", QbitController.XsmartVerdict(new JObject { ["ok"] = true, ["configured"] = true }).status);
+        Assert.Equal("fail", QbitController.XsmartVerdict(Xs(b => b["ok"] = false)).status);
+    }
+
+    /// <summary>
+    /// Киллсвитч: пустой адрес = ⏸, а не ❌. Ровно этот случай на реплике, где раздел выключен
+    /// профилем compose — иначе её экран висел бы вечно красным. ms=0 доказывает, что в сеть не ходили.
+    /// </summary>
+    [Fact]
+    async public Task ProbeXsmart_EmptyApi_IsOffWithoutNetwork()
+    {
+        TestEnv.EnsureConf();
+        string prev = ModInit.conf.xsmartApi;
+        try
+        {
+            ModInit.conf.xsmartApi = "";
+            var row = await QbitController.ProbeXsmart();
+
+            Assert.Equal("off", row.Value<string>("status"));
+            Assert.Equal(0, row.Value<long>("ms"));
+            Assert.Equal("Инфраструктура", row.Value<string>("group"));
+        }
+        finally { ModInit.conf.xsmartApi = prev; }
     }
     #endregion
 
