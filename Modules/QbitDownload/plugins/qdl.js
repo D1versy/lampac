@@ -504,6 +504,67 @@
         return (t && t.watched) ? 'grab' : 'off';
     }
 
+    // Карточка «Загрузок», скачанная из раздела XSMART: сервер кладёт {xsmart:{cat,id,ref,watch}}
+    // в /qdl/list (XsmartDecorateListItem). Третий контур слежения — свой файл подписок и свои
+    // ручки; с торрентным watch.json он не пересекается (пояс изоляции).
+    function isXsmart(t) {
+        return !!(t && t.xsmart && t.xsmart.id);
+    }
+
+    // Режим слежения xsmart-карточки — те же три состояния и тот же фолбэк, что у jutMode.
+    function xsMode(t) {
+        var m = t && t.xsmart && t.xsmart.watch;
+        if (m === 'off' || m === 'notify' || m === 'grab') return m;
+        return (t && t.watched) ? 'grab' : 'off';
+    }
+
+    // Показывать ли пункт слежения. Подписка у XSMART бывает только на сериал (сервер отвечает
+    // NOT_FOUND «Следить можно только за сериалом»), тип берём из меты — XsmartEnsureMeta пишет
+    // media_type по t.series.
+    // ⚠️ Вторая половина условия обязательна: без неё кривая или старая мета оставила бы уже
+    // существующую подписку вообще без способа её снять.
+    function xsCanWatch(t) {
+        return isXsmart(t) && ((t.meta && t.meta.media_type === 'tv') || xsMode(t) !== 'off');
+    }
+
+    function xsErrText(r) {
+        var m = r && (r.message || r.error);
+        return m || 'XSMART недоступен';
+    }
+
+    // Смена состояния подписки XSMART. from — текущий режим, want — желаемый ('off'|'notify'|'grab').
+    //
+    // ⚠️ Существующей подписке режим меняем через /qdl/xsmart/watch/mode, а НЕ повторной
+    // подпиской: /qdl/xsmart/watch сбрасывает baseline на текущее состояние источника, и серия,
+    // вышедшая между тиком и нажатием, ушла бы в baseline — в режиме «качаю» её уже никто
+    // не скачает. Плюс /watch/mode не ходит в сеть и работает, когда XSMART лежит.
+    function xsWatchSet(cat, id, from, want, done) {
+        var q = 'cat=' + encodeURIComponent(cat) + '&id=' + encodeURIComponent(id);
+        var grabFlag = want === 'grab' ? 1 : 0;
+        var u = want === 'off' ? (API + '/qdl/xsmart/watch/remove?' + q)
+              : from === 'off' ? (API + '/qdl/xsmart/watch?' + q + '&autoGrab=' + grabFlag)
+              : (API + '/qdl/xsmart/watch/mode?' + q + '&autoGrab=' + grabFlag);
+        var viaMode = u.indexOf('/watch/mode') !== -1;
+        // подписки могло уже не быть (NOT_WATCHED) — добираем полной подпиской, режим проставится
+        var repair = function () { xsWatchSet(cat, id, 'off', want, done); };
+
+        req(u, function (r) {
+            if (want !== 'off' && !(r && r.ok)) {
+                if (viaMode) { repair(); return; }
+                Lampa.Noty.show(xsErrText(r));
+                return;
+            }
+            Lampa.Noty.show(want === 'off' ? 'Слежение снято'
+                          : (r && r.message) ? r.message
+                          : want === 'grab' ? '⬇ Новые серии буду качать сам'
+                          : '🔔 Сообщу о новых сериях, качать не буду');
+            if (done) done(want);
+        }, function () {
+            if (viaMode) repair();
+            else Lampa.Noty.show('Не удалось изменить слежение');
+        });
+    }
+
     // поллинг прогресса транскода: «в очереди (N)» один раз, тост каждые ~10%, финал по done/error.
     // ⚠ ветка queued обязана продолжать поллинг, иначе полл тихо умрёт на стоящей в очереди задаче
     var tcPolls = {};
@@ -2368,6 +2429,11 @@
         // «Смотреть» онлайн и «Скачать»), а не плеер по мёртвому /qdl/stream-URL.
         var fallback = function () {
             if (n.slug) openJutTitle(n.slug, n.title);
+            // xsmart-уведомление: сервер отдаёт ref «cat-id» (только для своих ключей). В режиме
+            // «только уведомляю» карточки в «Загрузках» НЕТ вовсе — открываем карточку тайтла
+            // в разделе XSMART, а не плеер по мёртвому /qdl/stream-URL. Раздел рисует ЧУЖОЙ
+            // плагин: не загружен → openXsmartTitle вернёт false и мы уйдём в прежний фолбэк.
+            else if (n.xsmart && openXsmartTitle(n.xsmart, n.title)) { /* открыли карточку тайтла */ }
             else if (n.hash) watchByHash(n.hash, n.title);
             else Lampa.Noty.show('Загрузка не найдена');
         };
@@ -2380,6 +2446,24 @@
 
     function openJutTitle(slug, title) {
         Lampa.Activity.push({ url: '', title: title || 'jut.su', component: 'jut_title', jut_slug: slug });
+    }
+
+    // Карточку тайтла XSMART рисует ЧУЖОЙ плагин (xsmart.js из контейнера xsmart-proxy), а не мы.
+    // Если раздел не загружен, компонента в реестре нет и Activity.push увёл бы в nocomponent —
+    // пустой экран. Поэтому проверяем реестр и возвращаем false, чтобы вызывающий ушёл в свой
+    // фолбэк. Контракт активити — openTitle в xsmart.js (xsmart_card компонент не читает).
+    function openXsmartTitle(ref, title) {
+        var m = /^(\d+)-(.+)$/.exec(String(ref || ''));
+        if (!m) return false;
+        try {
+            if (!Lampa.Component || typeof Lampa.Component.get !== 'function') return false;
+            if (!Lampa.Component.get('xsmart_title')) return false;
+            Lampa.Activity.push({
+                url: '', title: title || 'XSMART', component: 'xsmart_title',
+                xsmart_cat: parseInt(m[1], 10), xsmart_id: m[2], page: 1
+            });
+            return true;
+        } catch (e) { return false; }
     }
 
     // Центр уведомлений (история): постер · сериал · серия · время
@@ -2732,6 +2816,20 @@
                 act: 'jutwatch'
             });
         }
+        // XSMART — третий контур: подписка на (тайтл, сезон) в своём файле и своих ручках.
+        // ⚠️ Как и jut-карточка, xsmart-карточка ВСЕГДА local — торрентная ветка ниже её не
+        // ловит, и без этой ветки пункта не было видно вообще (жалоба владельца).
+        // ⚠️ «Следить» ЗДЕСЬ означает «качать новые серии» (паритет с jut.su): понижение до
+        // «только уведомляю» живёт на карточке тайтла в разделе XSMART.
+        else if (xsCanWatch(t)) {
+            var xm = xsMode(t);
+            items.push({
+                title: xm === 'grab' ? '🔔 Не следить за новыми сериями'
+                     : xm === 'notify' ? '🔔 Слежу: только уведомления…'
+                     : '🔔 Следить: качать новые серии',
+                act: 'xswatch'
+            });
+        }
         else if (!t.local && t.state !== 'local')
             items.push({ title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'watch' });
         // в под-гриде коллекции — «Убрать», в общем гриде/карточке — «Добавить».
@@ -2782,6 +2880,33 @@
                         ],
                         onSelect: function (a) {
                             if (a.want) jutWatchSet(jslug, 'notify', a.want, applyJm);
+                            else Lampa.Controller.toggle('content');
+                        },
+                        onBack: function () { Lampa.Controller.toggle('content'); }
+                    });
+                }
+                else if (b.act === 'xswatch') {
+                    // «Загрузки» — точка, где включается автоскачивание. Понижение до
+                    // «только уведомления» живёт на карточке тайтла в разделе XSMART.
+                    var xc = t.xsmart.cat, xi = t.xsmart.id;
+                    var applyXm = function (now) {
+                        t.xsmart.watch = now;
+                        t.watched = now !== 'off';   // отметка в гриде — поле, общее с торрентами
+                    };
+                    var xmNow = xsMode(t);
+                    if (xmNow === 'off') xsWatchSet(xc, xi, 'off', 'grab', applyXm);
+                    else if (xmNow === 'grab') xsWatchSet(xc, xi, 'grab', 'off', applyXm);
+                    else Lampa.Select.show({
+                        // подписка сделана с карточки тайтла (только уведомления) — из «Загрузок»
+                        // её можно поднять до скачивания или снять совсем
+                        title: 'Новые серии — XSMART',
+                        items: [
+                            { title: '⬇ Качать новые серии', subtitle: 'сейчас только уведомления', want: 'grab' },
+                            { title: '🔕 Не следить', want: 'off' },
+                            { title: 'Отмена' }
+                        ],
+                        onSelect: function (a) {
+                            if (a.want) xsWatchSet(xc, xi, 'notify', a.want, applyXm);
                             else Lampa.Controller.toggle('content');
                         },
                         onBack: function () { Lampa.Controller.toggle('content'); }

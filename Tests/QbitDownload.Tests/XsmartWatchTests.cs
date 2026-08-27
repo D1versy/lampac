@@ -353,4 +353,32 @@ public class XsmartWatchTests
 
         Assert.Null(XsAccess.Rec("3-110"));
     }
+
+    // ── ref из ключа серии: тап по уведомлению должен открывать раздел XSMART ──
+    // В режиме "notify" карточки в «Загрузках» НЕТ вовсе, а hash необратим — без ref
+    // тап уходил в торрентную ветку и открывал плеер по мёртвому URL (та же болезнь,
+    // которую у jut.su лечили полем slug).
+
+    [Fact]
+    public void Ref_из_ключа_серии_разбирается_обратно()
+    {
+        Assert.Equal("3-109", QbitController.XsmartRefFromSeriesKey("x3-109"));
+    }
+
+    [Theory]
+    [InlineData("t603692")]        // торрентный по tmdb id
+    [InlineData("l4f3a2b1c")]      // торрентный по fnv(link)
+    [InlineData("jliar-game")]     // jut.su по slug
+    [InlineData("x")]
+    [InlineData("x3")]             // без id
+    [InlineData("x3-109-2")]       // лишний дефис: ref строго cat-id
+    [InlineData("xабв-109")]       // cat не число
+    [InlineData("")]
+    [InlineData(null)]
+    public void Чужие_и_битые_ключи_наружу_не_идут(string key)
+    {
+        // Гейт нужен именно здесь: поле уходит в /qdl/notifications ВСЕМ клиентам,
+        // и торрентный ключ, просочившийся как xsmart-ref, увёл бы тап не туда.
+        Assert.Null(QbitController.XsmartRefFromSeriesKey(key));
+    }
 }

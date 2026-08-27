@@ -4154,6 +4154,12 @@ public partial class QbitController : BaseController
                     // уходил в торрентную ветку и открывал плеер по мёртвому URL.
                     // Торрентные seriesKey наружу не идут (гейт внутри JutSlugFromSeriesKey).
                     ["slug"] = slug,
+                    // xsmart-уведомление: ref «cat-id» из ключа серии (seriesKey = "x" + ref).
+                    // Та же болезнь, что лечил slug: в режиме «только уведомляю» карточки
+                    // в «Загрузках» нет, и без ref тап уходил в торрентную ветку и открывал
+                    // плеер по мёртвому URL. Гейт по префиксу — внутри XsmartRefFromSeriesKey,
+                    // торрентные t…/l… и jut-овские j… наружу не идут.
+                    ["xsmart"] = XsmartRefFromSeriesKey(n.seriesKey),
                     // Постер решает сервер (qdl 2.46) — см. NotiPosterUrl. null = плитка без картинки.
                     // ⚠️ Имя поля НЕ "poster": JutPosterStampOne читает c["poster"] как сырой CDN-URL
                     // тайтла и записал бы наш путь в match/<slug>.json, если ленту когда-нибудь
