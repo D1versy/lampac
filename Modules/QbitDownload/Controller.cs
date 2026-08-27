@@ -4182,13 +4182,26 @@ public partial class QbitController : BaseController
     [Route("qdl/notifications/clear")]
     public ActionResult NotificationsClear()
     {
+        // 🔴 На реплике лента — ЗЕРКАЛО дома (ReplicaNoti.cs), а не своя история: очистка снесла бы
+        // привезённое, и вернулось бы оно только со следующей сменой домашней сигнатуры, то есть
+        // могло бы и не вернуться сутками. Чистят ленту дома, там же, где она и рождается.
+        var deny = ReplicaReadOnlyDeny(); if (deny != null) return deny;
+
         try { using var db = new SqlContext(); db.noti.ExecuteDelete(); return Json(new { success = true }); }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] notifications clear: " + ex); return Json(new { success = false }); }
     }
 
     [HttpGet, AllowAnonymous]
     [Route("qdl/notifications/scan")]
-    async public Task<ActionResult> NotificationsScan() { int n = await ScanEpisodeNotifications(); return Json(new { success = true, created = n }); }
+    async public Task<ActionResult> NotificationsScan()
+    {
+        // Сканер на реплике не работает по построению (watch.json пуст, слежение 403) — но он ходит
+        // в её qBittorrent и пишет в ту же таблицу, куда кладётся зеркало. Отказ честнее пустого «ок».
+        var deny = ReplicaReadOnlyDeny(); if (deny != null) return deny;
+
+        int n = await ScanEpisodeNotifications();
+        return Json(new { success = true, created = n });
+    }
     #endregion
 
     #region /qdl/collections — коллекции фильмов в «Загрузках» (общие для всех клиентов)

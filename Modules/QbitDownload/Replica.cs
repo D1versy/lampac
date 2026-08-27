@@ -284,7 +284,10 @@ public partial class QbitController
             // Staticache. Файлы кеша копировать бессмысленно — ключ считается из Scheme+Host,
             // а исходного URL в имени файла нет (Core/Middlewares/Staticache.cs).
             ["rows"] = new JArray(CatalogWarmup.ExportRowPaths().Cast<object>().ToArray()),
-            ["notiMaxId"] = NotiMaxIdSafe()
+            ["notiMaxId"] = NotiMaxIdSafe(),
+            // Сигнатура ленты (ReplicaNoti.cs): пока она та же, реплика за снапшотом не ходит.
+            // Поле аддитивное, manifestVersion не меняем — по той же причине, что и у known ниже.
+            ["notiSig"] = NotiSigSafe()
         };
 
         // 🔴 Fail-closed: неполный known ХУЖЕ отсутствующего. Отсутствие реплика читает как

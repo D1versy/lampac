@@ -108,9 +108,13 @@ public class ModInit : IModuleLoaded
         }, null, watchFirst, System.TimeSpan.FromHours(hours));
 
         // сканер «серия докачалась» → уведомления: первый запуск через 2 мин, далее каждые N минут
+        // ⚠️ На реплике таймера нет вовсе: слежение там запрещено (403), watch.json пуст, и сканер
+        // каждые 15 минут ходил в свой qBittorrent, чтобы гарантированно создать ноль строк. Заодно
+        // это гарантия для зеркала ленты (ReplicaNoti.cs): своих строк в noti у реплики не заводится,
+        // и домашние Id вставляются без единого шанса на столкновение.
         int notifyMin = (conf != null && conf.notifyScanIntervalMinutes > 0) ? conf.notifyScanIntervalMinutes : 15;
         _notifyTimer?.Dispose();
-        _notifyTimer = new System.Threading.Timer(async _ =>
+        _notifyTimer = QbitController.ReplicaMode ? null : new System.Threading.Timer(async _ =>
         {
             try { await QbitController.ScanEpisodeNotifications(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] notify timer: " + ex); }

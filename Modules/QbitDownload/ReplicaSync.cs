@@ -353,6 +353,11 @@ public partial class QbitController
         // а карточка без «Продолжить» работает.
         string historyNote = await ReplicaPullHistory(main);
 
+        // ── 7в. лента уведомлений и память экрана jut.su ─────────────────────────
+        // После истории и по той же причине: своих событий у реплики нет ни одного, лента здесь —
+        // зеркало дома. Запрос делается, только если сигнатура в манифесте изменилась.
+        string notiNote = await ReplicaPullNoti(main, manifest, state);
+
         // ── 8. удаления ──────────────────────────────────────────────────────────
         // Оба класса под одним fail-safe: манифест получен, версия сошлась, оба источника ok,
         // набор не съёжился. Зеркало идёт ПЕРВЫМ — освобождённое им место часто уводит
@@ -391,7 +396,8 @@ public partial class QbitController
             : $"зеркало −{mirrored}, ждут {orphansPending}; ";
 
         string summary = $"план {target.Count} шт / {Bytes(planned)}; добавлено {added}; мост ждёт {bridgePending}; мета {metaSynced}, постеры {postersSynced}; {mirrorNote}вычищено {evicted}"
-            + (historyNote != null ? "; " + historyNote : "");
+            + (historyNote != null ? "; " + historyNote : "")
+            + (notiNote != null ? "; " + notiNote : "");
         Console.WriteLine("[QbitDownload] replica: " + summary);
 
         // 🔴 Вердикт здоровья ставится РОВНО ЗДЕСЬ и больше нигде. Раньше его писали три места

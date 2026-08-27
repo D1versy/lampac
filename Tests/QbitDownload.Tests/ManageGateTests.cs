@@ -444,4 +444,62 @@ public class ManageGateTests
         foreach (string route in new[] { "qdl/list", "qdl/stream", "qdl/collections" })
             Assert.DoesNotContain("ManageDenied()", HandlerBody(src, route), StringComparison.Ordinal);
     }
+
+    // ══ уведомления на реплике: лента там зеркало дома ═════════════════════════
+
+    [Fact]
+    public async Task На_реплике_очистка_и_сканер_уведомлений_отвечают_403()
+    {
+        // Лента на реплике целиком привезена с дома (ReplicaNoti.cs). Очистка снесла бы зеркало
+        // до следующей смены домашней сигнатуры, а сканер полез бы в её qBittorrent и написал бы
+        // в ту же таблицу строки со своими Id.
+        TestEnv.FreshCache();
+
+        string prev = ModInit.conf.replicaRole;
+        try
+        {
+            ModInit.conf.replicaRole = "replica";
+
+            var clear = Ctl(uid: Dev, path: "/qdl/notifications/clear").NotificationsClear();
+            Assert.Equal(403, StatusOf(clear));
+            Assert.Equal("сервер-реплика: только чтение", ErrorOf(clear));
+
+            var scan = await Ctl(uid: Dev, path: "/qdl/notifications/scan").NotificationsScan();
+            Assert.Equal(403, StatusOf(scan));
+            Assert.Equal("сервер-реплика: только чтение", ErrorOf(scan));
+        }
+        finally { ModInit.conf.replicaRole = prev; }
+    }
+
+    [Fact]
+    public void Чтение_ленты_и_отметка_прочитанного_на_реплике_работают()
+    {
+        // 🔴 Без этого бейдж на tv2 не погасить никогда: «прочитано» там местное состояние
+        // просмотра ленты, а не правка источника правды — оно и домой не уезжает.
+        TestEnv.FreshCache();
+
+        string prev = ModInit.conf.replicaRole;
+        try
+        {
+            ModInit.conf.replicaRole = "replica";
+
+            Assert.NotEqual(403, StatusOf(Ctl(uid: Dev, path: "/qdl/notifications").Notifications()));
+            Assert.NotEqual(403, StatusOf(Ctl(uid: Dev, path: "/qdl/notifications/read").NotificationsRead()));
+        }
+        finally { ModInit.conf.replicaRole = prev; }
+    }
+
+    [Fact]
+    public void Гейт_реплики_стоит_ровно_в_мутациях_уведомлений()
+    {
+        // Сторож по исходнику: перестановка строк местами или новая ручка ленты без гейта иначе
+        // ловятся только на живой реплике.
+        string src = File.ReadAllText(Resolve(Path.Combine("Modules", "QbitDownload", "Controller.cs")));
+
+        foreach (string route in new[] { "qdl/notifications/clear", "qdl/notifications/scan" })
+            Assert.Contains("ReplicaReadOnlyDeny()", HandlerBody(src, route), StringComparison.Ordinal);
+
+        foreach (string route in new[] { "qdl/notifications", "qdl/notifications/read" })
+            Assert.DoesNotContain("ReplicaReadOnlyDeny()", HandlerBody(src, route), StringComparison.Ordinal);
+    }
 }

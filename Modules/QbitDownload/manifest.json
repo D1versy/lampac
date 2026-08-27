@@ -50,6 +50,7 @@
     "ReplicaSync.cs",
     "ReplicaRotate.cs",
     "ReplicaHistory.cs",
+    "ReplicaNoti.cs",
     "HistoryBackfill.cs",
     "TestSandbox.cs",
 
