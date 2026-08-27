@@ -263,9 +263,17 @@ public partial class QbitController
         if (skippedBig > 0)
             Console.WriteLine("[QbitDownload] replica noti: пропущено крупных файлов jut-памяти — " + skippedBig);
 
+        // Карта «seriesKey → живой хеш тайтла»: ею NotiPosterUrl спасает строки, чей хеш увёл
+        // SWITCH или перезахват (третья ветка резолва). Дома она строится из watch.json, которого
+        // на реплике нет и не будет, — поэтому едет готовой.
+        var live = new JObject();
+        try { foreach (var kv in WatchHashBySeriesKey()) live[kv.Key] = kv.Value; }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] replica noti: живые хеши: " + ex.Message); }
+
         var j = new JObject
         {
             ["notiVersion"] = ReplicaNotiVersion,
+            ["live"] = live,
             // 🔴 ok различает «лента пуста» и «прочитать не смог». Без этого флага сбой чтения БД
             // выглядел бы на реплике как «дом всё почистил» — и зеркало стёрлось бы по аварии.
             ["ok"] = ok,
@@ -283,6 +291,33 @@ public partial class QbitController
     #endregion
 
     #region роль replica: применить снапшот
+
+    /// <summary>Файл с привезённой картой «seriesKey → живой хеш» (только на реплике).</summary>
+    static string NotiLivePath => Path.Combine(ModInit.conf?.cachePath ?? "/qdl-data", "noti-live.json");
+
+    /// <summary>
+    /// Карта живых хешей для резолва постеров ленты. Здесь она — привезённая копия домашней:
+    /// собственного watch.json у реплики нет. Пусто = строки с уведённым хешем останутся без
+    /// картинки, то есть ровно то, что было до переноса, — не авария.
+    /// </summary>
+    internal static Dictionary<string, string> NotiLiveHashes()
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            var jo = JsonStore.ReadObject(NotiLivePath);
+            if (jo == null) return map;
+
+            foreach (var p in jo.Properties())
+            {
+                string h = p.Value?.ToString();
+                if (!string.IsNullOrEmpty(p.Name) && ValidHash(h)) map[p.Name] = h;
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] replica noti live: " + ex.Message); }
+
+        return map;
+    }
 
     /// <summary>Сколько строк в местной ленте. -1 = посчитать не удалось (решение принимает вызывающий).</summary>
     static int NotiRowCountSafe()
@@ -340,6 +375,10 @@ public partial class QbitController
         var rows = NotiSnapshotRows(raws);
         var (n, fresh, unread, prevMaxId) = ApplyNoti(rows);
         int jn = ApplyJutHistory(j["jut"] as JArray);
+
+        // Карту живых хешей кладём ДО того, как клиент придёт за лентой: без неё строки с уведённым
+        // хешем нарисуются плиткой, а обновится картинка только со следующей сменой сигнатуры.
+        if (j["live"] is JObject live) { try { JsonStore.WriteNow(NotiLivePath, live); } catch (Exception ex) { Console.WriteLine("[QbitDownload] replica noti live: " + ex.Message); } }
 
         // Курсор двигаем только после того, как строки реально легли: иначе одна неудачная запись
         // означала бы «зеркало актуально» до следующей смены сигнатуры дома.

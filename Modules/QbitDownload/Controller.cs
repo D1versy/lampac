@@ -4092,6 +4092,12 @@ public partial class QbitController : BaseController
     /// </summary>
     static Dictionary<string, string> WatchHashBySeriesKey()
     {
+        // На реплике слежения нет по построению, значит и watch.json пуст — а строк с уведённым
+        // хешем в привезённой ленте столько же, сколько дома (у нас это была треть). Карту им
+        // отдаёт зеркало (ReplicaNoti.cs), иначе центр уведомлений на tv2 выглядел бы заметно
+        // беднее домашнего на ровном месте.
+        if (ReplicaMode) return NotiLiveHashes();
+
         var map = new Dictionary<string, string>(StringComparer.Ordinal);
         try
         {

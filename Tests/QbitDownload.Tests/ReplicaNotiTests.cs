@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
 using QbitDownload;
 using Xunit;
@@ -238,6 +239,50 @@ public class ReplicaNotiTests
         var want = QbitController.NotiPostersWanted(QbitController.NotiSnapshotRows(arr), 0, _ => 0, 10);
 
         Assert.Equal(10, want.Count);
+    }
+
+    // ══ карта живых хешей (постеры строк, чей хеш увёл SWITCH) ════════════════
+
+    [Fact]
+    public void Карта_живых_хешей_читается_и_чистится_от_мусора()
+    {
+        string cache = TestEnv.FreshCache();
+        JsonStore.WriteNow(Path.Combine(cache, "noti-live.json"), new JObject
+        {
+            ["t555"] = H('b'),
+            ["t777"] = "не-хеш",       // мусор из сети до карты постеров доходить не должен
+            [""] = H('c')
+        });
+
+        var map = QbitController.NotiLiveHashes();
+
+        Assert.Equal(H('b'), map["t555"]);
+        Assert.Single(map);
+    }
+
+    [Fact]
+    public void На_реплике_постер_берётся_из_привезённой_карты()
+    {
+        // 🎯 Дома треть строк ленты получает обложку третьей веткой NotiPosterUrl — по живому хешу
+        // тайтла из watch.json. На реплике watch.json пуст всегда, и без привезённой карты центр
+        // уведомлений на tv2 выглядел бы заметно беднее домашнего: у нас это было 35 картинок из 50.
+        string cache = TestEnv.FreshCache();
+        string dead = H('a'), alive = H('b');
+
+        Directory.CreateDirectory(Path.Combine(cache, "img"));
+        File.WriteAllBytes(Path.Combine(cache, "img", alive + ".jpg"), new byte[128]);
+        SeedDb(new NotiModel { seriesKey = "t555", seriesId = 555, hash = dead, epkey = "s1e1", created = DateTime.UtcNow });
+        JsonStore.WriteNow(Path.Combine(cache, "noti-live.json"), new JObject { ["t555"] = alive });
+
+        string prev = ModInit.conf.replicaRole;
+        try
+        {
+            ModInit.conf.replicaRole = "replica";
+            string body = (LiveAccess.Controller(uid: "dueq3shm").Notifications() as ContentResult)?.Content ?? "";
+
+            Assert.Contains("/qdl/poster?hash=" + alive, body);
+        }
+        finally { ModInit.conf.replicaRole = prev; }
     }
 
     // ══ память экрана jut.su ═══════════════════════════════════════════════════
