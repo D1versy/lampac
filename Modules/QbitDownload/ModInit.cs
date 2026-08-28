@@ -51,6 +51,7 @@ public class ModInit : IModuleLoaded
         EventListener.MyLocalIp += MyIp;   // внешний IP без api.ipify.org (qdl 2.15, см. MyIp ниже)
         CatalogWarmup.Attach();            // почасовой прогрев каталога главной (CatalogWarmup.cs)
         Perms.Attach();                    // реестр устройств для прав на D1versy Live/Rec (Perms.cs)
+        Groups.Attach();                   // общая история у связанных устройств (Groups.cs, qdl 2.81)
 
         // SQLite-хранилище уведомлений: создаём схему (без миграций) + WAL для параллельных read/write
         try
@@ -509,6 +510,7 @@ public class ModInit : IModuleLoaded
                 // к прежнему пути и обязана быть забыта (перечитается лениво с нового).
                 QbitController.JutIdxReset();
                 Perms.ResetForConfigReload();
+                Groups.ResetForConfigReload();   // groups.json тоже живёт внутри cachePath
             }
             QbitController.DropListCache();
         }

@@ -271,6 +271,13 @@ public class ModuleConf : ModuleBaseConf
     // обычное устройство), и уборка /admin/d1v/api/test-purge отказывает всем без исключения.
     public bool testSandbox { get; set; } = true;
 
+    // Группы устройств (Groups.cs, qdl 2.81): связанные устройства делят ОДНУ историю
+    // просмотров — сервер подменяет им айди устройства на айди группы на входе в
+    // /bookmark/*, /timecode/* и /reqinfo. Состав групп лежит в groups.json (cachePath),
+    // не в конфиге. false — КИЛЛСВИТЧ на лету: резолв становится тождественным, история
+    // у всех снова личная, состав групп при этом цел и включается обратно одной правкой.
+    public bool groupsEnabled { get; set; } = true;
+
     // ── Заброшенная основная раздача: предложение переключиться на более полную ──
 
     public string watchAutoSwitch { get; set; } = "notify"; // off | notify (уведомление+подтверждение) | auto

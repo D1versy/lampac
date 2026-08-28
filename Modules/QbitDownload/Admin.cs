@@ -73,11 +73,22 @@ public class D1VAdminController : BaseController
     public ActionResult Devices()
     {
         SetHeadersNoCache();
+
+        // Группа общей истории (qdl 2.81) — колонкой прямо здесь, чтобы связка была видна там же,
+        // где владелец раздаёт права. Это только поиск по индексу в памяти, без единого запроса в БД.
+        var devices = Perms.List();
+        foreach (var d in devices)
+        {
+            string gid = Groups.GroupOf((string)d["uid"]);
+            d["group"] = gid ?? "";
+            d["groupName"] = gid == null ? "" : Groups.NameOf(gid);
+        }
+
         var payload = new JObject
         {
             ["enabled"] = ModInit.conf?.permsEnabled != false,
             ["features"] = new JArray(Perms.Features),
-            ["devices"] = Perms.List()
+            ["devices"] = devices
         };
         return Content(payload.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
     }
@@ -189,6 +200,142 @@ public class D1VAdminController : BaseController
 
         return Content(json, "application/json; charset=utf-8");
     }
+
+    #endregion
+
+    #region группы устройств — общая история (qdl 2.81)
+
+    // Связанные устройства делят одну историю просмотров: сервер подменяет им айди устройства
+    // на айди группы на входе в /bookmark/*, /timecode/* и /reqinfo (Groups.cs). Здесь — только
+    // управление составом; сама подмена и правила слияния живут в Groups.cs / GroupsHistory.cs.
+    //
+    // 🔴 Все операции, которые ПИШУТ историю, идут парой «сухой прогон → применить»: владелец
+    // видит счётчики до того, как нажмёт кнопку. Та же традиция, что у history-backfill и
+    // test-purge выше.
+
+    [HttpGet]
+    [Route("/admin/d1v/api/groups")]
+    public ActionResult GroupsList()
+    {
+        SetHeadersNoCache();
+
+        var payload = new JObject
+        {
+            ["enabled"] = ModInit.conf?.groupsEnabled != false,
+            ["replica"] = QbitController.ReplicaMode,
+            ["groups"] = Groups.List(),
+            ["devices"] = Perms.List()
+        };
+        return Content(payload.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
+
+    [HttpPost]
+    [Route("/admin/d1v/api/groups/create")]
+    public ActionResult GroupCreate([FromBody] GroupNameBody body)
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        if (body == null) return BadRequest();
+
+        var deny = GroupsReplicaDeny(); if (deny != null) return deny;
+
+        string gid = Groups.Create(body.name);
+        SetHeadersNoCache();
+
+        if (gid == null)
+            return StatusCode(400, new { success = false, error = "не удалось создать группу (достигнут предел?)" });
+
+        return Content("{\"success\":true,\"gid\":\"" + gid + "\"}", "application/json; charset=utf-8");
+    }
+
+    [HttpPost]
+    [Route("/admin/d1v/api/groups/rename")]
+    public ActionResult GroupRename([FromBody] GroupNameBody body)
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        if (body == null) return BadRequest();
+
+        var deny = GroupsReplicaDeny(); if (deny != null) return deny;
+
+        return Done(Groups.Rename(body.gid, body.name));
+    }
+
+    /// <summary>
+    /// Сухой прогон: что и куда сольётся. Ничего не пишет — админка показывает это в тосте
+    /// перед связыванием, чтобы «сколько тайтлов уедет» было видно ДО, а не после.
+    /// </summary>
+    [HttpGet]
+    [Route("/admin/d1v/api/groups/preview")]
+    public ActionResult GroupPreview(string op, string gid, string uid, bool keepCopy = true)
+        => RunGroupOp(op, gid, uid, keepCopy, apply: false);
+
+    [HttpPost]
+    [Route("/admin/d1v/api/groups/join")]
+    public ActionResult GroupJoin([FromBody] GroupLinkBody body)
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        if (body == null) return BadRequest();
+
+        return RunGroupOp("join", body.gid, body.uid, true, apply: true);
+    }
+
+    [HttpPost]
+    [Route("/admin/d1v/api/groups/leave")]
+    public ActionResult GroupLeave([FromBody] GroupLinkBody body)
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        if (body == null) return BadRequest();
+
+        return RunGroupOp("leave", null, body.uid, body.keepCopy, apply: true);
+    }
+
+    [HttpPost]
+    [Route("/admin/d1v/api/groups/delete")]
+    public ActionResult GroupDelete([FromBody] GroupLinkBody body)
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        if (body == null) return BadRequest();
+
+        return RunGroupOp("dissolve", body.gid, null, body.keepCopy, apply: true);
+    }
+
+    ActionResult RunGroupOp(string op, string gid, string uid, bool keepCopy, bool apply)
+    {
+        var deny = GroupsReplicaDeny(); if (deny != null) return deny;
+
+        SetHeadersNoCache();
+
+        JObject report;
+        switch ((op ?? "").ToLowerInvariant())
+        {
+            case "join": report = Groups.Join(gid, uid, apply); break;
+            case "leave": report = Groups.Leave(uid, keepCopy, apply); break;
+            case "dissolve": report = Groups.Dissolve(gid, keepCopy, apply); break;
+            default: return StatusCode(400, new { success = false, error = "неизвестная операция: " + op });
+        }
+
+        string json = report.ToString(Newtonsoft.Json.Formatting.None);
+
+        // Отказ отдаём 400 вместе с причиной: админке нужно не «не вышло», а что именно.
+        if (report["error"] != null)
+        {
+            HttpContext.Response.StatusCode = 400;
+            return Content(json, "application/json; charset=utf-8");
+        }
+
+        return Content(json, "application/json; charset=utf-8");
+    }
+
+    /// <summary>
+    /// 🔴 ТОЛЬКО ДОМ. Состав групп приезжает на реплику снимком вместе с историей
+    /// (ReplicaHistory), и правка здесь была бы затёрта ближайшим тиком; хуже того, слияние
+    /// поставило бы строке updated=now и домашняя копия навсегда стала бы «старее».
+    /// Та же причина, по которой закрыт history-backfill.
+    /// </summary>
+    ActionResult GroupsReplicaDeny()
+        => QbitController.ReplicaMode ? StatusCode(403, new { error = "replica role" }) : null;
+
+    public class GroupNameBody { public string gid { get; set; } public string name { get; set; } }
+    public class GroupLinkBody { public string gid { get; set; } public string uid { get; set; } public bool keepCopy { get; set; } = true; }
 
     #endregion
 

@@ -196,6 +196,10 @@ public partial class QbitController
             ["timecodes"] = timecodes,
             ["bookmarks"] = bookmarks,
             ["storage"] = storage,
+            // Состав групп общей истории (qdl 2.81). Поле АДДИТИВНОЕ и версию намеренно не
+            // бампает: бамп остановил бы репликацию до синхронного обновления обеих сторон,
+            // а старая реплика лишний ключ просто не заметит.
+            ["groups"] = Groups.Snapshot(),
             ["skippedBig"] = skippedBig,
             ["capped"] = capped
         };
@@ -233,12 +237,16 @@ public partial class QbitController
             return null;
         }
 
+        // Состав групп — ПЕРВЫМ: строки ниже приезжают уже под айди группы, и резолв на
+        // реплике должен знать о нём раньше, чем клиент придёт их читать.
+        bool gr = Groups.ApplySnapshot(j["groups"] as JObject);
+
         int tc = ApplyTimecodes(j["timecodes"] as JArray);
         int bm = ApplyBookmarks(j["bookmarks"] as JArray);
         int st = ApplyStorage(j["storage"] as JArray);
 
-        if (tc == 0 && bm == 0 && st == 0) return null;
-        return $"история: таймкодов {tc}, закладок {bm}, блобов {st}";
+        if (tc == 0 && bm == 0 && st == 0 && !gr) return null;
+        return $"история: таймкодов {tc}, закладок {bm}, блобов {st}" + (gr ? ", состав групп обновлён" : "");
     }
 
     static int ApplyTimecodes(JArray rows)

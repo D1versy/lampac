@@ -121,7 +121,16 @@ function makeLampa(over) {
     Template: { get: () => makeEl() },
     Scroll: function () { this.render = () => makeEl(); this.body = () => make$(); this.append = () => {}; this.minus = () => {}; this.update = () => {}; this.destroy = () => {}; },   // body() — jQuery-заглушка: компоненты зовут scroll.body().append(...)
     Lang: { add() {} },
-    Utils: { putScriptAsync() {}, hash: (s) => 'h' + String(s) },
+    // qdl 2.83: догоняющая установка плагинов (lampainit_invc.catchUpPlugins) — реестр
+    // расширений и загрузчик. Хранит список в памяти, как настоящий Lampa.Plugins.
+    Plugins: {
+      _list: [],
+      _saves: 0,
+      get() { return L.Plugins._list; },
+      add(p) { L.Plugins._list.push(p); },
+      save() { L.Plugins._saves++; },
+    },
+    Utils: { putScriptAsync() {}, _scripts: [], putScript(urls) { L.Utils._scripts.push(urls); }, hash: (s) => 'h' + String(s) },
     // Timeline-стаб: view() выдаёт стабильный объект на hash (как настоящий Lampa.Timeline)
     Timeline: {
       _store: {},
@@ -208,6 +217,10 @@ function loadLampaInit(opts) {
   // Нужен там, где проверяется адрес, вычисленный ИЗ хоста запроса (загрузка плагина XSMART).
   let src = fs.readFileSync(LAMPAINIT, 'utf8');
   if (opts.host) src = src.split('{localhost}').join(opts.host);
+  // opts.initiale — список плагинов, который сервер подставляет в {initiale} (ApiController.LamInit).
+  // Без подстановки `var want = {initiale}` — это объектный литерал со свободной ссылкой, и
+  // догоняющая установка молча уходит в catch. Умолчание — пустой список.
+  src = src.split('{initiale}').join(JSON.stringify(opts.initiale || []));
   const localStorage = opts.localStorage || makeStorage();
   const lampa = opts.lampa || makeLampa();
   const sandbox = {

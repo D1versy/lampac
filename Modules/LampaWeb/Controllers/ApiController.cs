@@ -819,7 +819,9 @@ public class ApiController : BaseController
                 }
             }
 
-            sb = sb.Replace("{initiale}", JsonConvert.SerializeObject(plugins));
+            // qdl 2.82: сама подстановка {initiale} уехала НИЖЕ — после вклейки lampainit-invc.js.
+            // Причина: наш файл тоже использует этот список (догоняющая установка плагинов), а
+            // вклеивается он позже, и замена, сделанная здесь, до него бы не доехала.
             #endregion
 
             if (ModInit.conf.initPlugins.pirate_store)
@@ -848,6 +850,9 @@ public class ApiController : BaseController
                 StatiCacheDisabled = true;
 
             sb = sb.Replace("{lampainit-invc}", initinvcjs);
+            // 🔴 ПОСЛЕ вклейки invc и ДО замены {localhost}: список приезжает с плейсхолдерами
+            // хоста внутри, их чинит общая замена ниже.
+            sb = sb.Replace("{initiale}", JsonConvert.SerializeObject(plugins));
             sb = sb.Replace("{country}", requestInfo.Country ?? string.Empty);
             sb = sb.Replace("{localhost}", host);
             // qdl 2.45: адресные ?v для наших плагинов ДО общей замены — они получают версию по
