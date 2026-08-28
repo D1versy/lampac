@@ -20,6 +20,7 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _jutWarmTimer;  // jut.su: прогрев кеша тайтлов (2 раза в сутки)
     static System.Threading.Timer _jutCatTimer;   // jut.su: снапшот-индекс каталога (сид/голова/ресид)
     static System.Threading.Timer _xsTimer;       // XSMART: слежение за сезоном (раз в сутки)
+    static System.Threading.Timer _seasonTimer;   // торренты: ожидание следующего сезона (раз в сутки)
     static System.Threading.Timer _healthTimer;   // пассивные хелс-чеки: сброс реестра на диск
     static System.Threading.Timer _onlineWarmTimer; // прогрев кнопок «Онлайн» (три полосы, постепенно)
     static System.Threading.Timer _replicaTimer;    // цикл репликации (только при replicaRole=replica)
@@ -228,6 +229,27 @@ public class ModInit : IModuleLoaded
             }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] xsmart watch timer: " + ex); }
         }, null, System.TimeSpan.FromMinutes(xsOverdue ? 8 : 50), System.TimeSpan.FromHours(xsHours));
+
+        // ── Ожидание следующего сезона у торрентных сериалов (SeasonWatch.cs, qdl 2.79) ──
+        // Тик раз в сутки, как у соседних контуров подписки. Первый — на 55-й минуте, после
+        // jut@35 и XSMART@50: все трое ходят в сеть и делят очередь скачивания.
+        // Догон пропущенных тиков обязателен по той же причине, что у jut: при суточном такте
+        // рестарт контейнера иначе сдвигает проверку на новые сутки бесконечно.
+        int seasonHours = System.Math.Max(1, conf?.seasonWatchIntervalHours ?? 24);
+        bool seasonOverdue = QbitController.SeasonWatchOverdue(System.TimeSpan.FromHours(seasonHours), out var seasonSince);
+        if (seasonOverdue)
+            System.Console.WriteLine($"[QbitDownload] season watch: пропущено {seasonSince.TotalHours:F1} ч — первый тик через 9 мин");
+
+        _seasonTimer?.Dispose();
+        _seasonTimer = QbitController.ReplicaMode ? null : new System.Threading.Timer(async _ =>
+        {
+            try
+            {
+                if (conf?.seasonWatch != true) return;   // выключатель проверяется В НАЧАЛЕ тика
+                await QbitController.SeasonWatchTick();
+            }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] season watch timer: " + ex); }
+        }, null, System.TimeSpan.FromMinutes(seasonOverdue ? 9 : 55), System.TimeSpan.FromHours(seasonHours));
 
         // ── Свип долгов скачивания (оба контура) ──────────────────────────────
         // Восстановления на старте мало: серия, упавшая через 10 секунд после запуска (прокси

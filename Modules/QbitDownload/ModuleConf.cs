@@ -243,6 +243,15 @@ public class ModuleConf : ModuleBaseConf
     public int donorUpgradeMinScore { get; set; } = 15;    // насколько кандидат должен обойти текущего донора
     public bool tmdbAiredCap { get; set; } = true;         // не охотиться за сериями, которые ещё не вышли
 
+    // ── «Жду следующий сезон» (SeasonWatch.cs, qdl 2.79): подписка на СЕРИАЛ, а не на раздачу.
+    //    Слежение выше умеет только то, что уже лежит на диске; здесь ждём выхода сезона N+1.
+    //    Контур ТОЛЬКО ДОБАВЛЯЕТ раздачи — удалять он не умеет по построению.
+    public bool seasonWatch { get; set; } = true;          // киллсвитч на лету
+    public int seasonWatchIntervalHours { get; set; } = 24; // тик раз в сутки, как у jut.su/XSMART
+    public bool seasonWatchAutoGrab { get; set; } = true;   // false — только уведомлять, не качать
+    public int seasonWatchMinSeeds { get; set; } = 0;       // 0 → recommendMinSeeds
+    public int seasonWatchMaxTries { get; set; } = 8;       // после N суток без раздачи — уведомление
+
     // ── D1VERSY LIVE: записи домашнего видеорегистратора (проект IPCamLive) ──
     // Регистратор доступен только из LAN, клиенты ходят к нему через наш прокси /qdl/live/*
     // (см. Live.cs). Адрес наружу не отдаётся.

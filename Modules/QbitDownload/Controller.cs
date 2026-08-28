@@ -978,6 +978,24 @@ public partial class QbitController : BaseController
             // из ответа — на склеенном списке он снёс бы штампы всех «спрятанных» сезонов.
             if (ModInit.conf.mergeSeasons) result = MergeSeriesCards(result);
 
+            // Маркер «жду следующий сезон» (qdl 2.79, SeasonWatch.cs) — отдельного GET клиенту не
+            // нужно, ровно как для watched выше. 🔴 Строго ПОСЛЕ склейки: MergeSeriesGroup клонирует
+            // ГЛАВНУЮ часть группы (самую раннюю по added), и поле, поставленное до, досталось бы
+            // не той карточке — а маркер живёт на сериале, не на раздаче.
+            try
+            {
+                var waitMap = SeasonWaitMap();
+                if (waitMap.Count > 0)
+                    foreach (var it in result.OfType<JObject>())
+                    {
+                        int mid = (it["meta"] as JObject)?.Value<int?>("id") ?? 0;
+                        if (mid > 0 && (it["meta"] as JObject).Value<string>("media_type") == "tv"
+                            && waitMap.TryGetValue(mid, out int wfrom))
+                            it["seasonWait"] = new JObject { ["from"] = wfrom };
+                    }
+            }
+            catch (Exception ex) { Console.WriteLine("[QbitDownload] list seasonWait: " + ex.Message); }
+
             // единый порядок по актуальности последней загрузки (новое сверху): новая серия/докачка
             // поднимает карточку; фолбэк и тай-брейк — прежняя дата добавления
             var ordered = new JArray(result
@@ -4913,6 +4931,13 @@ public partial class QbitController : BaseController
             foreach (var p in new[] { MetaPath(hash), LinkPath(hash), LocalPath(hash) }) JsonStore.Forget(p);
             foreach (var d in new[] { "meta", "img", "links", "local" })
                 JsonStore.ForgetDir(Path.Combine(ModInit.conf.cachePath, d));
+
+            // 7) маркер «жду сезон» (SeasonWatch.cs): он живёт в СВОЁМ файле по TMDB id, и снимать
+            //    его можно только когда у сериала не осталось ни одной карточки — иначе удаление
+            //    одного сезона гасило бы ожидание следующего. Строго ПОСЛЕ шага 6: индекс сериалов
+            //    читает каталог meta/, и без сброса снимка он ещё видел бы удалённую карточку.
+            SeriesIndexDrop();
+            SeasonWatchForgetIfOrphan(seriesId);
             DropListCache();
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] purge: " + ex.Message); }

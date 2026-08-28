@@ -581,6 +581,44 @@
         return m || 'XSMART недоступен';
     }
 
+    // ── «Жду следующий сезон» (qdl 2.79) ──────────────────────────────────────
+    // Маркер живёт на СЕРИАЛЕ (TMDB id), а не на раздаче: сервер отдаёт его в карточке
+    // /qdl/list полем seasonWait = {from}. 0 = маркера нет.
+    function seasonWaitFrom(t) {
+        var w = t && t.seasonWait;
+        return (w && w.from > 0) ? w.from : 0;
+    }
+
+    // 🔴 Гейт по МЕТЕ, а не по t.local. Тот же гейт, что у торрентного слежения
+    // (`!t.local && t.state !== 'local'`), дважды прятал пункт подписки у карточек, которые
+    // всегда local — у jut.su в 2.28 и у XSMART в 2.76. Здесь маркер вообще не про раздачу:
+    // сериал, целиком транскодированный в MP4 (торрента уже нет), ждать новый сезон может
+    // и должен. Из контура выпадают только jut.su и XSMART — у них своё слежение за сезоном.
+    function canSeasonWait(t) {
+        return !!(t && t.meta && t.meta.media_type === 'tv') && !isJut(t) && !isXsmart(t);
+    }
+
+    function seasonWaitToggle(item, done) {
+        var on = seasonWaitFrom(item);
+        if (on) {
+            req(API + '/qdl/season/watch/remove?hash=' + item.hash, function () {
+                item.seasonWait = null;
+                Lampa.Noty.show('Ожидание сезона снято');
+                if (done) done();
+            }, function () { Lampa.Noty.show('Не удалось снять ожидание'); });
+        }
+        else {
+            req(API + '/qdl/season/watch?hash=' + item.hash, function (r) {
+                if (r && r.success) {
+                    item.seasonWait = { from: r.from };
+                    Lampa.Noty.show('✓ Жду ' + r.from + ' сезон — скачаю сам, как выйдет');
+                }
+                else Lampa.Noty.show('Не вышло — у карточки нет данных TMDB');
+                if (done) done();
+            }, function () { Lampa.Noty.show('Не удалось включить ожидание'); });
+        }
+    }
+
     // Смена состояния подписки XSMART. from — текущий режим, want — желаемый ('off'|'notify'|'grab').
     //
     // ⚠️ Существующей подписке режим меняем через /qdl/xsmart/watch/mode, а НЕ повторной
@@ -2947,6 +2985,17 @@
         }
         else if (!t.local && t.state !== 'local')
             items.push({ title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'watch' });
+        // Ожидание СЛЕДУЮЩЕГО сезона (qdl 2.79) — отдельный пункт, а не режим слежения выше:
+        // то следит за раздачей (её новыми сериями), это ждёт сезон, которого ещё нет в природе.
+        // Пункт идёт рядом и виден ВСЕГДА у сериала — в том числе когда всё скачано и следить
+        // уже не за чем (жалоба владельца по «Телохранителям»).
+        if (canSeasonWait(t)) {
+            var swf = seasonWaitFrom(t);
+            items.push({
+                title: swf ? '⏳ Жду ' + swf + ' сезон — отменить' : '⏳ Ждать следующий сезон',
+                act: 'seasonwait'
+            });
+        }
         // в под-гриде коллекции — «Убрать», в общем гриде/карточке — «Добавить».
         // qdl 2.67: коллекции — тоже «Управление» (решение владельца), сервер их мутации гейтит.
         if (qdlManage()) {
@@ -3035,6 +3084,12 @@
                     // слежение живёт на КОНКРЕТНОЙ раздаче (по её infohash), поэтому на склеенной
                     // карточке спрашиваем сезон: новые серии приходят в последний
                     withPart(t, 'Следить за новыми сериями', function (it) { watchToggle(it); });
+                }
+                else if (b.act === 'seasonwait') {
+                    // 🔴 БЕЗ withPart: маркер живёт на сериале, а не на раздаче. Спрашивать
+                    // «какой сезон» тут бессмысленно — withPart перечисляет уже СКАЧАННОЕ,
+                    // а ждём мы тот, которого ещё нет.
+                    seasonWaitToggle(t);
                 }
                 else if (b.act === 'mp4') withPart(t, 'Транскодировать — какой сезон?', function (it) { startTranscode(it); });
                 else if (b.act === 'addcol') addToCollection(t);

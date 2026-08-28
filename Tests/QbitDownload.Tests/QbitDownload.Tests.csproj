@@ -59,6 +59,7 @@
     <Compile Include="..\..\Modules\QbitDownload\TorrentScoring.cs" Link="Module\TorrentScoring.cs" />
     <Compile Include="..\..\Modules\QbitDownload\EpisodeHunter.cs" Link="Module\EpisodeHunter.cs" />
     <Compile Include="..\..\Modules\QbitDownload\SeriesMerge.cs" Link="Module\SeriesMerge.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\SeasonWatch.cs" Link="Module\SeasonWatch.cs" />
     <!-- LiveTs.cs — чистая работа с байтами MPEG-TS. -->
     <Compile Include="..\..\Modules\QbitDownload\LiveTs.cs" Link="Module\LiveTs.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Warmup.cs" Link="Module\Warmup.cs" />

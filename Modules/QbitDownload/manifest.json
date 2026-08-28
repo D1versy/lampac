@@ -17,6 +17,7 @@
     "TorrentScoring.cs",
     "EpisodeHunter.cs",
     "SeriesMerge.cs",
+    "SeasonWatch.cs",
     "LiveTs.cs",
     "Live.cs",
     "Warmup.cs",

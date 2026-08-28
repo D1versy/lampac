@@ -77,42 +77,13 @@ public partial class QbitController
 
             if (tmdbId <= 0) return false;
 
-            // 2) детали карточки — через СВОЙ tmdb-прокси на loopback (как IndexCrawler/CatalogWarmup):
-            //    там кеш и, если настроен, апстрим-прокси; наружу напрямую не ходим
-            var card = await TmdbCard(tmdbId, tv);
+            // 2-3) карточка + постер по TMDB id
+            var card = await WriteCardFromTmdb(hash, tmdbId, tv);
             if (card == null)
             {
                 Console.WriteLine($"[QbitDownload] meta heal: {hash} → tmdb {tmdbId}, но детали не пришли");
                 return false;
             }
-
-            SaveMeta(hash, card);   // внутри — сброс горячего слоя и кеша /qdl/list
-
-            // 3) постер: путь берётся из только что записанной меты (как в /qdl/save)
-            try
-            {
-                string tp = TmdbPosterPath(null, hash);
-                if (tp != null && !HasPoster(hash) && _posterInFlight.TryAdd(hash, 0))
-                {
-                    try
-                    {
-                        // Host клиента здесь неоткуда взять (фон, не запрос) — картинка ляжет в свой
-                        // бакет Staticache; на отдачу это не влияет, постер мы кешируем у себя в img/.
-                        byte[] img = await FetchTmdbPoster(tp, null, false);
-                        if (img != null)
-                        {
-                            string dir = Path.Combine(ModInit.conf.cachePath, "img");
-                            Directory.CreateDirectory(dir);
-                            System.IO.File.WriteAllBytes(PosterPath(hash), img);
-                            // ⚠️ has_poster в /qdl/list считается по КЕШИРОВАННОМУ листингу img/, а снимок
-                            // бессрочный: без сброса карточка ехала бы с битой картинкой до рестарта.
-                            PosterWritten();
-                        }
-                    }
-                    finally { _posterInFlight.TryRemove(hash, out _); }
-                }
-            }
-            catch (Exception ex) { Console.WriteLine("[QbitDownload] meta heal постер: " + ex.Message); }
 
             // 4) указатель на раздачу — фундамент слежения/охоты (сам по себе слежение НЕ включает:
             //    подписку ставит пользователь через /qdl/watch)
@@ -127,6 +98,54 @@ public partial class QbitController
             return true;
         }
         finally { _healInFlight.TryRemove(hash, out _); }
+    }
+
+    /// <summary>
+    /// Записать карточку загрузки по TMDB id: мета + постер. Возвращает записанную карточку
+    /// или null, если TMDB не отдал детали.
+    ///
+    /// Вынесено из MetaHealAsync, потому что тем же путём карточку заводит контур ожидания
+    /// сезона (SeasonWatch.cs): раздачу там ставит сервер, клиента с его /qdl/save нет, а без
+    /// меты новая раздача не склеится с уже лежащими сезонами (SeriesMergeId требует id + media_type).
+    /// </summary>
+    internal static async Task<JObject> WriteCardFromTmdb(string hash, int tmdbId, bool tv)
+    {
+        if (!ValidHash(hash) || tmdbId <= 0) return null;
+
+        // детали карточки — через СВОЙ tmdb-прокси на loopback (как IndexCrawler/CatalogWarmup):
+        // там кеш и, если настроен, апстрим-прокси; наружу напрямую не ходим
+        var card = await TmdbCard(tmdbId, tv);
+        if (card == null) return null;
+
+        SaveMeta(hash, card);   // внутри — сброс горячего слоя и кеша /qdl/list
+
+        // постер: путь берётся из только что записанной меты (как в /qdl/save)
+        try
+        {
+            string tp = TmdbPosterPath(null, hash);
+            if (tp != null && !HasPoster(hash) && _posterInFlight.TryAdd(hash, 0))
+            {
+                try
+                {
+                    // Host клиента здесь неоткуда взять (фон, не запрос) — картинка ляжет в свой
+                    // бакет Staticache; на отдачу это не влияет, постер мы кешируем у себя в img/.
+                    byte[] img = await FetchTmdbPoster(tp, null, false);
+                    if (img != null)
+                    {
+                        string dir = Path.Combine(ModInit.conf.cachePath, "img");
+                        Directory.CreateDirectory(dir);
+                        System.IO.File.WriteAllBytes(PosterPath(hash), img);
+                        // ⚠️ has_poster в /qdl/list считается по КЕШИРОВАННОМУ листингу img/, а снимок
+                        // бессрочный: без сброса карточка ехала бы с битой картинкой до рестарта.
+                        PosterWritten();
+                    }
+                }
+                finally { _posterInFlight.TryRemove(hash, out _); }
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] карточка из TMDB, постер: " + ex.Message); }
+
+        return card;
     }
 
     /// <summary>Детали карточки TMDB нашим же прокси. null — не ответил/не карточка.</summary>
