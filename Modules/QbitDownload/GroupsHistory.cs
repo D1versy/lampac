@@ -41,8 +41,10 @@ public partial class QbitController
     #region замок обнуления (зовётся из хука Groups)
 
     /// <summary>
-    /// Есть ли у строки таймкода настоящий прогресс (time &gt; 0). Один точечный SELECT по
-    /// уникальному индексу (user, card, item) — см. TimeCode/SqlContext.cs.
+    /// Есть ли у строки таймкода настоящий прогресс. Один точечный SELECT по уникальному
+    /// индексу (user, card, item) — см. TimeCode/SqlContext.cs.
+    /// ⚠️ Прогресс — это time &gt; 0 ИЛИ percent &gt; 0: нативные плееры Android/iOS пишут
+    /// процент без времени, и проверка только по time считала бы такую строку пустой.
     /// Нет базы, нет таблицы, не разобрали — false, то есть «пусть пишет контроллер».
     /// </summary>
     internal static bool TimecodeHasProgress(string user, string card, string item)
@@ -63,7 +65,7 @@ public partial class QbitController
             string data = cmd.ExecuteScalar()?.ToString();
             if (string.IsNullOrEmpty(data)) return false;
 
-            return RoadTime(data) > 0;
+            return RoadTime(data) > 0 || RoadPercent(data) > 0;
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] groups zeroguard sql: " + ex.Message); return false; }
     }

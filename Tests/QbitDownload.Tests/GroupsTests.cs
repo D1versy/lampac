@@ -82,6 +82,9 @@ public class GroupsTests
     }
 
     static void SeedTimecode(string user, string card, string item, double percent, double time, string updated)
+        => SeedRoad(user, card, item, new JObject { ["duration"] = 100, ["time"] = time, ["percent"] = percent }, updated);
+
+    static void SeedRoad(string user, string card, string item, JObject road, string updated)
     {
         using var c = new SqliteConnection("Data Source=" + Db("TimeCode.sql"));
         c.Open();
@@ -90,7 +93,7 @@ public class GroupsTests
         cmd.Parameters.AddWithValue("$u", user);
         cmd.Parameters.AddWithValue("$c", card);
         cmd.Parameters.AddWithValue("$i", item);
-        cmd.Parameters.AddWithValue("$d", new JObject { ["duration"] = 100, ["time"] = time, ["percent"] = percent }.ToString(Newtonsoft.Json.Formatting.None));
+        cmd.Parameters.AddWithValue("$d", road.ToString(Newtonsoft.Json.Formatting.None));
         cmd.Parameters.AddWithValue("$up", updated);
         cmd.ExecuteNonQuery();
     }
@@ -362,9 +365,15 @@ public class GroupsTests
     // ── замок обнуления ───────────────────────────────────────────────────
 
     [Theory]
+    // пусто = ни позиции, ни процента; это и есть «плеер только открылся»
     [InlineData("{\"duration\":0,\"time\":0,\"percent\":0}", true)]
     [InlineData("{\"duration\":100,\"time\":0,\"percent\":0}", true)]
-    [InlineData("{\"duration\":0,\"time\":10,\"percent\":10}", true)]
+    [InlineData("{}", true)]
+    // 🔥 РЕГРЕССИЯ 28.08.2026: нативные плееры Android/iOS шлют процент БЕЗ времени и
+    // длительности. Первая версия правила считала такую запись пустой и выбрасывала её —
+    // промотка на телефоне до сервера не доезжала вовсе. Форма взята из боевой базы.
+    [InlineData("{\"duration\":0,\"time\":0,\"percent\":95}", false)]
+    [InlineData("{\"duration\":0,\"time\":10,\"percent\":10}", false)]
     [InlineData("{\"duration\":100,\"time\":10,\"percent\":10}", false)]
     [InlineData("не json", false)]
     public void Zero_road_detected(string data, bool zero) => Assert.Equal(zero, Groups.IsZeroRoad(data));
@@ -381,6 +390,11 @@ public class GroupsTests
 
         SeedTimecode("g-deadbeef", "qdl_t2", "i2", percent: 0, time: 0, updated: "2026-08-01 10:00:00");
         Assert.False(QbitController.TimecodeHasProgress("g-deadbeef", "qdl_t2", "i2"));      // нулевую затирать можно
+
+        // 🔥 Строка от нативного плеера: процент есть, времени нет. Это ПРОГРЕСС, и он защищён.
+        SeedRoad("g-deadbeef", "qdl_t3", "i3",
+                 new JObject { ["duration"] = 0, ["time"] = 0, ["percent"] = 95 }, "2026-08-01 10:00:00");
+        Assert.True(QbitController.TimecodeHasProgress("g-deadbeef", "qdl_t3", "i3"));
     }
 
     // ── граница подмены (самый дорогой инвариант) ─────────────────────────
