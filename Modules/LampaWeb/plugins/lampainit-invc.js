@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.83';
+window.qdl_fork_version = '2.80';
 
    // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
@@ -194,52 +194,7 @@ lampainit_invc.appload = function appload() {
 
 
 // Лампа полностью загружена, можно работать с интерфейсом
-// ── Догоняющая установка плагинов, объявленных сервером (qdl 2.82) ───────────
-// 🔴 upstream ставит плагины ТОЛЬКО при ПЕРВОЙ инициализации устройства: блок с plugins_add
-// стоит в lampainit.js НИЖЕ гарда `if (Lampa.Storage.get('lampac_initiale','false')) return;`.
-// Значит устройство, заведённое раньше, не получит НИ ОДНОГО нового плагина никогда — что бы
-// сервер ни объявлял в initPlugins. Именно так мак, Android TV и один айфон остались без
-// timecode.js/bookmark.js и за месяцы не написали на сервер ни строки истории (claude/06 §CP).
-//
-// Ставим недостающее сами, на КАЖДОМ старте. Список — тот же самый {initiale}, что и у upstream
-// (подстановка переехала ниже вклейки invc в ApiController), поэтому источник правды один и
-// разъехаться ему не с чем.
-//
-// ⚠️ Идемпотентно и только ДОБАВЛЯЕТ: сверяемся с Lampa.Plugins.get() по url и ничего не удаляем.
-// Осознанная цена: плагин из серверного списка, снесённый руками в «Расширениях», вернётся на
-// следующем старте. Это инфраструктура (синк, прокси), а не пользовательский выбор.
-lampainit_invc.catchUpPlugins = function catchUpPlugins() {
-  try {
-    var want = {initiale};
-    if (!want || !want.length || !window.Lampa || !Lampa.Plugins || !Lampa.Plugins.get) return [];
-
-    var have = Lampa.Plugins.get() || [];
-    var push = [];
-
-    want.forEach(function (plugin) {
-      if (!plugin || !plugin.url) return;
-      for (var i = 0; i < have.length; i++) {
-        if (have[i] && have[i].url === plugin.url) return;
-      }
-      Lampa.Plugins.add(plugin);
-      Lampa.Plugins.save();
-      push.push(plugin.url);
-    });
-
-    if (push.length) {
-      console.log('D1V', 'доставлены плагины:', push.join(', '));
-      Lampa.Utils.putScript(push, function () {}, function () {}, function () {}, true);
-    }
-    return push;
-  } catch (e) { return []; }
-};
-
-
 lampainit_invc.appready = function appready() {
-  // Догнать плагины, которых у устройства ещё нет (см. комментарий выше) — раньше всего
-  // остального: bookmark.js/timecode.js должны успеть подписаться на события Lampa.
-  lampainit_invc.catchUpPlugins();
-
   // ── Авторитетная локальная разблокировка premium ──
   // appready вызывается ПОСЛЕ события app 'ready', т.е. после Account.init → Profile.check,
   // который при отсутствии токена стирает account_user в '' (permit.access=false).

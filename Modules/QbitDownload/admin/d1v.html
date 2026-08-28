@@ -69,20 +69,6 @@
     .pill.bad{background:rgba(217,96,106,.18);color:#f09aa2}
     .pill.off{background:#222733;color:#8b93a7}
 
-    /* группы */
-    .gcard{border:1px solid #2a3040;border-radius:12px;background:#13161d;margin-bottom:14px;overflow:hidden}
-    .ghead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:13px 16px;border-bottom:1px solid #2a3040}
-    .ghead .gnm{flex:0 1 260px;min-width:160px}
-    .ghead .gst{flex:1;min-width:200px}
-    .gmem{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 16px;
-          border-bottom:1px solid rgba(255,255,255,.05)}
-    .gmem .who{flex:1;min-width:220px}
-    .gfoot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;background:rgba(255,255,255,.02)}
-    select.pick{padding:7px 9px;border-radius:7px;border:1px solid #2a3040;background:#0c0e12;color:#e6e9f0;
-                font-size:14px;max-width:340px;outline:none}
-    select.pick:focus{border-color:#4a7dff}
-    .gtag{display:inline-block;padding:2px 8px;border-radius:6px;background:rgba(74,125,255,.18);color:#9ec1ff;font-size:12px}
-
     #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#1a1e28;
            border:1px solid #2a3040;border-radius:10px;padding:10px 18px;font-size:14px;opacity:0;
            transition:opacity .2s;pointer-events:none}
@@ -95,7 +81,6 @@
 
   <div class="tabs">
     <button class="tab on" data-pane="access">Доступы</button>
-    <button class="tab" data-pane="groups">Группы</button>
     <button class="tab" data-pane="health">Хелс-чеки</button>
   </div>
 
@@ -130,49 +115,13 @@
     <div class="scroll">
       <table>
         <thead><tr>
-          <th>Устройство</th><th>Платформа</th><th>Айди</th><th>IP</th><th>Видели</th><th>Группа</th>
+          <th>Устройство</th><th>Платформа</th><th>Айди</th><th>IP</th><th>Видели</th>
           <th>Live</th><th>Rec</th><th>Управление</th><th></th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
       <div class="empty" id="empty" style="display:none"></div>
     </div>
-  </section>
-
-  <!-- ───────── группы ───────── -->
-  <section class="pane" id="pane-groups">
-    <div class="sub">
-      Связанные устройства делят <b>одну историю просмотров</b>: что смотрели, где остановились и
-      отметки «просмотрено». Общими становятся заодно «Нравится», «Позже», «Закладки» и «Брошено» —
-      в Lampa это один список на пользователя, делить его по частям мы не стали.
-      <br>Права на <b>Live</b>, <b>Rec</b> и <b>Управление</b> группа <b>не меняет</b>: они как были,
-      так и остаются у каждого устройства свои.
-      <br>При связывании история устройства <b>сливается</b> в общую, при отвязывании общая
-      <b>копируется</b> обратно в личную. Ни одна операция здесь ничего не удаляет — любую связку
-      можно откатить без потерь.
-      <br><b>Если несколько устройств смотрят одно и то же одновременно:</b> список просмотренного
-      только пополняется (потерять запись нельзя), досмотренное отмечается у всех, а позиция —
-      «кто последним двигал ползунок, тот её и задал». Запись «плеер только открылся» (нулевая
-      позиция) чужой прогресс не затирает.
-      <br>Устройство может быть максимум в одной группе. Перезапускать приложения не нужно.
-    </div>
-    <div class="warn" id="gkill" style="display:none">
-      ⚠️ Группы <b>выключены</b> (<code>groupsEnabled: false</code> в init.conf) — история сейчас
-      личная у всех, независимо от состава ниже.
-    </div>
-    <div class="warn" id="greplica" style="display:none">
-      ⚠️ Это <b>сервер-реплика</b>. Состав групп приезжает сюда с дома снимком — менять его можно
-      только на домашнем сервере.
-    </div>
-
-    <div class="bar">
-      <input class="nm" id="gname" placeholder="Название новой группы" style="max-width:250px" autocomplete="off">
-      <button class="mini" id="gcreate">Создать группу</button>
-      <button class="mini" id="greload">Обновить</button>
-      <span class="muted">Устройство появляется в списке само — при первом запуске приложения.</span>
-    </div>
-
-    <div id="glist"></div>
   </section>
 
   <!-- ───────── хелс-чеки ───────── -->
@@ -203,8 +152,6 @@
   var toastTimer = null;
   var devices = [];        // последний ответ сервера — фильтруем локально, без похода на сервер
   var healthLoaded = false;
-  var groupsLoaded = false;
-  var gdata = { groups: [], devices: [] };
 
   function toast(text) {
     toastEl.textContent = text;
@@ -263,7 +210,6 @@
       });
       // хелс-чеки тянем лениво: пробы живые, дёргать их на каждом открытии админки незачем
       if (t.dataset.pane === 'health' && !healthLoaded) loadHealth();
-      if (t.dataset.pane === 'groups' && !groupsLoaded) loadGroups();
       if (t.dataset.pane === 'access') qInput.focus();
     });
   });
@@ -314,7 +260,6 @@
         '<td class="uid">' + hi(d.uid, q) + '</td>' +
         '<td class="dim">' + esc(d.ip || '—') + '</td>' +
         '<td class="dim">' + esc(ago(d.last)) + '</td>' +
-        '<td>' + (d.group ? '<span class="gtag">' + esc(d.groupName || d.group) + '</span>' : '<span class="dim">—</span>') + '</td>' +
         '<td><label class="sw"><input type="checkbox" data-f="live"' + (grants.indexOf('live') >= 0 ? ' checked' : '') + '>эфир</label></td>' +
         '<td><label class="sw"><input type="checkbox" data-f="rec"' + (grants.indexOf('rec') >= 0 ? ' checked' : '') + '>записи</label></td>' +
         '<td><label class="sw"><input type="checkbox" data-f="manage"' + (grants.indexOf('manage') >= 0 ? ' checked' : '') + '>действия</label></td>' +
@@ -417,188 +362,6 @@
   }
 
   document.getElementById('hreload').addEventListener('click', loadHealth);
-
-  // ───────── группы устройств: общая история (qdl 2.81) ─────────
-
-  // Ответ ВМЕСТЕ С ТЕЛОМ: у групповых ручек в теле лежит причина отказа, а не только код,
-  // и показать её владельцу важнее, чем «не вышло» (post() выше тело на ошибке теряет).
-  function post2(url, body) {
-    return fetch(url, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', 'X-D1V-Admin': '1' },
-      body: JSON.stringify(body)
-    }).then(function (r) {
-      return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j || {} }; });
-    });
-  }
-
-  function getJson(url) {
-    return fetch(url, { credentials: 'same-origin', cache: 'no-store' }).then(function (r) {
-      return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j || {} }; });
-    });
-  }
-
-  function loadGroups() {
-    groupsLoaded = true;
-    var box = document.getElementById('glist');
-    box.innerHTML = '<div class="empty">Загружаю…</div>';
-    getJson('/admin/d1v/api/groups').then(function (res) {
-      if (!res.ok) throw new Error('http');
-      gdata = res.j;
-      document.getElementById('gkill').style.display = (gdata.enabled === false) ? '' : 'none';
-      document.getElementById('greplica').style.display = gdata.replica ? '' : 'none';
-      renderGroups();
-    }).catch(function () {
-      box.innerHTML = '<div class="empty">Не удалось получить список групп</div>';
-    });
-  }
-
-  function devOf(uid) {
-    var list = gdata.devices || [];
-    for (var i = 0; i < list.length; i++) if (list[i].uid === uid) return list[i];
-    return null;
-  }
-
-  function devLabel(uid) {
-    var d = devOf(uid);
-    if (!d) return uid + ' (нет в реестре)';
-    return (d.name || 'без имени') + ' · ' + (d.platform || '—');
-  }
-
-  function statLine(s) {
-    s = s || {};
-    return (s.history || 0) + ' в истории · ' + (s.timecodes || 0) + ' позиций · ' + (s.jut || 0) + ' аниме';
-  }
-
-  // Свободные = не в группе. Стенд e2e (d1v-test-…) сервер в группы не принимает — не предлагаем.
-  function freeDevices() {
-    var busy = {};
-    (gdata.groups || []).forEach(function (g) {
-      (g.members || []).forEach(function (u) { busy[u] = 1; });
-    });
-    return (gdata.devices || []).filter(function (d) { return !busy[d.uid] && !d.test; });
-  }
-
-  function renderGroups() {
-    var box = document.getElementById('glist');
-    var groups = gdata.groups || [];
-
-    if (!groups.length) {
-      box.innerHTML = '<div class="empty">Групп пока нет. Введи название выше, нажми «Создать группу» ' +
-        'и добавь в неё устройства.</div>';
-      return;
-    }
-
-    box.innerHTML = '';
-    var free = freeDevices();
-
-    var opts = ['<option value="">— выбрать устройство —</option>'].concat(free.map(function (d) {
-      return '<option value="' + esc(d.uid) + '">' +
-        esc((d.name || 'без имени') + ' · ' + (d.platform || '—') + ' · ' + d.uid) + '</option>';
-    })).join('');
-
-    groups.forEach(function (g) {
-      var card = document.createElement('div');
-      card.className = 'gcard';
-
-      var members = (g.members || []).map(function (u) {
-        var d = devOf(u);
-        return '<div class="gmem" data-uid="' + esc(u) + '">' +
-          '<span class="who">' + esc(devLabel(u)) + ' <span class="uid">' + esc(u) + '</span></span>' +
-          '<span class="dim">' + esc(d ? ago(d.last) : '—') + '</span>' +
-          '<button class="kill gleave">Отвязать</button></div>';
-      }).join('');
-
-      if (!members)
-        members = '<div class="gmem"><span class="who dim">Пока никого — добавь устройство ниже.</span></div>';
-
-      card.innerHTML =
-        '<div class="ghead">' +
-          '<input class="nm gnm" value="' + esc(g.name) + '" placeholder="без названия">' +
-          '<span class="gst dim">' + esc(g.gid) + ' &nbsp;·&nbsp; ' + esc(statLine(g.stats)) + '</span>' +
-          '<label class="sw" title="При отвязывании общая история останется устройству как личная">' +
-            '<input type="checkbox" class="gkeep" checked>оставить копию истории</label>' +
-          '<button class="kill gdel">Расформировать</button>' +
-        '</div>' + members +
-        '<div class="gfoot"><select class="pick gpick">' + opts + '</select>' +
-          '<button class="mini gadd">Добавить в группу</button></div>';
-
-      var keep = function () { return card.querySelector('.gkeep').checked; };
-      var done = function (r, okText) {
-        toast(r.ok ? okText : (r.j.error || 'Не вышло'));
-        loadGroups();
-        load();                       // колонка «Группа» на вкладке «Доступы» тоже обновится
-      };
-
-      card.querySelector('.gnm').addEventListener('change', function () {
-        var nm = this.value;
-        post2('/admin/d1v/api/groups/rename', { gid: g.gid, name: nm }).then(function (r) {
-          if (r.ok) g.name = nm.trim();
-          toast(r.ok ? 'Название сохранено' : 'Не сохранилось');
-        });
-      });
-
-      card.querySelector('.gadd').addEventListener('click', function () {
-        var uid = card.querySelector('.gpick').value;
-        if (!uid) { toast('Сначала выбери устройство'); return; }
-        joinDevice(g, uid, done);
-      });
-
-      card.querySelector('.gdel').addEventListener('click', function () {
-        var k = keep();
-        if (!confirm('Расформировать группу «' + (g.name || g.gid) + '»?\n\n' + (k
-          ? 'Каждому устройству останется копия общей истории, а общая — уберётся с диска (она станет полным дубликатом).'
-          : 'Устройства вернутся к своей истории до объединения; накопленное в группе им видно не будет, но с диска не пропадёт.')))
-          return;
-        post2('/admin/d1v/api/groups/delete', { gid: g.gid, keepCopy: k })
-          .then(function (r) { done(r, 'Группа расформирована'); });
-      });
-
-      [].forEach.call(card.querySelectorAll('.gleave'), function (btn) {
-        btn.addEventListener('click', function () {
-          var uid = btn.parentNode.dataset.uid;
-          var k = keep();
-          if (!confirm('Отвязать «' + devLabel(uid) + '» от группы?\n\n' + (k
-            ? 'Устройству останется копия общей истории — дальше оно ведёт её само.'
-            : 'Устройство вернётся к своей истории до объединения.'))) return;
-          post2('/admin/d1v/api/groups/leave', { uid: uid, keepCopy: k })
-            .then(function (r) { done(r, 'Отвязано'); });
-        });
-      });
-
-      box.appendChild(card);
-    });
-  }
-
-  // Сухой прогон ДО связывания: сколько именно уедет в общую историю. Ничего не пишет.
-  function joinDevice(g, uid, done) {
-    getJson('/admin/d1v/api/groups/preview?op=join&gid=' + encodeURIComponent(g.gid) +
-            '&uid=' + encodeURIComponent(uid)).then(function (res) {
-      if (!res.ok) { toast(res.j.error || 'Связать нельзя'); return; }
-      var j = res.j;
-      if (!confirm('Добавить «' + devLabel(uid) + '» в группу «' + (g.name || g.gid) + '»?\n\n' +
-        'Сольём в общую историю: закладок ' + (j.bookmarks || 0) + ', позиций ' + (j.timecodes || 0) +
-        ', аниме jut.su ' + (j.jut || 0) + '.\nЛичная история устройства останется на месте.')) return;
-      post2('/admin/d1v/api/groups/join', { gid: g.gid, uid: uid })
-        .then(function (r) { done(r, 'Связано'); });
-    });
-  }
-
-  document.getElementById('greload').addEventListener('click', loadGroups);
-
-  document.getElementById('gcreate').addEventListener('click', function () {
-    var box = document.getElementById('gname');
-    var nm = box.value.trim();
-    if (!nm) { toast('Введи название группы'); box.focus(); return; }
-    post2('/admin/d1v/api/groups/create', { name: nm }).then(function (r) {
-      if (!r.ok) { toast(r.j.error || 'Не вышло'); return; }
-      box.value = '';
-      toast('Группа создана');
-      loadGroups();
-    });
-  });
-
 
   load();
   setInterval(load, 30000);   // чтобы новое устройство всплывало само, пока владелец ждёт с телефоном в руках

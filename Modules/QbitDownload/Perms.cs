@@ -297,12 +297,7 @@ public static class Perms
     static DateTimeOffset Seen(JToken d)
         => (DateTimeOffset?)d["last"] ?? DateTimeOffset.MinValue;
 
-    /// <summary>
-    /// Вытеснение: только самые старые и только БЕЗ грантов. Устройство с правами вечно.
-    /// qdl 2.81: участник группы — тоже вечно. Его строка в реестре нужна админке, чтобы
-    /// связку было чем показать и чем разорвать; вытесни мы её — группа осталась бы с
-    /// членством на айди, которого в списке устройств больше нет.
-    /// </summary>
+    /// <summary>Вытеснение: только самые старые и только БЕЗ грантов. Устройство с правами вечно.</summary>
 
     static void Prune(JObject root)
     {
@@ -336,7 +331,7 @@ public static class Perms
 
 
         var victims = devices.Properties()
-            .Where(p => ((p.Value["grants"] as JArray)?.Count ?? 0) == 0 && !Groups.IsGrouped(p.Name))
+            .Where(p => ((p.Value["grants"] as JArray)?.Count ?? 0) == 0)
             .OrderBy(p => (DateTime?)p.Value["last"] ?? DateTime.MinValue)
             .Take(devices.Count - DeviceCap)
             .Select(p => p.Name)
@@ -537,11 +532,6 @@ public static class Perms
 
         _touched.TryRemove(key, out _);
 
-        // «Забыли» устройство → связка на него в groups.json обязана уйти вместе с ним,
-        // иначе в реестре групп осталась бы ссылка в никуда. Историю при этом НЕ трогаем:
-        // забывание — операция про реестр устройств, а не про данные (qdl 2.81).
-        Groups.ForgetDevice(key);
-
         return Mutate(root =>
         {
             ((JObject)root["devices"]).Remove(key);
@@ -627,13 +617,6 @@ public partial class QbitController
 
         var card = Perms.Card(requestInfo?.user_uid);
         card["features"] = JObject.FromObject(Perms.FeaturesOf(requestInfo?.user_uid));
-
-        // Группа общей истории (qdl 2.81) — справочно, чтобы будущий UI не заводил свою ручку.
-        // 🔴 Права выше считаются по УСТРОЙСТВУ и группой не меняются: /qdl/* под подмену айди
-        // не попадает никогда (белый список путей — Groups._syncPaths).
-        string gid = Groups.GroupOf(requestInfo?.user_uid);
-        if (gid != null)
-            card["group"] = new JObject { ["gid"] = gid, ["name"] = Groups.NameOf(gid), ["members"] = Groups.MembersOf(gid).Count };
 
         SetHeadersNoCache();
         return ContentTo(card.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");

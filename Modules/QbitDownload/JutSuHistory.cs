@@ -68,14 +68,6 @@ public partial class QbitController
     };
 
     /// <summary>
-    /// Запросный бакет: если устройство в группе с общей историей (qdl 2.81) — бакет группы.
-    /// 🔴 Отдельно от JutHistoryBucket, а не внутри него: на сыром бакете висит уборка
-    /// песочницы (TestSandbox.PurgeJutHistory), и она обязана видеть бакет УСТРОЙСТВА,
-    /// иначе удаление следов стенда уехало бы в общую историю.
-    /// </summary>
-    internal static string JutHistoryBucketFor(string uid) => JutHistoryBucket(Groups.Resolve(uid));
-
-    /// <summary>
     /// uid → имя файла бакета. 🔴 Санация обязательна, а не гигиена: ValidateIdentity по
     /// умолчанию выключен, и RequestInfo отдаёт значение query без единой проверки символов,
     /// а оно идёт в имя файла на диске. Пустой/мусорный uid → общий бакет.
@@ -99,7 +91,7 @@ public partial class QbitController
     /// <summary>Бакет текущего запроса. uid приходит из query — его разбирает RequestInfo.</summary>
     string JutHistoryBucketOfRequest()
     {
-        try { return JutHistoryBucketFor(requestInfo?.user_uid); }
+        try { return JutHistoryBucket(requestInfo?.user_uid); }
         catch { return JutSharedBucket; }
     }
 
@@ -222,7 +214,7 @@ public partial class QbitController
         if (ReplicaMode) return;                            // реплика в дом не пишет
         if (!JutSuParse.IsValidSlug(slug)) return;
 
-        string bucket = JutHistoryBucketFor(uid);
+        string bucket = JutHistoryBucket(uid);
         var now = DateTime.UtcNow;
         string dedupKey = bucket + "|" + slug;
         if (_jutWatchSeen.TryGetValue(dedupKey, out var seen) && (now - seen).TotalSeconds < JutWatchDedupSec)
@@ -257,7 +249,7 @@ public partial class QbitController
         if (ReplicaMode) return;
         if (items is not JArray arr || arr.Count == 0) return;
 
-        string bucket = JutHistoryBucketFor(uid);
+        string bucket = JutHistoryBucket(uid);
 
         try
         {
@@ -336,7 +328,7 @@ public partial class QbitController
     /// </summary>
     static JObject JutRecentPayload(int limit, string uid)
     {
-        string bucket = JutHistoryBucketFor(uid);
+        string bucket = JutHistoryBucket(uid);
 
         JObject own, shared = null;
         lock (_jutHistLock)
