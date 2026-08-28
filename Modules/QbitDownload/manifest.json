@@ -49,6 +49,8 @@
     "TorrentHash.cs",
     "MetaHeal.cs",
     "Perms.cs",
+    "Groups.cs",
+    "GroupsHistory.cs",
     "Admin.cs",
     "Replica.cs",
     "ReplicaSync.cs",
