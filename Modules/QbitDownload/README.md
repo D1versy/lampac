@@ -14,8 +14,9 @@
 | `GET /qdl.js` | клиентский плагин Lampa (кнопка + раздел «Загрузки») |
 | `GET /qdl/search?query=&year=` | поиск раздач через JacRed (нормализованный JSON) |
 | `GET|POST /qdl/add?magnet=\|parselink=&title=` | добавить в qBittorrent (резолвит parselink → magnet) |
-| `GET /qdl/list` | список загрузок (категория `lampa`) с прогрессом |
+| `GET /qdl/list` | список загрузок (категория `lampa`) с прогрессом. **Сезоны одного сериала отдаются ОДНОЙ карточкой** (`SeriesMerge.cs`, qdl 2.78): группа — один TMDB id + `media_type=tv` (jut.su/XSMART не участвуют), в карточке `parts[]` и `seasons[]`; киллсвитч `mergeSeasons` |
 | `GET /qdl/files?hash=` | файлы торрента |
+| `GET /qdl/episodes?hash=` | объединённый плейлист сериала: серии основной раздачи + доноров охоты, а у склеенной карточки — **всех раздач группы** (сезон за сезоном, дедуп по `epkey`). У каждой серии свой `hash` |
 | `GET /qdl/stream?hash=&index=` | отдать файл с диска (Range/seek, оффлайн) |
 | `GET /qdl/delete?hash=&deleteFiles=` | удалить загрузку |
 | `GET /qdl/live/cameras?date=` | **D1VERSY LIVE**: камеры, у которых ЕСТЬ записи за локальный день (+ сколько камер всего) |
