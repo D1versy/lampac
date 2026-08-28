@@ -1867,109 +1867,139 @@ public partial class QbitController
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            // watch-запись (доноры) + стабильный ключ сериала
-            JObject watchItem;
-            lock (_watchLock) { watchItem = LoadWatch().OfType<JObject>().FirstOrDefault(x => hash.Equals(x.Value<string>("hash"), StringComparison.OrdinalIgnoreCase)); }
-            int seriesId = watchItem?.Value<int?>("id") ?? 0;
-            string link = watchItem?.Value<string>("link");
-            if (seriesId == 0)
-                try { if (System.IO.File.Exists(MetaPath(hash))) seriesId = JObject.Parse(System.IO.File.ReadAllText(MetaPath(hash))).Value<int?>("id") ?? 0; } catch { }
-            if (string.IsNullOrEmpty(link))
-                try { if (System.IO.File.Exists(LinkPath(hash))) link = JObject.Parse(System.IO.File.ReadAllText(LinkPath(hash))).Value<string>("link"); } catch { }
-            string sk = SeriesKey(seriesId, link);
-
-            // локальный (не-торрент) маркер-финал: как /qdl/files, доноров у него не бывает
-            var loc = LoadLocal(hash);
-            if (loc != null && !LocalIsOverlay(loc))
+            // Сезоны одного сериала — одной карточкой (qdl 2.78, SeriesMerge.cs): по ЛЮБОМУ хешу
+            // группы отдаём ОБЩИЙ плейлист всех её раздач. Клиенту новых понятий не нужно — файл
+            // серии и так несёт свой `hash` (механика доноров охоты), а сортировку по
+            // (вид, сезон, номер) qdl.js делает сам.
+            // ⚠️ Порядок обхода — канонический (по хешу), а НЕ «сначала свой»: дедуп разрешает
+            // ничью в пользу первой записи, и «сначала свой» дал бы РАЗНЫЙ выбор копии в
+            // зависимости от того, с какой раздачи группы зритель зашёл.
+            // ⚠️ Сиблинг — в своём try: мёртвая мета (раздачу снесли мимо PurgeCache) не должна
+            // ронять плейлист карточки, которую реально открыли. Свой хеш — без глушилки:
+            // его сбой обязан остаться ошибкой ручки (клиент уйдёт в фолбэк /qdl/files).
+            var group = SeriesGroupHashes(hash);
+            if (group != null)
             {
-                var arr0 = new JArray();
-                // jut.su: свой префикс таймлайна, чтобы прогресс ОНЛАЙН-просмотра не потерялся
-                // после скачивания (клиент строит тот же ключ qdltl:jut:<slug>:s1e7).
-                string jutTl = (loc["jut"] as JObject)?.Value<string>("tlPrefix");
-                bool isJut = jutTl != null;
-                var rows = new List<(int kind, int season, int ep, string name, JObject o)>();
-                foreach (var f in LocalFiles(loc))
+                var all = new JArray();
+                foreach (string gh in group)
                 {
-                    if (!System.IO.File.Exists(f.path)) continue;
-                    var o = new JObject { ["hash"] = hash, ["index"] = f.index, ["name"] = f.name, ["size"] = f.size, ["progress"] = 1.0, ["source"] = "main" };
-                    string bn = System.IO.Path.GetFileNameWithoutExtension(f.name ?? "");
-                    int kindRank = 9, sn = -1, en = -1;   // sn/en, а не season/ep: имена заняты внешней областью
-                    string epkey = null;
-
-                    // Имена jut разбираем СВОИМ парсером (точная инверсия JutFileName): общий ParseEp
-                    // читает «film1» как серию 1 — фильм получал ключ таймлайна первой серии вместе
-                    // с её отметкой просмотра, — экстрам ключа не давал вовсе, а серии ≥1000 терял.
-                    if (isJut && TryParseJutFileName(bn, out var jk, out int js, out int jn))
-                    {
-                        var je = new JutEp { kind = jk, season = js, num = jn };
-                        epkey = je.epkey;
-                        kindRank = jk == JutEpKind.Episode ? 0 : jk == JutEpKind.Film ? 1
-                                 : jk == JutEpKind.Ova ? 2 : jk == JutEpKind.GameOva ? 3 : 4;
-                        sn = jk == JutEpKind.Episode ? js : 0;
-                        en = jn;
-                        if (jk == JutEpKind.Episode) { o["season"] = js; o["episode"] = jn; }
-                    }
+                    if (gh.Equals(hash, StringComparison.OrdinalIgnoreCase))
+                        foreach (var e in await EpisodesJson(gh)) all.Add(e);
                     else
-                    {
-                        var e = ParseEp(bn);
-                        if (e != null && e.any && e.kind == null && e.ep >= 0)
-                        {
-                            int ss = e.season > 0 ? e.season : 1;
-                            o["season"] = ss; o["episode"] = e.ep; epkey = "s" + ss + "e" + e.ep;
-                            kindRank = 0; sn = ss; en = e.ep;
-                        }
-                    }
-
-                    if (epkey != null) o["epkey"] = epkey;
-                    // 🔴 Явный ключ из маркера ПОБЕЖДАЕТ вычисленный. У XSMART имя файла несёт
-                    // порядковые номера (s01e05), а ключ таймлайна — идентификаторы серии
-                    // (s32215e524438), и вывести один из другого нельзя в принципе. Собрали бы
-                    // ключ по имени — прогресс скачанной копии разошёлся бы с онлайн-просмотром.
-                    if (!string.IsNullOrEmpty(f.tl)) o["tl"] = f.tl;
-                    else if (epkey != null) o["tl"] = (jutTl ?? sk) + ":" + epkey;
-                    rows.Add((kindRank, sn, en, f.name ?? "", o));
+                        try { foreach (var e in await EpisodesJson(gh)) all.Add(e); }
+                        catch (Exception sx) { Console.WriteLine("[QbitDownload] episodes sibling " + gh + ": " + sx.Message); }
                 }
-
-                // Порядок отдаём МЫ: файлы маркера лежат отсортированными по ПУТИ, то есть
-                // лексикографически — s1e100 попадал между s1e10 и s1e11, а film/ova вставали
-                // в начало списка. Клиент на этот порядок опирался («сервер уже отсортировал»),
-                // и «Продолжить» промахивалась мимо серии. Как в торрентной ветке выше:
-                // серии → экстры, внутри — по сезону и номеру; неразобранное в конец.
-                foreach (var r in rows.OrderBy(x => x.kind).ThenBy(x => x.season).ThenBy(x => x.ep)
-                                      .ThenBy(x => x.name, StringComparer.OrdinalIgnoreCase))
-                    arr0.Add(r.o);
-                return ContentTo(arr0.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+                return ContentTo(MergeGroupEpisodes(all).ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
             }
 
-            using var c = await Qbit();
-            var mainFiles = await QbitFiles(c, hash) ?? new JArray();
-            // оверлей-сирота: торрент удалён извне — фолбэк на файлы маркера (как /qdl/files)
-            if (mainFiles.Count == 0 && loc != null)
-            {
-                foreach (var f in LocalFiles(loc))
-                    if (System.IO.File.Exists(f.path))
-                        mainFiles.Add(new JObject { ["index"] = f.index, ["name"] = f.name, ["size"] = f.size, ["progress"] = 1.0 });
-            }
-
-            int season = DominantSeason(mainFiles);
-            if (season <= 0) season = Math.Max(1, (watchItem?["ctx"] as JObject)?.Value<int?>("season") ?? 1);
-
-            var donorData = new List<(JObject donor, JArray files)>();
-            if (watchItem?["donors"] is JArray donors)
-                foreach (var d in donors.OfType<JObject>())
-                {
-                    string dh = d.Value<string>("hash");
-                    if (ValidHash(dh)) donorData.Add((d, await QbitFiles(c, dh)));
-                }
-
-            var merged = MergeEpisodeFiles(hash, mainFiles, donorData, sk, season);
-            return ContentTo(merged.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+            return ContentTo((await EpisodesJson(hash)).ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
         }
         catch (Exception ex)
         {
             Console.WriteLine("[QbitDownload] episodes: " + ex);
             return Json(new { error = "internal error" });
         }
+    }
+
+    /// <summary>Серии ОДНОЙ карточки: локальный маркер-финал либо торрент + доноры охоты.</summary>
+    static async Task<JArray> EpisodesJson(string hash)
+    {
+        // watch-запись (доноры) + стабильный ключ сериала
+        JObject watchItem;
+        lock (_watchLock) { watchItem = LoadWatch().OfType<JObject>().FirstOrDefault(x => hash.Equals(x.Value<string>("hash"), StringComparison.OrdinalIgnoreCase)); }
+        int seriesId = watchItem?.Value<int?>("id") ?? 0;
+        string link = watchItem?.Value<string>("link");
+        if (seriesId == 0)
+            try { if (System.IO.File.Exists(MetaPath(hash))) seriesId = JObject.Parse(System.IO.File.ReadAllText(MetaPath(hash))).Value<int?>("id") ?? 0; } catch { }
+        if (string.IsNullOrEmpty(link))
+            try { if (System.IO.File.Exists(LinkPath(hash))) link = JObject.Parse(System.IO.File.ReadAllText(LinkPath(hash))).Value<string>("link"); } catch { }
+        string sk = SeriesKey(seriesId, link);
+
+        // локальный (не-торрент) маркер-финал: как /qdl/files, доноров у него не бывает
+        var loc = LoadLocal(hash);
+        if (loc != null && !LocalIsOverlay(loc))
+        {
+            var arr0 = new JArray();
+            // jut.su: свой префикс таймлайна, чтобы прогресс ОНЛАЙН-просмотра не потерялся
+            // после скачивания (клиент строит тот же ключ qdltl:jut:<slug>:s1e7).
+            string jutTl = (loc["jut"] as JObject)?.Value<string>("tlPrefix");
+            bool isJut = jutTl != null;
+            var rows = new List<(int kind, int season, int ep, string name, JObject o)>();
+            foreach (var f in LocalFiles(loc))
+            {
+                if (!System.IO.File.Exists(f.path)) continue;
+                var o = new JObject { ["hash"] = hash, ["index"] = f.index, ["name"] = f.name, ["size"] = f.size, ["progress"] = 1.0, ["source"] = "main" };
+                string bn = System.IO.Path.GetFileNameWithoutExtension(f.name ?? "");
+                int kindRank = 9, sn = -1, en = -1;   // sn/en, а не season/ep: имена заняты внешней областью
+                string epkey = null;
+
+                // Имена jut разбираем СВОИМ парсером (точная инверсия JutFileName): общий ParseEp
+                // читает «film1» как серию 1 — фильм получал ключ таймлайна первой серии вместе
+                // с её отметкой просмотра, — экстрам ключа не давал вовсе, а серии ≥1000 терял.
+                if (isJut && TryParseJutFileName(bn, out var jk, out int js, out int jn))
+                {
+                    var je = new JutEp { kind = jk, season = js, num = jn };
+                    epkey = je.epkey;
+                    kindRank = jk == JutEpKind.Episode ? 0 : jk == JutEpKind.Film ? 1
+                             : jk == JutEpKind.Ova ? 2 : jk == JutEpKind.GameOva ? 3 : 4;
+                    sn = jk == JutEpKind.Episode ? js : 0;
+                    en = jn;
+                    if (jk == JutEpKind.Episode) { o["season"] = js; o["episode"] = jn; }
+                }
+                else
+                {
+                    var e = ParseEp(bn);
+                    if (e != null && e.any && e.kind == null && e.ep >= 0)
+                    {
+                        int ss = e.season > 0 ? e.season : 1;
+                        o["season"] = ss; o["episode"] = e.ep; epkey = "s" + ss + "e" + e.ep;
+                        kindRank = 0; sn = ss; en = e.ep;
+                    }
+                }
+
+                if (epkey != null) o["epkey"] = epkey;
+                // 🔴 Явный ключ из маркера ПОБЕЖДАЕТ вычисленный. У XSMART имя файла несёт
+                // порядковые номера (s01e05), а ключ таймлайна — идентификаторы серии
+                // (s32215e524438), и вывести один из другого нельзя в принципе. Собрали бы
+                // ключ по имени — прогресс скачанной копии разошёлся бы с онлайн-просмотром.
+                if (!string.IsNullOrEmpty(f.tl)) o["tl"] = f.tl;
+                else if (epkey != null) o["tl"] = (jutTl ?? sk) + ":" + epkey;
+                rows.Add((kindRank, sn, en, f.name ?? "", o));
+            }
+
+            // Порядок отдаём МЫ: файлы маркера лежат отсортированными по ПУТИ, то есть
+            // лексикографически — s1e100 попадал между s1e10 и s1e11, а film/ova вставали
+            // в начало списка. Клиент на этот порядок опирался («сервер уже отсортировал»),
+            // и «Продолжить» промахивалась мимо серии. Как в торрентной ветке выше:
+            // серии → экстры, внутри — по сезону и номеру; неразобранное в конец.
+            foreach (var r in rows.OrderBy(x => x.kind).ThenBy(x => x.season).ThenBy(x => x.ep)
+                                  .ThenBy(x => x.name, StringComparer.OrdinalIgnoreCase))
+                arr0.Add(r.o);
+            return arr0;
+        }
+
+        using var c = await Qbit();
+        var mainFiles = await QbitFiles(c, hash) ?? new JArray();
+        // оверлей-сирота: торрент удалён извне — фолбэк на файлы маркера (как /qdl/files)
+        if (mainFiles.Count == 0 && loc != null)
+        {
+            foreach (var f in LocalFiles(loc))
+                if (System.IO.File.Exists(f.path))
+                    mainFiles.Add(new JObject { ["index"] = f.index, ["name"] = f.name, ["size"] = f.size, ["progress"] = 1.0 });
+        }
+
+        int season = DominantSeason(mainFiles);
+        if (season <= 0) season = Math.Max(1, (watchItem?["ctx"] as JObject)?.Value<int?>("season") ?? 1);
+
+        var donorData = new List<(JObject donor, JArray files)>();
+        if (watchItem?["donors"] is JArray donors)
+            foreach (var d in donors.OfType<JObject>())
+            {
+                string dh = d.Value<string>("hash");
+                if (ValidHash(dh)) donorData.Add((d, await QbitFiles(c, dh)));
+            }
+
+        return MergeEpisodeFiles(hash, mainFiles, donorData, sk, season);
     }
     #endregion
 

@@ -973,6 +973,11 @@ public partial class QbitController : BaseController
                 catch { }
             }
 
+            // Сезоны одного сериала — одной карточкой (qdl 2.78, SeriesMerge.cs). Строго ПОСЛЕ
+            // ActivityPrune: прун считает живыми хеши из result, а склейка часть из них убирает
+            // из ответа — на склеенном списке он снёс бы штампы всех «спрятанных» сезонов.
+            if (ModInit.conf.mergeSeasons) result = MergeSeriesCards(result);
+
             // единый порядок по актуальности последней загрузки (новое сверху): новая серия/докачка
             // поднимает карточку; фолбэк и тай-брейк — прежняя дата добавления
             var ordered = new JArray(result
@@ -4654,6 +4659,7 @@ public partial class QbitController : BaseController
     {
         JsonStore.WriteNow(MetaPath(hash), meta);
         JsonStore.ForgetDir(Path.Combine(ModInit.conf.cachePath, "meta"));
+        SeriesIndexDrop();   // группы сезонов строятся по мете (SeriesMerge.cs): back-link мог сменить id
         DropListCache();
     }
 

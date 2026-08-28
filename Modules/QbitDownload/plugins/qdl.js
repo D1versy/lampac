@@ -488,6 +488,55 @@
         return !!t && !t.local && t.state !== 'local' && (t.progress || 0) >= 1;
     }
 
+    // ───────── Склеенная карточка сезонов (сервер, qdl 2.78) ─────────
+    // /qdl/list отдаёт сезоны одного сериала ОДНОЙ карточкой и кладёт в неё parts — раздачи
+    // группы по сезонам. Просмотру знать про части не нужно вовсе: /qdl/episodes по хешу
+    // карточки уже отдаёт общий плейлист, и у каждой серии свой hash (механика доноров).
+    // Части нужны ровно УПРАВЛЕНИЮ: удалять, транскодировать, подписываться и запоминать
+    // озвучку умеет только конкретная раздача.
+    function cardParts(t) {
+        var p = t && t.parts;
+        return (p && p.length > 1) ? p : null;
+    }
+
+    // подпись части в меню: сезон, если сервер его разобрал, иначе укороченное имя раздачи
+    function partLabel(p) {
+        if (p && p.season > 0) return 'Сезон ' + p.season + (p.local ? ' · MP4' : '');
+        var n = String((p && p.name) || 'Раздача');
+        return (n.length > 40 ? n.slice(0, 40) + '…' : n) + (p && p.local ? ' · MP4' : '');
+    }
+
+    // часть как самостоятельная карточка: мета и постер общие, всё остальное — своё
+    function partItem(t, p) {
+        return {
+            hash: p.hash, name: p.name, meta: t.meta, progress: p.progress, state: p.state,
+            local: p.local, watched: p.watched, season: p.season
+        };
+    }
+
+    // Действие, которое умеет только КОНКРЕТНАЯ раздача. На обычной карточке выполняется
+    // сразу, на склеенной — сперва спрашиваем сезон. allTitle (если задан) добавляет пункт
+    // «ко всем частям»: run(null, parts).
+    function withPart(t, title, run, allTitle) {
+        var ps = cardParts(t);
+        if (!ps) { run(t, null); return; }
+        var items = ps.map(function (p) {
+            return { title: partLabel(p) + (p.watched ? '  🔔' : ''), subtitle: liveSize(p.size), part: p };
+        });
+        if (allTitle) items.unshift({ title: allTitle, all: true });
+        items.push({ title: 'Отмена' });
+        Lampa.Select.show({
+            title: title,
+            items: items,
+            onSelect: function (b) {
+                if (b.all) run(null, ps);
+                else if (b.part) run(partItem(t, b.part), null);
+                else Lampa.Controller.toggle('content');
+            },
+            onBack: function () { Lampa.Controller.toggle('content'); }
+        });
+    }
+
     // Карточка «Загрузок», пришедшая с jut.su: сервер кладёт {jut:{slug}} в /qdl/list,
     // когда у локального маркера есть поле jut. Признак нужен, чтобы развести слежение
     // (у торрентов — по infohash, здесь — по slug в отдельном контуре).
@@ -956,6 +1005,14 @@
         return 4;
     }
 
+    // Сезон для ЗАГОЛОВКА на экране серий: только уверенный (поле сервера), у экстр — 0
+    // («Дополнительно»). Гадать по имени здесь нельзя: epSeason по умолчанию отвечает «1»,
+    // и после второго сезона появился бы заголовок «Сезон 1» над фильмом/OVA.
+    function epHeadSeason(f) {
+        if (f && f.season > 0) return f.season;
+        return epKindRank(f) > 0 ? 0 : (f && f.epkey ? epSeason(f) : -1);
+    }
+
     // Сезон серии: поле сервера → epkey → имя файла → 1 (односезонные аниме сезон не пишут)
     function epSeason(f) {
         if (f && f.season > 0) return f.season;
@@ -1023,7 +1080,10 @@
     // иначе несуществующая дорожка → не тот язык или отказ HLS. Чужим — дефолтная дорожка (null).
     function buildPlaylist(hash, vids, audio, audioHash) {
         return vids.map(function (f) {
-            var a = (audioHash == null || srcHash(f, hash) === audioHash) ? audio : null;
+            // 2.78: у чужой раздачи (донор охоты, соседний сезон склеенной карточки) свои id
+            // дорожек — но своя запомненная озвучка у неё тоже есть, и она лучше дефолта
+            var fh = srcHash(f, hash);
+            var a = (audioHash == null || fh === audioHash) ? audio : (getAudioPref(fh) || null);
             var item = { title: baseName(f.name) + (f.source === 'donor' ? ' · врем.' : ''), url: streamUrl(srcHash(f, hash), f.index, a) };
             try { item.timeline = pickTimeline(hash, f); } catch (e) {}
             return item;
@@ -1930,7 +1990,21 @@
                 }
                 if (bar.children().length) body.append(bar);
 
-                vids.forEach(function (f, i) { body.append(rowEl(f, i)); });
+                // 2.78: в списке больше одного сезона (склеенная карточка) → разделители.
+                // Без них нумерация начинается заново посреди списка и читается как дубль.
+                var seasons = {}, multi = 0, prevHead = null;
+                vids.forEach(function (f) { var h = epHeadSeason(f); if (h > 0 && !seasons[h]) { seasons[h] = 1; multi++; } });
+                vids.forEach(function (f, i) {
+                    if (multi > 1) {
+                        var h = epHeadSeason(f);
+                        if (h !== prevHead && h >= 0) {
+                            body.append('<div style="padding:1.2em 1.6em .3em;font-size:1.35em;font-weight:700;opacity:.7">'
+                                + esc(h > 0 ? 'Сезон ' + h : 'Дополнительно') + '</div>');
+                            prevHead = h;
+                        }
+                    }
+                    body.append(rowEl(f, i));
+                });
                 comp.refreshMarks();   // отметки + подсветка текущей + стартовый фокус на ней
             }
 
@@ -2224,6 +2298,16 @@
                 : pct < 100
                     ? '<div style="position:absolute;left:.4em;top:.4em;background:rgba(0,0,0,.75);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">' + pct + '%</div>'
                     : '<div style="position:absolute;left:.4em;top:.4em;background:rgba(20,160,40,.9);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">✓</div>');
+
+            // 2.78: карточка склеена из нескольких раздач — говорим об этом вслух. Иначе
+            // «одна карточка вместо двух» выглядит как пропавший сезон.
+            var prt = cardParts(t);
+            if (prt) {
+                var sc = (t.seasons && t.seasons.length) || 0;
+                var slbl = sc > 1 ? sc + ' ' + livePlural(sc, 'сезон', 'сезона', 'сезонов')
+                                  : prt.length + ' ' + livePlural(prt.length, 'раздача', 'раздачи', 'раздач');
+                view.append('<div style="position:absolute;right:.4em;top:.4em;background:rgba(110,60,220,.9);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">' + esc(slbl) + '</div>');
+            }
 
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:enter', function () { openDownload(t); });
@@ -2795,6 +2879,37 @@
         }, function () { run(null); });
     }
 
+    // Слежение за новыми сериями — по infohash РАЗДАЧИ (контур торрентов; у jut.su/XSMART свои).
+    function watchToggle(item, done) {
+        if (item.watched)
+            req(API + '/qdl/watch/remove?hash=' + item.hash, function () {
+                item.watched = false; Lampa.Noty.show('Слежение выключено'); if (done) done();
+            });
+        else
+            req(API + '/qdl/watch?hash=' + item.hash, function (r) {
+                if (r && r.success) { item.watched = true; Lampa.Noty.show('✓ Слежу за новыми сериями'); }
+                else Lampa.Noty.show('Не вышло — перекачай раздачу и попробуй снова');
+                if (done) done();
+            });
+    }
+
+    // Удаление пачкой (склеенная карточка = несколько раздач). Строго ПОСЛЕДОВАТЕЛЬНО:
+    // /qdl/delete чистит общие структуры (watch.json, коллекции, activity), и параллельные
+    // вызовы гонялись бы за одни и те же файлы. Первая ошибка останавливает цепочку — молча
+    // удалить половину сериала и отрапортовать «готово» нельзя.
+    function deleteHashes(hashes, done) {
+        var i = 0;
+        (function next() {
+            if (i >= hashes.length) { done(true); return; }
+            var h = hashes[i++];
+            req(API + '/qdl/delete?hash=' + h + '&deleteFiles=true', function () {
+                dropAudioPref(h);   // подчистить запомненную озвучку (localStorage)
+                dropEpCache(h);     // и кеш списка серий
+                next();
+            }, function () { done(false); });
+        })();
+    }
+
     function quickMenu(t, ctx) {
         var items = [
             { title: 'Открыть карточку', act: 'page' },
@@ -2847,14 +2962,18 @@
                 if (b.act === 'page') openDownload(t);
                 else if (b.act === 'play') watch(t);
                 else if (b.act === 'audio') {
-                    req(API + '/qdl/audio?hash=' + t.hash + '&index=-1', function (opts) {
-                        opts = opts || [];
-                        if (!opts.length) { Lampa.Noty.show('Аудиодорожек не найдено'); return; }
-                        Lampa.Select.show({
-                            title: 'Озвучка',
-                            items: opts.map(function (o) { return { title: o.label, id: o.id }; }),
-                            onSelect: function (s) { setAudioPref(t.hash, s.id); Lampa.Noty.show('Озвучка: ' + s.title); },
-                            onBack: function () { Lampa.Controller.toggle('content'); }
+                    // 2.78: id дорожки специфичен для КОНКРЕТНОГО рипа, поэтому на склеенной
+                    // карточке озвучка запоминается сезону, а не «сериалу вообще»
+                    withPart(t, 'Озвучка — какой сезон?', function (it) {
+                        req(API + '/qdl/audio?hash=' + it.hash + '&index=-1', function (opts) {
+                            opts = opts || [];
+                            if (!opts.length) { Lampa.Noty.show('Аудиодорожек не найдено'); return; }
+                            Lampa.Select.show({
+                                title: 'Озвучка',
+                                items: opts.map(function (o) { return { title: o.label, id: o.id }; }),
+                                onSelect: function (s) { setAudioPref(it.hash, s.id); Lampa.Noty.show('Озвучка: ' + s.title); },
+                                onBack: function () { Lampa.Controller.toggle('content'); }
+                            });
                         });
                     });
                 }
@@ -2913,15 +3032,11 @@
                     });
                 }
                 else if (b.act === 'watch') {
-                    if (t.watched)
-                        req(API + '/qdl/watch/remove?hash=' + t.hash, function () { t.watched = false; Lampa.Noty.show('Слежение выключено'); });
-                    else
-                        req(API + '/qdl/watch?hash=' + t.hash, function (r) {
-                            if (r && r.success) { t.watched = true; Lampa.Noty.show('✓ Слежу за новыми сериями'); }
-                            else Lampa.Noty.show('Не вышло — перекачай раздачу и попробуй снова');
-                        });
+                    // слежение живёт на КОНКРЕТНОЙ раздаче (по её infohash), поэтому на склеенной
+                    // карточке спрашиваем сезон: новые серии приходят в последний
+                    withPart(t, 'Следить за новыми сериями', function (it) { watchToggle(it); });
                 }
-                else if (b.act === 'mp4') startTranscode(t);
+                else if (b.act === 'mp4') withPart(t, 'Транскодировать — какой сезон?', function (it) { startTranscode(it); });
                 else if (b.act === 'addcol') addToCollection(t);
                 else if (b.act === 'uncol') {
                     colPost('/qdl/collections/remove', { id: ctx.collection.id, hash: t.hash }, function (r) {
@@ -2930,25 +3045,30 @@
                     });
                 }
                 else if (b.act === 'del') {
-                    // подтверждение: одно случайное нажатие не должно безвозвратно удалять файлы
-                    Lampa.Select.show({
-                        title: 'Удалить «' + ((t.meta && t.meta.title) || t.name) + '» с файлами?',
-                        items: [{ title: 'Удалить', ok: true }, { title: 'Отмена' }],
-                        onSelect: function (a) {
-                            if (!a.ok) { Lampa.Controller.toggle('content'); return; }
-                            req(API + '/qdl/delete?hash=' + t.hash + '&deleteFiles=true', function () {
-                                dropAudioPref(t.hash);   // подчистить запомненную озвучку (localStorage)
-                                dropEpCache(t.hash);     // и кеш списка серий
-                                Lampa.Noty.show('Удалено');
-                                Lampa.Activity.replace();
-                            }, function () {
-                                // 2.67: сюда приходит и 403 «нет права управления» (протухший клиент
-                                // или отозванный грант). Без колбэка экран молча ничего не делал.
-                                Lampa.Noty.show('Не удалось удалить — нет права или сервер недоступен');
-                            });
-                        },
-                        onBack: function () { Lampa.Controller.toggle('content'); }
-                    });
+                    // 2.78: на склеенной карточке сперва выбор — весь сериал или один сезон.
+                    // Молча сносить всю группу нельзя: сезоны — отдельные раздачи, и «удалить
+                    // лишний сезон» обязано остаться отдельным действием.
+                    var dtitle = (t.meta && t.meta.title) || t.name;
+                    withPart(t, 'Удалить с файлами: «' + dtitle + '»', function (it, all) {
+                        var hashes = all ? all.map(function (p) { return p.hash; }) : [it.hash];
+                        var what = all ? '«' + dtitle + '» целиком (раздач: ' + hashes.length + ')'
+                                       : (it.season > 0 ? 'сезон ' + it.season + ' — «' + dtitle + '»' : '«' + dtitle + '»');
+                        // подтверждение: одно случайное нажатие не должно безвозвратно удалять файлы
+                        Lampa.Select.show({
+                            title: 'Удалить ' + what + ' с файлами?',
+                            items: [{ title: 'Удалить', ok: true }, { title: 'Отмена' }],
+                            onSelect: function (a) {
+                                if (!a.ok) { Lampa.Controller.toggle('content'); return; }
+                                deleteHashes(hashes, function (ok) {
+                                    // 2.67: в ошибку приходит и 403 «нет права управления» (протухший
+                                    // клиент или отозванный грант) — без колбэка экран молча ничего не делал
+                                    Lampa.Noty.show(ok ? 'Удалено' : 'Не удалось удалить — нет права или сервер недоступен');
+                                    Lampa.Activity.replace();
+                                });
+                            },
+                            onBack: function () { Lampa.Controller.toggle('content'); }
+                        });
+                    }, '🗑 Весь сериал');
                 }
             },
             onBack: function () { Lampa.Controller.toggle('content'); }

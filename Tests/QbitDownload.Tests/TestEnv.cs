@@ -49,6 +49,7 @@ public static class TestEnv
             QualityCaches.ResetForTests();   // кеш решений об апгрейде — тоже статика
             Perms.ResetForConfigReload();   // троттлинг «когда видели» относился к прежнему cachePath
             QbitController.DropListCache();
+            QbitController.SeriesIndexDrop();   // индекс групп сезонов — тоже статика поверх cachePath
             // Снимок «что уже скачано» держится 10 с, а тесты меняют каталог загрузок
             // быстрее — без сброса следующий тест читал бы снимок предыдущего.
             QbitController.JutDropAllDiskKeys();

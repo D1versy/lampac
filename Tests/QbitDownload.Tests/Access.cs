@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
@@ -189,6 +189,7 @@ public static class Access
     }
     public static bool LocalIsOverlay(JObject loc) => (bool)Call("LocalIsOverlay", loc);
     public static void SaveLocal(string hash, JObject marker) => Call("SaveLocal", hash, marker);
+    public static void SaveMeta(string hash, JObject meta) => Call("SaveMeta", hash, meta);
     /// <summary>Файл на месте? Через кешированный листинг каталога + самолечение промаха (§BM).</summary>
     public static bool FileInDir(string path) => (bool)Call("FileInDir", path);
     /// <summary>Постер на месте? Тот же приём для каталога img/ + самолечение промаха (§BV).</summary>

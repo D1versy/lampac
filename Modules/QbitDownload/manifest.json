@@ -16,6 +16,7 @@
     "FfWorker.cs",
     "TorrentScoring.cs",
     "EpisodeHunter.cs",
+    "SeriesMerge.cs",
     "LiveTs.cs",
     "Live.cs",
     "Warmup.cs",
