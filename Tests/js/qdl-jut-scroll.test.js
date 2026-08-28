@@ -33,13 +33,14 @@ test('догрузка страницы НЕ дёргает activity.toggle (и�
 
 test('тач помечает last (без этого collectionFocus всегда падает на первую карточку)', () => {
   const fn = catalogSrc();
-  assert.ok(fn.includes("el.on('hover:touch hover:hover', markLast(el));"),
-    'карточки и плитка поиска обязаны писать last по тачу — образец app.min.js');
+  // qdl 2.80: локальный markLast уехал в общий хелпер — теперь так пишут ВСЕ наши экраны
+  assert.strictEqual(
+    (fn.match(/\.on\('hover:touch hover:hover', function \(\) \{ last = markLast\(el\); \}\);/g) || []).length, 2,
+    'карточки И плитка поиска обязаны писать last по тачу и мыши — образец app.min.js');
   // именно focused, а не focus: focus триггерит hover:focus и двигает скролл
-  const i = fn.indexOf('function markLast');
-  const mk = fn.slice(i, i + 300);
-  assert.ok(mk.includes('last = el[0]'));
+  const mk = H.qdlSource().match(/function markLast\(el\)[\s\S]{0,240}/)[0];
   assert.ok(mk.includes('Navigator.focused(el[0])'));
+  assert.ok(mk.includes('return el[0];'), 'хелпер отдаёт элемент вызывающей стороне — им и пишется last');
   assert.ok(!mk.includes('Navigator.focus('), 'Navigator.focus утащит скролл — нужен focused');
 });
 
@@ -65,7 +66,7 @@ test('пагинация и стартовый фокус на месте', () =
   // регресс-страховка: чиня скролл, легко потерять саму догрузку
   assert.ok(fn.includes('scroll.onEnd'), 'бесконечная лента');
   assert.ok(fn.includes('PREFETCH_AHEAD'), 'префетч за два ряда — на пульте иначе ждёшь на дне');
-  assert.ok(fn.includes('Lampa.Controller.collectionFocus(last || false, scroll.render())'),
-    'возврат из карточки обязан восстанавливать позицию');
+  assert.ok(fn.includes('focusBack(scroll, last)'),
+    'возврат из карточки обязан восстанавливать позицию (qdl 2.80 — общий хелпер)');
   assert.ok(fn.includes('scroll.minus()'), 'без minus() на ТВ у .scroll нет высоты');
 });

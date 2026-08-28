@@ -172,7 +172,7 @@ test('экран серий обновляет отметки при каждо�
   const i = src.indexOf('function ComponentJutEpisodes');
   const fn = src.slice(i, i + 6000);
   assert.ok(fn.includes('comp.refreshMarks()'), 'иначе ✓/►N% не обновятся после просмотра');
-  assert.ok(fn.includes('collectionFocus(last'), 'возврат из плеера обязан вернуть фокус');
+  assert.ok(fn.includes('focusBack(scroll, last)'), 'возврат из плеера обязан вернуть фокус (qdl 2.80 — общий хелпер)');
   assert.ok(fn.includes('if (cur && !last)'),
     'стартовый фокус на продолжаемой ставится только если пользователь ещё не выбрал сам');
 });

@@ -785,6 +785,58 @@
         try { Lampa.Background.change(url); } catch (e) {}
     }
 
+    // ───────── Бухгалтерия фокуса: «где я был» и возврат ровно туда же (§CO) ─────────
+    //
+    // Наши экраны помнят текущую карточку в last, чтобы вернуть фокус после селектбокса,
+    // плеера или левого меню. Писался он ТОЛЬКО по hover:focus — а это событие ПУЛЬТА:
+    //  • палец: touchstart → hover:touch (+ таймер 800 мс → hover:long), hover:focus НЕ приходит вовсе;
+    //  • мышь десктопа (navigation_type=mouse): mouseenter → trigger_mouseenter → ТОЛЬКО hover:hover
+    //    (так же ресинкает фокус наш desktop.js после глайда колесом).
+    // Значит на мыши и пальце last оставался пуст, и любой Controller.toggle('content') уводил
+    // collectionFocus на ПЕРВЫЙ .selector — лента прыгала в начало (жалоба владельца по долгому
+    // нажатию в «Загрузках»). Сама Lampa свои списки пишет именно парой обработчиков — список
+    // торрентов и папки настроек в app.min.js; делаем так же.
+    //
+    // ⚠️ Navigator.focused, а НЕ focus: focus триггерит hover:focus и сам утащит скролл.
+    // ⚠️ Вешать ОТДЕЛЬНОЙ строкой, не сливая с bgFocus: на таче родная Lampa фон не красит,
+    //    а touchstart во время пальцевого скролла красил бы фоном случайные карточки.
+    // Возвращает сам элемент, чтобы вызов на месте был одной строкой:
+    //     el.on('hover:touch hover:hover', function () { last = markLast(el); });
+    function markLast(el) {
+        try { Navigator.focused(el[0]); } catch (e) {}
+        return el[0];
+    }
+
+    // Элемент сейчас в кадре? Только по вертикали: все наши экраны — вертикальные ленты.
+    function onScreen(el) {
+        try {
+            var r = el.getBoundingClientRect();
+            var h = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 0;
+            return !!(r.width || r.height) && r.bottom > 0 && r.top < h;
+        } catch (e) { return false; }
+    }
+
+    // Возврат управления экрану: фокус на прежний элемент И ЛЕНТА НЕ ДВИГАЕТСЯ.
+    // Штатный обработчик hover:focus зовёт scroll.update(el, true), то есть ЦЕНТРИРУЕТ элемент,
+    // и при возврате это лишний рывок на полэкрана: карточка и так перед глазами (требование
+    // владельца — «фокус оставался на том же месте»). Глушим update ровно на время фокусировки:
+    // это ОДНО место вместо правки двух десятков обработчиков.
+    // 🔴 Подмена безопасна именно потому, что цепочка Navigator.focus → Controller.focus →
+    //    Utils.trigger('hover:focus') идёт СИНХРОННО, без setTimeout — чужой вызов в окно не попадёт.
+    // ⚠️ Элемент ВНЕ экрана центрируем как раньше (палец начал скролл с карточки, которая давно
+    //    уехала): иначе фокус остался бы там, куда не видно.
+    function focusBack(scroll, last) {
+        Lampa.Controller.collectionSet(scroll.render());
+        if (!last || !onScreen(last)) {
+            Lampa.Controller.collectionFocus(last || false, scroll.render());
+            return;
+        }
+        var upd = scroll.update;
+        scroll.update = function () {};
+        try { Lampa.Controller.collectionFocus(last, scroll.render()); }
+        finally { scroll.update = upd; }
+    }
+
     // Постер строки уведомления. Решает СЕРВЕР (n.posterUrl, qdl 2.46): только он знает, лежит ли
     // файл на диске, есть ли апгрейженная обложка и какой хеш у раздачи СЕЙЧАС. У jut-уведомления
     // hash ПСЕВДО (sha1("jutsu:"+slug)), и файла img/<hash>.jpg для НЕ скачанного тайтла не бывает —
@@ -1989,6 +2041,7 @@
             );
             el.find('.qdl-ep-name').text(baseName(f.name) + (f.source === 'donor' ? ' · врем.' : ''));
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
             el.on('hover:enter', function () { comp.play(i); });
             rows.push({ el: el, f: f });
             return el;
@@ -2016,6 +2069,7 @@
                     langBtn = $('<div class="selector qdl-btn-focus qdl-lang-btn" style="' + btnCss + '"></div>');
                     langBtn.text('Язык: ' + langLabel(comp.audioOpts, getLangPref()));
                     langBtn.on('hover:focus', function () { last = langBtn[0]; scroll.update(langBtn, true); });
+                    langBtn.on('hover:touch hover:hover', function () { last = markLast(langBtn); });
                     langBtn.on('hover:enter', function () { askLang(); });
                     bar.append(langBtn);
                 }
@@ -2023,6 +2077,7 @@
                     audioBtn = $('<div class="selector qdl-btn-focus qdl-audio-btn" style="' + btnCss + '"></div>');
                     audioBtn.text('Озвучка: ' + audioLabel());
                     audioBtn.on('hover:focus', function () { last = audioBtn[0]; scroll.update(audioBtn, true); });
+                    audioBtn.on('hover:touch hover:hover', function () { last = markLast(audioBtn); });
                     audioBtn.on('hover:enter', function () { askAudio(null); });
                     bar.append(audioBtn);
                 }
@@ -2086,10 +2141,7 @@
             if (comp.tlbucket) { activeEpisodesComp = comp; setTlBucket(comp.tlbucket); }
             comp.refreshMarks();
             Lampa.Controller.add('content', {
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
+                toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { Navigator.move('right'); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
@@ -2221,10 +2273,7 @@
             // добавленная/удалённая здесь кнопка попадает в неё сама — navAppend не нужен
             if (comp.refreshContinue) comp.refreshContinue();
             Lampa.Controller.add('content', {
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(false, scroll.render());
-                },
+                toggle: function () { focusBack(scroll, false); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
                 down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
@@ -2309,6 +2358,7 @@
             view.append('<div style="position:absolute;left:.4em;top:.4em;background:rgba(110,60,220,.9);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">📁 ' + c.items.length + '</div>');
 
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
             el.on('hover:enter', function () { openCollection(c.col); });
             // Фон под фокусом (bgFocus): hover:focus — пульт, hover:hover — мышь десктопа.
             el.on('hover:focus hover:hover', function () { bgFocus(posterUrl(c.cover)); });
@@ -2348,6 +2398,7 @@
             }
 
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
             el.on('hover:enter', function () { openDownload(t); });
             // Фон под фокусом (bgFocus): hover:focus — пульт, hover:hover — мышь десктопа.
             // ⚠️ posterUrl(t) — в момент фокуса: enrich() дописывает t.posterUrl уже ПОСЛЕ сборки карточки.
@@ -2375,10 +2426,7 @@
             // коллекции менялись, пока грид был в фоне (мутация в под-гриде и т.п.) → перерисовать
             if (builtStamp !== -1 && builtStamp !== colStamp) { Lampa.Activity.replace(); return; }
             Lampa.Controller.add('content', {
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
+                toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { Navigator.move('right'); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
@@ -2635,6 +2683,7 @@
             );
             el.find('img').on('error', function () { this.src = PX1; });   // нейтральная плитка, не рваная заглушка
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
             el.on('hover:enter', function () { openNotification(n); });
             body.append(el);
         };
@@ -2655,6 +2704,7 @@
             var el = $('<div class="qdl-noti-id selector qdl-row-focus" style="padding:1.1em 1.4em;margin:1.2em .6em .4em;' +
                 'background:rgba(255,255,255,.04);border-radius:.7em;opacity:.75;font-size:1.15em">' + esc(text) + '</div>');
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
             el.on('hover:enter', function () { Lampa.Noty.show(text); });
             body.append(el);
         };
@@ -2662,10 +2712,7 @@
         this.render = function () { return html; };
         this.start = function () {
             Lampa.Controller.add('content', {
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
+                toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { Navigator.move('right'); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
@@ -3932,6 +3979,7 @@
             img.attr('src', withUid(API + '/qdl/live/watch/thumb?camera=' + c.id + '&t=' + Date.now()));
             img.on('error', function () { this.src = './img/img_broken.svg'; });
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
 
             // iPhone: нативный плеер требует ЖИВОГО жеста → прямой click (hover:enter Lampa
             // диспатчит через setTimeout — жест мёртв). На один тап прилетают ОБА события
@@ -3969,10 +4017,7 @@
         this.start = function () {
             startTimer();   // вернулись на экран (в т.ч. Back с другого) — сетка снова дышит
             Lampa.Controller.add('content', {
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
+                toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { Navigator.move('right'); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
@@ -4104,6 +4149,7 @@
 
             [prev, day, next].forEach(function (el) {
                 el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+                el.on('hover:touch hover:hover', function () { last = markLast(el); });
             });
 
             return bar.append(prev).append(day).append(next);
@@ -4129,6 +4175,7 @@
             img.on('error', function () { this.src = './img/img_broken.svg'; });
             // Наводка будит ремукс суток — к нажатию Enter день обычно уже готов целиком.
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); liveWarmDay(c, date); });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
             // Обычный вход = весь день одной записью. Разбивка на куски осталась запасным путём
             // (долгое нажатие) — на случай, если склейка почему-то не собралась.
             el.on('hover:enter', function () { livePlayDay(c, date, currentLabel); });
@@ -4153,10 +4200,7 @@
         this.render = function () { return html; };
         this.start = function () {
             Lampa.Controller.add('content', {
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
+                toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { Navigator.move('right'); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
@@ -4224,11 +4268,13 @@
             // Основной путь — та же склеенная запись дня, что и по обычному входу в камеру.
             var day = $('<div class="selector qdl-btn-green" style="margin:.6em 1.4em;padding:1em 1.2em;background:rgba(20,160,40,.85);border-radius:.8em;font-size:1.5em;font-weight:600">▶ Весь день одной записью   ·   ' + liveDur(total) + '</div>');
             day.on('hover:focus', function () { last = day[0]; scroll.update(day, true); });
+            day.on('hover:touch hover:hover', function () { last = markLast(day); });
             day.on('hover:enter', function () { livePlayDay(cam, date, label); });
 
             // Запасной: куски по очереди (каждый со своим таймлайном) — если склейка не собралась.
             var seq = $('<div class="selector qdl-btn-focus" style="margin:.4em 1.4em;padding:.8em 1.2em;background:rgba(255,255,255,.1);border-radius:.8em;font-size:1.3em">Фрагменты подряд, по одному</div>');
             seq.on('hover:focus', function () { last = seq[0]; scroll.update(seq, true); });
+            seq.on('hover:touch hover:hover', function () { last = markLast(seq); });
             seq.on('hover:enter', function () { livePlay(cam, items, 0); });
 
             return box.append(day).append(seq);
@@ -4254,6 +4300,7 @@
             img.attr('src', withUid(API + '/qdl/live/thumb?id=' + rec.id));
             img.on('error', function () { this.src = './img/img_broken.svg'; });
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
             el.on('hover:enter', function () { livePlay(cam, items, i); });
             return el;
         }
@@ -4261,10 +4308,7 @@
         this.render = function () { return html; };
         this.start = function () {
             Lampa.Controller.add('content', {
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
+                toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { Navigator.move('right'); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
@@ -4319,6 +4363,7 @@
             var bar = $('<div style="display:flex;align-items:center;gap:.7em;padding:1.2em 1.4em .5em"></div>');
             var pick = $('<div class="selector qdl-btn-focus" style="padding:.65em 1.1em;background:rgba(255,255,255,.08);border-radius:.6em;font-size:1.4em">📅 Выбрать день</div>');
             pick.on('hover:focus', function () { last = pick[0]; scroll.update(pick, true); });
+            pick.on('hover:touch hover:hover', function () { last = markLast(pick); });
             pick.on('hover:enter', function () {
                 livePickDay('', function (d) {
                     Lampa.Activity.push({ url: '', title: 'D1versy Rec', component: 'qdl_live', qdl_date: d, page: 1 });
@@ -4401,8 +4446,7 @@
             img.attr('src', withUid(API + '/qdl/live/thumb?id=' + rec.id));
             img.on('error', function () { this.src = './img/img_broken.svg'; });
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); comp.prefetch(el); });
-            // На таче hover:focus не приходит вовсе — last остался бы пустым (грабля JutCatalog).
-            el.on('hover:touch', function () { last = el[0]; try { Navigator.focused(el[0]); } catch (e) {} });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
             el.on('hover:enter', function () {
                 livePlay({ id: rec.camera, name: rec.cameraName }, [rec], 0);
             });
@@ -4419,10 +4463,7 @@
 
         this.start = function () {
             Lampa.Controller.add('content', {
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
+                toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { Navigator.move('right'); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
@@ -5058,16 +5099,6 @@
             if (i >= 0 && i >= kids.length - PREFETCH_AHEAD) comp.load(page + 1);
         };
 
-        // 🔥 На таче hover:focus не приходит ВООБЩЕ (палец не «фокусит»), поэтому last оставался
-        // пустым и любой collectionFocus(last || false) уводил на первую карточку. Штатные
-        // компоненты Lampa пишут last именно по hover:touch/hover:hover; Navigator.focused
-        // (в отличие от focus) только помечает элемент активным и скролл не двигает.
-        function markLast(el) {
-            return function () {
-                last = el[0];
-                try { Navigator.focused(el[0]); } catch (e) {}
-            };
-        }
 
         // ⚠️ width:100% — правило .cols--N > * даёт долю ширины ЛЮБОМУ прямому потомку,
         // иначе сообщение сожмётся до ширины одной карточки
@@ -5087,7 +5118,7 @@
             var view = el.find('.card__view'); if (!view.length) view = el;
             view.append('<div style="position:absolute;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:3em">🔍</div>');
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
-            el.on('hover:touch hover:hover', markLast(el));
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
             el.on('hover:enter', function () {
                 Lampa.Activity.push({ url: '', title: 'jut.su — поиск', component: 'jut_search', page: 1 });
             });
@@ -5135,7 +5166,7 @@
                 loadPoster();
                 last = el[0]; scroll.update(el, true); comp.prefetch(el);
             });
-            el.on('hover:touch hover:hover', markLast(el));
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
             el.on('hover:enter', function () {
                 Lampa.Activity.push({ url: '', title: c.title || c.slug, component: 'jut_title', jut_slug: c.slug, jut_card: c });
             });
@@ -5163,10 +5194,7 @@
                 // link обязателен: по нему Controller.own(comp) отличает «активны мы» от
                 // «активен кто-то другой» — на этом держится безопасная догрузка карточек
                 link: comp,
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
+                toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { Navigator.move('right'); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
@@ -5269,6 +5297,7 @@
                 var b = $('<div class="selector ' + (opts.green ? 'qdl-btn-green' : 'qdl-btn-focus') + '" style="display:inline-flex;align-items:center;gap:.5em;background:' + (opts.green ? 'rgba(20,160,40,.85)' : 'rgba(255,255,255,.12)') + ';padding:.8em 1.3em;border-radius:.5em;font-size:1.2em">' + (opts.icon || '') + '<span></span></div>');
                 b.children('span').text(label);
                 b.on('hover:focus', function () { last = b[0]; scroll.update(b, true); });
+                b.on('hover:touch hover:hover', function () { last = markLast(b); });
                 b.on('hover:enter', function () { onEnter(b); });
                 btns.append(b);
                 return b;
@@ -5343,10 +5372,7 @@
             setTlBucket(jutBucket(slug));
             comp.refreshContinue();
             Lampa.Controller.add('content', {
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
+                toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { Navigator.move('right'); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
@@ -5412,6 +5438,7 @@
                     var el = $('<div class="selector qdl-ep qdl-row-focus" style="padding:.9em 1.1em;margin-bottom:.4em;background:rgba(255,255,255,.07);border-radius:.5em;font-size:1.2em">' +
                         '<span class="qdl-ep-mark"></span>' + esc(jutEpTitle(e, '')) + '</div>');
                     el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+                    el.on('hover:touch hover:hover', function () { last = markLast(el); });
                     el.on('hover:enter', function () { jutPlay(slug, e, data.title, data.items); });
                     el.on('hover:long', function () { jutDownloadMenu(slug, e, e.season); });
                     body.append(el);
@@ -5463,10 +5490,7 @@
             comp.refreshMarks();
             comp.autoplay();
             Lampa.Controller.add('content', {
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
+                toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { Navigator.move('right'); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
@@ -5548,10 +5572,7 @@
                 field.on('hover:enter', openKeyboard);
             }
             field.on('hover:focus', function () { last = field[0]; scroll.update(field, true); });
-            field.on('hover:touch hover:hover', function () {
-                last = field[0];
-                try { Navigator.focused(field[0]); } catch (e) {}
-            });
+            field.on('hover:touch hover:hover', function () { last = markLast(field); });
 
             wrap.append(field);
             scroll.body().append(wrap);
@@ -5601,10 +5622,7 @@
                 view.append('<div style="position:absolute;right:.4em;top:.4em;background:rgba(0,0,0,.65);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">' + c.episodes + '</div>');
 
             el.on('hover:focus', function () { loadPoster(); last = el[0]; scroll.update(el, true); });
-            el.on('hover:touch hover:hover', function () {
-                last = el[0];
-                try { Navigator.focused(el[0]); } catch (e) {}
-            });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
             // Фон под фокусом (bgFocus): hover:focus — пульт, hover:hover — мышь десктопа.
             el.on('hover:focus hover:hover', function () { bgFocus(psrc); });
             el.on('hover:enter', function () {
@@ -5620,11 +5638,8 @@
         this.start = function () {
             Lampa.Controller.add('content', {
                 link: comp,
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    // Стартовый фокус — на поле: экран открывают, чтобы искать.
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
+                // Стартовый фокус — на поле: экран открывают, чтобы искать.
+                toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { Navigator.move('right'); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
