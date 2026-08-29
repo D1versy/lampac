@@ -291,9 +291,10 @@ public partial class QbitController : BaseController
         if (full == null || !System.IO.File.Exists(full))
             return NotFound();
 
-        // Манифесты (json/xml) должны быть всегда свежими; бинари версионированы именем — можно кэшировать.
+        // Манифесты (json/xml/plist) и страница установки должны быть всегда свежими;
+        // бинари версионированы именем — можно кэшировать.
         string ext = Path.GetExtension(full).ToLowerInvariant();
-        if (ext == ".json" || ext == ".xml")
+        if (ext == ".json" || ext == ".xml" || ext == ".plist" || ext == ".html")
             SetHeadersNoCache();
 
         return PhysicalFile(full, MimeType(full), enableRangeProcessing: true);
@@ -1226,9 +1227,16 @@ public partial class QbitController : BaseController
             case ".exe":
             case ".msi":
             case ".nupkg":
+            case ".ipa":
             case ".zip": return "application/octet-stream";
             case ".xml": return "application/xml; charset=utf-8";
             case ".json": return "application/json; charset=utf-8";
+            // канал ios: страница установки + манифест itms-services с иконками.
+            // ⚠️ Тип критичен: html как octet-stream Safari СКАЧАЕТ вместо показа,
+            // а манифест не того типа iOS отвергает молча, без ошибки на экране.
+            case ".html": return "text/html; charset=utf-8";
+            case ".plist": return "text/xml; charset=utf-8";
+            case ".png": return "image/png";
             default: return "application/octet-stream";
         }
     }
