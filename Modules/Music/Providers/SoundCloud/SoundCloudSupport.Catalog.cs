@@ -513,16 +513,12 @@ public static partial class SoundCloudSupport
         if (selections.ValueKind != JsonValueKind.Array || selections.GetArrayLength() == 0)
             return null;
 
-        string country = Country.ToUpperInvariant();
-
-        if (country is "GB" or "UK")
+        string country = Country;
+        foreach (var selection in selections.EnumerateArray())
         {
-            foreach (var selection in selections.EnumerateArray())
-            {
-                string title = GetString(selection, "title");
-                if (!string.IsNullOrWhiteSpace(title) && title.Contains("UK", StringComparison.OrdinalIgnoreCase))
-                    return selection;
-            }
+            string title = GetString(selection, "title");
+            if (!string.IsNullOrWhiteSpace(title) && title.EndsWith($" {country}", StringComparison.OrdinalIgnoreCase))
+                return selection;
         }
 
         foreach (var selection in selections.EnumerateArray())
@@ -849,6 +845,7 @@ public static partial class SoundCloudSupport
             artists = string.IsNullOrWhiteSpace(artistName) ? new List<string>() : new List<string> { artistName },
             album_id = album?.id,
             album_title = album?.title,
+            isrc = GetTrackIsrc(track),
             duration_ms = GetInt(track, "full_duration") ?? GetInt(track, "duration"),
             track_number = position,
             date = GetString(track, "published_at"),
@@ -1368,6 +1365,7 @@ public static partial class SoundCloudSupport
             title = title.Trim(),
             artist_name = string.IsNullOrWhiteSpace(artistName) ? "SoundCloud" : artistName,
             artists = string.IsNullOrWhiteSpace(artistName) ? new List<string>() : new List<string> { artistName },
+            isrc = GetTrackIsrc(track),
             duration_ms = GetInt(track, "full_duration") ?? GetInt(track, "duration"),
             date = GetString(track, "published_at"),
             images = string.IsNullOrWhiteSpace(artwork)
