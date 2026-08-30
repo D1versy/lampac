@@ -2036,20 +2036,6 @@
         return extractYouTubeMatchId(json) || extractYouTubeTrackId(track);
     }
 
-    function isDirectArtistEntity(artist) {
-        if (!artist) return false;
-
-        var id = String(artist.id || '');
-        var provider = getEntityProviderId(artist);
-
-        return provider === 'youtubeaudio'
-            || provider === 'soundcloudcharts'
-            || provider === 'spotify'
-            || /^youtube:channel:/i.test(id)
-            || /^soundcloud:user:/i.test(id)
-            || /^spotify:artist:/i.test(id);
-    }
-
     function buildTrackRequestParams(track) {
         var parts = [];
 
@@ -3761,35 +3747,22 @@
         });
     }
 
-    function getActiveMusicQuery() {
-        try {
-            var active = Lampa.Activity.active();
-            if (!active || active.component !== 'lampac_music_home') return '';
-            return String(active.query || '').trim();
-        } catch (e) {
-            return '';
-        }
-    }
-
+    // d1v:artist-enter — Enter на карточке артиста MusicBrainz не открывал его НИГДЕ.
+    // Апстрим открывал каталог только для «прямых» сущностей (YouTube/SoundCloud/Spotify) либо
+    // когда имя артиста совпадало с активным поисковым запросом, а запрос брал getActiveMusicQuery,
+    // требовавший component === 'lampac_music_home'. Главная же query НИКОГДА не несёт (его кладёт
+    // только openSearchScreen в 'lampac_music_search'), поэтому вторая ветка была мертва на всех
+    // экранах сразу — и в поиске, и в закладках, и в «похожих» внутри самого экрана артиста.
+    // Всё это время работал обход: длинное нажатие → «Открыть дискографию» (activateEntryMenu),
+    // который зовёт openArtistCatalog БЕЗ каких-либо гейтов. Enter теперь делает ровно то же.
+    // Собственные гарды openArtistCatalog сохранены: артист без id и псевдо-артист related:*
+    // («часто встречается в фитах») по-прежнему уходят в поиск.
+    // Побочно: saveRecentEntity переехал внутрь openArtistCatalog, поэтому related:* перестали
+    // попадать в «недавних артистов».
     function openArtist(artist) {
         if (!artist) return;
 
-        saveRecentEntity(MUSIC.storage.recent_artists, artist);
-
-        var artistName = String(artist.name || '').trim();
-        var activeQuery = getActiveMusicQuery();
-
-        if (isDirectArtistEntity(artist)) {
-            openArtistCatalog(artist);
-            return;
-        }
-
-        if (artistName && normalizeText(activeQuery) === normalizeText(artistName)) {
-            openArtistCatalog(artist);
-            return;
-        }
-
-        openSearchQuery(artistName);
+        openArtistCatalog(artist);
     }
 
     // фоллбек «Открыть альбом» для треков без album-меты (SoundCloud-аплоады,
@@ -9308,6 +9281,28 @@
         return value > 0 ? params + '&played_ms=' + encodeURIComponent(value) : params;
     }
 
+    // d1v:hist-image — обложка для истории прослушиваний.
+    //
+    // Треки youtube:*/inline:* идут мимо метапоиска (ShouldSkipMetadataTrackLookup), поэтому сервер
+    // собирает их из присланных параметров, а картинки среди них не было вовсе: в playback_history
+    // ложился payload с "images":[], и «Недавно слушали» рисовало серую заглушку вместо обложки.
+    // Тот же payload читает «Твой топ», так что чинятся обе витрины разом.
+    //
+    // 🔴 Отдельный аппендер, а НЕ параметр в buildTrackRequestParams: тот строит ещё и адреса
+    // /music/play и /music/stream, которые уезжают в src плеера и в m3u, и ключ префетч-кеша.
+    // Проксированный URL картинки — это сотни символов; в адресе плеера ему не место.
+    // 🔴 Берём images напрямую, а не trackImage(): последний при отсутствии картинки возвращает
+    // сгенерированный SVG (data:), и в базу уехала бы заглушка вместо «картинки нет».
+    function appendTrackImageParam(params, track) {
+        var image = track && track.images ? selectSizedImage(track.images, 250) : '';
+        if (!image) return params;
+
+        image = String(image);
+        if (image.indexOf('http') !== 0 && image.indexOf('//') !== 0) return params;
+
+        return params + '&image=' + encodeURIComponent(image);
+    }
+
     function markTrackPlayed(track, playedMs) {
         if (!track || !track.id) return;
 
@@ -9318,7 +9313,7 @@
         // count_play — только здесь: это честный play-путь (после задержки
         // реального воспроизведения); refreshRecentlyPlayedTrack обновляет
         // payload без прослушивания и счётчик статистики не трогает
-        requestPost(MUSIC.endpoints.markHistory, appendPlayedMsParam(buildTrackRequestParams(track) + '&count_play=true', track, playedMs), function () {
+        requestPost(MUSIC.endpoints.markHistory, appendTrackImageParam(appendPlayedMsParam(buildTrackRequestParams(track) + '&count_play=true', track, playedMs), track), function () {
             refreshStatsTopAfterPlayedTrack();
         }, function () {});
     }
@@ -9329,7 +9324,7 @@
         var value = normalizePlayedMs(track, playedMs);
         if (value <= 0) return;
 
-        requestPost(MUSIC.endpoints.markHistory, appendPlayedMsParam(buildTrackRequestParams(track), track, value), function () {}, function () {});
+        requestPost(MUSIC.endpoints.markHistory, appendTrackImageParam(appendPlayedMsParam(buildTrackRequestParams(track), track, value), track), function () {}, function () {});
     }
 
     function refreshRecentlyPlayedTrack(track) {
@@ -9338,7 +9333,7 @@
         touchHomeCacheEntry('recently_played', mapTrackCard(track), RECENT_SECTION_STORAGE_LIMIT);
         updateHomeSectionMetaFromCache('recently_played');
         emitRecentChanged('recently_played', track);
-        requestPost(MUSIC.endpoints.markHistory, buildTrackRequestParams(track), function () {}, function () {});
+        requestPost(MUSIC.endpoints.markHistory, appendTrackImageParam(buildTrackRequestParams(track), track), function () {}, function () {});
     }
 
     function findQueueTrackById(trackId) {
@@ -13113,11 +13108,13 @@
             });
         }
 
-        img.on('load', function () {
-            html.addClass('loaded');
-        });
-        img.on('error', function () {
-            img.attr('src', item.image || IMG_BG);
+        // d1v:img-noloop-card — апстрим в обработчике ошибки ставил ТОТ ЖЕ src (item.image || IMG_BG),
+        // то есть ровно то, что уже стоит строкой ниже: одна не загрузившаяся обложка уходила в
+        // горячий цикл без затухания (замерено 77 запросов/с, пока экран открыт, из них все — в наш
+        // же /proxyimg). Схлопнуто в один обработчик по образцу hero-секции ниже по файлу.
+        // 🔴 addClass('loaded') обязателен и на ошибке: .lm-card__img держится на opacity:0 и
+        // раскрывается ТОЛЬКО классом loaded на обёртке — без него битая картинка станет невидимой.
+        img.on('load error', function () {
             html.addClass('loaded');
         });
         img.attr('src', item.image || IMG_BG);
@@ -15735,11 +15732,11 @@
             var content = $('<div class="lm-artist-sections"></div>');
             var img = artistImage(artistData, 250);
 
-            posterImg.on('load', function () {
+            // d1v:img-noloop-artist — обработчик ошибки ставил ТОТ ЖЕ src (img), что и строкой ниже:
+            // битая обложка уходила в бесконечный перезапрос. 🔴 css('opacity', 1) обязателен и
+            // на ошибке: у .lm-full__poster-img нет правила .loaded, он раскрывается только так.
+            posterImg.on('load error', function () {
                 posterImg.css('opacity', 1);
-            });
-            posterImg.on('error', function () {
-                posterImg.attr('src', img).css('opacity', 1);
             });
             posterImg.attr('src', img);
 
@@ -16016,11 +16013,11 @@
                         .join(' · ')
                 );
 
-                posterImg.on('load', function () {
+                // d1v:img-noloop-album — обработчик ошибки ставил ТОТ ЖЕ src (img), что и строкой ниже:
+                // битая обложка уходила в бесконечный перезапрос. 🔴 css('opacity', 1) обязателен и
+                // на ошибке: у .lm-full__poster-img нет правила .loaded, он раскрывается только так.
+                posterImg.on('load error', function () {
                     posterImg.css('opacity', 1);
-                });
-                posterImg.on('error', function () {
-                    posterImg.attr('src', img).css('opacity', 1);
                 });
                 posterImg.attr('src', img);
 

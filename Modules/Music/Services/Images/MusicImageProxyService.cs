@@ -125,6 +125,21 @@ public static class MusicImageProxyService
             return album;
 
         ProxyImages(controller, album.images);
+
+        // d1v:img-album-tracks — апстрим обходил только обложку самого альбома, поэтому картинки
+        // ТРЕКОВ уезжали клиенту сырыми: в /music/album 150 ссылок из 151 вели прямо на i.scdn.co
+        // и i1.sndcdn.com. Это ломало инвариант «клиент ходит только на наш сервер» и попутно
+        // кормило цикл перезапроса битых картинок на клиенте. У MusicArtist и MusicBrowseSection
+        // обход вложенных сущностей есть — здесь это забытый случай, а не решение.
+        // Повторного проксирования не будет: ProxyImages идемпотентен (TryRewriteProxyHost плюс
+        // два гарда в NeedProxy), а у Spotify обложка альбома и обложка трека — вообще один и тот
+        // же инстанс MusicImage, он просто будет посещён несколько раз вхолостую.
+        if (album.tracks != null)
+        {
+            foreach (var track in album.tracks)
+                Apply(controller, track);
+        }
+
         return album;
     }
 
@@ -172,6 +187,19 @@ public static class MusicImageProxyService
         {
             if (image == null || string.IsNullOrWhiteSpace(image.url))
                 continue;
+
+            // d1v:img-scheme — protocol-relative («//yt3.googleusercontent.com/…», так отдаёт
+            // YoutubeExplode) проваливал Uri.TryCreate(…, UriKind.Absolute) в NeedProxy, и такая
+            // ссылка уезжала клиенту СЫРОЙ: 8 из 103 в /music/search, 32 из 333 при full=true.
+            // В браузере она разрешается относительно origin и «работает», а на origin file://
+            // (виджет Tizen/webOS) превращается в file://yt3… — битая картинка, которую клиент
+            // раньше ещё и перезапрашивал в цикле.
+            // 🔴 Нормализовать ОБЯЗАТЕЛЬНО до HostImgProxy: ProxyImg требует href.StartsWith("http")
+            // и на завёрнутом «//host» вернул бы 404 — стало бы хуже, чем было. Пишем безусловно,
+            // до всех гардов: даже при выключенном проксировании (sisi.proxyimg_disable) клиент
+            // должен получить https://…, а не //…. Схема именно https — доноры по HTTP не отдают.
+            if (image.url.StartsWith("//", StringComparison.Ordinal))
+                image.url = "https:" + image.url;
 
             // кэши секций/сущностей шарят инстансы между запросами, а Apply
             // мутирует url на месте — хост ПЕРВОГО запросившего запекался в

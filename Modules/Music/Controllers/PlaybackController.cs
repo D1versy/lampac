@@ -92,13 +92,21 @@ public class PlaybackController : BaseController
 
     [HttpPost]
     [Route("music/history/mark")]
-    async public Task<ActionResult> MarkHistory(string id, string provider, string title, string artist_name, string album_title, int? duration_ms, string date, string isrc, bool count_play = false, long? played_ms = null)
+    async public Task<ActionResult> MarkHistory(string id, string provider, string title, string artist_name, string album_title, int? duration_ms, string date, string isrc, bool count_play = false, long? played_ms = null, string image = null)
     {
         var track = await MusicPlaybackService.ResolveRequestTrackAsync(id, provider, title, artist_name, album_title, duration_ms, date, isrc);
         string profileId = MusicProfileIdentity.Resolve(requestInfo, Request);
 
         if (track != null)
         {
+            // d1v:hist-image — треки youtube:*/inline:* собираются из параметров запроса мимо
+            // метапоиска, и картинки среди них не было: в playback_history ложился payload с
+            // пустым images, а «Недавно слушали» и «Твой топ» рисовали серую заглушку. Обложку
+            // знает только клиент — он и присылает её (см. appendTrackImageParam в plugin.js).
+            // Ставим ТОЛЬКО когда своих картинок нет: найденный в каталоге трек знает лучше.
+            if ((track.images == null || track.images.Count == 0) && !string.IsNullOrWhiteSpace(image))
+                track.images = new List<MusicImage> { new MusicImage { url = image } };
+
             await MusicPlaybackHistoryService.SaveAsync(profileId, track);
 
             // статистику инкрементим только по честному прослушиванию:

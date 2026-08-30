@@ -28,6 +28,24 @@ public static class MusicMetadataCacheService
         if (payload is System.Collections.ICollection collection)
             return collection.Count == 0;
 
+        // d1v:empty-artist / d1v:empty-album — контейнерные DTO апстрим пустыми не считал вовсе
+        // (ветки ниже знают только коллекции и результат поиска), поэтому артист без альбомов и
+        // альбом без треков уходили в кеш с ПОЛНЫМ ttl — 7 суток. А появляются они ровно от сбоя
+        // провайдера: GetJsonAsync отдаёт null, и ParseAlbums(null) даёт пустой список при внешне
+        // валидном объекте. Боевой случай: экран Metallica показывал «0 альбомов» неделю, при живом
+        // MusicBrainz с 1108 релиз-группами. Теперь такой результат живёт 20 минут и самолечится.
+        // ⚠️ Цена названа вслух: у артиста, у которого альбомов ЧЕСТНО нет, ответ будет
+        // перезапрашиваться раз в 20 минут. Это два запроса через шлюз 1 req/s — дешевле, чем
+        // неделя пустого экрана.
+        if (payload is MusicArtist artist)
+        {
+            return (artist.albums == null || artist.albums.Count == 0)
+                && (artist.sections == null || artist.sections.Count == 0);
+        }
+
+        if (payload is MusicAlbum album)
+            return album.tracks == null || album.tracks.Count == 0;
+
         if (payload is MusicSearchResult search)
         {
             return (search.artists == null || search.artists.Count == 0)

@@ -187,38 +187,90 @@ public class MusicBrainzMetadataProvider : IMusicMetadataProvider
         return trackJson == null ? null : ParseTrack(trackJson);
     }
 
+    // d1v:mb-retry — один ретрай на «сервис занят» + лог.
+    //
+    // Зачем. Апстрим на ЛЮБОЙ не-2xx молча возвращал null, а вызывающий это проглатывал:
+    // GetArtistAsync делает artist.albums = ParseAlbums(albumsJson?[...]), то есть провалившийся
+    // запрос списка релизов превращался в «у артиста ноль альбомов» — и такой артист уходил в кеш
+    // на 7 суток (см. d1v:empty-artist в MusicMetadataCacheService). Боевой случай: у Metallica
+    // экран был пуст, при том что MusicBrainz отвечал 200 за 0.23 с и отдавал 12 альбомов из 1108.
+    //
+    // 429/5xx — это «сейчас занято», а не ответ. Одна повторная попытка стоит секунду и снимает
+    // почти весь класс. 4xx (включая 404 «артиста нет») не ретраим и не логируем: это ответ.
+    // ⚠️ Ретрай обязан пройти через RespectRateLimitAsync заново — шлюз держит 1 запрос/с на
+    // процесс, обходить его нельзя. Ожидание кападим 3 с: бюджет ручки поиска — 20 с.
     static async Task<JsonObject> GetJsonAsync(string path, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(path))
             return null;
 
-        await RespectRateLimitAsync(cancellationToken);
-
-        try
+        for (int attempt = 0; ; attempt++)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/{path}");
-            request.Headers.TryAddWithoutValidation("User-Agent", userAgent);
-            request.Headers.TryAddWithoutValidation("Accept", "application/json");
+            await RespectRateLimitAsync(cancellationToken);
 
-            using var response = await httpClient.SendAsync(request, cancellationToken);
-            if (!response.IsSuccessStatusCode)
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/{path}");
+                request.Headers.TryAddWithoutValidation("User-Agent", userAgent);
+                request.Headers.TryAddWithoutValidation("Accept", "application/json");
+
+                using var response = await httpClient.SendAsync(request, cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    bool busy = (int)response.StatusCode == 429 || (int)response.StatusCode >= 500;
+                    if (busy && attempt == 0)
+                    {
+                        var wait = response.Headers.RetryAfter?.Delta;
+                        if (wait > TimeSpan.Zero)
+                            await Task.Delay(wait.Value < retryAfterCap ? wait.Value : retryAfterCap, cancellationToken);
+
+                        continue;
+                    }
+
+                    if (busy)
+                        NoteFailure(path, ((int)response.StatusCode).ToString());
+
+                    return null;
+                }
+
+                var json = await response.Content.ReadAsStringAsync(cancellationToken);
+                return JsonNode.Parse(json) as JsonObject;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
                 return null;
+            }
+            catch (HttpRequestException ex)
+            {
+                if (attempt == 0)
+                    continue;
 
-            var json = await response.Content.ReadAsStringAsync(cancellationToken);
-            return JsonNode.Parse(json) as JsonObject;
+                NoteFailure(path, ex.GetType().Name);
+                return null;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return null;
+            }
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            return null;
-        }
-        catch (HttpRequestException)
-        {
-            return null;
-        }
-        catch (System.Text.Json.JsonException)
-        {
-            return null;
-        }
+    }
+
+    static readonly TimeSpan retryAfterCap = TimeSpan.FromSeconds(3);
+    static string lastFailure;
+
+    /// <summary>
+    /// Сбой похода в MusicBrainz. Печатаем только смену картины — правило проекта «строка в логе
+    /// должна что-то значить»: иначе череда 503 забьёт лог одинаковыми строками.
+    /// В сообщение идут путь запроса и код/имя исключения, без тел и заголовков.
+    /// </summary>
+    static void NoteFailure(string path, string reason)
+    {
+        string kind = path.Split('?')[0] + " " + reason;
+        if (string.Equals(kind, lastFailure, StringComparison.Ordinal))
+            return;
+
+        lastFailure = kind;
+        Console.WriteLine("[Music] musicbrainz: " + kind + " — ответ не получен, метаданные будут неполными");
     }
 
     // MusicBrainz asks clients to keep Web Service requests at 1 req/s.
