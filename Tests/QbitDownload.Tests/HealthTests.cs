@@ -948,6 +948,143 @@ public class HealthTests
         Assert.DoesNotContain("cub.best", name);
     }
 
+    #region строка «Музыка (полки)» — вердикт прогрева
+
+    /// <summary>Снимок MusicWarm.HealthSnapshot в том виде, в каком его читает вердикт.</summary>
+    static JObject Warm(bool enabled = true, int hosts = 1, DateTime? lastRun = null, DateTime? lastOk = null,
+                        int shelves = 6, bool warming = false, string[] empty = null, int ms = 47, int fails = 0)
+    {
+        var o = new JObject
+        {
+            ["enabled"] = enabled,
+            ["periodMin"] = 20,
+            ["hosts"] = hosts,
+            ["ms"] = ms,
+            ["warming"] = warming,
+            ["fails"] = fails,
+            ["shelves"] = shelves,
+            ["empty"] = new JArray(empty ?? Array.Empty<string>())
+        };
+        if (lastRun != null) o["lastRun"] = lastRun.Value;
+        if (lastOk != null) o["lastOkAt"] = lastOk.Value;
+        return o;
+    }
+
+    [Fact]
+    public void MusicWarm_Ok()
+    {
+        var (status, detail) = QbitController.MusicWarmVerdict(Warm(lastRun: T0, lastOk: T0), T0.AddMinutes(5));
+        Assert.Equal("ok", status);
+        Assert.Contains("полок 6", detail);
+        Assert.Contains("47 мс", detail);
+    }
+
+    [Fact]
+    public void MusicWarm_Disabled_IsOffNotFail()
+    {
+        // 🔴 «выключено» ≠ «отвалилось»: иначе киллсвитч светился бы аварией
+        var (status, detail) = QbitController.MusicWarmVerdict(Warm(enabled: false, lastRun: T0, lastOk: T0), T0);
+        Assert.Equal("off", status);
+        Assert.Contains("выключен", detail);
+    }
+
+    [Fact]
+    public void MusicWarm_NoRunsYet_IsOff()
+    {
+        var (status, _) = QbitController.MusicWarmVerdict(Warm(lastRun: null, lastOk: null), T0);
+        Assert.Equal("off", status);
+    }
+
+    [Fact]
+    public void MusicWarm_NoObservedHost_IsOff()
+    {
+        // греть некуда — это не сбой: хост берётся только с живого клиента
+        var (status, detail) = QbitController.MusicWarmVerdict(Warm(hosts: 0, lastRun: T0), T0);
+        Assert.Equal("off", status);
+        Assert.Contains("никто не открывал", detail);
+    }
+
+    [Fact]
+    public void MusicWarm_StaleSuccess_IsFail()
+    {
+        var (status, detail) = QbitController.MusicWarmVerdict(Warm(lastRun: T0, lastOk: T0), T0.AddHours(3));
+        Assert.Equal("fail", status);
+        Assert.Contains("последний удачный прогрев", detail);
+    }
+
+    [Fact]
+    public void MusicWarm_NeverSucceeded_IsFail()
+    {
+        var (status, detail) = QbitController.MusicWarmVerdict(Warm(lastRun: T0, lastOk: null, fails: 3), T0);
+        Assert.Equal("fail", status);
+        Assert.Contains("сбоев подряд 3", detail);
+    }
+
+    [Fact]
+    public void MusicWarm_NoShelves_IsFail()
+    {
+        var (status, detail) = QbitController.MusicWarmVerdict(Warm(lastRun: T0, lastOk: T0, shelves: 0), T0);
+        Assert.Equal("fail", status);
+        Assert.Contains("все полки пусты", detail);
+    }
+
+    [Fact]
+    public void MusicWarm_Warming_IsWarn()
+    {
+        var (status, detail) = QbitController.MusicWarmVerdict(Warm(lastRun: T0, lastOk: T0, warming: true), T0);
+        Assert.Equal("warn", status);
+        Assert.Contains("бюджет 2 с", detail);
+    }
+
+    [Fact]
+    public void MusicWarm_EmptyShelf_IsWarnWithId()
+    {
+        var (status, detail) = QbitController.MusicWarmVerdict(
+            Warm(lastRun: T0, lastOk: T0, empty: new[] { "browse:vk_top_tracks" }), T0);
+
+        Assert.Equal("warn", status);
+        // светим ИМЯ полки — его проверяют копипастой в /music/section?id=
+        Assert.Contains("browse:vk_top_tracks", detail);
+    }
+
+    [Fact]
+    public void MusicWarm_NullSnapshot_DoesNotThrow()
+    {
+        var (status, _) = QbitController.MusicWarmVerdict(null, T0);
+        Assert.Equal("off", status);
+    }
+
+    [Fact]
+    public void MusicWarm_BrokenFieldTypes_DoNotThrow()
+    {
+        var o = new JObject
+        {
+            ["enabled"] = true,
+            ["periodMin"] = "двадцать",
+            ["hosts"] = "один",
+            ["lastRun"] = "не дата",
+            ["shelves"] = new JArray(),
+            ["empty"] = "не массив"
+        };
+
+        var ex = Record.Exception(() => QbitController.MusicWarmVerdict(o, T0));
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void MusicWarm_RowIsInReport()
+    {
+        TestEnv.EnsureConf();
+        var arr = new JArray();
+        QbitController.AddPassiveChecks(arr, DateTime.UtcNow, 60);
+
+        var row = Find(arr, "music-warm");
+        Assert.NotNull(row);
+        Assert.Equal("Музыка", row.Value<string>("group"));
+    }
+
+    #endregion
+
     [Fact]
     public void PassiveRow_Cub_NoCubConf_DoesNotThrow()
     {

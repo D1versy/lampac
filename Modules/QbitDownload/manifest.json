@@ -23,6 +23,7 @@
     "Warmup.cs",
     "CatalogWarmup.cs",
     "OnlineWarm.cs",
+    "MusicWarm.cs",
     "SearchCache.cs",
     "CubExtensions.cs",
     "AppReplace.cs",

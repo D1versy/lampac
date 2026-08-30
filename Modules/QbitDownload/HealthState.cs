@@ -38,6 +38,11 @@ public static class HealthState
         // Репликация (роль replica): «тихо перестала синхронизироваться» обязано быть видно
         // ДО аварии дома, иначе вскроется ровно в момент, когда бекап понадобился.
         public const string Replica = "replica";
+
+        // Прогрев полок «Музыки» (MusicWarm.cs). Строка НЕ проходит через реестр наблюдений:
+        // вердикт считается из music-warm.json целиком, id здесь — чтобы ключ строки отчёта
+        // жил в одном месте со всеми остальными.
+        public const string MusicWarm = "music-warm";
     }
 
     public const string StatusOk = "ok";

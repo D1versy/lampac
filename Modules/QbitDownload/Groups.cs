@@ -24,6 +24,12 @@ namespace QbitDownload;
 //   database/Sync.sql      bookmarks(user, data)        «История просмотров» + все списки Избранного
 //   database/TimeCode.sql  timecodes(user, card, item)  позиции просмотра и отметки «просмотрено»
 //   <jutDataDir>/history/<uid>.json                     лента «недавнее» раздела jut.su
+//   database/music/Music.sql  playback_history / track_stats_daily / user_playlists (profile_id)
+//
+// Музыка (раздел «Музыка», апстримный модуль Modules/Music) вписывается сюда БЕСПЛАТНО:
+// MusicProfileIdentity.Resolve первым делом берёт requestInfo.user_uid — то есть видит уже
+// подменённый айди, и ни одной правки внутри чужого модуля не требуется. Слияние прошлого при
+// связывании и копия при разрыве — GroupsHistory.GroupsMergeMusic.
 //
 // Значит группа — это «подставить вместо айди устройства айди группы» на входе в контроллеры.
 // Никаких вторых копий, никакой фоновой синхронизации, ни одной правки клиента: фича приезжает
@@ -39,6 +45,12 @@ namespace QbitDownload;
 //
 //  1. БЕЛЫЙ СПИСОК ПУТЕЙ, а не «подменяем везде». Список ниже (_syncPaths) — исчерпывающий.
 //     Всё, что вне его, видит настоящий айди устройства.
+//     ⚠️ Исключение — /music/*: там правило ПРЕФИКСНОЕ с deny-списком (IsMusicSyncPath). Причина
+//     в разнице характеров: /bookmark+/timecode это 8 роутов, которые апстрим не трогает годами,
+//     а Modules/Music — молодой модуль на 41 роут, куда в один синк приезжает по шесть коммитов.
+//     Точный список там МОЛЧА отстал бы при первом же новом /music/favorites — история по нему
+//     уехала бы на устройство, и никто бы не заметил. Обратный риск префикса (новый профильный
+//     роут тихо станет общим) закрыт канарейкой в лог при первой подмене незнакомого пути.
 //  2. ГРУППА НЕ ВЛИЯЕТ НА ПРАВА. /qdl/* под подмену не попадает никогда: реестр устройств
 //     (Perms.Touch) и гранты live/rec/manage остаются на УСТРОЙСТВО. Иначе одна галочка
 //     «объединить историю» тихо раздала бы эфир камер всей группе.
@@ -72,6 +84,61 @@ public static class Groups
         "/bookmark/list", "/bookmark/set", "/bookmark/add", "/bookmark/added", "/bookmark/remove",
         "/timecode/all", "/timecode/add"
     };
+
+    // ── /music/* — префиксное правило (см. красную линию 1) ──
+    // 🔴 «/music/play» сравнивается ТОЧНО, а не по префиксу: StartsWith съел бы /music/playlists
+    // и все ручки плейлистов, и групповые плейлисты молча отвалились бы.
+    static readonly HashSet<string> _musicDenyExact = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "/music/clientlog",     // приём клиентских трейсов, профиль не читает вовсе
+        "/music/play",          // profileId только для поиска кред провайдера
+        "/music/stream",        // relay по тикету
+        "/music/matches",       // audio_source_matches ключуется (track_id, provider_scope) — профиля там нет
+        "/music/playlist.m3u"   // список треков приходит явным ids=
+    };
+
+    static readonly string[] _musicDenyPrefix =
+    {
+        "/music/js/",     // отдача плагина — та же логика, что у /timecode/js/{token}
+        "/music/match/",  // закрепление источника: общее по треку, профилем не ключуется
+        // 🔴 auth_credentials — это OAuth-токены SoundCloud. Красная линия 2: галочка «объединить
+        // историю» не должна раздавать чужой аккаунт. У апстрима для общего доступа есть штатный
+        // путь — запись с пустым profile_id (MusicAuthStorageService), он работает без групп.
+        "/music/auth/"
+    };
+
+    // Канарейка новых роутов: префикс не отстаёт от апстрима, но и не спрашивает разрешения.
+    // Одна строка в лог на КАЖДЫЙ впервые увиденный путь — чтобы «тихий дрейф» стал видимым.
+    static readonly HashSet<string> _musicSeen = new(StringComparer.OrdinalIgnoreCase);
+    const int MusicSeenCap = 64;
+
+    static bool MusicGroups => ModInit.conf?.musicGroupsEnabled != false;
+
+    /// <summary>Путь раздела «Музыка», которому положена подмена айди. Чистая функция.</summary>
+    public static bool IsMusicSyncPath(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return false;
+
+        if (path.Equals("/music", StringComparison.OrdinalIgnoreCase)) return true;
+        if (!path.StartsWith("/music/", StringComparison.OrdinalIgnoreCase)) return false;
+
+        if (_musicDenyExact.Contains(path)) return false;
+
+        foreach (string pre in _musicDenyPrefix)
+            if (path.StartsWith(pre, StringComparison.OrdinalIgnoreCase)) return false;
+
+        return true;
+    }
+
+    static void NoteMusicPath(string path)
+    {
+        lock (_musicSeen)
+        {
+            if (_musicSeen.Count >= MusicSeenCap || !_musicSeen.Add(path)) return;
+        }
+        Console.WriteLine("[QbitDownload] groups music: новый роут под подменой — " + path
+            + " (проверь, что это история, а не права)");
+    }
 
     static readonly object _lock = new object();
 
@@ -573,7 +640,13 @@ public static class Groups
             if (ctx == null) return true;
 
             string path = ctx.Request.Path.Value;
-            if (path == null || !_syncPaths.Contains(path)) return true;
+            bool music = false;
+            if (path == null) return true;
+            if (!_syncPaths.Contains(path))
+            {
+                if (!MusicGroups || !IsMusicSyncPath(path)) return true;
+                music = true;
+            }
 
             var req = ctx.Features.Get<RequestModel>();
             if (req == null || req.IsLocalRequest) return true;   // межмодульные вызовы — не устройства
@@ -582,6 +655,8 @@ public static class Groups
             if (gid == null || string.Equals(gid, req.user_uid, StringComparison.Ordinal)) return true;
 
             req.user_uid = gid;
+
+            if (music) NoteMusicPath(path);
 
             // Замок обнуления — только для группы и только на записи таймкода.
             if (path.Equals("/timecode/add", StringComparison.OrdinalIgnoreCase) && await DropZeroWriteAsync(ctx, gid))

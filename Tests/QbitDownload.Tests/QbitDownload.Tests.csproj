@@ -66,6 +66,7 @@
     <Compile Include="..\..\Modules\QbitDownload\AppReplace.cs" Link="Module\AppReplace.cs" />
     <Compile Include="..\..\Modules\QbitDownload\CatalogWarmup.cs" Link="Module\CatalogWarmup.cs" />
     <Compile Include="..\..\Modules\QbitDownload\OnlineWarm.cs" Link="Module\OnlineWarm.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\MusicWarm.cs" Link="Module\MusicWarm.cs" />
     <Compile Include="..\..\Modules\QbitDownload\SearchCache.cs" Link="Module\SearchCache.cs" />
     <Compile Include="..\..\Modules\QbitDownload\CubExtensions.cs" Link="Module\CubExtensions.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Bitmagnet.cs" Link="Module\Bitmagnet.cs" />

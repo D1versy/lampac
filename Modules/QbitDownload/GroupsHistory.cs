@@ -35,6 +35,21 @@ namespace QbitDownload;
 // При слиянии ТАЙМКОДОВ побеждает бо́льший percent (тай-брейк — более свежая запись). Это не
 // то же правило, что на живой записи позиции («последний победил»), и так задумано: при
 // объединении двух историй никто не должен отнимать у другого досмотренное.
+//
+// МУЗЫКА (database/music/Music.sql, апстримный модуль Modules/Music). Три таблицы на profile_id:
+// playback_history (что слушали), track_stats_daily (счётчики «Твоего топа») и user_playlists.
+//   • playback_history и user_playlists — побеждает более свежая запись (updated);
+//   • track_stats_daily — MAX(play_count), MAX(total_ms), MAX(last_played).
+// ⚠️ Про MAX сказано вслух: «честнее» было бы СУММИРОВАТЬ (строки за один день у двух устройств
+//    это разные прослушивания), но сумма ломает инвариант 2 — повторный перенос удвоил бы
+//    счётчики, а Join зовётся и из админки, и из Dissolve. MAX — ровно правило таймкодов и та же
+//    формулировка: при объединении историй никто не отнимает у другого послушанное. Цена: если
+//    два устройства слушали ОДИН трек в ОДИН день, меньший счётчик теряется.
+//   • auth_credentials НЕ ТРОГАЕМ вовсе — это OAuth-токены (красная линия «группа не влияет на
+//     права», см. Groups.cs); audio_source_matches профилем не ключуется, там нечего сливать.
+// Пишем под ТЕМ ЖЕ замком, что и сам модуль Music: SemaphorManager("Music") живёт в общей сборке
+// Shared, поэтому ключ (строка) виден обоим Roslyn-модулям, хотя типы — нет. Без него наш merge
+// мог бы столкнуться с живым /music/history/mark: у MusicContext нет WAL и стоит synchronous=FULL.
 // ─────────────────────────────────────────────────────────────────────────────
 public partial class QbitController
 {
@@ -106,7 +121,7 @@ public partial class QbitController
             return "";
         }
 
-        int bookmarks = 0, timecodes = 0, jut = 0;
+        int bookmarks = 0, timecodes = 0, jut = 0, music = 0;
         var errors = report["errors"] as JArray;
         if (errors == null) { errors = new JArray(); report["errors"] = errors; }
 
@@ -119,13 +134,17 @@ public partial class QbitController
         try { jut = GroupsMergeJut(from, to, apply); }
         catch (Exception ex) { errors.Add("jut: " + ex.Message); }
 
+        try { music = GroupsMergeMusic(from, to, apply); }
+        catch (Exception ex) { errors.Add("музыка: " + ex.Message); }
+
         report["bookmarks"] = bookmarks;
         report["timecodes"] = timecodes;
         report["jut"] = jut;
+        report["music"] = music;
 
         if (apply) JsonStore.Flush();   // groups.json и бакеты jut — синхронно, админка читает сразу
 
-        return $"закладок {bookmarks}, позиций {timecodes}, jut {jut}";
+        return $"закладок {bookmarks}, позиций {timecodes}, jut {jut}, музыки {music}";
     }
 
     #endregion
@@ -262,6 +281,219 @@ public partial class QbitController
 
     #endregion
 
+    #region музыка (database/music/Music.sql)
+
+    internal static string MusicDbPathOverride;
+
+    static string MusicDbPath => MusicDbPathOverride ?? System.IO.Path.Combine(DbDir, "music", "Music.sql");
+
+    /// <summary>
+    /// Слить музыкальные данные профиля from в профиль to: история прослушиваний, дневная
+    /// статистика и плейлисты. Возврат — сколько строк приёмника добавилось/обновилось суммарно.
+    /// Нет базы (модуль Music не поднимался) или нет таблицы — 0 без исключения.
+    /// </summary>
+    static int GroupsMergeMusic(string from, string to, bool apply)
+    {
+        if (!System.IO.File.Exists(MusicDbPath)) return 0;
+
+        // Тот же замок, что берут все писатели модуля Music (MusicContext.semaphoreKey = "Music").
+        // Ключ — строка, поэтому чужие типы не нужны. Не дождались — честная ошибка в отчёт,
+        // а не запись вслепую поверх живого /music/history/mark.
+        var sem = new Shared.Services.SemaphorManager("Music", TimeSpan.FromSeconds(20));
+        if (!sem.WaitAsync().GetAwaiter().GetResult())
+            throw new Exception("модуль Music занят, попробуйте ещё раз");
+
+        try
+        {
+            using var db = OpenDb(MusicDbPath);
+            using var tx = apply ? db.BeginTransaction() : null;
+
+            int n = 0;
+            n += MusicMergeHistory(db, tx, from, to, apply);
+            n += MusicMergeStats(db, tx, from, to, apply);
+            n += MusicMergePlaylists(db, tx, from, to, apply);
+            tx?.Commit();
+
+            if (apply && n > 0) Console.WriteLine("[QbitDownload] groups music: " + from + " -> " + to + " = " + n);
+            return n;
+        }
+        finally { sem.Release(); }
+    }
+
+    /// <summary>playback_history: ключ (profile_id, track_id), побеждает более свежая updated.</summary>
+    static int MusicMergeHistory(SqliteConnection db, SqliteTransaction tx, string from, string to, bool apply)
+    {
+        if (!TableExists(db, "playback_history")) return 0;
+
+        var rows = new List<(string track, string payload, string updated)>();
+        using (var sel = db.CreateCommand())
+        {
+            sel.Transaction = tx;
+            sel.CommandText = "select track_id, payload, updated from playback_history where profile_id=$u";
+            sel.Parameters.AddWithValue("$u", from);
+            using var r = sel.ExecuteReader();
+            while (r.Read())
+                rows.Add((r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1), r.IsDBNull(2) ? null : r.GetValue(2)?.ToString()));
+        }
+
+        int n = 0;
+        foreach (var row in rows)
+        {
+            string dstUpdated = null;
+            bool exists = false;
+            using (var sel = db.CreateCommand())
+            {
+                sel.Transaction = tx;
+                sel.CommandText = "select updated from playback_history where profile_id=$u and track_id=$t limit 1";
+                sel.Parameters.AddWithValue("$u", to);
+                sel.Parameters.AddWithValue("$t", row.track);
+                using var r = sel.ExecuteReader();
+                if (r.Read()) { exists = true; dstUpdated = r.IsDBNull(0) ? null : r.GetValue(0)?.ToString(); }
+            }
+
+            // Инвариант 2: приёмник свежее — не трогаем, повторный прогон даёт 0
+            if (exists && !HistoryNewer(row.updated, dstUpdated)) continue;
+
+            n++;
+            if (!apply) continue;
+
+            using var cmd = db.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = exists
+                ? "update playback_history set payload=$p, updated=$up where profile_id=$u and track_id=$t"
+                : "insert into playback_history(profile_id, track_id, payload, updated) values($u,$t,$p,$up)";
+            cmd.Parameters.AddWithValue("$u", to);
+            cmd.Parameters.AddWithValue("$t", row.track);
+            cmd.Parameters.AddWithValue("$p", (object)row.payload ?? string.Empty);
+            cmd.Parameters.AddWithValue("$up", (object)row.updated ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        return n;
+    }
+
+    /// <summary>track_stats_daily: ключ (profile_id, track_id, day), правило — MAX по каждому полю.</summary>
+    static int MusicMergeStats(SqliteConnection db, SqliteTransaction tx, string from, string to, bool apply)
+    {
+        if (!TableExists(db, "track_stats_daily")) return 0;
+
+        var rows = new List<(string track, string day, long plays, long ms, string last)>();
+        using (var sel = db.CreateCommand())
+        {
+            sel.Transaction = tx;
+            sel.CommandText = "select track_id, day, play_count, total_ms, last_played from track_stats_daily where profile_id=$u";
+            sel.Parameters.AddWithValue("$u", from);
+            using var r = sel.ExecuteReader();
+            while (r.Read())
+                rows.Add((r.GetString(0), r.GetString(1), r.GetInt64(2), r.GetInt64(3), r.IsDBNull(4) ? null : r.GetValue(4)?.ToString()));
+        }
+
+        int n = 0;
+        foreach (var row in rows)
+        {
+            bool exists = false;
+            long dPlays = 0, dMs = 0;
+            string dLast = null;
+            using (var sel = db.CreateCommand())
+            {
+                sel.Transaction = tx;
+                sel.CommandText = "select play_count, total_ms, last_played from track_stats_daily where profile_id=$u and track_id=$t and day=$d limit 1";
+                sel.Parameters.AddWithValue("$u", to);
+                sel.Parameters.AddWithValue("$t", row.track);
+                sel.Parameters.AddWithValue("$d", row.day);
+                using var r = sel.ExecuteReader();
+                if (r.Read())
+                {
+                    exists = true;
+                    dPlays = r.GetInt64(0);
+                    dMs = r.GetInt64(1);
+                    dLast = r.IsDBNull(2) ? null : r.GetValue(2)?.ToString();
+                }
+            }
+
+            long plays = Math.Max(row.plays, dPlays);
+            long ms = Math.Max(row.ms, dMs);
+            string last = HistoryNewer(row.last, dLast) ? row.last : dLast;
+
+            // Инвариант 2: если MAX ничего не меняет — строку не трогаем и не считаем
+            if (exists && plays == dPlays && ms == dMs && string.Equals(last, dLast, StringComparison.Ordinal)) continue;
+
+            n++;
+            if (!apply) continue;
+
+            using var cmd = db.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = exists
+                ? "update track_stats_daily set play_count=$p, total_ms=$m, last_played=$l where profile_id=$u and track_id=$t and day=$d"
+                : "insert into track_stats_daily(profile_id, track_id, day, play_count, total_ms, last_played) values($u,$t,$d,$p,$m,$l)";
+            cmd.Parameters.AddWithValue("$u", to);
+            cmd.Parameters.AddWithValue("$t", row.track);
+            cmd.Parameters.AddWithValue("$d", row.day);
+            cmd.Parameters.AddWithValue("$p", plays);
+            cmd.Parameters.AddWithValue("$m", ms);
+            cmd.Parameters.AddWithValue("$l", (object)last ?? string.Empty);
+            cmd.ExecuteNonQuery();
+        }
+
+        return n;
+    }
+
+    /// <summary>user_playlists: ключ (profile_id, playlist_id), побеждает более свежая updated.</summary>
+    static int MusicMergePlaylists(SqliteConnection db, SqliteTransaction tx, string from, string to, bool apply)
+    {
+        if (!TableExists(db, "user_playlists")) return 0;
+
+        var rows = new List<(string id, string title, string payload, string source, string updated)>();
+        using (var sel = db.CreateCommand())
+        {
+            sel.Transaction = tx;
+            sel.CommandText = "select playlist_id, title, payload, source, updated from user_playlists where profile_id=$u";
+            sel.Parameters.AddWithValue("$u", from);
+            using var r = sel.ExecuteReader();
+            while (r.Read())
+                rows.Add((r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2),
+                          r.IsDBNull(3) ? null : r.GetString(3), r.IsDBNull(4) ? null : r.GetValue(4)?.ToString()));
+        }
+
+        int n = 0;
+        foreach (var row in rows)
+        {
+            string dstUpdated = null;
+            bool exists = false;
+            using (var sel = db.CreateCommand())
+            {
+                sel.Transaction = tx;
+                sel.CommandText = "select updated from user_playlists where profile_id=$u and playlist_id=$p limit 1";
+                sel.Parameters.AddWithValue("$u", to);
+                sel.Parameters.AddWithValue("$p", row.id);
+                using var r = sel.ExecuteReader();
+                if (r.Read()) { exists = true; dstUpdated = r.IsDBNull(0) ? null : r.GetValue(0)?.ToString(); }
+            }
+
+            if (exists && !HistoryNewer(row.updated, dstUpdated)) continue;
+
+            n++;
+            if (!apply) continue;
+
+            using var cmd = db.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = exists
+                ? "update user_playlists set title=$t, payload=$pl, source=$s, updated=$up where profile_id=$u and playlist_id=$p"
+                : "insert into user_playlists(profile_id, playlist_id, title, payload, source, updated) values($u,$p,$t,$pl,$s,$up)";
+            cmd.Parameters.AddWithValue("$u", to);
+            cmd.Parameters.AddWithValue("$p", row.id);
+            cmd.Parameters.AddWithValue("$t", (object)row.title ?? string.Empty);
+            cmd.Parameters.AddWithValue("$pl", (object)row.payload ?? string.Empty);
+            cmd.Parameters.AddWithValue("$s", (object)row.source ?? string.Empty);
+            cmd.Parameters.AddWithValue("$up", (object)row.updated ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        return n;
+    }
+
+    #endregion
+
     #region лента jut.su (файл-бакет на пользователя)
 
     /// <summary>
@@ -332,7 +564,7 @@ public partial class QbitController
     /// <summary>Сколько всего накоплено под этим айди: тайтлов в истории, позиций, аниме jut.su.</summary>
     internal static JObject GroupsStats(string user)
     {
-        var o = new JObject { ["history"] = 0, ["timecodes"] = 0, ["jut"] = 0 };
+        var o = new JObject { ["history"] = 0, ["timecodes"] = 0, ["jut"] = 0, ["music"] = 0 };
         if (string.IsNullOrEmpty(user)) return o;
 
         try
@@ -377,6 +609,24 @@ public partial class QbitController
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] groups stats jut: " + ex.Message); }
 
+        try
+        {
+            // Один COUNT(*) по уникальному индексу IX_playback_history_profile_id_track_id —
+            // дешевле, чем разбор JSON закладок выше. Замок не берём: чтение.
+            if (System.IO.File.Exists(MusicDbPath))
+            {
+                using var db = OpenDb(MusicDbPath);
+                if (TableExists(db, "playback_history"))
+                {
+                    using var cmd = db.CreateCommand();
+                    cmd.CommandText = "select count(*) from playback_history where profile_id=$u";
+                    cmd.Parameters.AddWithValue("$u", user);
+                    o["music"] = Convert.ToInt32(cmd.ExecuteScalar());
+                }
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] groups stats music: " + ex.Message); }
+
         return o;
     }
 
@@ -404,7 +654,7 @@ public partial class QbitController
         if (ReplicaMode) return null;
         if (Groups.Exists(gid)) return null;               // 🔴 замок 3: группа ещё жива
 
-        int bm = 0, tc = 0, jt = 0;
+        int bm = 0, tc = 0, jt = 0, mu = 0;
 
         try
         {
@@ -450,10 +700,37 @@ public partial class QbitController
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] groups purge jut: " + ex.Message); }
 
-        if (bm + tc + jt == 0) return null;
+        try
+        {
+            // Те же три замка в начале метода покрывают и эти DELETE: ключ строго g-…, не реплика,
+            // группы в реестре уже нет. auth_credentials НЕ трогаем — мы туда ничего не клали.
+            if (System.IO.File.Exists(MusicDbPath))
+            {
+                var sem = new Shared.Services.SemaphorManager("Music", TimeSpan.FromSeconds(20));
+                if (sem.WaitAsync().GetAwaiter().GetResult())
+                {
+                    try
+                    {
+                        using var db = OpenDb(MusicDbPath);
+                        foreach (string table in new[] { "playback_history", "track_stats_daily", "user_playlists" })
+                        {
+                            if (!TableExists(db, table)) continue;
+                            using var cmd = db.CreateCommand();
+                            cmd.CommandText = "delete from " + table + " where profile_id=$u";   // имя таблицы — константа нашего кода
+                            cmd.Parameters.AddWithValue("$u", gid);
+                            mu += cmd.ExecuteNonQuery();
+                        }
+                    }
+                    finally { sem.Release(); }
+                }
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] groups purge music: " + ex.Message); }
+
+        if (bm + tc + jt + mu == 0) return null;
 
         JsonStore.Flush();
-        string s = $"закладок {bm}, позиций {tc}, jut {jt}";
+        string s = $"закладок {bm}, позиций {tc}, jut {jt}, музыки {mu}";
         Console.WriteLine("[QbitDownload] groups purge " + gid + ": " + s);
         return s;
     }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -86,6 +86,39 @@ public class TestSandboxTests
         using var cmd = c.CreateCommand();
         cmd.CommandText = sql;
         cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Шестое хранилище: БД модуля Music. Ключ — profile_id, а НЕ user.</summary>
+    static void SeedMusic(string cache, string uid, int plays)
+    {
+        string dir = Path.Combine(cache, "database", "music");
+        Directory.CreateDirectory(dir);
+        QbitController.MusicDbPathOverride = Path.Combine(dir, "Music.sql");
+
+        using var c = new SqliteConnection("Data Source=" + QbitController.MusicDbPathOverride);
+        c.Open();
+        Exec(c, "create table if not exists playback_history (profile_id text, track_id text, payload text, updated text)");
+        Exec(c, "create table if not exists track_stats_daily (profile_id text, track_id text, day text, play_count integer, total_ms integer, last_played text)");
+        Exec(c, "create table if not exists user_playlists (profile_id text, playlist_id text, title text, payload text, source text, updated text)");
+        Exec(c, "create table if not exists auth_credentials (profile_id text, provider_id text, payload text, updated text)");
+
+        for (int i = 0; i < plays; i++)
+        {
+            Exec(c, "insert into playback_history(profile_id, track_id, payload, updated) values('" + uid + "', 'yt:" + i + "', '{}', 'u')");
+            Exec(c, "insert into track_stats_daily(profile_id, track_id, day, play_count, total_ms, last_played) values('" + uid + "', 'yt:" + i + "', '2026-08-30', 1, 10, 'u')");
+        }
+    }
+
+    static int MusicRows(string table, string uid)
+    {
+        if (!File.Exists(QbitController.MusicDbPathOverride)) return 0;
+
+        using var c = new SqliteConnection("Data Source=" + QbitController.MusicDbPathOverride);
+        c.Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "select count(*) from " + table + " where profile_id=$u";
+        cmd.Parameters.AddWithValue("$u", uid);
+        return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
     static int Rows(string cache, string file, string table, string uid)
@@ -519,5 +552,67 @@ public class TestSandboxTests
 
         Assert.True(Perms.Known("dueq3shm"));
         Assert.True(Perms.Known("diqituzn"));
+    }
+
+    // ══ шестое хранилище: музыка (Music.sql, profile_id) ══════════════════════
+
+    [Fact]
+    public void Музыка_тестового_айди_убирается()
+    {
+        const string MacUa = "Mozilla/5.0 (Macintosh) lampa_client d1vision_mac/1.0.13-523";
+        string cache = FreshEnv();
+        Perms.Touch(Req(TestUid, MacUa), force: true);
+        SeedMusic(cache, TestUid, plays: 3);
+
+        var report = QbitController.TestPurge(TestUid, all: false, apply: true);
+
+        Assert.Null(report["error"]);
+        Assert.Equal(6, report.Value<int>("music"));   // 3 прослушивания + 3 строки статистики
+        Assert.Equal(0, MusicRows("playback_history", TestUid));
+        Assert.Equal(0, MusicRows("track_stats_daily", TestUid));
+    }
+
+    [Fact]
+    public void Музыка_настоящего_устройства_не_трогается()
+    {
+        // 🔴 главный инвариант уборки: чужие строки не должны исчезнуть никогда
+        const string MacUa = "Mozilla/5.0 (Macintosh) lampa_client d1vision_mac/1.0.13-523";
+        string cache = FreshEnv();
+        Perms.Touch(Req(TestUid, MacUa), force: true);
+        SeedMusic(cache, TestUid, plays: 1);
+        SeedMusic(cache, "diqituzn", plays: 2);        // боевое устройство владельца
+
+        QbitController.TestPurge(TestUid, all: false, apply: true);
+
+        Assert.Equal(0, MusicRows("playback_history", TestUid));
+        Assert.Equal(2, MusicRows("playback_history", "diqituzn"));
+    }
+
+    [Fact]
+    public void Сухой_прогон_музыку_считает_но_не_удаляет()
+    {
+        const string MacUa = "Mozilla/5.0 (Macintosh) lampa_client d1vision_mac/1.0.13-523";
+        string cache = FreshEnv();
+        Perms.Touch(Req(TestUid, MacUa), force: true);
+        SeedMusic(cache, TestUid, plays: 2);
+
+        var report = QbitController.TestPurge(TestUid, all: false, apply: false);
+
+        Assert.Equal(4, report.Value<int>("music"));
+        Assert.Equal(2, MusicRows("playback_history", TestUid));
+    }
+
+    [Fact]
+    public void Отсутствующая_база_музыки_не_ошибка()
+    {
+        const string MacUa = "Mozilla/5.0 (Macintosh) lampa_client d1vision_mac/1.0.13-523";
+        string cache = FreshEnv();
+        QbitController.MusicDbPathOverride = Path.Combine(cache, "нет-такой", "Music.sql");
+        Perms.Touch(Req(TestUid, MacUa), force: true);
+
+        var report = QbitController.TestPurge(TestUid, all: false, apply: true);
+
+        Assert.Equal(0, report.Value<int>("music"));
+        Assert.Empty((JArray)report["errors"]);
     }
 }

@@ -138,6 +138,7 @@ public partial class QbitController
     const string GrpMeta = "Метаданные";
     const string GrpSearch = "Поиск раздач";
     const string GrpJut = "jut.su";
+    const string GrpMusic = "Музыка";
 
     // JutOn (вкладка jut.su включена) объявлен в JutSu.cs — тот же partial-класс
     static string NoSlash(string s) => (s ?? "").TrimEnd('/');
@@ -204,6 +205,13 @@ public partial class QbitController
             jutOff ?? (string.IsNullOrWhiteSpace(ModInit.conf?.jutUserId) ? "куки не заданы" : null));
         AddPassiveRow(arr, HealthState.Ids.Shikimori, "Shikimori", GrpJut, now, flap, jutOff);
         AddPassiveRow(arr, HealthState.Ids.AniList, "AniList", GrpJut, now, flap, jutOff);
+
+        // ── Музыка ── вердикт целиком из состояния прогрева (music-warm.json), ноль сети.
+        // Строка отвечает на вопрос «полки живые и тёплые?», а не «жив ли внешний провайдер»:
+        // до провайдеров мы не ходим, до них ходит модуль Music.
+        var mw = MusicWarm.HealthSnapshot();
+        var (mwStatus, mwDetail) = MusicWarmVerdict(mw, now);
+        arr.Add(Svc(HealthState.Ids.MusicWarm, "Музыка (полки)", GrpMusic, mwStatus, mw.Value<int?>("ms") ?? 0, mwDetail));
     }
 
     static void AddPassiveRow(JArray arr, string id, string name, string group, DateTime now, int flap, string offReason = null)
@@ -417,6 +425,71 @@ public partial class QbitController
     /// Вердикт по телу /xsmart/health. Чистая функция: живая проба только приносит JSON.
     /// Порядок проверок = порядок важности, первое совпадение и есть вердикт.
     /// </summary>
+    /// <summary>
+    /// Вердикт по состоянию прогрева полок «Музыки» (MusicWarm.HealthSnapshot).
+    /// Чистая функция: ни одного запроса, всё уже посчитал тик прогрева.
+    /// Порядок проверок = порядок важности, первое совпадение и есть вердикт.
+    /// 🔴 «Выключено» и «греть некуда» — это off, а не fail: отсутствие работы не авария.
+    /// </summary>
+    internal static (string status, string detail) MusicWarmVerdict(JObject b, DateTime now)
+    {
+        if (b == null) return ("off", "состояния нет");
+        if (!MwBool(b, "enabled")) return ("off", "прогрев музыки выключен");
+
+        // ⚠️ Поля читаются ЗАЩИЩЁННО (MwInt/MwBool/MwDate): снимок приходит из файла на диске,
+        // а он переживает падения по питанию и откаты образа. Битое поле не имеет права уронить
+        // весь /qdl/health — экран настроек погас бы целиком из-за одной строки.
+        var lastRun = MwDate(b, "lastRun");
+        if (lastRun == null) return ("off", "прогонов ещё не было");
+
+        // Хост берётся только с живого клиента: обложки в ответе подписываются хостом запроса,
+        // и выдуманный 127.0.0.1 запёкся бы в общий кеш полок (см. шапку MusicWarm.cs).
+        if (MwInt(b, "hosts", 0) == 0) return ("off", "«Музыку» ещё никто не открывал — греть некуда");
+
+        int periodMin = Math.Max(5, MwInt(b, "periodMin", 20));
+        var lastOk = MwDate(b, "lastOkAt");
+        int fails = MwInt(b, "fails", 0);
+
+        // Три пропущенных прогона подряд — это уже не «моргнуло»
+        if (lastOk == null || (now - lastOk.Value).TotalMinutes > periodMin * 3)
+            return ("fail", lastOk == null
+                ? "удачных прогревов ещё не было" + (fails > 0 ? " · сбоев подряд " + fails : "")
+                : "последний удачный прогрев " + HealthState.Ago(now - lastOk.Value));
+
+        int shelves = MwInt(b, "shelves", 0);
+        if (shelves == 0) return ("fail", "все полки пусты — провайдеры не отвечают");
+
+        string tail = " · полок " + shelves + " · home " + MwInt(b, "ms", 0) + " мс · " + HealthState.Ago(now - lastOk.Value);
+
+        // warming — провайдер не уложился в 2-секундный бюджет /music/home; клиент по этому флагу
+        // делает до трёх дозапросов, то есть цена видна человеку, а не только нам.
+        if (MwBool(b, "warming"))
+            return ("warn", "провайдер не укладывается в бюджет 2 с" + tail);
+
+        // Светим ИМЕНА полок, а не тексты ошибок: имя проверяется копипастой в /music/section?id=
+        var empty = (b["empty"] as JArray)?.Select(x => (string)x).Where(x => !string.IsNullOrEmpty(x)).ToArray();
+        if (empty != null && empty.Length > 0)
+            return ("warn", "пусто: " + string.Join(", ", empty) + tail);
+
+        return ("ok", "полок " + shelves + " · home " + MwInt(b, "ms", 0) + " мс · прогрев " + HealthState.Ago(now - lastOk.Value));
+    }
+
+    static int MwInt(JObject b, string key, int def)
+        => b?[key] is JValue v && v.Type is JTokenType.Integer or JTokenType.Float ? Convert.ToInt32(v.Value) : def;
+
+    static bool MwBool(JObject b, string key)
+        => b?[key] is JValue v && v.Type == JTokenType.Boolean && (bool)v.Value;
+
+    static DateTime? MwDate(JObject b, string key)
+    {
+        if (b?[key] is not JValue v) return null;
+        if (v.Type == JTokenType.Date) return Convert.ToDateTime(v.Value);
+        if (v.Type == JTokenType.String && DateTime.TryParse((string)v.Value, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var d))
+            return d;
+        return null;
+    }
+
     internal static (string status, string detail) XsmartVerdict(JObject b)
     {
         if (b == null) return ("fail", "пустой ответ");

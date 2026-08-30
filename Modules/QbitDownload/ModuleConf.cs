@@ -333,6 +333,20 @@ public class ModuleConf : ModuleBaseConf
     public int onlineWarmPerRunC { get; set; } = 5;       // хвост каталога по персистентному курсору
     public int onlineWarmPaceMs { get; set; } = 5000;     // пауза между карточками — прогон растянут, а не залпом
 
+    // ── Прогрев полок «Музыки» (MusicWarm.cs) ──
+    // /music/home собирает четыре discovery-провайдера, у каждого свой кеш на диске (Apple 6 ч,
+    // Spotify/SoundCloud/VK 1 ч). Протухло — платит первый живой клиент. Тик дёргает home сам.
+    // Период выбран не по TTL, а по допустимому холодному окну: при живом кеше тик — это один
+    // локальный GET и ноль пакетов наружу, наружу уходит только то, что и так протухло.
+    public bool musicWarmEnabled { get; set; } = true;
+    public int musicWarmIntervalMin { get; set; } = 20;   // кламп ≥5
+    public int musicWarmPruneDays { get; set; } = 14;     // хост не заходил N дней → забыть
+    public int musicWarmHostCap { get; set; } = 4;        // сколько хостов клиентов помним (греем самый свежий)
+
+    // ── Общая история музыки внутри группы устройств (Groups.cs) ──
+    // Отдельный выключатель от groupsEnabled: музыку можно откатить, не разбирая группы кино.
+    public bool musicGroupsEnabled { get; set; } = true;
+
     // ── Кеш выдачи поиска раздач (SearchCache.cs, qdl 2.45) ──
     // /qdl/search — самое долгое ожидание в системе: два прохода по всем трекерам + bitmagnet +
     // локальный индекс, реально 3–15 с при таймаутах 40/45 с. Политика владельца: 6 ч отдаём молча,

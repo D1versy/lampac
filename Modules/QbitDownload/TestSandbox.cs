@@ -15,13 +15,16 @@ namespace QbitDownload;
 // прогон на сломанном коде). Значит стенд оставляет ровно те же следы, что настоящий клиент,
 // и убирать их надо ПОСЛЕ, а не запрещать до.
 //
-// Пять хранилищ — это ВСЁ, что пишется по айди устройства. Список собран по коду, не на глаз:
+// Шесть хранилищ — это ВСЁ, что пишется по айди устройства. Список собран по коду, не на глаз:
 //
 //   1. /qdl-data/access.json                      реестр устройств и гранты     (Perms)
 //   2. /qdl-data/jut/history/<uid>.json           история и поиски jut.su       (JutSuHistory)
 //   3. database/Sync.sql      bookmarks(user,…)   закладки + ИСТОРИЯ ПРОСМОТРОВ (модуль Sync)
 //   4. database/TimeCode.sql  timecodes(user,…)   позиции просмотра             (модуль Sync)
 //   5. database/storage/syncview/<md5(uid)>       блоб localStorage             (модуль Storage)
+//   6. database/music/Music.sql                   прослушивания, «Твой топ»,    (модуль Music)
+//      playback_history / track_stats_daily /     плейлисты и креды профиля
+//      user_playlists / auth_credentials          ⚠️ колонка profile_id, а НЕ user
 //
 // ⚠️ Почему лезем в чужие хранилища напрямую: модули компилируются в ОТДЕЛЬНЫЕ сборки и API
 // друг друга не видят. Схема таблиц и путь блоба — те же, что уже используются в
@@ -63,6 +66,7 @@ public partial class QbitController
             ["bookmarks"] = 0,
             ["timecodes"] = 0,
             ["blobs"] = 0,
+            ["music"] = 0,
             ["errors"] = errors
         };
 
@@ -116,8 +120,13 @@ public partial class QbitController
 
             Bump(report, "jut", PurgeJutHistory(key, apply, errors));
             Bump(report, "blobs", PurgeStorageBlob(key, apply, errors));
-            Bump(report, "bookmarks", PurgeSqlRows(SyncDbPath, "bookmarks", key, apply, errors));
-            Bump(report, "timecodes", PurgeSqlRows(TimeCodeDbPath, "timecodes", key, apply, errors));
+            Bump(report, "bookmarks", PurgeSqlRows(SyncDbPath, "bookmarks", "user", key, apply, errors));
+            Bump(report, "timecodes", PurgeSqlRows(TimeCodeDbPath, "timecodes", "user", key, apply, errors));
+
+            // Модуль Music ключует всё по profile_id (не по user). Четыре таблицы — полный набор
+            // писателей по профилю: grep "INSERT INTO|UPDATE|DELETE FROM" по Modules/Music/Services.
+            foreach (string table in new[] { "playback_history", "track_stats_daily", "user_playlists", "auth_credentials" })
+                Bump(report, "music", PurgeSqlRows(MusicDbPath, table, "profile_id", key, apply, errors));
 
             // Реестр — последним (см. п.3 красной линии).
             Bump(report, "devices", PurgeDeviceRow(key, apply));
@@ -184,10 +193,11 @@ public partial class QbitController
     }
 
     /// <summary>
-    /// Строки одного устройства в БД модуля Sync. Имя таблицы — константа из НАШЕГО кода,
-    /// айди уходит параметром: собрать «delete всего» из внешних данных здесь физически нечем.
+    /// Строки одного устройства в чужой БД. Имя таблицы И имя колонки — константы из НАШЕГО
+    /// кода (у модуля Sync это user, у модуля Music — profile_id), айди уходит параметром:
+    /// собрать «delete всего» из внешних данных здесь по-прежнему физически нечем.
     /// </summary>
-    static int PurgeSqlRows(string dbPath, string table, string key, bool apply, JArray errors)
+    static int PurgeSqlRows(string dbPath, string table, string column, string key, bool apply, JArray errors)
     {
         try
         {
@@ -199,7 +209,7 @@ public partial class QbitController
             int n;
             using (var cnt = db.CreateCommand())
             {
-                cnt.CommandText = "select count(*) from " + table + " where user=$u";
+                cnt.CommandText = "select count(*) from " + table + " where " + column + "=$u";
                 cnt.Parameters.AddWithValue("$u", key);
                 n = Convert.ToInt32(cnt.ExecuteScalar());
             }
@@ -208,7 +218,7 @@ public partial class QbitController
 
             using (var del = db.CreateCommand())
             {
-                del.CommandText = "delete from " + table + " where user=$u";
+                del.CommandText = "delete from " + table + " where " + column + "=$u";
                 del.Parameters.AddWithValue("$u", key);
                 n = del.ExecuteNonQuery();
             }
