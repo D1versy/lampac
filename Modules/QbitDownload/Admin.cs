@@ -288,6 +288,20 @@ public class D1VAdminController : BaseController
         return RunGroupOp("leave", null, body.uid, body.keepCopy, apply: true);
     }
 
+    /// <summary>
+    /// Дослить историю уже связанных устройств (см. Groups.Resync). Нужна, когда в подмену
+    /// добавили новое хранилище после того, как группы уже были собраны.
+    /// </summary>
+    [HttpPost]
+    [Route("/admin/d1v/api/groups/resync")]
+    public ActionResult GroupResync([FromBody] GroupLinkBody body)
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        if (body == null) return BadRequest();
+
+        return RunGroupOp("resync", body.gid, null, true, apply: true);
+    }
+
     [HttpPost]
     [Route("/admin/d1v/api/groups/delete")]
     public ActionResult GroupDelete([FromBody] GroupLinkBody body)
@@ -310,6 +324,7 @@ public class D1VAdminController : BaseController
             case "join": report = Groups.Join(gid, uid, apply); break;
             case "leave": report = Groups.Leave(uid, keepCopy, apply); break;
             case "dissolve": report = Groups.Dissolve(gid, keepCopy, apply); break;
+            case "resync": report = Groups.Resync(gid, apply); break;
             default: return StatusCode(400, new { success = false, error = "неизвестная операция: " + op });
         }
 

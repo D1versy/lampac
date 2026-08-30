@@ -380,6 +380,80 @@ public class MusicGroupsTests
         Assert.Equal(2, PlayCount(UidA));
     }
 
+    // ── дослияние уже связанных устройств ─────────────────────────────────
+
+    [Fact]
+    public void Resync_backfills_music_of_existing_members()
+    {
+        // 🔴 Ровно тот случай, ради которого Resync и написан: группа собрана РАНЬШЕ, чем
+        // /music/* попали под подмену, поэтому музыка участников в неё не переехала.
+        FreshEnv();
+        string gid = Groups.Create("Семья");
+        Groups.Join(gid, UidA, apply: true);
+        Groups.Join(gid, UidB, apply: true);
+
+        // «музыка появилась после связывания» — пишем прямо под личные айди
+        SeedPlay(UidA, "yt:aaa", "2026-08-29 10:00:00");
+        SeedPlay(UidB, "yt:bbb", "2026-08-29 11:00:00");
+        Assert.Equal(0, PlayCount(gid));
+
+        var report = Groups.Resync(gid, apply: true);
+
+        Assert.Null(report["error"]);
+        Assert.Equal(2, report.Value<int>("members"));
+        Assert.Equal(2, report.Value<int>("music"));
+        Assert.Equal(2, PlayCount(gid));
+
+        // ничего не удалено — личные строки на месте
+        Assert.Equal(1, PlayCount(UidA));
+        Assert.Equal(1, PlayCount(UidB));
+    }
+
+    [Fact]
+    public void Resync_is_idempotent()
+    {
+        FreshEnv();
+        string gid = Groups.Create("Семья");
+        Groups.Join(gid, UidA, apply: true);
+        SeedPlay(UidA, "yt:aaa", "2026-08-29 10:00:00");
+
+        Assert.Equal(1, Groups.Resync(gid, apply: true).Value<int>("music"));
+        Assert.Equal(0, Groups.Resync(gid, apply: true).Value<int>("music"));
+        Assert.Equal(1, PlayCount(gid));
+    }
+
+    [Fact]
+    public void Resync_preview_writes_nothing()
+    {
+        FreshEnv();
+        string gid = Groups.Create("Семья");
+        Groups.Join(gid, UidA, apply: true);
+        SeedPlay(UidA, "yt:aaa", "2026-08-29 10:00:00");
+
+        var report = Groups.Resync(gid, apply: false);
+
+        Assert.Equal(1, report.Value<int>("music"));
+        Assert.Equal(0, PlayCount(gid));
+    }
+
+    [Theory]
+    [InlineData("g-нетакой")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void Resync_refuses_unknown_group(string gid)
+    {
+        FreshEnv();
+        Assert.NotNull(Groups.Resync(gid, apply: true)["error"]);
+    }
+
+    [Fact]
+    public void Resync_refuses_empty_group()
+    {
+        FreshEnv();
+        string gid = Groups.Create("Пустая");
+        Assert.NotNull(Groups.Resync(gid, apply: true)["error"]);
+    }
+
     // ── счётчик админки ───────────────────────────────────────────────────
 
     [Fact]

@@ -434,6 +434,69 @@ public static class Groups
     /// иначе всё, что посмотрели за время в группе, для устройства просто исчезло бы.
     /// Личная строка при этом никогда не удалялась — она просто не читалась, пока шла группа.
     /// </summary>
+    /// <summary>
+    /// Дослить в группу историю тех, кто в ней УЖЕ состоит.
+    ///
+    /// Зачем это вообще нужно: слияние происходит ровно один раз — в момент `Join`. Значит любое
+    /// хранилище, добавленное в подмену ПОЗЖЕ создания группы, у существующих участников остаётся
+    /// лежать под личным айди: не потерянным, но и не видимым, пока группа жива. Ровно это
+    /// случилось с музыкой в qdl 2.85 — группы были заведены 28.08, `/music/*` попали под подмену
+    /// 30.08.
+    ///
+    /// Операция безопасна по построению: `GroupsMergeHistory` идемпотентен (повторный прогон даёт
+    /// нули) и ничего не удаляет, поэтому её можно звать сколько угодно раз. Сухой прогон
+    /// (`apply:false`) показывает, сколько подтянется, до нажатия.
+    /// </summary>
+    public static JObject Resync(string gid, bool apply)
+    {
+        var report = new JObject { ["op"] = "resync", ["apply"] = apply, ["gid"] = gid ?? "" };
+
+        if (!Enabled) { report["error"] = "группы выключены (groupsEnabled: false)"; return report; }
+        if (string.IsNullOrEmpty(gid) || !Exists(gid)) { report["error"] = "группы нет: " + gid; return report; }
+
+        var members = MembersOf(gid);
+        if (members == null || members.Count == 0) { report["error"] = "в группе нет устройств"; return report; }
+
+        var errors = report["errors"] as JArray;
+        if (errors == null) { errors = new JArray(); report["errors"] = errors; }
+
+        int bookmarks = 0, timecodes = 0, jut = 0, music = 0;
+        var per = new JObject();
+
+        foreach (string uid in members)
+        {
+            var one = new JObject { ["errors"] = errors };   // ошибки копим общим списком
+            QbitController.GroupsMergeHistory(uid, gid, apply, one);
+
+            if (one["error"] != null) { report["error"] = one["error"]; return report; }
+
+            bookmarks += one.Value<int?>("bookmarks") ?? 0;
+            timecodes += one.Value<int?>("timecodes") ?? 0;
+            jut += one.Value<int?>("jut") ?? 0;
+            music += one.Value<int?>("music") ?? 0;
+
+            per[uid] = new JObject
+            {
+                ["bookmarks"] = one.Value<int?>("bookmarks") ?? 0,
+                ["timecodes"] = one.Value<int?>("timecodes") ?? 0,
+                ["jut"] = one.Value<int?>("jut") ?? 0,
+                ["music"] = one.Value<int?>("music") ?? 0
+            };
+        }
+
+        report["members"] = members.Count;
+        report["bookmarks"] = bookmarks;
+        report["timecodes"] = timecodes;
+        report["jut"] = jut;
+        report["music"] = music;
+        report["byDevice"] = per;
+
+        if (apply)
+            Console.WriteLine($"[QbitDownload] groups resync {gid}: устройств {members.Count}, закладок {bookmarks}, позиций {timecodes}, jut {jut}, музыки {music}");
+
+        return report;
+    }
+
     public static JObject Leave(string uid, bool keepCopy, bool apply)
     {
         string key = Perms.NormUid(uid);
