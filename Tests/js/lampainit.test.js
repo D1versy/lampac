@@ -324,6 +324,25 @@ test('lampainit: без ключа появляется отдельный уз�
   assert.ok(extras.indexOf('[data-action="console"]') === -1, 'замок не подмешивается в #qdl-hide-extras');
 });
 
+test('lampainit: замок закрывает и нижнюю панель телефона (qdl 2.84)', () => {
+  // 🔴 Дыра до 2.84: при Platform.screen('mobile') Lampa рисует СВОЮ нижнюю панель, её кнопка
+  // зовёт Controller.toggle('settings') напрямую — мимо шестерёнки и мимо пункта левого меню.
+  // То есть с телефона настройки Lampa открывались в обход замка.
+  const { lock } = appload();
+  assert.match(lock.textContent, /\.navigation-bar__item\[data-action="settings"\]\{display:none!important\}/,
+    'без этого правила замок обходится с телефона');
+});
+
+test('lampainit: общий блок прячет мёртвую «Трансляцию» и убранные пункты меню (qdl 2.84)', () => {
+  // Фолбэк к AppPatch: при смене tree бандла якорь тихо не находится, и без CSS иконка/пункты
+  // вернулись бы у всех клиентов.
+  const { extras } = appload();
+  assert.ok(extras.indexOf('.head__action.open--broadcast{display:none!important}') !== -1,
+    'иконка «Трансляции» — фолбэк к патчу broadcast');
+  assert.ok(extras.indexOf('[data-action="mytorrents"]') !== -1, 'фолбэк к патчу menu-items');
+  assert.ok(extras.indexOf('[data-action="myperson"]') !== -1, 'фолбэк к флагу disable_features.persons');
+});
+
 test('lampainit: с кукой qdl_unlock=1 узла замка нет вовсе, а общий блок от куки не зависит', () => {
   const withKey = appload('a=1; qdl_unlock=1; b=2');
   assert.strictEqual(withKey.lock, null, 'с ключом замка не должно быть в принципе');

@@ -1661,6 +1661,10 @@
             node.id = 'qdl-hide-settings';
             node.textContent = '.head__action.open--settings{display:none!important}'
                 + '.menu__item[data-action="settings"],.menu__item[data-action="console"]{display:none!important}'
+                // 🔴 qdl 2.84: нижняя панель телефона (NavigationBar при Platform.screen('mobile'))
+                // зовёт Controller.toggle('settings') напрямую — её кнопку надо гасить отдельно,
+                // иначе замок обходится с телефона. Копия правила есть в lampainit-invc.js.
+                + '.navigation-bar__item[data-action="settings"]{display:none!important}'
                 // 🔴 Плитка «Хелс-чеки» — тем же замком. Lampa.SettingsApi снять компонент не умеет,
                 // а гард window.qdl_health_settings стоит навсегда: без этого правила отозванное
                 // право прятало шестерёнку, но раздел доживал до перезапуска (поймано permsgate).
@@ -4557,7 +4561,9 @@
         if (a.length) return a;
         a = $('.menu .menu__item[data-action="main"]').first();
         if (a.length) return a;
-        return $('.menu .menu__item[data-action="myperson"]').first();
+        // 🔴 2.84: третьим фолбэком был «myperson», но пункт «Персоны» мы скрыли штатным
+        // флагом disable_features.persons — держим «Фильмы», он остаётся при любых настройках.
+        return $('.menu .menu__item[data-action="movie"]').first();
     }
 
     function ensureMenu() {

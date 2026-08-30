@@ -187,6 +187,15 @@ test('applySettingsLock: без права ставит узел #qdl-hide-setti
     'замок обязан прятать и плитку раздела «Хелс-чеки»');
 });
 
+test('applySettingsLock: узел замка закрывает и нижнюю панель телефона (qdl 2.84)', () => {
+  // Вторая копия правила (первая — в lampainit-invc.js): общего кода между файлами нет, и
+  // разъехаться они не должны. Без него замок обходится кнопкой нижней панели на телефоне.
+  const { doc, qdl } = domLock({ perms: { live: true } });
+  qdl.applySettingsLock();
+  const node = doc.getElementById('qdl-hide-settings');
+  assert.match(node.textContent, /\.navigation-bar__item\[data-action="settings"\]/);
+});
+
 test('applySettingsLock: право снимает узел, который синхронно поставил lampainit-invc.js', () => {
   const { doc, qdl } = domLock({ perms: { manage: true } });
   seedLock(doc);

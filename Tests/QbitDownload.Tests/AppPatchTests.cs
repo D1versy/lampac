@@ -12,7 +12,13 @@ namespace QbitDownload.Tests;
 public class AppPatchTests
 {
     // все якори + окружение, как в бандле (пин tree в LampaWeb/ModInit)
-    const string AllAnchors = @"
+    //
+    // 🔴 Переводы строк ОБЯЗАТЕЛЬНО LF: боевой app.min.js — чистый LF (54 230 строк,
+    // ни одного CR), а этот файл лежит в репозитории с CRLF, и verbatim-строка
+    // тащит их внутрь. Пока все
+    // якоря были однострочными, расхождение не проявлялось; многострочный якорь broadcast-share
+    // (2.84) на CRLF-фикстуре не нашёлся бы, а в бою работал — то есть тест врал бы в обе стороны.
+    const string RawAnchors = @"
       PlayerPlaylist: PlayerPlaylist,
       Timeline: Timeline,
       PlayerVideo.listener.follow('ended', function (e) {
@@ -74,6 +80,31 @@ public class AppPatchTests
         }
       });
       need.timeout = 1000 * 30;
+      function show$5(data, call) {
+        if (type.any) return call();
+        Preroll.load(data.vast_url, call);
+      }
+      function init$K() {
+        var timer, activity;
+        var broadcast = Head.addIcon(Template.string('icon_broadcast'), function () {
+          open$6({ type: 'card', object: Activity.extractObject(activity) });
+        });
+        broadcast.addClass('open--broadcast');
+        broadcast.hide();
+      }
+      var items = [{
+      title: Lang.translate('player_video_speed'),
+      subtitle: speed == 'default' ? Lang.translate('player_speed_default_title') : speed,
+      method: 'speed'
+    }, {
+      title: Lang.translate('player_share_title'),
+      subtitle: Lang.translate('player_share_descr'),
+      method: 'share'
+    }, {
+      title: Lang.translate('player_segments_title'),
+      subtitle: Lang.translate('player_segments_descr'),
+      method: 'segments'
+    }];
     ";
 
     [Fact]
@@ -94,9 +125,80 @@ public class AppPatchTests
         Assert.Contains("/*qdl-cut:shots*/", result);
         Assert.Contains("/*qdl-cut:plugin-reset*/", result);
         Assert.Contains("/*qdl-cut:swr*/", result);
+        // 🔴 preroll до 2.84 не был покрыт вовсе: якоря не было в фикстуре, и смена tree
+        // сломала бы вырез рекламы молча.
+        Assert.Contains("/*qdl-cut:preroll*/", result);
+        Assert.Contains("/*qdl-cut:broadcast*/", result);
+        Assert.Contains("/*qdl-cut:broadcast-share*/", result);
     }
 
+    static readonly string AllAnchors = RawAnchors.Replace("\r\n", "\n");
+
     static int Count(string s, string sub) => s.Split(sub).Length - 1;
+
+    [Fact]
+    public void PatchAppJs_Broadcast_IconDetachedAndShareItemCut()
+    {
+        // «Трансляция» мертва by design (CUB-WebSocket выключен с 2.19, токена нет) — убираем оба
+        // входа: иконку в шапке карточки и пункт «Поделиться» в панели плеера.
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        // 1. иконка: класс вешается как раньше, но узел сразу снимается
+        Assert.Contains("broadcast.addClass('open--broadcast');broadcast.remove();", result);
+        // сам механизм не ломаем — hide() ниже отработает на detached-узле
+        Assert.Contains("broadcast.hide();", result);
+
+        // 2. пункт «Поделиться» исчез целиком, вместе с subtitle и method
+        Assert.DoesNotContain("player_share_title", result);
+        Assert.DoesNotContain("player_share_descr", result);
+        Assert.DoesNotContain("method: 'share'", result);
+
+        // 3. 🔴 соседи по массиву целы, структура не поехала: вырезан ровно один элемент
+        Assert.Contains("player_speed_default_title", result);
+        Assert.Contains("method: 'speed'", result);
+        Assert.Contains("player_segments_title", result);
+        Assert.Contains("method: 'segments'", result);
+        Assert.Equal(Count(AllAnchors, "}, {") - 1, Count(result, "}, {"));
+    }
+
+    [Fact]
+    public void PatchAppJs_Broadcast_Idempotent()
+    {
+        // Staticache может прогнать патч по уже пропатченному телу.
+        string once = AppPatch.PatchAppJs(AllAnchors);
+        string twice = AppPatch.PatchAppJs(once);
+
+        Assert.Equal(once, twice);
+        Assert.Equal(1, Count(twice, "/*qdl-cut:broadcast*/"));
+        Assert.Equal(1, Count(twice, "/*qdl-cut:broadcast-share*/"));
+        Assert.Equal(1, Count(twice, "broadcast.remove();"));
+    }
+
+    [Fact]
+    public void PatchAppJs_Menu_HidesMytorrentsToo()
+    {
+        // «Мои торренты» дублируют наши «Загрузки». Убираем ПУНКТ МЕНЮ, а не torrents_use:
+        // тот же флаг гейтит кнопку торрентов в карточке и разделы настроек Парсер/TorrServer.
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.Contains("item.action == 'mytorrents') return false;/*qdl-cut:menu*/", result);
+        Assert.Contains("item.action == 'relise'", result);
+        Assert.Contains("item.action == 'timetable'", result);
+        Assert.Contains("item.action == 'subscribes'", result);
+        // штатное условие upstream по torrents_use осталось на месте
+        Assert.Contains("if (!window.lampa_settings.torrents_use && item.action == 'mytorrents') return false;", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_Preroll_EarlyReturn()
+    {
+        // Реклама: ранний return из Preroll.show — та же ветка, которой бандл сам пропускает
+        // показ, поэтому плеер стартует как обычно, а Google IMA SDK не грузится вовсе.
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.Contains("function show$5(data, call) {return call();/*qdl-cut:preroll*/", result);
+        Assert.Contains("Preroll.load(data.vast_url, call);", result);   // тело функции не тронуто
+    }
 
     [Fact]
     public void PatchAppJs_Swr_RevalidatesCachedHit_WithoutTouchingMissOrFallback()

@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.83';
+window.qdl_fork_version = '2.84';
 
    // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
@@ -96,7 +96,11 @@ lampainit_invc.appload = function appload() {
         // фолбэк к AppPatch (QbitDownload/AppReplace.cs): при смене tree якоря могут не сработать —
         // тогда CSS прячет уцелевший upstream-колокольчик и пункты меню Релизы/Расписание/Подписки
         + '.head__action.notice--icon{display:none!important}'
-        + '.menu__item[data-action="relise"],.menu__item[data-action="timetable"],.menu__item[data-action="subscribes"]{display:none!important}';
+        + '.menu__item[data-action="relise"],.menu__item[data-action="timetable"],.menu__item[data-action="subscribes"]{display:none!important}'
+        // qdl 2.84: тем же фолбэком — мёртвая «Трансляция» (AppPatch broadcast) и пункты
+        // «Мои торренты» (AppPatch menu-items) / «Персоны» (штатный флаг persons ниже)
+        + '.head__action.open--broadcast{display:none!important}'
+        + '.menu__item[data-action="mytorrents"],.menu__item[data-action="myperson"]{display:none!important}';
       st.textContent = css;
       document.head.appendChild(st);
 
@@ -122,6 +126,11 @@ lampainit_invc.appload = function appload() {
       stg.id = 'qdl-hide-settings';
       stg.textContent = '.head__action.open--settings{display:none!important}'
                       + '.menu__item[data-action="settings"],.menu__item[data-action="console"]{display:none!important}'
+                      // 🔴 qdl 2.84: на телефоне Lampa рисует СВОЮ нижнюю панель
+                      // (NavigationBar.init при Platform.screen('mobile')), и её кнопка
+                      // зовёт Controller.toggle('settings') напрямую — мимо шестерёнки и
+                      // мимо пункта меню. Без этой строки замок обходился с телефона.
+                      + '.navigation-bar__item[data-action="settings"]{display:none!important}'
                       // плитка раздела «Хелс-чеки»: снять компонент Lampa не умеет, прячем правилом
                       + '[data-component="qdl_health"]{display:none!important}';
       document.head.appendChild(stg);
@@ -410,6 +419,39 @@ try { window.lampa_settings.disable_features.blacklist = true; } catch (e) {}
 // ровно как на пустом ответе. Серверная ручка cache_reactions при этом остаётся: она
 // прикрывает клиентов со старым закешированным lampainit.js.
 try { window.lampa_settings.disable_features.reactions = true; } catch (e) {}
+
+// ── qdl 2.84: остатки CUB, которые у нас не могут работать в принципе ──
+// Общее: CUB-токена нет (permit.access=false), поэтому всё, что упирается в аккаунт, отдаёт
+// либо ошибку, либо модалку «войдите». Гасим штатными флагами upstream, а не CSS: флаг
+// выключает и КОД, и запрос, тогда как CSS прячет только картинку.
+
+// persons=true — пункт меню «Персоны» («Мои персоны»). Гейт стоит ровно в одном месте — фильтре
+// menu_items, поэтому открытие карточки актёра из фильма продолжает работать как раньше;
+// исчезает только раздел, где эти подписки хранит сервер CUB.
+try { window.lampa_settings.disable_features.persons = true; } catch (e) {}
+
+// ai=true — два пункта AI-ассистента в кнопке «Ещё» карточки («Рекомендации» и «Факты»).
+// Оба зовут Api.load('ai/generate/{facts,recommend}/…') с таймаутом 60 000 мс — это премиум-ручка
+// CUB, у нас она недостижима. Тот же флаг снимает Search.addSource(Ai.discovery()) в поиске.
+try { window.lampa_settings.disable_features.ai = true; } catch (e) {}
+
+// discuss=true — комментарии CUB (`api/discuss/get/*`, таймаут 5 с). Запрос уходит из ветки,
+// которая и так гейтится account_use, но флаг закрывает её на обоих путях.
+try { window.lampa_settings.disable_features.discuss = true; } catch (e) {}
+
+// remote_configuration=true — раздел настроек «Удалённая конфигурация»: даёт другому приложению
+// временный доступ ставить расширения и менять параметры нашего клиента. Механика построена на
+// CUB-сокете, то есть мертва, но раздел в настройках виден — убираем и его.
+try { window.lampa_settings.disable_features.remote_configuration = true; } catch (e) {}
+
+// account_use=false — весь CUB-аккаунт. Это НЕ Storage-ключ 'account_use' (тумблер синхронизации,
+// который читает наш bookmark.js) — это флаг сборки. Что он делает: штатно удаляет папку
+// «Синхронизация» из настроек (`if (!account_use) comp.find('[data-component="account"]').remove()`),
+// не запускает Account.init() и Bookmarks.update() в очереди старта.
+// 🔴 На hasPremium НЕ влияет: тот читает Storage['account_user'], который мы сеем ниже по файлу, —
+// поэтому подделка премиума (темы витрины, метки «Избранного» без замков) остаётся живой.
+// CSS-правило [data-component="account"] ниже оставлено фолбэком на случай смены поведения.
+try { window.lampa_settings.account_use = false; } catch (e) {}
 
 // ── ДО загрузки Lampa: локализация внешних источников (qdl 2.15, см. claude/11 Media-server) ──
 // Клиент должен ходить ТОЛЬКО на наш сервер (осознанные исключения: YouTube-трейлеры, стрим балансеров).

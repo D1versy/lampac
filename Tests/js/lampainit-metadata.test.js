@@ -41,16 +41,44 @@ test('lampainit-invc: blacklist и reactions выключены (qdl 2.53)', () 
   assert.strictEqual(df.reactions, true);
 });
 
+test('lampainit-invc: остатки CUB выключены штатными флагами (qdl 2.84)', () => {
+  // Ставим ПОВЕРХ пришедших значений — за тем и ставим:
+  //   persons — пункт меню «Мои персоны» (подписки на актёров живут на сервере CUB);
+  //   ai      — «Рекомендации»/«Факты» в кнопке «Ещё» карточки, ai/generate/* с таймаутом 60 с;
+  //   discuss — комментарии CUB;
+  //   remote_configuration — раздел настроек «Удалённая конфигурация» (чужому приложению
+  //             временный доступ ставить расширения и менять параметры).
+  const { sandbox } = load({ persons: false, ai: false, discuss: false, remote_configuration: false });
+  const df = sandbox.window.lampa_settings.disable_features;
+  assert.strictEqual(df.persons, true);
+  assert.strictEqual(df.ai, true);
+  assert.strictEqual(df.discuss, true);
+  assert.strictEqual(df.remote_configuration, true);
+});
+
+test('lampainit-invc: account_use выключен, премиум-спуф не задет (qdl 2.84)', () => {
+  // account_use — флаг СБОРКИ (не Storage-ключ, который читает наш bookmark.js): штатно убирает
+  // папку «Синхронизация» из настроек и не запускает Account.init().
+  // 🔴 hasPremium читает Storage['account_user'] и от account_use не зависит — иначе вернулись бы
+  // замки на темах витрины и в «Избранном».
+  const { sandbox } = load();
+  assert.strictEqual(sandbox.window.lampa_settings.account_use, false);
+
+  const user = JSON.parse(sandbox.window.localStorage.getItem('account_user') || '{}');
+  assert.ok(user.premium > Date.now(), 'премиум-спуф обязан пережить выключение account_use');
+});
+
 test('lampainit-invc: чужие выключатели не задеты', () => {
-  // трогаем ровно четыре ключа (subscribe/metadata/blacklist/reactions) — всё остальное,
-  // что налил бандл или lampainit.js, обязано дойти до Lampa как есть.
-  const { sandbox } = load({ discuss: false, persons: false, trailers: false, lgbt: true });
+  // Трогаем ровно восемь ключей (subscribe/metadata/blacklist/reactions + persons/ai/discuss/
+  // remote_configuration) — всё остальное, что налил бандл или lampainit.js, обязано дойти
+  // до Lampa как есть. trailers особенно: YouTube-трейлеры — осознанное решение владельца.
+  const { sandbox } = load({ trailers: false, lgbt: true, dmca: false, install_proxy: false });
   const df = sandbox.window.lampa_settings.disable_features;
   assert.strictEqual(df.subscribe, true);
   assert.strictEqual(df.metadata, true);
-  assert.strictEqual(df.discuss, false, 'discuss выключать не собирались');
-  assert.strictEqual(df.persons, false, 'persons выключать не собирались');
   assert.strictEqual(df.trailers, false, 'trailers выключать не собирались');
+  assert.strictEqual(df.dmca, false, 'dmca выключать не собирались');
+  assert.strictEqual(df.install_proxy, false, 'install_proxy выключать не собирались');
   assert.strictEqual(df.lgbt, true);
 });
 

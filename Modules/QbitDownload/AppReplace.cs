@@ -22,6 +22,8 @@ namespace QbitDownload;
 //                 отдаётся как раньше, но параллельно тихо дотягивается свежий ответ — он
 //                 переписывает запись кеша и уходит событием 'request_revalidate'. Что и когда
 //                 перестраивать, решает qdl.js (чтобы политика менялась по воздуху);
+//   broadcast   — мёртвая «Трансляция»: иконка в шапке карточки (CUB-WebSocket выключен);
+//   broadcast-share — она же вторым входом: пункт «Поделиться» в панели плеера;
 //   preroll     — рекламный преролл перед плеером: Preroll.show() тянет Google IMA SDK
 //                 (https://imasdk.googleapis.com/js/sdkloader/ima3.js) и крутит VAST из data.vast_url.
 //                 Штатного выключателя нет: disable_features.ads в текущем бандле не читается
@@ -42,7 +44,7 @@ public static class AppPatch
             "/*qdl-cut:notice-cub*/"),
         new P("menu-items",
             "if (!window.lampa_settings.torrents_use && item.action == 'mytorrents') return false;",
-            "if (!window.lampa_settings.torrents_use && item.action == 'mytorrents') return false;\n      if (item.action == 'relise' || item.action == 'timetable' || item.action == 'subscribes') return false;/*qdl-cut:menu*/"),
+            "if (!window.lampa_settings.torrents_use && item.action == 'mytorrents') return false;\n      if (item.action == 'relise' || item.action == 'timetable' || item.action == 'subscribes' || item.action == 'mytorrents') return false;/*qdl-cut:menu*/"),
         new P("tt-extract",
             "Timer.add(time_extract, extract);",
             "/*qdl-cut:tt-extract*/"),
@@ -153,6 +155,24 @@ public static class AppPatch
             "qdl_swr_req.success = function (fresh) { if (!fresh) return; cacheSet(params, fresh); " +
             "Lampa.Listener.send('request_revalidate', { params: params, url: params.url, data: fresh, cached: cached }); }; " +
             "qdl_swr_req.error = function () {}; $.ajax(qdl_swr_req); } } catch (e) {}/*qdl-cut:swr*/"),
+        // ── qdl 2.84: мёртвая «Трансляция» (broadcast) ────────────────────────────────
+        // Иконка в шапке карточки и пункт «Поделиться» в панели плеера ведут в одну модалку,
+        // которая шлёт Socket.send('devices') в WebSocket cub.rip. У нас он закрыт с qdl 2.19
+        // (socket_use=false + socket_methods=false), а склеивать устройства сокету нечем:
+        // единственный ключ в сообщении — data.account, то есть токен CUB, которого у нас нет.
+        // Пользователь получал вечное «сканирование» с пустым списком. Чинить «по-своему»
+        // (через наш /nws) осознанно не стали — решение владельца убрать.
+        // remove() безопасен: элемент уже создан, дальнейшие show()/hide() отработают на
+        // detached-узле. Фолбэк при смене tree — CSS в lampainit-invc.js.
+        new P("broadcast",
+            "broadcast.addClass('open--broadcast');",
+            "broadcast.addClass('open--broadcast');broadcast.remove();/*qdl-cut:broadcast*/"),
+        // Второй вход в ту же модалку: плеер → «Настройки» → «Поделиться». Режем элемент
+        // массива целиком (вместе с закрывающим `}, {`), ветка `a.method == 'share'` в
+        // обработчике остаётся недостижимой — трогать её незачем.
+        new P("broadcast-share",
+            "      title: Lang.translate('player_share_title'),\n      subtitle: Lang.translate('player_share_descr'),\n      method: 'share'\n    }, {\n",
+            "/*qdl-cut:broadcast-share*/"),
     };
 
     public static void Attach() => EventListener.AppReplace += OnAppReplace;

@@ -1,4 +1,4 @@
-using Shared.Models.Module;
+﻿using Shared.Models.Module;
 using System.Collections.Generic;
 
 namespace QbitDownload;
@@ -346,6 +346,13 @@ public class ModuleConf : ModuleBaseConf
     // отдельный, заведомо меньший бюджет вместо общего счётчика штук: 24 фона ≈ 120 постеров по байтам.
     public int catalogWarmupBackdropsPerRow { get; set; } = 3; // сколько первых карточек ряда греть фоном
     public int catalogWarmupBackdropBudget { get; set; } = 24; // фонов за тик (ротация курсора добирает хвост)
+    // ── «Лента» (qdl 2.84) ────────────────────────────────────────────────────
+    // Ряды греются по префиксу /cub/tmdb., а лента живёт по /cub/<домен>/api/feed/all —
+    // в LRU рядов она не попадала в принципе, и раз в 3 часа первый открывший платил 3.29 с.
+    public bool catalogWarmupFeed { get; set; } = true;
+    // сколько find/<imdb> греть за тик. 32 с запасом покрывает ленту (50 записей ≈ 32 тайтла),
+    // а TTL find/ — сутки, поэтому MISS дают только новые элементы.
+    public int catalogWarmupFeedBudget { get; set; } = 32;
 
     // ─────────────────────────────────────────────────────────────────────────
     // jut.su — вкладка аниме (JutSu*.cs).

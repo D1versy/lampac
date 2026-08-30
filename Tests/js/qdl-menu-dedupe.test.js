@@ -241,14 +241,27 @@ test('якорь: «Ленту» спрятали настройкой Lampa —
   assert.deepStrictEqual(order.slice(order.indexOf('main'), order.indexOf('main') + 6), ['main'].concat(ALL));
 });
 
-test('якорь: нет ни «Ленты», ни «Главной» — последний фолбэк «Персоны»', () => {
+test('якорь: нет ни «Ленты», ни «Главной» — последний фолбэк «Фильмы» (qdl 2.84)', () => {
+  // Был «myperson», но с 2.84 пункт «Персоны» скрыт штатным флагом disable_features.persons —
+  // фолбэк на него означал бы «якоря нет вовсе». «Фильмы» остаются при любых настройках.
+  const ctx = H.loadQdlDom({ bodyHtml: menuHtmlCustom(
+    '<li class="menu__item selector" data-action="movie">Фильмы</li>') });
+  ctx.qdl.setPerms({ live: true, rec: true });
+  ctx.qdl.ensureMenu();
+
+  const order = ourOrder(ctx.doc);
+  assert.deepStrictEqual(order.slice(0, 6), ['movie'].concat(ALL));
+});
+
+test('якорь: скрытые «Персоны» больше не считаются якорем (qdl 2.84)', () => {
+  // Меню без «Ленты»/«Главной»/«Фильмов» — вставлять некуда, ждём следующего тика.
   const ctx = H.loadQdlDom({ bodyHtml: menuHtmlCustom(
     '<li class="menu__item selector" data-action="myperson">Персоны</li>') });
   ctx.qdl.setPerms({ live: true, rec: true });
   ctx.qdl.ensureMenu();
 
-  const order = ourOrder(ctx.doc);
-  assert.deepStrictEqual(order.slice(0, 6), ['myperson'].concat(ALL));
+  assert.strictEqual(ctx.doc.querySelectorAll('.qdl-menu').length, 0,
+    'мёртвый якорь не должен превращаться в «вставим куда попало»');
 });
 
 test('якорь: меню ещё не отрисовано — не вставляем ничего и не падаем', () => {

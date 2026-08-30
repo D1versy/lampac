@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Http;
+﻿using Microsoft.AspNetCore.Http;
 using Shared;
 using Shared.Models.Events;
 using System;
@@ -104,6 +104,21 @@ public static class CatalogWarmup
     // курсоры ротации по стабильному ключу (последний обработанный), переживают рестарт
     static string _posterCur, _backdropCur, _cardCur;
 
+    // ── «Лента» (qdl 2.84) ────────────────────────────────────────────────────────
+    // Дыра, описанная в медиасервере claude/11: ряды греются по префиксу /cub/tmdb., а лента
+    // живёт по /cub/<домен>/api/feed/all — в LRU рядов она не попадала В ПРИНЦИПЕ. Замер оттуда:
+    // сама лента 3.29 с холодная / 1–5 мс тёплая, плюс на КАЖДЫЙ элемент бандл делает отдельный
+    // find/<imdb>?external_source=imdb_id (160–314 мс холодный). Раз в 3 часа за это платил
+    // первый открывший.
+    //
+    // 🔥 Форму find/ НЕ конструируем, а СНИМАЕМ с живого клиента — ровно по тем же граблям, что
+    // и шаблоны карточки (§AV.4): бандл строит адрес динамически, и любая рукописная
+    // реконструкция разъедется с ключом Staticache при первом же обновлении фронта. Нет снятой
+    // формы — греем только саму ленту (это и есть те самые 3.29 с), find/ подтянутся, когда
+    // клиент один раз откроет ленту сам.
+    static Entry _feed;          // единственный URL: лент у клиента не бывает много
+    static string _findForm;     // "/tmdb/api/3/find/{imdb}?external_source=imdb_id&…"
+
     const int TmplCap = 24;
 
     static string StorePath => Path.Combine(ModInit.conf?.cachePath ?? "/qdl-data", "catalog-warmup.json");
@@ -179,6 +194,20 @@ public static class CatalogWarmup
             if (cub && IsRowUrl(path, query))
             {
                 Note(req.Scheme, req.Host.Value, path + query);
+                return true;
+            }
+
+            if (cub && IsFeedUrl(path, query))
+            {
+                NoteFeed(req.Scheme, req.Host.Value, path + query);
+                return true;
+            }
+
+            string findForm = ToFindForm(path, query);
+            if (findForm != null)
+            {
+                if (!string.Equals(_findForm, findForm, StringComparison.Ordinal)) _dirty = true;
+                _findForm = findForm;
                 return true;
             }
 
@@ -285,6 +314,137 @@ public static class CatalogWarmup
             if (c < '0' || c > '9') return false;
         return true;
     }
+
+    #region «Лента»: распознавание, форма find/ и разбор ответа (qdl 2.84)
+
+    /// <summary>
+    /// URL ленты: /cub/&lt;домен&gt;/api/feed/&lt;что угодно&gt;. Домен не пиним — CubProxy отдаёт ленту
+    /// по тому хосту, который подставлен в бандл, и он меняется вместе с cub.mirror.
+    /// </summary>
+    public static bool IsFeedUrl(string path, string query)
+    {
+        if (path == null || !path.StartsWith("/cub/", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (IsJunkUrl(path, query))
+            return false;
+
+        return path.Contains("/api/feed/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Клиентский find-по-imdb → форма с плейсхолдером {imdb}. null, если это не он.
+    /// Понимает обе формы адреса: /tmdb/api/3/find/&lt;tt…&gt; и /cub/tmdb.&lt;домен&gt;/3/find/&lt;tt…&gt;.
+    /// Принимаем ТОЛЬКО imdb-идентификатор (tt + цифры): find умеет и другие внешние источники,
+    /// а подставлять мы будем именно imdb_id из ленты.
+    /// </summary>
+    public static string ToFindForm(string path, string query)
+    {
+        if (string.IsNullOrEmpty(path)) return null;
+        query ??= string.Empty;
+
+        if (IsJunkUrl(path, query)) return null;
+        if (!query.Contains("external_source=imdb_id", StringComparison.OrdinalIgnoreCase)) return null;
+
+        int i = path.IndexOf("/3/find/", StringComparison.OrdinalIgnoreCase);
+        if (i < 0) return null;
+
+        string head = path.Substring(0, i + "/3/find/".Length);
+        string id = path.Substring(i + "/3/find/".Length);
+
+        if (id.Length < 3 || !id.StartsWith("tt", StringComparison.Ordinal)) return null;
+        for (int k = 2; k < id.Length; k++)
+            if (id[k] < '0' || id[k] > '9') return null;
+
+        return head + "{imdb}" + query;
+    }
+
+    /// <summary>
+    /// imdb_id из ответа ленты. Форму ответа не пиним: обходим документ и собираем ЛЮБОЕ
+    /// свойство imdb_id со значением вида tt&lt;цифры&gt; — так разбор переживёт смену обёртки
+    /// (results/result/data), которую нам никто не обещал.
+    /// </summary>
+    public static List<string> ExtractImdbIds(byte[] body, int max)
+    {
+        var list = new List<string>();
+        if (body == null || max <= 0) return list;
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            Walk(doc.RootElement, 0);
+        }
+        catch { }
+        return list;
+
+        void Walk(JsonElement el, int depth)
+        {
+            if (list.Count >= max || depth > 8) return;
+
+            if (el.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in el.EnumerateObject())
+                {
+                    if (list.Count >= max) return;
+
+                    if (prop.NameEquals("imdb_id") && prop.Value.ValueKind == JsonValueKind.String)
+                    {
+                        string v = prop.Value.GetString();
+                        if (IsImdbId(v) && seen.Add(v)) list.Add(v);
+                        continue;
+                    }
+
+                    Walk(prop.Value, depth + 1);
+                }
+            }
+            else if (el.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in el.EnumerateArray())
+                {
+                    if (list.Count >= max) return;
+                    Walk(item, depth + 1);
+                }
+            }
+        }
+    }
+
+    static bool IsImdbId(string v)
+    {
+        if (v == null || v.Length < 3 || !v.StartsWith("tt", StringComparison.Ordinal)) return false;
+        for (int i = 2; i < v.Length; i++)
+            if (v[i] < '0' || v[i] > '9') return false;
+        return true;
+    }
+
+    /// <summary>IsFeedUrl для склеенной строки «путь+query» (в файле состояния лежит она).</summary>
+    internal static bool IsFeedPathQuery(string pathQuery)
+    {
+        if (string.IsNullOrEmpty(pathQuery)) return false;
+        int q = pathQuery.IndexOf('?');
+        return q < 0 ? IsFeedUrl(pathQuery, null)
+                     : IsFeedUrl(pathQuery.Substring(0, q), pathQuery.Substring(q));
+    }
+
+    internal static void NoteFeed(string scheme, string host, string pathQuery)
+    {
+        if (string.IsNullOrEmpty(host) || string.IsNullOrEmpty(pathQuery)) return;
+
+        var cur = _feed;
+        if (cur != null && cur.host == host && cur.pathQuery == pathQuery)
+        {
+            cur.lastSeen = DateTime.UtcNow;
+            // клиент попросил снова — снимаем карантин, как это делает Quarantined для рядов
+            if (cur.deadAt != null) { cur.deadAt = null; cur.fails = 0; }
+            _dirty = true;
+            return;
+        }
+
+        _feed = new Entry { scheme = scheme ?? "http", host = host, pathQuery = pathQuery, lastSeen = DateTime.UtcNow };
+        _dirty = true;
+    }
+
+    #endregion
 
     #region шаблоны запросов карточки (снимаются с живого клиента)
 
@@ -743,20 +903,73 @@ public static class CatalogWarmup
             int backdropMiss = await WarmList(port, backdrops, backdropBudget, _backdropCur, v => _backdropCur = v);
             var (cardsDone, cardUrls, cardMiss) = await WarmCards(port, cards, cardBudget);
 
+            var (feedOk, feedUrls, feedMiss) = conf.catalogWarmupFeed
+                ? await WarmFeed(port, Math.Max(0, conf.catalogWarmupFeedBudget), deadAfter, deadRetryHours)
+                : (false, 0, 0);
+
             // карантин в тригере по ИЗМЕНЕНИЮ, а не по факту: иначе строка про dead N печаталась бы
             // каждые 15 минут вечно. Пересчитываем после цикла — в нём состояние могло поменяться.
             int deadNow = _rows.Values.Count(e => e.deadAt != null);
             bool deadChanged = deadNow != _deadLogged;
             _deadLogged = deadNow;
 
-            if (miss > 0 || fail > 0 || posterMiss > 0 || backdropMiss > 0 || cardMiss > 0 || deadChanged)
-                Console.WriteLine($"[QbitDownload] catalog warmup: rows {rows.Length} (miss {miss}, fail {fail}, dead {deadNow}, skip {deadSkipped}{(ignoreQuarantine ? ", карантин отключён — мёртвых больше половины" : "")}), posters {Math.Min(posters.Count, posterBudget)}/{posters.Count} (miss {posterMiss}), backdrops {Math.Min(backdrops.Count, backdropBudget)}/{backdrops.Count} (miss {backdropMiss}), cards {cardsDone}/{cards.Count} ({cardUrls} url, miss {cardMiss}), tmpl {_tmpl.Count}");
+            if (miss > 0 || fail > 0 || posterMiss > 0 || backdropMiss > 0 || cardMiss > 0 || feedMiss > 0 || deadChanged)
+                Console.WriteLine($"[QbitDownload] catalog warmup: rows {rows.Length} (miss {miss}, fail {fail}, dead {deadNow}, skip {deadSkipped}{(ignoreQuarantine ? ", карантин отключён — мёртвых больше половины" : "")}), posters {Math.Min(posters.Count, posterBudget)}/{posters.Count} (miss {posterMiss}), backdrops {Math.Min(backdrops.Count, backdropBudget)}/{backdrops.Count} (miss {backdropMiss}), cards {cardsDone}/{cards.Count} ({cardUrls} url, miss {cardMiss}), tmpl {_tmpl.Count}{(feedOk ? $", feed {feedUrls} url (miss {feedMiss})" : "")}");
 
             FlushTickHealth(Math.Max(1, conf.healthAllFailMinSamples));
 
             if (_dirty) { _dirty = false; Save(); }
         }
         finally { Interlocked.Exchange(ref _ticking, 0); }
+    }
+
+    /// <summary>
+    /// Прогрев «Ленты» (qdl 2.84). Два шага: сама лента, затем find/ по imdb_id из её ответа.
+    ///
+    /// Трафика наружу почти не добавляет: find/ живут сутки, лента — 3 часа, так что MISS дают
+    /// только новые элементы. Бюджет считается в find-запросах; сама лента вне бюджета — ради
+    /// неё всё и затевалось.
+    /// </summary>
+    static async Task<(bool ok, int urls, int miss)> WarmFeed(int port, int budget, int deadAfter, int deadRetryHours)
+    {
+        var feed = _feed;
+        if (feed == null)
+            return (false, 0, 0);
+
+        var now = DateTime.UtcNow;
+        if (Quarantined(feed, now, deadRetryHours))
+            return (false, 0, 0);
+
+        var (ok, wasMiss, code, body, contentType) = await Fetch(port, feed.scheme, feed.host, feed.pathQuery);
+
+        var (f, d) = RowQuarantine(feed.fails, feed.deadAt != null, ok, code, deadAfter);
+        if (f != feed.fails || d != (feed.deadAt != null) || d)
+        {
+            feed.fails = f;
+            feed.lastCode = code;
+            feed.deadAt = d ? now : (DateTime?)null;
+            _dirty = true;
+        }
+
+        int urls = 1, miss = wasMiss ? 1 : 0;
+        if (!ok)
+            return (true, urls, miss);
+
+        // формы ещё не видели (чистый том, лента не открывалась с этого образа) — греем только её
+        string form = _findForm;
+        if (form == null || budget <= 0 || body == null || body.Length > 3_000_000
+            || contentType?.StartsWith("application/json") != true)
+            return (true, urls, miss);
+
+        foreach (string imdb in ExtractImdbIds(body, budget))
+        {
+            var r = await Fetch(port, feed.scheme, feed.host, form.Replace("{imdb}", imdb), readBody: false);
+            urls++;
+            if (r.miss) miss++;
+            await Task.Delay(100);
+        }
+
+        return (true, urls, miss);
     }
 
     /// <summary>
@@ -1079,6 +1292,12 @@ public static class CatalogWarmup
         public string cardCur { get; set; }
         [JsonPropertyName("firstSeen")]
         public Dictionary<string, long> firstSeen { get; set; }
+
+        // qdl 2.84, оба АДДИТИВНЫЕ: старый файл их не содержит (останутся null — «ленту ещё
+        // не видели»), старый образ молча проигнорирует. ver не бампаем по той же причине,
+        // что и в 2.65 — откат образа не должен требовать отката данных.
+        public Entry feed { get; set; }
+        public string findForm { get; set; }
     }
 
     internal static void Load()
@@ -1115,6 +1334,13 @@ public static class CatalogWarmup
                     foreach (var kv in st.firstSeen ?? new Dictionary<string, long>())
                         if (long.TryParse(kv.Key, out long cid) && cid > 0)
                             _cardFirstSeen.TryAdd(cid, kv.Value);
+
+                    // тот же фильтр, что на приёме: мусор не должен переживать рестарт
+                    if (st.feed != null && !string.IsNullOrEmpty(st.feed.host) && IsFeedPathQuery(st.feed.pathQuery))
+                        _feed = st.feed;
+
+                    if (!string.IsNullOrEmpty(st.findForm) && st.findForm.Contains("{imdb}", StringComparison.Ordinal))
+                        _findForm = st.findForm;
                 }
             }
 
@@ -1144,7 +1370,9 @@ public static class CatalogWarmup
                 posterCur = _posterCur,
                 backdropCur = _backdropCur,
                 cardCur = _cardCur,
-                firstSeen = _cardFirstSeen.ToDictionary(kv => kv.Key.ToString(), kv => kv.Value)
+                firstSeen = _cardFirstSeen.ToDictionary(kv => kv.Key.ToString(), kv => kv.Value),
+                feed = _feed,
+                findForm = _findForm
             };
 
             // ⚠️ .tmp → Move, а не WriteAllText поверх: хост падает по питанию ~23 раза в месяц,

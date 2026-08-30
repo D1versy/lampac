@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Xunit;
 
 namespace QbitDownload.Tests;
@@ -227,5 +227,78 @@ public class CatalogWarmupTests
 
         // счётчик ведём, чтобы после включения не начинать с нуля
         Assert.Equal((10, false), s);
+    }
+
+    // ─────────── «Лента» (qdl 2.84): распознавание, форма find/, разбор ответа ───────────
+
+    [Theory]
+    [InlineData("/cub/cub.red/api/feed/all", "")]
+    [InlineData("/cub/cub.rip/api/feed/all", "?page=1")]
+    [InlineData("/cub/CUB.RED/API/FEED/all", "")]              // регистр не важен
+    public void IsFeedUrl_Feed_True(string path, string query)
+        => Assert.True(CatalogWarmup.IsFeedUrl(path, query));
+
+    [Theory]
+    [InlineData("/cub/tmdb./", "?sort=now_playing")]           // ряд каталога — не лента
+    [InlineData("/cub/red/api/checker", "")]
+    [InlineData("/tmdb/api/3/movie/123", "?api_key=k")]
+    [InlineData("/cub/cub.red/api/feed&zzr=1/all", "")]        // '&' в ПУТИ — мусор (IsJunkUrl)
+    public void IsFeedUrl_Other_False(string path, string query)
+        => Assert.False(CatalogWarmup.IsFeedUrl(path, query));
+
+    [Fact]
+    public void IsFeedPathQuery_SplitsQuery()
+    {
+        Assert.True(CatalogWarmup.IsFeedPathQuery("/cub/cub.red/api/feed/all?page=1"));
+        Assert.True(CatalogWarmup.IsFeedPathQuery("/cub/cub.red/api/feed/all"));
+        Assert.False(CatalogWarmup.IsFeedPathQuery("/cub/tmdb./?sort=top"));
+        Assert.False(CatalogWarmup.IsFeedPathQuery(""));
+    }
+
+    [Fact]
+    public void ToFindForm_TakesClientUrl_AndPlacesImdbPlaceholder()
+    {
+        // 🔥 Форму СНИМАЕМ с клиента, а не конструируем: бандл строит адрес динамически, и
+        // рукописная реконструкция разъедется с ключом Staticache при обновлении фронта.
+        string form = CatalogWarmup.ToFindForm("/tmdb/api/3/find/tt0903747",
+                                               "?external_source=imdb_id&api_key=k&language=ru");
+        Assert.Equal("/tmdb/api/3/find/{imdb}?external_source=imdb_id&api_key=k&language=ru", form);
+
+        // вторая форма адреса (до XHR-патча) тоже понимается
+        Assert.Equal("/cub/tmdb.cub.red/3/find/{imdb}?external_source=imdb_id",
+                     CatalogWarmup.ToFindForm("/cub/tmdb.cub.red/3/find/tt123", "?external_source=imdb_id"));
+    }
+
+    [Theory]
+    [InlineData("/tmdb/api/3/find/tt0903747", "?external_source=tvdb_id")]   // другой источник — не наш случай
+    [InlineData("/tmdb/api/3/find/12345", "?external_source=imdb_id")]       // не imdb-идентификатор
+    [InlineData("/tmdb/api/3/find/tt12x4", "?external_source=imdb_id")]      // мусор в id
+    [InlineData("/tmdb/api/3/movie/123", "?external_source=imdb_id")]        // не find
+    [InlineData("/tmdb/api/3/find/tt1", "?external_source=imdb_id&q=a\b")] // экранированный мусор (IsJunkUrl)
+    public void ToFindForm_Other_Null(string path, string query)
+        => Assert.Null(CatalogWarmup.ToFindForm(path, query));
+
+    [Fact]
+    public void ExtractImdbIds_FindsIdsAtAnyDepth_DedupsAndRespectsBudget()
+    {
+        // Форму ответа ленты не пиним: обходим документ и берём любое imdb_id вида tt<цифры>.
+        string json = """
+        {"secuses":true,"result":[
+          {"id":1,"data":{"imdb_id":"tt0000001","name":"a"}},
+          {"id":2,"data":{"imdb_id":"tt0000002"}},
+          {"id":3,"data":{"imdb_id":"tt0000001"}},
+          {"id":4,"data":{"imdb_id":"nm0000009"}},
+          {"id":5,"data":{"imdb_id":null}},
+          {"id":6,"card":{"deep":{"imdb_id":"tt0000003"}}}
+        ]}
+        """;
+        var ids = CatalogWarmup.ExtractImdbIds(Encoding.UTF8.GetBytes(json), 10);
+
+        Assert.Equal(new[] { "tt0000001", "tt0000002", "tt0000003" }, ids);   // дедуп + мусор отсеян
+
+        Assert.Equal(2, CatalogWarmup.ExtractImdbIds(Encoding.UTF8.GetBytes(json), 2).Count);   // бюджет
+        Assert.Empty(CatalogWarmup.ExtractImdbIds(Encoding.UTF8.GetBytes("{"), 10));            // битое тело
+        Assert.Empty(CatalogWarmup.ExtractImdbIds(null, 10));
+        Assert.Empty(CatalogWarmup.ExtractImdbIds(Encoding.UTF8.GetBytes(json), 0));
     }
 }
