@@ -105,6 +105,17 @@ public class AppPatchTests
       subtitle: Lang.translate('player_segments_descr'),
       method: 'segments'
     }];
+          var adult_block = key_tags && key_tags.find && key_tags.length ? key_tags.find(function (key) {
+            return Keys.adult.find(function (word) {
+              return key.name.toLowerCase().indexOf(word) >= 0;
+            });
+          }) : false;
+          if (Storage.field('adult_content_view')) adult_block = false;
+          if (adult_block) data.movie.adult = true;
+          if (!adult_block && data.persons && data.persons.cast && data.persons.cast.length) _this.rows.push(['persons', {}]);
+        if (this.card.adult) {
+          var warning = new Warning({ type: 'full-adult' });
+        }
     ";
 
     [Fact]
@@ -130,6 +141,42 @@ public class AppPatchTests
         Assert.Contains("/*qdl-cut:preroll*/", result);
         Assert.Contains("/*qdl-cut:broadcast*/", result);
         Assert.Contains("/*qdl-cut:broadcast-share*/", result);
+        Assert.Contains("/*qdl-cut:adult-block*/", result);
+        Assert.Contains("/*qdl-cut:adult-flag*/", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_Adult_BothSourcesDead_AndCardRowsRestored()
+    {
+        // 18+ на карточке взводился ДВУМЯ путями: ключевые слова TMDB (adult_block) и «родное»
+        // поле adult от самого TMDB. Гасим оба — иначе предупреждение осталось бы у второй группы.
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        // 1. источник по ключевым словам мёртв: гард Storage снят, сброс безусловный
+        Assert.DoesNotContain("if (Storage.field('adult_content_view')) adult_block = false;", result);
+        Assert.Contains("adult_block = false;/*qdl-cut:adult-block*/", result);
+
+        // 2. флаг карточки не взводится ни от ключевых слов, ни от TMDB
+        Assert.DoesNotContain("data.movie.adult = true", result);
+        Assert.Contains("data.movie.adult = false;/*qdl-cut:adult-flag*/", result);
+
+        // 3. 🔴 главное побочное: ряды карточки (актёры/серии/похожие) гейтились тем же
+        //    adult_block — сама ветка остаётся на месте, но её условие теперь всегда истинно
+        Assert.Contains("if (!adult_block && data.persons", result);
+
+        // 4. точку отрисовки Warning намеренно НЕ патчим — она просто недостижима
+        Assert.Contains("if (this.card.adult) {", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_Adult_Idempotent()
+    {
+        string once = AppPatch.PatchAppJs(AllAnchors);
+        string twice = AppPatch.PatchAppJs(once);
+
+        Assert.Equal(once, twice);
+        Assert.Equal(1, Count(twice, "/*qdl-cut:adult-block*/"));
+        Assert.Equal(1, Count(twice, "/*qdl-cut:adult-flag*/"));
     }
 
     static readonly string AllAnchors = RawAnchors.Replace("\r\n", "\n");

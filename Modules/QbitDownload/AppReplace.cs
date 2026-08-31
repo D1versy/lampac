@@ -24,6 +24,8 @@ namespace QbitDownload;
 //                 перестраивать, решает qdl.js (чтобы политика менялась по воздуху);
 //   broadcast   — мёртвая «Трансляция»: иконка в шапке карточки (CUB-WebSocket выключен);
 //   broadcast-share — она же вторым входом: пункт «Поделиться» в панели плеера;
+//   adult-*     — предупреждение «Взрослый контент» 18+ на карточке и всё, что оно за собой
+//                 тянуло (ряды карточки, трейлеры, плашка ADULT) — решение владельца;
 //   preroll     — рекламный преролл перед плеером: Preroll.show() тянет Google IMA SDK
 //                 (https://imasdk.googleapis.com/js/sdkloader/ima3.js) и крутит VAST из data.vast_url.
 //                 Штатного выключателя нет: disable_features.ads в текущем бандле не читается
@@ -173,6 +175,35 @@ public static class AppPatch
         new P("broadcast-share",
             "      title: Lang.translate('player_share_title'),\n      subtitle: Lang.translate('player_share_descr'),\n      method: 'share'\n    }, {\n",
             "/*qdl-cut:broadcast-share*/"),
+        // ── qdl 2.87: предупреждение «Взрослый контент» (18+) ──────────────────────────
+        // Владелец: «когда включаешь ужасы, у Лампы есть уведомление 18+ — в нём нет смысла,
+        // кто захочет, просто нажимает „Смотреть“, и всё равно работает». Так и есть: блок
+        // Warning(type:'full-adult') в описании карточки + модалка «Мне 18 лет или больше»,
+        // которая ничего не проверяет, а лишь ставит Storage-ключ adult_content_view.
+        //
+        // 🔴 Ужасы ловились не случайно. adult_block взводится по КЛЮЧЕВЫМ СЛОВАМ TMDB из
+        // списка Keys.adult (porn, sex, xxx, erotic, … nude, nudity, naked …), причём сравнение
+        // подстрокой (indexOf) — у ужасов на TMDB сплошь стоят 'nudity' / 'female nudity' /
+        // 'sexual violence'. И тот же флаг ВЫРЕЗАЕТ с карточки серии, съёмочную группу, актёров,
+        // обсуждение, коллекцию, рекомендации и похожие, а card.adult сверх того прячет трейлеры
+        // и вешает плашку ADULT на постер. То есть на «пойманном» ужастике карточка молча теряла
+        // половину контента — это уходит вместе с предупреждением.
+        //
+        // Штатного выключателя нет: adult_content_view — скрытый ключ Storage без пункта в
+        // настройках, его ставит только кнопка модалки. Через плагин (Storage.set) не делаем:
+        // ключ локален устройству и не гасит «родной» флаг adult от самого TMDB.
+        //
+        // adult-block: снимаем гард у уже существующей в бандле ветки сброса — источник по
+        // ключевым словам мёртв, ряды карточки возвращаются всегда.
+        new P("adult-block",
+            "if (Storage.field('adult_content_view')) adult_block = false;",
+            "adult_block = false;/*qdl-cut:adult-block*/"),
+        // adult-flag: второй источник — поле adult, пришедшее от самого TMDB. Гасим и его, тогда
+        // недостижимы разом Warning (`if (this.card.adult)`), плашка ADULT и скрытие трейлеров;
+        // отдельного якоря на месте отрисовки не заводим — лишняя точка отказа при смене tree.
+        new P("adult-flag",
+            "if (adult_block) data.movie.adult = true;",
+            "data.movie.adult = false;/*qdl-cut:adult-flag*/"),
     };
 
     public static void Attach() => EventListener.AppReplace += OnAppReplace;
