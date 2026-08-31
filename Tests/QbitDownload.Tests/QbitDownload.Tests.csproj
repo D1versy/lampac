@@ -133,6 +133,10 @@
          Shared (RequestModel/CoreInit) + Serilog — всё уже подключено FrameworkReference’ом и ProjectReference’ом.
          Тесты гоняют Invoke() на DefaultHttpContext, без подъёма Startup. -->
     <Compile Include="..\..\Core\Middlewares\D1VPerimeter.cs" Link="Core\D1VPerimeter.cs" />
+
+    <!-- D1VContentPolicy.cs — CSP на документы (qdl 2.88). Тот же приём и та же причина:
+         зависимостей за пределами AspNetCore.Http + Shared у него нет. -->
+    <Compile Include="..\..\Core\Middlewares\D1VContentPolicy.cs" Link="Core\D1VContentPolicy.cs" />
   </ItemGroup>
 
 </Project>

@@ -156,8 +156,13 @@ public class TmdbProxyController : BaseController
     #region IMG
     // qdl 2.16: URL content-addressed (t/p/<size>/<hash>.jpg — содержимое неизменно) → год+immutable
     // вместо суточного max-age: сетка постеров не перекачивается клиентом раз в сутки.
-    // 302-фолбэк при ошибке апстрима безопасен: редиректы StaticacheWriter не кэширует и
-    // immutable-ветка требует StatusCode 200.
+    //
+    // 🔴 qdl 2.88: раньше на отказ апстрима тут стоял `Redirect(uri)` — и это была САМАЯ ЧАСТАЯ
+    // утечка во всём проекте. proxy_tmdb форсится каждую загрузку (lampainit-invc.js), значит через
+    // эту ручку идут ВСЕ постеры и фоны; отказом же считался любой не-200 (statusCodeOK по умолчанию
+    // true, Http.cs:712), включая рядовой 404 на битый poster_path. То есть наш сервер сам говорил
+    // устройству «сходи на image.tmdb.org». Теперь отдаём свою заглушку — см. PlaceholderImage.
+    // NoCache() обязателен: без него immutable-ветка залипила бы заглушку на год.
     [HttpGet]
     [Staticache(always: true, immutable: true)]
     [Route("tmdb/img/{*suffix}")]
@@ -215,8 +220,8 @@ public class TmdbProxyController : BaseController
         else
         {
             proxyManager?.Refresh();
-            HttpContext.Response.StatusCode = StatusCodes.Status302Found;
-            HttpContext.Response.Redirect(uri);
+            NoCache();
+            await PlaceholderImage.WriteAsync(HttpContext).ConfigureAwait(false);
         }
     }
     #endregion

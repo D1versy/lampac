@@ -28,4 +28,21 @@ public class D1vConf
     /// <summary>GET-префиксы, открытые извне без ключа (OTA-канал /d1vision/apps/ — бинари подписаны).</summary>
     [JsonProperty("publicPrefixes", ObjectCreationHandling = ObjectCreationHandling.Replace, NullValueHandling = NullValueHandling.Ignore)]
     public List<string> publicPrefixes { get; set; }
+
+    /// <summary>
+    /// Content-Security-Policy на отдаваемые документы (qdl 2.88, Core/Middlewares/D1VContentPolicy.cs).
+    /// null = дефолт из кода. Пустая строка = не ставить заголовок вовсе — кил-свитч без пересборки
+    /// образа: секция d1v перечитывается на лету, а первое боевое включение CSP почти наверняка
+    /// что-нибудь уронит.
+    /// </summary>
+    public string csp { get; set; }
+
+    /// <summary>Отдельная политика для страницы-моста трейлеров (/lampa-main/youtube.html). null = дефолт.</summary>
+    public string cspYoutube { get; set; }
+
+    /// <summary>
+    /// true → отдавать Content-Security-Policy-Report-Only: браузер только пишет нарушения в консоль
+    /// и ничего не блокирует. Режим обкатки перед боевым включением.
+    /// </summary>
+    public bool cspReportOnly { get; set; }
 }

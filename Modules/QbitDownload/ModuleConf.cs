@@ -20,8 +20,13 @@ public class ModuleConf : ModuleBaseConf
 
     // Витрина расширений CUB локально (qdl 2.17, CubExtensions.cs): смонтированный том с копией
     // тем (CSS), скринсейверов (MP4), превью и JS плагинов + локальный list.json с premium=0.
-    // Наполняется scripts/vendor-cub-extensions.ps1; пусто/нет файла → редирект на upstream-cub.
+    // Наполняется scripts/vendor-cub-extensions.ps1.
     public string cubExtPath { get; set; } = "/lampac/wwwroot/cubext";
+
+    // Куда класть то, что вендор не привёз, а клиент попросил (qdl 2.88). Том cubExtPath
+    // смонтирован :ro (docker-compose.yml), писать в него нельзя — поэтому дотянутое живёт
+    // отдельно, в записываемом lampac-cache. Порядок поиска: вендор → этот кеш → сходить самим.
+    public string cubExtCachePath { get; set; } = "/lampac/cache/cubext";
 
     // Каталог с бинарными билдами клиентов для самообновления (OTA app updates): смонтированный
     // том, лежат manifest.json/appcast.xml + сами APK/DMG. Отдаётся через GET /d1vision/apps/<platform>/<file>.

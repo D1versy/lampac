@@ -212,6 +212,53 @@ public partial class QbitController
         var mw = MusicWarm.HealthSnapshot();
         var (mwStatus, mwDetail) = MusicWarmVerdict(mw, now);
         arr.Add(Svc(HealthState.Ids.MusicWarm, "Музыка (полки)", GrpMusic, mwStatus, mw.Value<int?>("ms") ?? 0, mwDetail));
+
+        arr.Add(CubExtRow());
+    }
+
+    /// <summary>
+    /// Полнота вендора витрины CUB (qdl 2.88). До 2.88 неполный вендор был НЕВИДИМ: промах молча
+    /// редиректил клиента на cub.best, и понять это можно было только замером трафика. Теперь
+    /// промах дотягивается сервером — а строка показывает, сколько раз пришлось, чтобы «подстраховка
+    /// работает» не превратилось в «вендор не прогоняли полгода».
+    /// ⚠️ MP4 скринсейверов гитигнорятся (109 МБ) — на свежей машине тут будет полный некомплект,
+    /// пока не прогонят scripts/vendor-cub-extensions.ps1.
+    /// </summary>
+    static JObject CubExtRow()
+    {
+        const string id = "cub-ext", name = "Витрина CUB (вендор)";
+
+        try
+        {
+            // 🔴 Полные имена System.IO.*: модуль компилируется в РАНТАЙМЕ отдельным компилятором,
+            // без implicit usings из .csproj — сборка решения проходит, а контейнер падает
+            // на «Имя Directory не существует». Проверено этой же правкой.
+            string dir = ModInit.conf?.cubExtPath ?? "/lampac/wwwroot/cubext";
+            string list = System.IO.Path.Combine(dir, "list.json");
+
+            if (!System.IO.File.Exists(list))
+                return Svc(id, name, GrpInfra, "fail", 0, "нет list.json — витрина пустая, прогнать vendor-cub-extensions.ps1");
+
+            int themes = CountFiles(System.IO.Path.Combine(dir, "theme"), "*.css");
+            int savers = CountFiles(System.IO.Path.Combine(dir, "screensaver"), "*.mp4");
+            int plugins = CountFiles(System.IO.Path.Combine(dir, "plugin"), "*.js");
+            int fetched = CubExtFetched;
+
+            string detail = $"тем {themes}, заставок {savers}, плагинов {plugins}" +
+                            (fetched > 0 ? $"; дотянуто с upstream: {fetched}" : "");
+
+            // Ноль MP4 — это ровно тот случай «свежий клон, вендор не прогоняли».
+            string status = savers == 0 || themes == 0 ? "warn" : (fetched > 0 ? "warn" : "ok");
+
+            return Svc(id, name, GrpInfra, status, 0, detail);
+        }
+        catch (Exception ex) { return Svc(id, name, GrpInfra, "fail", 0, ShortErr(ex)); }
+    }
+
+    static int CountFiles(string dir, string mask)
+    {
+        try { return System.IO.Directory.Exists(dir) ? System.IO.Directory.GetFiles(dir, mask).Length : 0; }
+        catch { return 0; }
     }
 
     static void AddPassiveRow(JArray arr, string id, string name, string group, DateTime now, int flap, string offReason = null)

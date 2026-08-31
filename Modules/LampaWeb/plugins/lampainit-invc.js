@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.87';
+window.qdl_fork_version = '2.88';
 
    // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
@@ -514,6 +514,79 @@ try {
   if (localStorage.getItem('screensaver') !== 'false') localStorage.setItem('screensaver', 'false');
   if (localStorage.getItem('screensaver_type') !== 'cub') localStorage.setItem('screensaver_type', 'cub');
 } catch (e) {}
+
+// ── ДО загрузки Lampa: перевод залипших чужих адресов на наш origin (qdl 2.88) ──
+// Тема и скринсейвер хранятся в localStorage АБСОЛЮТНЫМ URL, зашитым в момент установки:
+// Theme.toggle → Storage.set('cub_theme', 'https://cub.red/extensions/196'). Устройство,
+// выбравшее тему до вендоринга 2.17, тянет её с cub.red на КАЖДОМ старте — Theme.init() зовёт
+// set(get()) и вставляет <link rel=stylesheet> нативно, мимо Lampa.Reguest, так что ни
+// request_before, ни cubproxy.js этого не видят. Серверные ручки тут бессильны: до них дело
+// не доходит вовсе. Единственное место, где это лечится, — здесь, до старта Lampa.
+//
+// Чиним, а не сбрасываем: id элемента витрины сохраняется, а наш /cub/red/extensions/<id>
+// сам дотянет файл, если его нет в вендоре (CubExtensions.FetchAndCache). Тема остаётся той же.
+// Сбрасываем только то, из чего id не вынуть.
+//
+// Каждую загрузку, а не в first_initiale: ручная установка чужой темы иначе пережила бы перезапуск.
+(function () {
+  var ORIGIN = location.protocol + '//' + location.host;
+
+  function ours(u) {
+    return typeof u === 'string' && u.indexOf(ORIGIN) === 0;
+  }
+
+  // '<что угодно>/extensions/<id>' → '<наш origin>/cub/red/extensions/<id>'. Хвост запроса
+  // (?token=…) отбрасываем: он был нужен премиум-гейту CUB, у нас премиум снят в вендоре.
+  function localizeExt(u) {
+    if (typeof u !== 'string' || !u || ours(u)) return u;
+    var m = u.match(/\/extensions\/(\d{1,12})(?:[?#]|$)/);
+    return m ? ORIGIN + '/cub/red/extensions/' + m[1] : null;
+  }
+
+  ['cub_theme', 'cub_screensaver'].forEach(function (key) {
+    try {
+      var cur = localStorage.getItem(key);
+      if (!cur || cur === '""' || ours(cur)) return;
+      var fixed = localizeExt(cur);
+      // null = id не разобрался → сброс на дефолт (пустая строка = «тема не выбрана»).
+      localStorage.setItem(key, fixed === null ? '' : fixed);
+    } catch (e) {}
+  });
+
+  // Плагины витрины: Plugins.add({url: <как пришло из каталога>}) оседает в localStorage['plugins']
+  // навсегда, и addPluginParams грузит его <script>-ом при каждом старте. Свои вендоренные лежат
+  // на /ext/<slug>.js — чужие переводим туда же по имени файла, неузнанные выбрасываем: исполнять
+  // сторонний JS в нашем origin (тут же кука периметра D1Vision) нельзя тем более.
+  try {
+    var raw = localStorage.getItem('plugins');
+    if (raw) {
+      var list = JSON.parse(raw), changed = false;
+      if (Object.prototype.toString.call(list) === '[object Array]') {
+        var kept = [];
+        for (var i = 0; i < list.length; i++) {
+          var p = list[i], u = p && p.url;
+          if (!u || ours(u)) { kept.push(p); continue; }
+          var slug = (u.split('?')[0].split('#')[0].match(/\/([^\/]+\.js)$/) || [])[1];
+          changed = true;
+          if (slug) { p.url = ORIGIN + '/ext/' + slug; kept.push(p); }
+        }
+        if (changed) localStorage.setItem('plugins', JSON.stringify(kept));
+      }
+    }
+  } catch (e) {}
+
+  // Кеш каталога витрины: если внутри есть хоть один НЕ наш абсолютный адрес — кеш от старой
+  // версии (до вендоринга). Выбрасываем, Lampa перечитает наш /cub/red/api/extensions/list.
+  try {
+    var cache = localStorage.getItem('account_extensions');
+    if (cache) {
+      var urls = cache.match(/https?:\/\/[^"'\\\s]+/g) || [];
+      for (var j = 0; j < urls.length; j++) {
+        if (!ours(urls[j])) { localStorage.removeItem('account_extensions'); break; }
+      }
+    }
+  } catch (e) {}
+})();
 // proxy_tmdb=true КАЖДУЮ загрузку (не в first_initiale): upstream lampainit.js ставит его только при
 // первом запуске (гард lampac_initiale) и по GeoIP — LAN-клиент получал null→false и ходил за
 // постерами/TMDB-API на image.tmdb.org/api.themoviedb.org напрямую, мимо сервера. Форс до старта

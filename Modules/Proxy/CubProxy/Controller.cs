@@ -144,9 +144,12 @@ public class CubProxyController : BaseController
         string uri = (slashIndex >= 0 ? path.Substring(slashIndex + 1) : path) + HttpContext.Request.QueryString.Value;
 
         #region ws
+        // qdl 2.88: раньше отсюда уходил 302 на https://ws.cub.best — то есть наш сервер сам
+        // отправлял клиента открывать сокет к третьей стороне. Штатный бандл сюда не ходит
+        // (lampainit-invc.js гасит socket_use), но роут был открыт кому угодно. Закрыт.
         if (subdomain.Equals("ws"))
         {
-            HttpContext.Response.Redirect($"https://{domain}{HttpContext.Request.QueryString.Value}");
+            HttpContext.Response.StatusCode = StatusCodes.Status404NotFound;
             return Task.CompletedTask;
         }
         #endregion
@@ -369,9 +372,12 @@ public class CubProxyController : BaseController
                 }
                 else
                 {
+                    // 🔴 qdl 2.88: тут стоял 302 на cub.best — самый широкий канал утечки во всём
+                    // CubProxy: он покрывал ВЕСЬ префикс /cub/* (картинки, img/background/default.mp4,
+                    // plugin/*) и срабатывал при любом таймауте апстрима. Содержимое мы выдумать не
+                    // можем, поэтому честная ошибка — но НЕ адрес третьей стороны.
                     proxyManager?.Refresh();
-                    HttpContext.Response.StatusCode = StatusCodes.Status302Found;
-                    HttpContext.Response.Redirect(requri);
+                    HttpContext.Response.StatusCode = StatusCodes.Status502BadGateway;
                 }
             }
         }
@@ -464,20 +470,34 @@ public class CubProxyController : BaseController
     #endregion
 
     #region CopyResponseHeaders
-    static readonly FrozenSet<string> excludedResponseHeaders = new[]
+    // 🔴 qdl 2.88: было чёрным списком — и `location` с `set-cookie` в него не входили. Любой 30x,
+    // который SocketsHttpHandler не разматывает сам (кросс-схемный https→http, превышение лимита
+    // прыжков), уезжал клиенту ДОСЛОВНО, с чужим Location: то есть устройство шло на cub.best.
+    // Чёрный список для этого негоден в принципе — он защищает только от того, что вспомнили.
+    // Теперь белый, по образцу ProxyAPI.Utilities.cs:39-46: пропускаем ровно то, без чего ломается
+    // тело и Range, остальное отбрасываем. Заодно 3xx не транслируем вовсе (см. ниже).
+    static readonly FrozenSet<string> allowedResponseHeaders = new[]
     {
-        "server",
-        "transfer-encoding",
-        "etag",
-        "connection",
-        "content-security-policy",
-        "content-disposition"
+        "content-type",
+        "content-length",
+        "content-range",
+        "accept-ranges",
+        "cache-control",
+        "last-modified",
+        "expires",
+        "vary",
+        "age"
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     static void CopyResponseHeaders(HttpContext context, HttpResponseMessage responseMessage)
     {
         var response = context.Response;
-        response.StatusCode = (int)responseMessage.StatusCode;
+
+        // Статус 3xx без Location — сломанный ответ, а с чужим Location — утечка. Апстримные
+        // редиректы штатно доедаются самим HttpClient (AllowAutoRedirect), так что сюда доходят
+        // только те, за которыми он ходить отказался. Клиенту про них знать нечего.
+        int status = (int)responseMessage.StatusCode;
+        response.StatusCode = status is >= 300 and < 400 ? StatusCodes.Status502BadGateway : status;
 
         void UpdateHeaders(HttpHeaders headers)
         {
@@ -486,20 +506,10 @@ public class CubProxyController : BaseController
 
             foreach (var header in headers)
             {
-                string key = header.Key;
-
-                if (excludedResponseHeaders.Contains(key))
+                if (!allowedResponseHeaders.Contains(header.Key))
                     continue;
 
-                if (key.StartsWith("x-", StringComparison.OrdinalIgnoreCase) ||
-                    key.StartsWith("alt-", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                if (key.StartsWith("access-control", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var values = header.Value;
-                response.Headers[key] = header.Value.ToArray();
+                response.Headers[header.Key] = header.Value.ToArray();
             }
         }
 

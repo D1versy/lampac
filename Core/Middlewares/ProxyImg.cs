@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Http;
+﻿using Microsoft.AspNetCore.Http;
 using Microsoft.IO;
 using Microsoft.Net.Http.Headers;
 using Shared;
@@ -197,7 +197,7 @@ public class ProxyImg
                     catch (Exception ex)
                     {
                         Log.Error(ex, "CatchId={CatchId}", "id_8h9jv1s0");
-                        httpContext.Response.Redirect(href);
+                        await PlaceholderImage.WriteAsync(httpContext).ConfigureAwait(false);
                         return;
                     }
                 }
@@ -207,9 +207,12 @@ public class ProxyImg
 
                 try
                 {
+                    // qdl 2.88: негативный кеш гасит ПОВТОРНЫЕ ИСХОДЯЩИЕ попытки к чужому CDN на
+                    // минуту — и только их. Раньше он же мгновенно отправлял туда клиента 302-м,
+                    // то есть «не ходи» превращалось в «сходи сам, только быстро».
                     if (errorDownloads.ContainsKey(href))
                     {
-                        httpContext.Response.Redirect(href);
+                        await PlaceholderImage.WriteAsync(httpContext).ConfigureAwait(false);
                         return;
                     }
 
@@ -220,7 +223,7 @@ public class ProxyImg
                         bool _acquired = await semaphore.WaitAsync().ConfigureAwait(false);
                         if (!_acquired)
                         {
-                            httpContext.Response.Redirect(href);
+                            await PlaceholderImage.WriteAsync(httpContext).ConfigureAwait(false);
                             return;
                         }
                     }
@@ -294,6 +297,15 @@ public class ProxyImg
                                         #region url_reserve
                                         if (response.StatusCode != HttpStatusCode.OK)
                                         {
+                                            if (cacheimg)
+                                                MarkDownloadError(href, response.StatusCode);
+
+                                            proxyManager?.Refresh();
+
+                                            // 🔴 qdl 2.88: тут не хватало return — резервный Location
+                                            // на НАШ /proxyimg ставился, а следом его безусловно
+                                            // перетирал Redirect(href) на чужой CDN. То есть резерв
+                                            // не работал никогда, а наружу уходили все.
                                             if (url_reserve != null)
                                             {
                                                 decryptLink.uri = url_reserve;
@@ -305,13 +317,10 @@ public class ProxyImg
                                                         prefix: [CoreInit.Host(httpContext), "/proxyimg/"]
                                                     )
                                                 );
+                                                return;
                                             }
 
-                                            if (cacheimg)
-                                                MarkDownloadError(href);
-
-                                            proxyManager?.Refresh();
-                                            httpContext.Response.Redirect(href);
+                                            await PlaceholderImage.WriteAsync(httpContext).ConfigureAwait(false);
                                             return;
                                         }
                                         #endregion
@@ -408,6 +417,12 @@ public class ProxyImg
                             #region url_reserve
                             if (!result.success)
                             {
+                                if (cacheimg)
+                                    MarkDownloadError(href, result.status);
+
+                                proxyManager?.Refresh();
+
+                                // qdl 2.88: тот же пропущенный return, что и в ветке без rsize.
                                 if (url_reserve != null)
                                 {
                                     decryptLink.uri = url_reserve;
@@ -419,13 +434,10 @@ public class ProxyImg
                                             prefix: [CoreInit.Host(httpContext), $"/proxyimg:{width}:{height}"]
                                         )
                                     );
+                                    return;
                                 }
 
-                                if (cacheimg)
-                                    MarkDownloadError(href);
-
-                                proxyManager?.Refresh();
-                                httpContext.Response.Redirect(href);
+                                await PlaceholderImage.WriteAsync(httpContext).ConfigureAwait(false);
                                 return;
                             }
                             #endregion
@@ -464,7 +476,7 @@ public class ProxyImg
                                             }
 
                                             proxyManager?.Refresh();
-                                            httpContext.Response.Redirect(href);
+                                            await PlaceholderImage.WriteAsync(httpContext).ConfigureAwait(false);
                                             return;
                                         }
                                         #endregion
@@ -513,13 +525,15 @@ public class ProxyImg
         catch (Exception ex)
         {
             Log.Error(ex, "CatchId={CatchId}", "id_4qyrn7xp");
-            httpContext.Response.Redirect(href);
+            await PlaceholderImage.WriteAsync(httpContext).ConfigureAwait(false);
         }
     }
 
 
     #region Download
-    async Task<(bool success, string contentType)> Download(LazyMsm ms, string url, CancellationToken cancellationToken, string plugin, IReadOnlyList<HeadersModel> headers = null, WebProxy proxy = null)
+    // qdl 2.88: третьим полем отдаём статус апстрима — вызывающему нужно отличать «нет и не будет»
+    // (404/410 у спекулятивных обложек MusicBrainz) от «сеть моргнула». См. MarkDownloadError.
+    async Task<(bool success, string contentType, HttpStatusCode? status)> Download(LazyMsm ms, string url, CancellationToken cancellationToken, string plugin, IReadOnlyList<HeadersModel> headers = null, WebProxy proxy = null)
     {
         var client = FriendlyHttp.MessageClient(
             "base",
@@ -541,7 +555,7 @@ public class ProxyImg
                 using (HttpResponseMessage response = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false))
                 {
                     if (response.StatusCode != HttpStatusCode.OK || cancellationToken.IsCancellationRequested)
-                        return default;
+                        return (false, null, response.StatusCode);
 
                     HttpContent content = response.Content;
 
@@ -566,11 +580,11 @@ public class ProxyImg
                         response.Content.Headers.TryGetValues("Content-Type", out var _contentType);
 
                         ms.Stream.Position = 0;
-                        return (true, ImageContentType(_contentType?.FirstOrDefault()));
+                        return (true, ImageContentType(_contentType?.FirstOrDefault()), HttpStatusCode.OK);
                     }
 
                     ms.Stream.Position = 0;
-                    return (true, null);
+                    return (true, null, HttpStatusCode.OK);
                 }
             }
         }
@@ -748,10 +762,17 @@ public class ProxyImg
         return path.Slice(separatorIndex + 2);
     }
 
+    // qdl 2.88: TTL зависит от того, ЧТО ответил апстрим.
+    // Минута годится для «сеть моргнула», но не для «картинки нет и не будет»: у обложек
+    // MusicBrainz адрес строится СПЕКУЛЯТИВНО для каждой релиз-группы (MusicBrainzMetadataProvider
+    // BuildReleaseGroupImages), и у части их попросту не существует — по замеру 25 из 323. С
+    // минутным TTL мы ходили за одним и тем же несуществующим файлом снова и снова. 404/410 —
+    // это ответ «нет», а не сбой: помним сутки и наружу не ходим.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    static void MarkDownloadError(string href)
+    static void MarkDownloadError(string href, HttpStatusCode? status = null)
     {
-        errorDownloads[href] = DateTime.UtcNow.AddMinutes(1);
+        bool permanent = status is HttpStatusCode.NotFound or HttpStatusCode.Gone;
+        errorDownloads[href] = permanent ? DateTime.UtcNow.AddHours(24) : DateTime.UtcNow.AddMinutes(1);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

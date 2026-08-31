@@ -637,6 +637,10 @@ public class Startup
         // и ДО Map("/nws")/Staticache/StaticFiles, чтобы покрыть ВСЁ (ws, кэш, статику, /proxy, /ts).
         app.UseD1VPerimeter();
 
+        // D1Vision: CSP на отдаваемые документы (qdl 2.88). 🔴 Обязательно ДО UseStaticache:
+        // на кэш-хите Staticache формирует ответ сам и заголовки контроллера не реплеит.
+        app.UseD1VContentPolicy();
+
         if (mods.nws)
         {
             app.Map("/nws", nwsApp =>
