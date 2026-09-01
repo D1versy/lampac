@@ -1630,20 +1630,16 @@
         if (mode === 'always') return true;
         return window.d1vision_platform === 'ios' && window.d1vision_network === 'cellular';
     }
-    // Кука qdl_unlock=1 — мастер-ключ владельца в браузере: он сеет её один раз скриптом в консоли
-    // (рецепт: медиасервер claude/04-operations.md). Приложения куку не имеют и иметь не могут,
-    // поэтому с 2.67 те же действия выдаются устройству правом «Управление» в /admin/d1v — см.
-    // qdlManage() ниже, это и есть точка, которую надо звать в UI. Тот же однострочник
-    // продублирован в lampainit-invc.js (CSS-гейт шестерёнки) — общего кода между файлами нет.
-    function qdlUnlocked() {
-        try { return /(?:^|;\s*)qdl_unlock=1/.test(document.cookie || ''); } catch (e) { return false; }
-    }
-
-    // qdl 2.67: то же самое, но ЕЩЁ и по праву «Управление», выданному устройству в /admin/d1v.
-    // Кука осталась вторым ключом — она страховка от самозапирания, если потеряется access.json.
+    // Единственная точка гейта служебного UI — право «действия» (manage), выданное устройству
+    // в /admin/d1v. Её и надо звать во всех местах, где решается «показывать ли».
+    //
+    // 🔴 qdl 2.89: мастер-кука qdl_unlock=1 (второй ключ с 2.39) убрана целиком по решению
+    // владельца — «всё завязано по пермишину через админку». Страховка от самозапирания при
+    // потере access.json теперь одна и её достаточно: сама админка /admin/d1v открывается
+    // рут-паролем (кука accspasswd) и от прав устройств не зависит.
     // 🔴 Это по-прежнему только отрисовка: настоящий замок стоит на сервере (ManageDenied → 403),
     // поэтому подделка localStorage даёт максимум видимый пункт, который откажет при нажатии.
-    function qdlManage() { return qdlUnlocked() || qdlAllowed('manage'); }
+    function qdlManage() { return qdlAllowed('manage'); }
 
     // Замок служебных входов Lampa (шестерёнка «Настройки», пункт «Консоль»). Узел
     // <style id="qdl-hide-settings"> создаёт СИНХРОННО lampainit-invc.js — мгновенным обязано быть
@@ -1668,7 +1664,7 @@
                 // 🔴 Плитка «Хелс-чеки» — тем же замком. Lampa.SettingsApi снять компонент не умеет,
                 // а гард window.qdl_health_settings стоит навсегда: без этого правила отозванное
                 // право прятало шестерёнку, но раздел доживал до перезапуска (поймано permsgate).
-                + '[data-component="qdl_health"]{display:none!important}';
+                + '[data-component="qdl_health"],[data-component="qdl_d1vision"]{display:none!important}';
             document.head.appendChild(node);
         } catch (e) {}
     }
@@ -5659,8 +5655,8 @@
         this.destroy = function () { scroll.destroy(); html.remove(); };
     }
 
-    // ── Экран «Хелс-чеки» в настройках (qdl 2.39). Виден только при куке qdl_unlock=1:
-    // без неё компонент вообще не регистрируется (плитку раздела иначе не скрыть).
+    // ── Экран «Хелс-чеки» в настройках (qdl 2.39). Виден только по праву «действия»:
+    // без него компонент вообще не регистрируется (плитку раздела иначе не скрыть).
     // Данные — GET /qdl/health (сервер кеширует ответ ~30 с, поллинга нет: перезапрос
     // при каждом открытии экрана + строка «Обновить»).
     var HEALTH_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 12h4l2.5-6 4 12 2.5-6h5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -5752,6 +5748,93 @@
         });
     }
 
+    // ── Раздел «D1Vision» в настройках (qdl 2.89) ────────────────────────────────────────────
+    // Настройки здесь ОБЩИЕ на весь сервер: меняешь на одном устройстве — применяется всем.
+    // Поэтому раздел и гейтится правом «действия»: сервер отдаёт 403 на запись всем остальным
+    // (ManageDenied), а прятать раздел — только чтобы не показывать заведомо отказную кнопку.
+    //
+    // Разметку рисуем руками, как в «Хелс-чеках», а не через Lampa.SettingsApi.addParam:
+    // ⚠️ типа 'toggle' у addParam НЕ существует (валидны select/trigger/input/title/static/button),
+    // поле с ним молча не отрисовывается — грабля уже описана в Modules/Music/plugin.js.
+    var D1V_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 6h16M4 12h10M4 18h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+
+    function d1vRow(action, name, value, descr) {
+        return '<div class="settings-param selector" data-action="' + action + '">'
+            + '<div class="settings-param__name">' + esc(name) + '</div>'
+            + '<div class="settings-param__value">' + esc(value) + '</div>'
+            + (descr ? '<div class="settings-param__descr">' + esc(descr) + '</div>' : '')
+            + '</div>';
+    }
+
+    function renderD1Vision(body) {
+        var list = body.find('.qdl-d1v-list');
+
+        var paint = function (f) {
+            list.html(
+                '<div class="settings-param-title"><span>Каталог</span></div>'
+                + d1vRow('enabled', 'Фильтр по году выпуска', f.enabled ? 'Включён' : 'Выключен',
+                    'Убирает из рядов «Сейчас смотрят», «Новинки» и «В хорошем качестве» всё старее указанных годов. Топы, жанровые подборки и коллекции не трогает.')
+                + d1vRow('movieYear', 'Фильмы не старше', String(f.movieYear), 'Год выпуска. Всё, что вышло раньше, в рядах не показывается.')
+                + d1vRow('tvYear', 'Сериалы не старше', String(f.tvYear), 'Отдельный порог: у сериалов считается год первой серии.')
+                + '<div class="settings-param" data-static="true"><div class="settings-param__descr">'
+                + 'Настройка общая для всех устройств. Ряды обновятся не сразу — кеш каталога живёт до 3 часов.'
+                + '</div></div>'
+            );
+
+            var save = function (next) {
+                post(API + '/qdl/catalog-filter', next, function (r) {
+                    if (r && r.success) { paint(r.filter || next); try { Lampa.Noty.show('Сохранено для всех устройств'); } catch (e) {} }
+                    // Отказ показываем ПРИЧИНОЙ: отозванное право иначе читается как поломка.
+                    else { try { Lampa.Noty.show((r && r.error) || 'Не удалось сохранить'); } catch (e) {} }
+                }, function () { try { Lampa.Noty.show('Сервер недоступен'); } catch (e) {} });
+            };
+
+            var year = function (key, title) {
+                if (!(Lampa.Input && Lampa.Input.edit)) { try { Lampa.Noty.show('Ввод недоступен'); } catch (e) {} return; }
+                Lampa.Input.edit({ title: title, value: String(f[key]), free: true, nosave: true }, function (v) {
+                    try { Lampa.Controller.toggle('content'); } catch (e) {}   // клавиатура уводит фокус (та же грабля, что в поиске jut)
+                    var n = parseInt(String(v || '').replace(/\D+/g, ''), 10);
+                    if (!n || n < 1900) { try { Lampa.Noty.show('Нужен год, например 2020'); } catch (e) {} return; }
+                    var next = { enabled: f.enabled, movieYear: f.movieYear, tvYear: f.tvYear };
+                    next[key] = n;
+                    save(next);
+                });
+            };
+
+            try {
+                list.find('[data-action="enabled"]').on('hover:enter click', function () {
+                    save({ enabled: !f.enabled, movieYear: f.movieYear, tvYear: f.tvYear });
+                });
+                list.find('[data-action="movieYear"]').on('hover:enter click', function () { year('movieYear', 'Фильмы не старше'); });
+                list.find('[data-action="tvYear"]').on('hover:enter click', function () { year('tvYear', 'Сериалы не старше'); });
+                Lampa.Params.listener.send('update_scroll');   // после динамической вставки (образец parental_control)
+            } catch (e) {}
+        };
+
+        list.html('<div class="settings-param"><div class="settings-param__name">Читаю настройки…</div></div>');
+        req(API + '/qdl/catalog-filter', function (r) {
+            if (r && typeof r.movieYear === 'number') paint(r);
+            else list.html('<div class="settings-param"><div class="settings-param__name">❌ Сервер вернул не то</div></div>');
+        }, function () {
+            list.html('<div class="settings-param"><div class="settings-param__name">❌ /qdl/catalog-filter недоступен</div></div>');
+        });
+    }
+
+    function registerD1VisionSettings() {
+        // Гард от двойной регистрации — и он же делает её необратимой (Lampa.SettingsApi снятия
+        // компонента не умеет). Отзыв права дострахован CSS-замком в applySettingsLock: ровно
+        // та же схема, что у «Хелс-чеков», и поймана она была тем же permsgate.
+        if (window.qdl_d1v_settings || !qdlManage()) return;
+        if (!window.Lampa || !Lampa.SettingsApi || !Lampa.SettingsApi.addComponent) return;
+        window.qdl_d1v_settings = true;
+        Lampa.SettingsApi.addComponent({ component: 'qdl_d1vision', icon: D1V_ICON, name: 'D1Vision' });
+        // ⚠️ строго ПОСЛЕ addComponent: он сам ставит пустой шаблон и перетёр бы наш
+        Lampa.Template.add('settings_qdl_d1vision', '<div><div class="qdl-d1v-list"></div></div>');
+        Lampa.Settings.listener.follow('open', function (e) {
+            if (e && e.name === 'qdl_d1vision') renderD1Vision(e.body);
+        });
+    }
+
     function start() {
         Lampa.Component.add('qdl_downloads', ComponentDownloads);
         Lampa.Component.add('qdl_episodes', ComponentEpisodes);
@@ -5774,6 +5857,7 @@
             try { ensureMenu(); } catch (e) {}
             try { applySettingsLock(); } catch (e) {}
             try { registerHealthSettings(); } catch (e) {}
+            try { registerD1VisionSettings(); } catch (e) {}
         };
         // Права тянем ДО первой отрисовки меню, но не ждём ответа: стартовый проход рисует по кешу
         // (мгновенно и без мигания), а пришедший ответ перестраивает меню — в том числе снимает
@@ -5783,7 +5867,8 @@
         startMenuWatcher();
         startHeaderNotiWatcher();
         startPlayerFsWatcher();
-        try { registerHealthSettings(); } catch (e) {}   // «Хелс-чеки» — по куке или праву «Управление» (повтор в onFeatures)
+        try { registerHealthSettings(); } catch (e) {}     // «Хелс-чеки» — по праву «действия» (повтор в onFeatures)
+        try { registerD1VisionSettings(); } catch (e) {}   // раздел «D1Vision» — там же (qdl 2.89)
         pollNotifications();
         try { initSelectFix(); } catch (e) {}            // фикс скролла селектбоксов (upstream mheight-баг)
         try { initTimelineMirror(); } catch (e) {}       // аварийный фолбэк зеркала (режим 'auto', см. qdl 2.18)

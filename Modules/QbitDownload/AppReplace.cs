@@ -14,7 +14,7 @@ namespace QbitDownload;
 //   tt-extract  — фоновый парсер TimeTable: TMDB-запрос каждые 30 сек вечным циклом;
 //   tt-rows     — ряды «Скоро выйдут»/«Недавно вышли» на главной (питались от TimeTable);
 //   dev-wait    — 1000 мс ожидания «тройного вверх» перед стартом очереди загрузки
-//                 (оставлено под кукой qdl_unlock=1);
+//                 (оставлено по праву «действия», qdl 2.89);
 //   splash-*    — 1000 мс + fadeOut 500 мс логотипа УЖЕ ПОСЛЕ готовности интерфейса;
 //   shots       — сторонний JS с cub.red каждый старт (services=false его не ловил);
 //   plugin-reset— reset=Math.random() у URL плагинов: кеш-бастер, бивший по внешним клиентам;
@@ -85,12 +85,19 @@ public static class AppPatch
         //
         // dev-wait: developerApp() жёстко ждёт 1000 мс, не нажмут ли трижды «вверх» (вход в
         // меню разработчика), и только потом зовёт loadLang → loadTask, то есть пауза стоит
-        // ДО всей очереди загрузки. Режем не насухо, а гейтим кукой qdl_unlock=1 — той же,
-        // что уже открывает «Настройки»/«Консоль» (lampainit-invc.js и qdl.js): у обычных
-        // клиентов 0 мс, у владельца с кукой прежние 1000 мс и рабочий тройной «вверх».
+        // ДО всей очереди загрузки. Режем не насухо, а гейтим правом «действия»: у обычных
+        // клиентов 0 мс, у устройств с грантом прежние 1000 мс и рабочий тройной «вверх».
+        //
+        // 🔴 qdl 2.89: было гейтом по куке qdl_unlock=1, кука убрана целиком. Право читаем из
+        // КЕША, который кладёт qdl.js: Lampa.Storage.set('qdl_features', …) пишет прямо в
+        // localStorage['qdl_features'] как JSON — то есть значение доступно СИНХРОННО, ещё до
+        // загрузки самого qdl.js (а сюда мы попадаем именно на старте). Кеша нет (первый в
+        // жизни запуск устройства) — идём быстрым путём: это и есть безопасный дефолт.
+        // Подделка localStorage правом не является: ею открывается только локальная пауза,
+        // а все действия сервер всё равно проверяет через ManageDenied().
         new P("dev-wait",
             "function developerApp(proceed) {",
-            "function developerApp(proceed) {if (!/(?:^|;\\s*)qdl_unlock=1/.test(document.cookie || '')) return proceed();/*qdl-cut:dev-wait*/"),
+            "function developerApp(proceed) {try{if(!JSON.parse(localStorage.getItem('qdl_features')||'{}').manage) return proceed();}catch(e){return proceed();}/*qdl-cut:dev-wait*/"),
         // splash-wait / splash-fade: showApp() зовёт startApp() СРАЗУ, а логотип .welcome
         // снимает через setTimeout 1000 мс + fadeOut 500 мс — полторы секунды заставки уже
         // ПОСЛЕ того, как интерфейс готов и работает. 150 мс / fade 200 мс — выбор владельца

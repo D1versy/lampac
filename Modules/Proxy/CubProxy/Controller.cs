@@ -9,6 +9,7 @@ using Shared.Services.Pools;
 using System;
 using System.Buffers;
 using System.Collections.Frozen;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -304,6 +305,25 @@ public class CubProxyController : BaseController
                 }
                 #endregion
 
+                #region фильтр рядов каталога по году (qdl 2.89)
+                // Ряды «что сейчас / новинки» режем по году выпуска — порог глобальный, лежит
+                // в файле на томе (пишет его QbitDownload, см. FilterStore). Топы, жанры,
+                // коллекции и детали карточки не трогаем: список кандидатов — в RowFilter.
+                //
+                // 🔴 Почему фильтруем ЗДЕСЬ, в контроллере, а не в middleware: на промахе кеша
+                // BodyWriter — это не сокет, а LazyMsm (буфер в памяти, BaseController), и
+                // StaticacheWriter кладёт на диск ровно те байты, что записал контроллер. То есть
+                // фильтрация тут автоматически означает «раз в TTL (3 ч)», а не на каждый запрос.
+                // Любая точка до UseStaticacheWriter (EventListener.Middleware) закешироваться
+                // не смогла бы вообще.
+                var fconf = init.catalogFilter && RowFilter.IsCandidate(subdomain, uri)
+                    ? FilterStore.Read(init.catalogFilterFile)
+                    : default;
+
+                bool filtering = fconf.enabled;
+                var fbuf = filtering ? new MemoryStream() : null;
+                #endregion
+
                 var result = await Http.BaseGetReaderAsync(
                     async e =>
                     {
@@ -311,7 +331,12 @@ public class CubProxyController : BaseController
                         {
                             int bytesRead;
                             while ((bytesRead = await e.stream.ReadAsync(nbuf.Memory, e.ct).ConfigureAwait(false)) > 0)
-                                BodyWriter.Write(nbuf.Span.Slice(0, bytesRead));
+                            {
+                                if (filtering)
+                                    fbuf.Write(nbuf.Span.Slice(0, bytesRead));
+                                else
+                                    BodyWriter.Write(nbuf.Span.Slice(0, bytesRead));
+                            }
                         }
                     },
                     url: requri,
@@ -379,6 +404,70 @@ public class CubProxyController : BaseController
                     proxyManager?.Refresh();
                     HttpContext.Response.StatusCode = StatusCodes.Status502BadGateway;
                 }
+
+                #region отдача отфильтрованного тела (qdl 2.89)
+                if (filtering)
+                {
+                    byte[] raw = fbuf.ToArray();
+                    fbuf.Dispose();
+
+                    string body = null;
+
+                    if (result.success && result.response.StatusCode == HttpStatusCode.OK &&
+                        (HttpContext.Response.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) ?? false))
+                    {
+                        try
+                        {
+                            string first = Encoding.UTF8.GetString(raw);
+                            int kept = RowFilter.CountKept(first, fconf);
+
+                            if (kept >= 0)
+                            {
+                                var pages = new List<string> { first };
+
+                                // 🔴 Добор соседних страниц апстрима — не про «красивее», а про
+                                // работоспособность: экран «Дальше» (category_full) грузит
+                                // следующую страницу только от scroll.onEnd, а Scroll.isEnd() на
+                                // незаполненном гриде возвращает false. Отдать одну короткую
+                                // страницу = отдать экран, который НИКОГДА не догрузится.
+                                for (int i = 1; i < RowFilter.MaxPages && kept < RowFilter.Target; i++)
+                                {
+                                    string next = await Http.Get(
+                                        RowFilter.NextPageUrl(requri, i),
+                                        headers: headers,
+                                        timeoutSeconds: 10,
+                                        proxy: proxy,
+                                        statusCodeOK: true
+                                    ).ConfigureAwait(false);
+
+                                    int k = RowFilter.CountKept(next, fconf);
+                                    if (k < 0)
+                                        break;   // страница кончилась или пришло не то — не настаиваем
+
+                                    pages.Add(next);
+                                    kept += k;
+                                }
+
+                                body = RowFilter.Build(pages, fconf);
+                            }
+                        }
+                        catch { body = null; }   // фильтр не имеет права уронить выдачу каталога
+                    }
+
+                    if (body != null)
+                    {
+                        // ⚠️ ОБЯЗАТЕЛЬНО: CopyResponseHeaders копирует content-length апстрима
+                        // (он в белом списке). С переписанным телом это не только битый ответ
+                        // клиенту — StaticacheWriter при рассинхроне длины срезает TTL записи
+                        // до одной минуты, и «фильтруем раз в 3 часа» превратилось бы в
+                        // «фильтруем и ходим в CUB каждую минуту».
+                        HttpContext.Response.ContentLength = null;
+                        BodyWriter.Write(Encoding.UTF8.GetBytes(body));
+                    }
+                    else
+                        BodyWriter.Write(raw);   // не наша форма / резать нечего / осталось меньше порога
+                }
+                #endregion
             }
         }
     }

@@ -1,17 +1,19 @@
 'use strict';
-// qdl 2.67: право «Управление» (manage) — ВТОРОЙ ключ к тому же скрытому функционалу, что и кука
-// qdl_unlock=1, но выдаваемый конкретному устройству в админке /admin/d1v. Кука живёт только в
-// браузере владельца (он сеет её скриптом в консоли), приложения иметь её не могут — поэтому до
-// 2.67 транскод, удаление с файлами, коллекции и «Хелс-чеки» были доступны исключительно из веба.
+// qdl 2.67: право «Управление» (manage, в админке подписано «действия») — гейт транскода,
+// удаления с файлами, коллекций и служебных экранов Lampa, выдаваемый конкретному устройству
+// в /admin/d1v.
 //
-// 🔴 Единая точка гейта в UI — qdlManage() = qdlUnlocked() || qdlAllowed('manage'). Самый дешёвый
-// способ сломать фичу при следующей правке — оставить где-то прямой qdlUnlocked(); это ловит
-// инвариант по исходнику в конце файла.
+// 🔴 qdl 2.89: ключ остался ОДИН. Мастер-кука qdl_unlock=1 (второй ключ с 2.39) убрана целиком
+// по решению владельца — «всё завязано по пермишину через админку». Страховка от самозапирания
+// при потере access.json теперь одна и её хватает: сама админка открывается рут-паролем
+// (кука accspasswd) и от прав устройств не зависит. Инвариант в конце файла сторожит, что
+// куки не осталось нигде в исходнике.
+//
+// 🔴 Единая точка гейта в UI — qdlManage() = qdlAllowed('manage'). Самый дешёвый способ сломать
+// фичу при следующей правке — позвать qdlAllowed('manage') напрямую мимо неё.
 //
 // 🔴 Как и с Live/Rec, здесь только ОТРИСОВКА: настоящий замок стоит на сервере (мутации отвечают
 // 403 с причиной). Подделка прав в localStorage даёт максимум видимый пункт, который откажет.
-//
-// Ветка куки (мастер-ключ владельца) сторожится отдельно — qdl-unlock-gate.test.js.
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -21,21 +23,14 @@ const tick = () => new Promise((r) => setImmediate(r));
 
 // ─────────────────────────────── qdlManage ───────────────────────────────
 
-test('qdlManage: кука открывает управление и без прав с сервера', () => {
-  const { qdl } = H.loadQdl({ cookie: 'qdl_unlock=1' });
-  qdl.setPerms(null);
-  assert.strictEqual(qdl.qdlManage(), true);
-});
-
-test('qdlManage: право manage открывает управление БЕЗ куки — ради этого фича и делалась', () => {
-  const { qdl } = H.loadQdl({ cookie: '' });
+test('qdlManage: право manage открывает управление — ради этого фича и делалась', () => {
+  const { qdl } = H.loadQdl({});
   qdl.setPerms({ manage: true });
   assert.strictEqual(qdl.qdlManage(), true);
-  assert.strictEqual(qdl.qdlUnlocked(), false, 'кука тут ни при чём — у приложения её нет и быть не может');
 });
 
-test('qdlManage: ни куки, ни права → false (и явный manage:false тоже false)', () => {
-  const { qdl } = H.loadQdl({ cookie: '' });
+test('qdlManage: нет права → false (и явный manage:false тоже false)', () => {
+  const { qdl } = H.loadQdl({});
   qdl.setPerms(null);
   assert.strictEqual(qdl.qdlManage(), false);
   qdl.setPerms({ manage: false });
@@ -43,7 +38,7 @@ test('qdlManage: ни куки, ни права → false (и явный manage:
 });
 
 test('qdlManage: соседние права управление НЕ открывают', () => {
-  const { qdl } = H.loadQdl({ cookie: '' });
+  const { qdl } = H.loadQdl({});
   qdl.setPerms({ live: true, rec: true });
   assert.strictEqual(qdl.qdlManage(), false, 'эфир и записи — не управление, наборы прав независимы');
   assert.strictEqual(qdl.qdlAllowed('live'), true, 'а сами по себе они выданы — набор не сломан');
@@ -59,7 +54,7 @@ test('право приезжает обычным /qdl/features и пережи
       };
     },
   });
-  const { qdl } = H.loadQdl({ lampa, cookie: '' });
+  const { qdl } = H.loadQdl({ lampa });
   qdl.loadFeatures();
   assert.strictEqual(qdl.qdlManage(), true);
   assert.deepStrictEqual(lampa.Storage.get('qdl_features', null), { manage: true },
@@ -76,7 +71,7 @@ function menuTitles(opts) {
   opts = opts || {};
   let captured = null;
   const lampa = H.makeLampa({ Select: { show: (o) => { captured = o; } } });
-  const { qdl } = H.loadQdl({ lampa, cookie: '' });
+  const { qdl } = H.loadQdl({ lampa });
   qdl.setPerms(opts.perms || null);
   qdl.quickMenu(opts.item || TORRENT, opts.ctx);
   assert.ok(captured, 'Select.show должен быть вызван');
@@ -122,7 +117,7 @@ test('HEVC-подсказка про транскод следует за пра
       this.silent = (url, ok) => { ok([{ title: 'Movie 2160p', codec: 'hevc', magnet: 'magnet:?xt=1' }]); };
     },
   });
-  const { qdl } = H.loadQdl({ lampa, cookie: '' });
+  const { qdl } = H.loadQdl({ lampa });
   qdl.setPerms({ manage: true });
   qdl.chooseAndDownload({ title: 'Movie', media_type: 'movie' });
   assert.ok(select, 'список раздач должен показаться');
@@ -137,12 +132,12 @@ test('«Хелс-чеки» регистрируются по праву — б�
     Template: { add: () => {}, get: () => H.makeEl() },
     Settings: { listener: { follow() {} } },
   });
-  const off = H.loadQdl({ lampa: mk(), cookie: '' });
+  const off = H.loadQdl({ lampa: mk() });
   off.qdl.setPerms({ live: true });
   off.qdl.registerHealthSettings();
   assert.deepStrictEqual(calls, [], 'без права раздел не регистрируется');
 
-  const on = H.loadQdl({ lampa: mk(), cookie: '' });
+  const on = H.loadQdl({ lampa: mk() });
   on.qdl.setPerms({ manage: true });
   on.qdl.registerHealthSettings();
   assert.deepStrictEqual(calls, ['qdl_health'], 'с правом — регистрируется без всякой куки');
@@ -152,10 +147,10 @@ test('«Хелс-чеки» регистрируются по праву — б�
 // Здесь нужен НАСТОЯЩИЙ DOM (jsdom): узел снимается через node.parentNode.removeChild,
 // а у makeDocument-заглушки parentNode нет — снятие молча провалилось бы в try/catch.
 
-/** qdl.js в jsdom, по умолчанию без куки. */
+/** qdl.js в jsdom, по умолчанию без прав. */
 function domLock(opts) {
   opts = opts || {};
-  const r = H.loadQdlDom({ cookie: opts.cookie || '' });
+  const r = H.loadQdlDom({});
   r.qdl.setPerms(opts.perms || null);
   return r;
 }
@@ -180,11 +175,13 @@ test('applySettingsLock: без права ставит узел #qdl-hide-setti
   assert.match(node.textContent, /\.head__action\.open--settings\{display:none!important\}/);
   assert.match(node.textContent, /\.menu__item\[data-action="settings"\]/);
   assert.match(node.textContent, /\.menu__item\[data-action="console"\]/);
-  // 🔴 Плитка «Хелс-чеки» — тем же замком: Lampa.SettingsApi снять компонент не умеет,
+  // 🔴 Плитки служебных разделов — тем же замком: Lampa.SettingsApi снять компонент не умеет,
   // поэтому при отзыве права раздел остаётся зарегистрированным и без этого правила доживал бы
   // до перезапуска (регрессию поймал боевой permsgate на фазе «отозвали»).
-  assert.match(node.textContent, /\[data-component="qdl_health"\]\{display:none!important\}/,
+  assert.match(node.textContent, /\[data-component="qdl_health"\]/,
     'замок обязан прятать и плитку раздела «Хелс-чеки»');
+  assert.match(node.textContent, /\[data-component="qdl_d1vision"\]/,
+    'и плитку раздела «D1Vision» — там глобальный фильтр каталога (qdl 2.89)');
 });
 
 test('applySettingsLock: узел замка закрывает и нижнюю панель телефона (qdl 2.84)', () => {
@@ -232,15 +229,6 @@ test('applySettingsLock: отзыв права на ЖИВОМ клиенте в
   assert.match(node.textContent, /open--settings/);
 });
 
-test('applySettingsLock: кука снимает замок и без права — страховка от самозапирания', () => {
-  const { doc, qdl } = domLock({ cookie: 'qdl_unlock=1' });
-  seedLock(doc);
-  qdl.setPerms({ manage: false });
-  qdl.applySettingsLock();
-  assert.strictEqual(doc.getElementById('qdl-hide-settings'), null,
-    'если потеряется access.json, войти в настройки владелец должен по куке');
-});
-
 // ─────────────────────────────── uid в мутациях ───────────────────────────────
 
 test('🔴 POST-мутация коллекции несёт uid — без него сервер отказал бы 403 даже устройству с грантом', async () => {
@@ -255,7 +243,6 @@ test('🔴 POST-мутация коллекции несёт uid — без не
   lampa.Storage.set('lampac_unic_id', 'dueq3shm');
   const { qdl } = H.loadQdl({
     lampa,
-    cookie: '',
     fetch: (url, init) => {
       fetches.push({ url: String(url), body: (init && init.body) || '' });
       return Promise.resolve({ json: () => Promise.resolve({ success: true }) });
@@ -292,14 +279,22 @@ test('🔴 инвариант: post() дописывает uid ДО отправ
   assert.ok(uid < send, 'uid дописывается ДО fetch, иначе строка бессмысленна');
 });
 
-test('🔴 инвариант: UI гейтится qdlManage(), а qdlUnlocked() зовётся только из неё', () => {
+test('🔴 инвариант: UI гейтится qdlManage(), а куки qdl_unlock в исходнике не осталось', () => {
   const src = H.qdlSource();
-  const bad = src.split('\n').filter((l) => l.indexOf('qdlUnlocked()') !== -1
-    && l.indexOf('function qdlUnlocked') === -1
+
+  // qdl 2.89: кука убрана целиком. Вернуть её «на всякий случай» = вернуть второй ключ,
+  // о котором админка не знает и который владелец просил убрать.
+  const cookie = src.split('\n').filter((l) => l.indexOf('qdl_unlock') !== -1
+    && l.trim().indexOf('//') !== 0);
+  assert.deepStrictEqual(cookie, [],
+    'кука qdl_unlock вернулась в qdl.js — гейт снова двухключевой:\n' + cookie.join('\n'));
+
+  // Право читаем ТОЛЬКО через qdlManage(): прямой qdlAllowed('manage') мимо неё разъезжается
+  // с CSS-замком applySettingsLock, и отзыв права перестаёт доезжать до живого клиента.
+  const bad = src.split('\n').filter((l) => l.indexOf("qdlAllowed('manage')") !== -1
     && l.indexOf('function qdlManage') === -1);
   assert.deepStrictEqual(bad, [],
-    'прямой вызов qdlUnlocked() мимо qdlManage() — гейт разъехался, устройство с грантом снова\n'
-    + 'увидит урезанный UI:\n' + bad.join('\n'));
+    'прямой вызов qdlAllowed(\'manage\') мимо qdlManage():\n' + bad.join('\n'));
 
   // И сами точки гейта на месте: пропасть они могут только вместе с фичей.
   // ⚠️ Якоря нарочно РЕГЕКСЫ, а не точные строки: два из них уже ломались на безобидном

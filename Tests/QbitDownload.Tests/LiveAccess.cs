@@ -122,5 +122,5 @@ public static class LiveAccess
     // ManageDenied/ManageCookie объявлены в Perms.cs, но это тот же partial QbitController и те же
     // приватные инстанс-методы — шлюз общий, отдельный заводить незачем.
     public static ActionResult ManageDenied(QbitController c) => (ActionResult)CallOn(c, "ManageDenied");
-    public static bool ManageCookie(QbitController c) => (bool)CallOn(c, "ManageCookie");
+    // qdl 2.89: ManageCookie удалён вместе с кукой qdl_unlock=1 — ключ теперь только право.
 }

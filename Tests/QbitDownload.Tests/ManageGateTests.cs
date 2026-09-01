@@ -161,35 +161,23 @@ public class ManageGateTests
         Assert.Null(LiveAccess.ManageDenied(Ctl(uid: Dev)));
     }
 
-    [Fact]
-    public void Кука_владельца_открывает_управление_без_всякого_гранта()
-    {
-        // 🔴 Мастер-ключ оставлен сознательно и это не дыра: гейт удаления, до которого нельзя
-        // добраться, потеряв access.json, был бы хуже прежнего состояния. Куку ставит только тот,
-        // у кого есть консоль браузера на нашем origin, а снаружи браузер не проходит периметр.
-        TestEnv.FreshCache();
-
-        Assert.Null(LiveAccess.ManageDenied(Ctl(cookie: "qdl_unlock=1")));
-        Assert.Null(LiveAccess.ManageDenied(Ctl(uid: "неизвестное-устройство", cookie: "qdl_unlock=1")));
-        Assert.True(LiveAccess.ManageCookie(Ctl(cookie: "other=x; qdl_unlock=1; more=y")));
-    }
-
     [Theory]
+    [InlineData("qdl_unlock=1")]       // бывший мастер-ключ владельца
+    [InlineData("other=x; qdl_unlock=1; more=y")]
     [InlineData("qdl_unlock=0")]
-    [InlineData("qdl_unlock=")]
-    [InlineData("qdl_unlock=true")]
-    [InlineData("qdl_unlock=11")]
-    [InlineData("xqdl_unlock=1")]      // чужое имя с нашим хвостом
-    [InlineData("qdl_unlock_x=1")]     // чужое имя с нашим началом
+    [InlineData("xqdl_unlock=1")]
     [InlineData("qdl=1")]
-    public void Мусорная_кука_ключом_не_является(string cookie)
+    public void Кука_qdl_unlock_ключом_БОЛЬШЕ_НЕ_является(string cookie)
     {
-        // Сравнение строгое и по полному имени: «похоже на разблокировку» открывать удаление
-        // не имеет права.
+        // 🔴 qdl 2.89, решение владельца: «убери куку, у нас всё завязано по пермишину через
+        // админку». Второго ключа больше нет — ни рабочего, ни похожего. Тест обязан покраснеть,
+        // если ветку ManageCookie вернут «на всякий случай».
+        // Самозапирание при потере access.json закрывает сама админка /admin/d1v: она открывается
+        // рут-паролем (кука accspasswd), от прав устройств не зависит и переживает потерю реестра.
         TestEnv.FreshCache();
 
-        Assert.False(LiveAccess.ManageCookie(Ctl(cookie: cookie)));
         Assert.Equal(403, StatusOf(LiveAccess.ManageDenied(Ctl(cookie: cookie))));
+        Assert.Equal(403, StatusOf(LiveAccess.ManageDenied(Ctl(uid: "неизвестное-устройство", cookie: cookie))));
     }
 
     [Fact]
@@ -255,14 +243,14 @@ public class ManageGateTests
     }
 
     [Fact]
-    public async Task Транскод_по_куке_владельца_доходит_до_валидации()
+    public async Task Транскод_по_куке_отклоняется_403_а_не_доходит_до_валидации()
     {
-        // Браузер владельца остаётся рабочим входом и после 2.67 — иначе фича сломала бы
-        // единственный способ управлять сервером без записи в access.json.
+        // Зеркало теста выше на настоящей ручке: с 2.89 кука не открывает НИЧЕГО. 403 (гейт),
+        // а не 400 (валидация хеша) — значит запрос остановлен до самой ручки.
         TestEnv.FreshCache();
 
         var r = await Ctl(cookie: "qdl_unlock=1", path: "/qdl/transcode").Transcode(BadHash);
-        Assert.Equal(400, StatusOf(r));
+        Assert.Equal(403, StatusOf(r));
     }
 
     [Fact]

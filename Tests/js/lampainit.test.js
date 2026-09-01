@@ -284,15 +284,17 @@ test('lampainit: appload injects <style id="qdl-hide-extras"> into document.head
   assert.match(st.textContent, /feed-head__info/);
 });
 
-// qdl 2.39: вход в настройки Lampa скрыт у ВСЕХ клиентов, открывает кука qdl_unlock=1
-// (владелец сетит её скриптом в консоли браузера). Платформенных веток тут нет.
+// qdl 2.39: вход в настройки Lampa скрыт у ВСЕХ клиентов. Платформенных веток тут нет.
+// 🔴 2.89: замок ставится БЕЗУСЛОВНО — куки qdl_unlock=1, которая его открывала, больше нет.
+// Единственный ключ — право «действия» из /admin/d1v, и снимает узел уже qdl.js по приезде прав.
 //
 // 🔴 2.67: правила замка переехали из общего #qdl-hide-extras в ОТДЕЛЬНЫЙ узел #qdl-hide-settings.
 // Причина ровно одна: из склеенной строки правило потом не вынуть, а вынимать его теперь надо —
 // когда с сервера приезжает право «Управление», узел целиком снимает qdl.js (applySettingsLock).
 // Поэтому здесь проверяем ДВА разных факта: узел замка (есть/нет) и неприкосновенность общего блока.
 
-/** Прогон appload с заданной кукой → {doc, lock, extras}. */
+/** Прогон appload → {doc, lock, extras}. Аргумент cookie оставлен как ШУМ: с 2.89 замок
+ *  от кук не зависит вовсе, и тесты ниже это прямо проверяют. */
 function appload(cookie) {
   const doc = H.makeDocument();
   if (cookie !== undefined) doc.cookie = cookie;
@@ -313,11 +315,13 @@ test('lampainit: без ключа появляется отдельный уз�
   assert.match(lock.textContent, /\.head__action\.open--settings\{display:none!important\}/);
   assert.match(lock.textContent, /\.menu__item\[data-action="settings"\]/);
   assert.match(lock.textContent, /\.menu__item\[data-action="console"\]/);
-  // 🔴 Плитка «Хелс-чеки» — тем же замком: Lampa.SettingsApi снять компонент не умеет,
+  // 🔴 Плитки служебных разделов — тем же замком: Lampa.SettingsApi снять компонент не умеет,
   // поэтому при отзыве права раздел остаётся зарегистрированным и без этого правила доживал бы
   // до перезапуска (регрессию поймал боевой permsgate на фазе «отозвали»).
-  assert.match(lock.textContent, /\[data-component="qdl_health"\]\{display:none!important\}/,
+  assert.match(lock.textContent, /\[data-component="qdl_health"\]/,
     'замок обязан прятать и плитку раздела «Хелс-чеки»');
+  assert.match(lock.textContent, /\[data-component="qdl_d1vision"\]/,
+    'и плитку раздела «D1Vision» — там глобальный фильтр каталога (qdl 2.89)');
   // 🔴 и ни одного из этих правил не должно остаться в общем блоке: снять их оттуда нечем
   assert.ok(extras.indexOf('open--settings') === -1, 'замок не подмешивается в #qdl-hide-extras');
   assert.ok(extras.indexOf('[data-action="settings"]') === -1, 'замок не подмешивается в #qdl-hide-extras');
@@ -343,14 +347,14 @@ test('lampainit: общий блок прячет мёртвую «Трансл�
   assert.ok(extras.indexOf('[data-action="myperson"]') !== -1, 'фолбэк к флагу disable_features.persons');
 });
 
-test('lampainit: с кукой qdl_unlock=1 узла замка нет вовсе, а общий блок от куки не зависит', () => {
+test('lampainit: 🔴 кука qdl_unlock замок больше НЕ открывает (убрана в 2.89)', () => {
   const withKey = appload('a=1; qdl_unlock=1; b=2');
-  assert.strictEqual(withKey.lock, null, 'с ключом замка не должно быть в принципе');
-  assert.ok(!withKey.doc.head._children.some((c) => c.id === 'qdl-hide-settings'));
+  assert.ok(withKey.lock, 'старая кука обязана быть бесполезной — ключ теперь только право');
+  assert.match(withKey.lock.textContent, /open--settings/);
 
-  // 🔴 главный инвариант переезда: содержимое #qdl-hide-extras теперь ОДИНАКОВО с ключом и без.
-  // Пока правила замка жили строкой внутри него, эти две строки отличались — и снять замок,
-  // не тронув скрытия CUB, было невозможно.
+  // 🔴 инвариант переезда 2.67 (жив и сейчас): содержимое #qdl-hide-extras ОДИНАКОВО в обоих
+  // прогонах. Пока правила замка жили строкой внутри него, снять замок, не тронув скрытия CUB,
+  // было невозможно.
   assert.strictEqual(withKey.extras, appload('').extras, 'общий блок обязан быть побайтово тем же');
 
   // прочие скрытия целы — переезд не должен был унести соседей
@@ -368,12 +372,27 @@ test('lampainit: с кукой qdl_unlock=1 узла замка нет вовс�
   ]) assert.ok(withKey.extras.indexOf(rule) !== -1, 'потерялось скрытие: ' + rule);
 });
 
-test('lampainit: похожая кука замок не открывает', () => {
-  for (const cookie of ['xqdl_unlock=1', 'qdl_unlock=0', 'qdl_unlock=', 'xqdl_unlock=1; qdl_unlock=0']) {
+test('lampainit: замок ставится при любых куках — от них он не зависит', () => {
+  for (const cookie of ['', 'xqdl_unlock=1', 'qdl_unlock=1', 'qdl_unlock=0', 'a=1; qdl_unlock=1; b=2']) {
     const { lock } = appload(cookie);
     assert.ok(lock, 'кука «' + cookie + '» не должна открывать настройки');
     assert.match(lock.textContent, /open--settings/);
   }
+});
+
+test('lampainit: 🔴 в исходнике invc не осталось чтения куки qdl_unlock', () => {
+  const src = require('node:fs').readFileSync(
+    require('node:path').join(H.REPO, 'Modules', 'LampaWeb', 'plugins', 'lampainit-invc.js'), 'utf8');
+  const bad = src.split('\n').filter((l) => l.indexOf('qdl_unlock') !== -1 && l.trim().indexOf('//') !== 0);
+  assert.deepStrictEqual(bad, [], 'кука вернулась в lampainit-invc.js:\n' + bad.join('\n'));
+});
+
+test('lampainit: замок прячет плитки обоих служебных разделов настроек', () => {
+  const { lock } = appload('');
+  // Lampa.SettingsApi снятия компонента не умеет, поэтому плитки гасятся правилом. Копия списка
+  // живёт в qdl.js::applySettingsLock — разъехавшись, они дают раздел, видимый без права.
+  assert.match(lock.textContent, /\[data-component="qdl_health"\]/);
+  assert.match(lock.textContent, /\[data-component="qdl_d1vision"\]/);
 });
 
 test('lampainit: appload does not re-inject style when one already exists', () => {

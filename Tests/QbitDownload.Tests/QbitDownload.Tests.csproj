@@ -65,6 +65,7 @@
     <Compile Include="..\..\Modules\QbitDownload\Warmup.cs" Link="Module\Warmup.cs" />
     <Compile Include="..\..\Modules\QbitDownload\AppReplace.cs" Link="Module\AppReplace.cs" />
     <Compile Include="..\..\Modules\QbitDownload\CatalogWarmup.cs" Link="Module\CatalogWarmup.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\CatalogFilter.cs" Link="Module\CatalogFilter.cs" />
     <Compile Include="..\..\Modules\QbitDownload\OnlineWarm.cs" Link="Module\OnlineWarm.cs" />
     <Compile Include="..\..\Modules\QbitDownload\MusicWarm.cs" Link="Module\MusicWarm.cs" />
     <Compile Include="..\..\Modules\QbitDownload\SearchCache.cs" Link="Module\SearchCache.cs" />
@@ -123,6 +124,13 @@
     <Compile Include="..\..\Modules\JacRed\Engine\RutrackerRow.cs" Link="JacRed\RutrackerRow.cs" />
     <Compile Include="..\..\Modules\JacRed\Engine\FlareSolverr.cs" Link="JacRed\FlareSolverr.cs" />
     <Compile Include="..\..\Modules\JacRed\Models\AppConf\FlareSolverrConf.cs" Link="JacRed\FlareSolverrConf.cs" />
+
+    <!-- CubProxy: линкуем ТОЛЬКО RowFilter.cs — фильтр рядов каталога по году (qdl 2.89).
+         По тому же правилу, что ProxyFallback.cs: он намеренно не обращается ни к CubProxy.ModInit
+         (иначе коллизия с QbitDownload.ModInit), ни к BaseController — конфиг приходит параметром.
+         ⚠️ FilterStore.cs сюда НЕ линкуется: он читает файл и держит статический кеш, тестировать
+         в нём нечего, а статика между тестами протекала бы. -->
+    <Compile Include="..\..\Modules\Proxy\CubProxy\RowFilter.cs" Link="CubProxy\RowFilter.cs" />
 
     <!-- Online: линкуем ТОЛЬКО OnlineEventsCache.cs — он не трогает ни Online.ModInit, ни
          BaseController, поэтому коллизии с QbitDownload.ModInit не возникает. Под тестами его

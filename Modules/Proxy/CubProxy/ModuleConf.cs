@@ -24,6 +24,21 @@ public class ModuleConf : CubConf, Iproxy
     /// </summary>
     public bool stubAiMetadata { get; set; } = true;
 
+    /// <summary>
+    /// qdl 2.89: киллсвитч фильтра рядов каталога по году. Сам порог и тумблер владельца лежат
+    /// в catalogFilterFile (их правят из настроек Lampa по праву «действия»); это — аварийный
+    /// рубильник в init.conf, которым фича гасится целиком, не трогая значения владельца.
+    /// ⚠️ Секции "cub" в боевом init.conf нет вовсе, так что дефолт из кода работает сразу.
+    /// </summary>
+    public bool catalogFilter { get; set; } = true;
+
+    /// <summary>
+    /// qdl 2.89: файл глобальной настройки фильтра. Пишет его модуль QbitDownload
+    /// (JsonStore.WriteNow), читаем мы — напрямую связать модули нельзя, они компилируются
+    /// в разные сборки. Путь обязан совпадать с cachePath модуля QbitDownload.
+    /// </summary>
+    public string catalogFilterFile { get; set; } = "/qdl-data/catalog-filter.json";
+
 
     [JsonProperty("limit_map", ObjectCreationHandling = ObjectCreationHandling.Replace, NullValueHandling = NullValueHandling.Ignore)]
     public List<WafLimitRootMap> limit_map { get; set; }

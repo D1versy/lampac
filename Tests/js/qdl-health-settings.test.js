@@ -1,8 +1,9 @@
 'use strict';
-// qdl 2.39: экран «Хелс-чеки» в настройках Lampa. Регистрируется только при куке qdl_unlock=1
-// (без неё раздела нет ни у кого — плитку раздела иначе не спрятать), ровно один раз,
+// qdl 2.39: экран «Хелс-чеки» в настройках Lampa. Регистрируется только по праву «действия»
+// (без него раздела нет ни у кого — плитку раздела иначе не спрятать), ровно один раз,
 // и обязательно СВОИМ шаблоном ПОСЛЕ addComponent: тот сам кладёт пустой settings_qdl_health
 // и перетёр бы нашу вёрстку при обратном порядке.
+// ⚠️ qdl 2.89: гейтом была кука qdl_unlock=1, теперь только право — см. qdl-manage-gate.test.js.
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -23,16 +24,16 @@ function settingsLampa(over) {
   return { lampa, calls };
 }
 
-test('health: без куки раздел не регистрируется', () => {
+test('health: без права раздел не регистрируется', () => {
   const { lampa, calls } = settingsLampa();
-  const { qdl } = H.loadQdl({ lampa, cookie: '' });
+  const { qdl } = H.loadQdl({ lampa, perms: {} });
   qdl.registerHealthSettings();
   assert.strictEqual(calls.length, 0, 'ни addComponent, ни Template.add не должны вызываться');
 });
 
-test('health: с кукой раздел регистрируется, Template.add строго ПОСЛЕ addComponent', () => {
+test('health: с правом раздел регистрируется, Template.add строго ПОСЛЕ addComponent', () => {
   const { lampa, calls } = settingsLampa();
-  const { qdl } = H.loadQdl({ lampa, cookie: 'qdl_unlock=1' });
+  const { qdl } = H.loadQdl({ lampa });
   qdl.registerHealthSettings();
 
   const iAdd = calls.findIndex((c) => c[0] === 'addComponent');
@@ -45,7 +46,7 @@ test('health: с кукой раздел регистрируется, Template.
 
 test('health: повторный вызов не дублирует регистрацию', () => {
   const { lampa, calls } = settingsLampa();
-  const { qdl, sandbox } = H.loadQdl({ lampa, cookie: 'qdl_unlock=1' });
+  const { qdl, sandbox } = H.loadQdl({ lampa });
   qdl.registerHealthSettings();
   qdl.registerHealthSettings();
   assert.strictEqual(calls.filter((c) => c[0] === 'addComponent').length, 1);
@@ -54,7 +55,7 @@ test('health: повторный вызов не дублирует регист
 
 test('health: без SettingsApi (старый бандл) не падает и не помечает себя зарегистрированным', () => {
   const lampa = H.makeLampa({ SettingsApi: undefined });
-  const { qdl, sandbox } = H.loadQdl({ lampa, cookie: 'qdl_unlock=1' });
+  const { qdl, sandbox } = H.loadQdl({ lampa });
   assert.doesNotThrow(() => qdl.registerHealthSettings());
   assert.ok(!sandbox.window.qdl_health_settings);
 });

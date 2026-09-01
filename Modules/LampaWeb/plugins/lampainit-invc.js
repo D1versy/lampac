@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.88';
+window.qdl_fork_version = '2.89';
 
    // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
@@ -107,11 +107,11 @@ lampainit_invc.appload = function appload() {
       st.textContent = css;
       document.head.appendChild(st);
 
-      // qdl 2.39: служебные входы Lampa скрыты У ВСЕХ (и в вебе тоже) — открывает кука qdl_unlock=1,
-      // владелец сетит её скриптом в консоли браузера (рецепт: медиасервер claude/04-operations.md).
+      // qdl 2.39: служебные входы Lampa скрыты У ВСЕХ (и в вебе тоже).
       // display:none безопасен для пульта: navigator Lampa пропускает скрытые элементы.
-      // Тот же однострочник продублирован в qdl.js (qdlUnlocked) — общего кода между файлами нет.
       // 2.40: сюда же «Консоль» (нижний блок меню, рядом с «Настройки» и уже скрытым «О проекте»).
+      // 🔴 2.89: куки qdl_unlock=1 больше нет — единственный ключ это право «действия» из
+      // /admin/d1v, замок снимает qdl.js::applySettingsLock, когда права приезжают с сервера.
       //
       // 🔴 2.67: правила живут в ОТДЕЛЬНОМ узле, а не строкой в #qdl-hide-extras — из общего блока
       // их потом не вынуть. Теперь замок открывает ещё и право «Управление» (админка /admin/d1v),
@@ -124,7 +124,7 @@ lampainit_invc.appload = function appload() {
     // 🔴 Узел замка создаётся ВНЕ гарда #qdl-hide-extras (это два независимых узла): иначе при
     // уже существующем общем блоке — повторный appload, чужой узел с тем же id — замок не
     // создался бы вовсе, и шестерёнка светилась бы до первого applySettingsLock() из qdl.js.
-    if (!/(?:^|;\s*)qdl_unlock=1/.test(document.cookie || '') && !document.getElementById('qdl-hide-settings')) {
+    if (!document.getElementById('qdl-hide-settings')) {
       var stg = document.createElement('style');
       stg.id = 'qdl-hide-settings';
       stg.textContent = '.head__action.open--settings{display:none!important}'
@@ -134,8 +134,9 @@ lampainit_invc.appload = function appload() {
                       // зовёт Controller.toggle('settings') напрямую — мимо шестерёнки и
                       // мимо пункта меню. Без этой строки замок обходился с телефона.
                       + '.navigation-bar__item[data-action="settings"]{display:none!important}'
-                      // плитка раздела «Хелс-чеки»: снять компонент Lampa не умеет, прячем правилом
-                      + '[data-component="qdl_health"]{display:none!important}';
+                      // плитки разделов «Хелс-чеки» и «D1Vision»: снять компонент Lampa не умеет,
+                      // прячем правилом (копия списка — в qdl.js::applySettingsLock)
+                      + '[data-component="qdl_health"],[data-component="qdl_d1vision"]{display:none!important}';
       document.head.appendChild(stg);
     }
 

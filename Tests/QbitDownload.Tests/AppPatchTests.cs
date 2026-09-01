@@ -304,13 +304,21 @@ public class AppPatchTests
     }
 
     [Fact]
-    public void PatchAppJs_DevMenu_StaysReachableUnderUnlockCookie()
+    public void PatchAppJs_DevMenu_StaysReachableUnderManageRight()
     {
-        // Меню разработчика не отнимаем — оно живёт под той же кукой qdl_unlock=1, что и
-        // «Настройки»/«Консоль»: у обычных клиентов ранний proceed(), у владельца прежние 1000 мс.
+        // Меню разработчика не отнимаем — оно живёт под тем же правом «действия», что и
+        // «Настройки»/«Консоль»: у обычных клиентов ранний proceed(), у устройств с грантом
+        // прежние 1000 мс и рабочий тройной «вверх».
+        //
+        // 🔴 qdl 2.89: гейтом была кука qdl_unlock=1, теперь право. Читаем его из КЕША, который
+        // кладёт qdl.js (Lampa.Storage.set пишет прямо в localStorage) — сюда мы попадаем на
+        // старте, ещё до загрузки самого плагина, и синхронный localStorage единственное, что
+        // тут доступно. Нет кеша — быстрый путь, это и есть безопасный дефолт.
         string result = AppPatch.PatchAppJs(AllAnchors);
 
-        Assert.Contains("qdl_unlock=1", result);
+        Assert.DoesNotContain("qdl_unlock", result);
+        Assert.Contains("localStorage.getItem('qdl_features')", result);
+        Assert.Contains(".manage", result);
         Assert.Contains("return proceed();", result);
         Assert.Contains("var timer = setTimeout(function () {", result);   // сам механизм цел
     }
