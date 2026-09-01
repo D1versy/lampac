@@ -21,6 +21,7 @@
     "SeasonWatch.cs",
     "LiveTs.cs",
     "Live.cs",
+    "LiveDetect.cs",
     "Warmup.cs",
     "CatalogWarmup.cs",
     "CatalogFilter.cs",

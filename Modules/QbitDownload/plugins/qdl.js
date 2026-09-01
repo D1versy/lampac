@@ -164,11 +164,44 @@
             // сетка эфира: по центру и во всю ширину (рут-em клампится на 10.6px → телефон ~36em:
             // фикс-ширина давала одну колонку слева с мёртвым полем справа). flex-grow растягивает
             // колонки, кап 38em не даёт одинокой плитке распухнуть на весь ТВ.
-            '.qdl-watch-grid{display:flex;flex-wrap:wrap;gap:1em;padding:1.2em 1.4em;justify-content:center}' +
-            '.qdl-watch-grid>div:not(.qdl-watch-tile){flex:1 1 100%}' +
-            '.qdl-watch-tile{flex:1 1 20em;max-width:38em;min-width:0;transition:transform .1s}' +
+            // Сетка эфира — жёсткие ДВЕ колонки, как раскладка «Quad» у оригинального Live View
+            // регистратора (4 камеры = 2x2). На телефоне корневой em клампится, две колонки
+            // превращаются в кашу — там одна, ровно как у оригинала.
+            '.qdl-watch-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:1em;padding:1.2em 1.4em}' +
+            '.qdl-watch-grid>div:not(.qdl-watch-tile){grid-column:1/-1}' +
+            '@media (max-width:600px){.qdl-watch-grid{grid-template-columns:1fr}}' +
+            '.qdl-watch-tile{position:relative;border-radius:.8em;overflow:hidden;background:#111;min-width:0;transition:transform .1s}' +
             // тайл сетки эфира: без своего focus-правила он никак не подсвечивается пультом
             '.qdl-watch-tile.focus{box-shadow:0 0 0 .22em #fff;transform:scale(1.04);z-index:1}' +
+            // кадр-подложка задаёт высоту плитки и виден, пока поток не поднялся
+            '.qdl-watch-frame{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#0a0a0a}' +
+            '.qdl-watch-tile video{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;background:#000}' +
+            '.qdl-watch-note{position:absolute;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:1.2em;opacity:.8;text-shadow:0 .1em .3em #000;pointer-events:none;z-index:1}' +
+            '.qdl-watch-bar{position:absolute;left:0;right:0;bottom:0;padding:.6em .8em;background:linear-gradient(0deg,rgba(0,0,0,.85),rgba(0,0,0,0));display:flex;align-items:center;gap:.6em;z-index:2}' +
+            '.qdl-watch-name{flex:1;min-width:0;font-size:1.25em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+            // Фулл вью одной камеры — та же плитка, растянутая на экран. Fullscreen API тут не
+            // годится: у релизного Android-клиента WebChromeClient ставится только в DEBUG,
+            // то есть requestFullscreen() мёртв (SysView.kt).
+            '.qdl-watch-tile--full{position:fixed;left:0;top:0;width:100%;height:100%;z-index:900;border-radius:0;transform:none}' +
+            '.qdl-watch-tile--full.focus{box-shadow:none;transform:none}' +
+            '.qdl-watch-tile--full video{object-fit:contain}' +
+            '.qdl-watch-tile--full .qdl-watch-frame{width:100%;height:100%;aspect-ratio:auto;object-fit:contain}' +
+            // ── Detection: лента скриншотов детектора ──
+            '.qdl-det-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.8em;padding:.4em 1.4em 2em}' +
+            '@media (max-width:600px){.qdl-det-grid{grid-template-columns:repeat(2,1fr)}}' +
+            '.qdl-det-day{grid-column:1/-1;padding:.9em .2em .1em;font-size:1.35em;font-weight:600;opacity:.85}' +
+            '.qdl-det-card{position:relative;border-radius:.7em;overflow:hidden;background:#111;transition:transform .1s}' +
+            '.qdl-det-card.focus{box-shadow:0 0 0 .22em #fff;transform:scale(1.04);z-index:1}' +
+            '.qdl-det-img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#0a0a0a}' +
+            '.qdl-det-type{position:absolute;left:.5em;top:.5em;padding:.12em .5em;border-radius:.35em;font-size:.9em;font-weight:700;color:#fff;background:rgba(200,30,30,.9)}' +
+            '.qdl-det-type--motion{background:rgba(210,140,20,.92)}' +
+            '.qdl-det-bar{position:absolute;left:0;right:0;bottom:0;padding:.5em .6em;background:linear-gradient(0deg,rgba(0,0,0,.85),rgba(0,0,0,0));display:flex;align-items:flex-end;gap:.5em}' +
+            '.qdl-det-name{flex:1;min-width:0;font-size:1.05em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+            '.qdl-det-time{font-size:1em;opacity:.85;flex:none}' +
+            '.qdl-det-view{position:fixed;left:0;top:0;width:100%;height:100%;z-index:900;background:#000;display:flex;align-items:center;justify-content:center}' +
+            '.qdl-det-view img{max-width:100%;max-height:100%;object-fit:contain}' +
+            '.qdl-det-head{position:absolute;left:0;right:0;top:0;padding:1em 1.4em;font-size:1.3em;background:linear-gradient(180deg,rgba(0,0,0,.85),rgba(0,0,0,0))}' +
+            '.qdl-det-foot{position:absolute;left:0;right:0;bottom:0;padding:1em 1.4em;text-align:center;font-size:1.1em;opacity:.85;background:linear-gradient(0deg,rgba(0,0,0,.85),rgba(0,0,0,0))}' +
             // фокус пульта в наших списках/кнопках: Lampa вешает класс .focus только на ТВ/десктопе,
             // а генерического .selector.focus в её CSS нет — без этих правил фокус невидим
             '.qdl-row-focus{transition:box-shadow .1s}' +
@@ -4336,8 +4369,8 @@
     }
 
     // ── D1versy Live: ЭФИР — сетка подключённых камер ──
-    // Тайл = живой кадр (обновляется сам) + имя + статус. Enter — эфир камеры фуллскрином
-    // в плеере (rolling-HLS через наш прокси /qdl/live/watch/*). Поток на регистраторе общий
+    // С qdl 2.95 тайл — ЖИВОЕ видео (rolling-HLS через наш прокси /qdl/live/watch/*), кадр
+    // остался подложкой и режимом при выключенном тумблере. Поток на регистраторе общий
     // на всех зрителей, stop не зовём никогда.
     // ── iPhone: эфир в НАТИВНОМ iOS-плеере (без VLC и без обновления приложения) ──
     // Приложение не перехватывает HTML5-видео (в VLC ведёт только мост Lampa.Player.play →
@@ -4490,15 +4523,165 @@
         poll();
     }
 
+    // ── ЖИВОЙ ЭФИР В ПЛИТКАХ (qdl 2.95) ──
+    // Прежнее решение «сетка на ТВ — это тайлы, а не видеостена» (claude/06 §AL2) отменено
+    // замерами, а не на глаз: поток каждой камеры — H.264 Main@L3.1 720p25 ~2 Мбит/с, декодер
+    // домашнего ТВ (MT5896) паспортно держит 720p на 510 fps при 16 инстансах, а нам нужно 100;
+    // сам сервер на зрителя не тратит ничего — ffmpeg крутит эти потоки 24/7 в любом случае.
+    // Разбор с числами — claude/06 §DB.
+    //
+    // Три правила, на которых всё держится:
+    //  1. играют ТОЛЬКО плитки в кадре и не больше LIVE_MAX_PLAYERS — прокрутил ниже, верхние гаснут;
+    //  2. тумблер «Видео» гасит стриминг на живую, без перезахода в раздел;
+    //  3. pause()/stop()/destroy() ОБЯЗАНЫ снести все плееры: Lampa на forward-навигации зовёт
+    //     только pause(), и без этого каждый вход в раздел оставлял бы позади ещё четыре
+    //     живых декодера (та же грабля, что убила таймер сетки в §AL2).
+    var LIVE_MAX_PLAYERS = 4;
+
+    // На iPhone дефолт «выкл»: WKWebView собран без снятого mediaTypesRequiringUserActionForPlayback,
+    // автоплей там запрещён, и плитки-видео честно не заведутся. Тап по плитке уводит в нативный
+    // плеер iOS (liveWatchPlayIOS) — этот путь не трогаем.
+    function liveVideoOn() {
+        var def = window.d1vision_platform !== 'ios';
+        try {
+            var v = Lampa.Storage.get('qdl_live_video', def ? '1' : '0');
+            if (v === true || v === 1 || v === '1') return true;
+            if (v === false || v === 0 || v === '0') return false;
+        } catch (e) {}
+        return def;
+    }
+
+    function liveVideoSet(on) {
+        try { Lampa.Storage.set('qdl_live_video', on ? '1' : '0'); } catch (e) {}
+    }
+
+    // hls.js приезжает АСИНХРОННО: бандл Lampa грузит ./vender/hls/hls.js через putScriptAsync,
+    // и в момент открытия раздела window.Hls может ещё не существовать.
+    function liveHlsReady(cb, dead) {
+        var tries = 0;
+        (function wait() {
+            if (dead && dead()) return;              // плитку успели увести с экрана — ждать некому
+            if (window.Hls && window.Hls.isSupported) { cb(window.Hls); return; }
+            if (++tries > 40) { cb(null); return; }   // 40 x 250 мс = 10 с, дальше сдаёмся честно
+            setTimeout(wait, 250);
+        })();
+    }
+
+    /// Живой плеер одной плитки. box — DOM плитки, note(text) рисует надпись поверх кадра.
+    /// Поведение при сбое — как у оригинального Live View: не подменяем картинку молча,
+    /// а пишем «Переподключаюсь…» и грузим снова.
+    function liveMakePlayer(box, url, note) {
+        var video = document.createElement('video');
+        video.muted = true;
+        video.autoplay = true;
+        video.setAttribute('playsinline', '');
+        video.setAttribute('muted', '');
+
+        var st = { video: video, hls: null, dead: false, retry: null, watch: null, seen: -1, still: 0 };
+
+        st.destroy = function () {
+            st.dead = true;
+            clearTimeout(st.retry);
+            clearInterval(st.watch);
+            if (st.hls) { try { st.hls.destroy(); } catch (e) {} st.hls = null; }
+            try { video.pause(); } catch (e) {}
+            try { video.removeAttribute('src'); video.load(); } catch (e) {}   // канонический release потока в WebKit
+            try { if (video.parentNode) video.parentNode.removeChild(video); } catch (e) {}
+        };
+
+        function say(t) { try { note(t); } catch (e) {} }
+
+        function play() {
+            var p;
+            try { p = video.play(); } catch (e) { say('Нажми, чтобы включить'); return; }
+            if (p && p.catch) p.catch(function () { say('Нажми, чтобы включить'); });
+        }
+
+        video.addEventListener('playing', function () { st.still = 0; say(''); });
+        video.addEventListener('waiting', function () { say('Соединяюсь…'); });
+
+        box.appendChild(video);
+        say('Соединяюсь…');
+
+        if (video.canPlayType && video.canPlayType('application/vnd.apple.mpegurl')) {
+            // Мак/айфон: HLS в <video> нативно, hls.js не нужен вовсе.
+            video.src = url;
+            play();
+        }
+        else liveHlsReady(function (Hls) {
+            if (st.dead) return;
+            if (!Hls || !Hls.isSupported()) { say('Видео не поддерживается'); return; }
+
+            // Кап буферов — не косметика: на домашнем ТВ свободно ~800 МБ, а дефолт hls.js
+            // тянет 30-60 с вперёд на КАЖДЫЙ из четырёх потоков.
+            var hls = new Hls({
+                enableWorker: true,
+                lowLatencyMode: true,
+                backBufferLength: 10,
+                maxBufferLength: 10,
+                maxMaxBufferLength: 20,
+                liveSyncDurationCount: 3,
+                liveMaxLatencyDurationCount: 6
+            });
+            st.hls = hls;
+            hls.loadSource(url);
+            hls.attachMedia(video);
+            hls.on(Hls.Events.MANIFEST_PARSED, play);
+            hls.on(Hls.Events.ERROR, function (e, data) {
+                if (st.dead || !data || !data.fatal) return;
+                if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                    // Watchdog регистратора при рестарте ffmpeg СНАЧАЛА удаляет плейлист (окно
+                    // 4-8 с) — это норма, а не смерть эфира. Ждём и грузим снова, как оригинал.
+                    say('Переподключаюсь…');
+                    clearTimeout(st.retry);
+                    st.retry = setTimeout(function () {
+                        if (!st.dead && st.hls) { try { st.hls.startLoad(); } catch (er) {} }
+                    }, 3000);
+                }
+                else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                    say('Переподключаюсь…');
+                    try { hls.recoverMediaError(); } catch (er) {}
+                }
+                else say('Эфир недоступен');
+            });
+        }, function () { return st.dead; });
+
+        // Сторож: ffmpeg может встать, а плеер об этом не узнает — ошибки нет, просто нет данных.
+        st.watch = setInterval(function () {
+            if (st.dead || video.paused) return;
+            var t = video.currentTime || 0;
+            if (t > st.seen + 0.1) { st.seen = t; st.still = 0; return; }
+            if (++st.still < 3) return;                 // 3 x 5 с = 15 с тишины
+            st.still = 0;
+            say('Переподключаюсь…');
+            if (st.hls) { try { st.hls.startLoad(); } catch (e) {} }
+            else { try { video.load(); play(); } catch (e) {} }
+        }, 5000);
+
+        return st;
+    }
+
     function ComponentLiveWatch(object) {
         var comp = this;
         var network = new Lampa.Reguest();
         var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
         var html = $('<div></div>');
-        var body = $('<div class="qdl-watch-grid"></div>');   // раскладка — в injectCss (центр + растягивание)
+        var body = $('<div class="qdl-watch-grid"></div>');   // раскладка — в injectCss (2 колонки)
         var last;
         var timer = null;
         var haveTiles = false;
+
+        var cams = [];        // снимок ответа сервера; refresh мутирует ЭТИ ЖЕ объекты
+        var tiles = {};       // id -> плитка
+        var players = {};     // id -> живой плеер (см. liveMakePlayer)
+        var visible = {};     // id -> плитка сейчас в кадре
+        var wokeAt = {};      // id -> когда последний раз будили /watch/start
+        var io = null;
+        var syncTimer = null;
+        var visTimer = null;   // фолбек-пересчёт видимости там, где нет IntersectionObserver
+        var fullId = 0;       // какая камера развёрнута на весь экран (0 — сетка)
+        var fullHome = null;  // куда вернуть развёрнутую плитку: {parent, next}
+        var videoBtn = null;
 
         // Таймер живёт только пока экран активен: Lampa на forward-навигации НЕ зовёт destroy
         // (компонент висит в стеке до pages_save_total), и без stop в pause() каждая копия сетки
@@ -4522,7 +4705,9 @@
 
         this.build = function (r) {
             if (comp.destroyed) return;
-            var cams = r.cameras || [];
+            cams = r.cameras || [];
+
+            body.append(headBar());
 
             if (r.error)
                 body.append(liveMsg('⚠️ ' + r.error));
@@ -4534,9 +4719,11 @@
             // статусы и кадры дышат сами; DOM не перестраиваем — фокус пульта не теряется
             haveTiles = cams.length > 0;
             startTimer();
+            watchVisibility();
 
             this.activity.loader(false);
             this.activity.toggle();
+            sync();
         };
 
         function badgeHtml(c) {
@@ -4545,20 +4732,53 @@
                 : '<span style="background:rgba(255,255,255,.16);color:#ddd;padding:.12em .55em;border-radius:.35em;font-size:.85em">не в эфире</span>';
         }
 
+        function mkBtn(text) {
+            var el = $('<div class="selector qdl-btn-focus" style="padding:.65em 1.1em;background:rgba(255,255,255,.08);border-radius:.6em;font-size:1.3em;white-space:nowrap"></div>');
+            el.text(text);
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); scheduleSync(); });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
+            return el;
+        }
+
+        function videoLabel() { return liveVideoOn() ? '📡 Видео: вкл' : '📡 Видео: выкл'; }
+
+        function headBar() {
+            var bar = $('<div style="display:flex;align-items:center;gap:.7em;padding:1.2em 0 .5em;flex-wrap:wrap"></div>');
+            var full = mkBtn('⛶ На весь экран');
+            var det = mkBtn('🎯 Detection');
+            videoBtn = mkBtn(videoLabel());
+
+            full.on('hover:enter', function () { openFocused(); });
+            det.on('hover:enter', function () {
+                Lampa.Activity.push({ url: '', title: 'Detection', component: 'qdl_live_detect', page: 1 });
+            });
+            videoBtn.on('hover:enter', function () {
+                var on = !liveVideoOn();
+                liveVideoSet(on);
+                videoBtn.text(videoLabel());
+                if (!on) { if (fullId) exitFull(); stopAll(); }
+                sync();
+                Lampa.Noty.show(on ? 'Эфир в плитках включён' : 'Эфир в плитках выключен');
+            });
+
+            return bar.append(full).append(det).append(videoBtn);
+        }
+
         function tile(c) {
             var el = $(
-                '<div class="selector qdl-watch-tile" data-cam="' + c.id + '" style="position:relative;border-radius:.8em;overflow:hidden;background:#111">' +
-                  '<img style="display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#0a0a0a">' +
-                  '<div style="position:absolute;left:0;right:0;bottom:0;padding:.6em .8em;background:linear-gradient(0deg,rgba(0,0,0,.85),rgba(0,0,0,0));display:flex;align-items:center;gap:.6em">' +
-                    '<div class="qdl-watch-name" style="flex:1;min-width:0;font-size:1.25em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(c.name) + '</div>' +
+                '<div class="selector qdl-watch-tile" data-cam="' + c.id + '">' +
+                  '<img class="qdl-watch-frame">' +
+                  '<div class="qdl-watch-note"></div>' +
+                  '<div class="qdl-watch-bar">' +
+                    '<div class="qdl-watch-name">' + esc(c.name) + '</div>' +
                     '<div class="qdl-watch-badge">' + badgeHtml(c) + '</div>' +
                   '</div>' +
                 '</div>'
             );
-            var img = el.find('img');
+            var img = el.find('.qdl-watch-frame');
             img.attr('src', withUid(API + '/qdl/live/watch/thumb?camera=' + c.id + '&t=' + Date.now()));
             img.on('error', function () { this.src = './img/img_broken.svg'; });
-            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); scheduleSync(); });
             el.on('hover:touch hover:hover', function () { last = markLast(el); });
 
             // iPhone: нативный плеер требует ЖИВОГО жеста → прямой click (hover:enter Lampa
@@ -4572,52 +4792,728 @@
             });
             el.on('hover:enter', function () {
                 if (Date.now() - iosTapAt < 1000) return;   // этот тап уже забрал нативный путь
-                liveWatchPlay(c);
+                if (fullId === c.id) { exitFull(); return; }
+                if (liveVideoOn() && !iosLiveNative()) { enterFull(c.id); return; }
+                liveWatchPlay(c);   // тумблер выключен (и весь путь iOS) — прежний нативный плеер
             });
+            // Нативный плеер со звуком/перемоткой остаётся под рукой всегда.
+            el.on('hover:long', function () { liveWatchPlay(c); });
+
+            tiles[c.id] = el;
             return el;
+        }
+
+        // ── кто сейчас обязан играть ──────────────────────────────────────────────
+        function camById(id) {
+            for (var i = 0; i < cams.length; i++) if (cams[i].id === id) return cams[i];
+            return null;
+        }
+
+        function playerOpened() {
+            try { return !!(Lampa.Player.opened && Lampa.Player.opened()); } catch (e) { return false; }
+        }
+
+        function note(el, text) { try { el.find('.qdl-watch-note').text(text || ''); } catch (e) {} }
+
+        function tileDist(el) {
+            try {
+                var r = el.getBoundingClientRect();
+                var h = window.innerHeight || 720;
+                return Math.abs((r.top + r.bottom) / 2 - h / 2);
+            } catch (e) { return 0; }
+        }
+
+        function startPlayer(c, idx) {
+            if (players[c.id]) return;
+            var el = tiles[c.id];
+            if (!el || !el.length) return;
+
+            // Камера не в эфире: будим поток на регистраторе (идемпотентно) и ждём ответа —
+            // плейлист появится не мгновенно, плитка пока живёт кадром.
+            if (!c.path) { wake(c); return; }
+
+            var slot = { pending: true, timerId: null };
+            players[c.id] = slot;
+            // Разбег стартов: не бить регистратор четырьмя запросами разом (как initDelay
+            // у оригинального CameraGrid).
+            slot.timerId = setTimeout(function () {
+                if (comp.destroyed || players[c.id] !== slot) return;
+                players[c.id] = liveMakePlayer(el[0], withUid(API + c.path), function (t) { note(el, t); });
+            }, (idx || 0) * 500);
+        }
+
+        function stopPlayer(id) {
+            var p = players[id];
+            if (!p) return;
+            delete players[id];
+            clearTimeout(p.timerId);
+            if (p.destroy) p.destroy();
+            var el = tiles[id];
+            if (el && el.length) note(el, '');
+        }
+
+        function stopAll() { Object.keys(players).forEach(stopPlayer); }
+
+        function setPaused(id, on) {
+            var p = players[id];
+            if (!p || !p.video) return;
+            if (on) {
+                try { p.video.pause(); } catch (e) {}
+                if (p.hls) { try { p.hls.stopLoad(); } catch (e) {} }
+            }
+            else {
+                if (p.hls) { try { p.hls.startLoad(); } catch (e) {} }
+                try { var q = p.video.play(); if (q && q.catch) q.catch(function () {}); } catch (e) {}
+            }
+        }
+
+        function unmute(id, on) {
+            var p = players[id];
+            if (!p || !p.video) return;
+            p.video.muted = !on;
+            if (!on) return;
+            var q;
+            try { q = p.video.play(); } catch (e) {}
+            // Со звуком автоплей может быть запрещён политикой браузера — тихо возвращаем немой.
+            if (q && q.catch) q.catch(function () {
+                try { p.video.muted = true; p.video.play(); } catch (e) {}
+            });
+        }
+
+        function wake(c) {
+            var now = Date.now();
+            if (wokeAt[c.id] && now - wokeAt[c.id] < 20000) return;
+            wokeAt[c.id] = now;
+            network.silent(withUid(API + '/qdl/live/watch/start?camera=' + encodeURIComponent(c.id)),
+                function (st) {
+                    if (comp.destroyed || !st || !st.ready || !st.path) return;
+                    c.live = true;
+                    c.path = st.path;
+                    var el = tiles[c.id];
+                    if (el && el.length) { el.attr('data-live', '1'); el.find('.qdl-watch-badge').html(badgeHtml(c)); }
+                    sync();
+                },
+                function () {});
+        }
+
+        function sync() {
+            if (comp.destroyed) return;
+
+            // Тумблер выключен или поверх открыт нативный плеер — в сетке не должно остаться
+            // ни одного декодера.
+            if (!liveVideoOn() || playerOpened()) { stopAll(); return; }
+
+            // В фулл вью составом рулят enterFull/exitFull: там ровно одна играющая камера,
+            // остальные стоят на паузе, но живут (возврат в сетку обязан быть мгновенным).
+            if (fullId) {
+                var fc = camById(fullId);
+                if (fc) startPlayer(fc, 0);
+                return;
+            }
+
+            var cand = [];
+            cams.forEach(function (c) {
+                var el = tiles[c.id];
+                if (!el || !el.length || !visible[String(c.id)]) return;
+                cand.push({ c: c, d: tileDist(el[0]) });
+            });
+            cand.sort(function (a, b) { return a.d - b.d; });
+            cand = cand.slice(0, LIVE_MAX_PLAYERS);
+
+            var want = {};
+            cand.forEach(function (x) { want[String(x.c.id)] = 1; });
+
+            Object.keys(players).forEach(function (id) { if (!want[String(id)]) stopPlayer(id); });
+
+            var fresh = 0;
+            cand.forEach(function (x) {
+                if (players[x.c.id]) return;
+                startPlayer(x.c, fresh++);
+            });
+        }
+
+        function scheduleSync() {
+            clearTimeout(syncTimer);
+            syncTimer = setTimeout(sync, 200);
+        }
+
+        function watchVisibility() {
+            if (window.IntersectionObserver) {
+                io = new window.IntersectionObserver(function (entries) {
+                    entries.forEach(function (en) {
+                        var id = en.target.getAttribute('data-cam');
+                        if (en.isIntersecting) visible[id] = 1; else delete visible[id];
+                    });
+                    scheduleSync();
+                }, { rootMargin: '25% 0px', threshold: 0.01 });
+                Object.keys(tiles).forEach(function (id) { try { io.observe(tiles[id][0]); } catch (e) {} });
+            }
+            else {
+                // Фолбек для движков без IntersectionObserver: считаем сами тем же onScreen(),
+                // которым живут остальные наши экраны.
+                recompute();
+                visTimer = setInterval(recompute, 1000);
+            }
+        }
+
+        function recompute() {
+            if (comp.destroyed) return;
+            Object.keys(tiles).forEach(function (id) {
+                if (onScreen(tiles[id][0])) visible[id] = 1; else delete visible[id];
+            });
+            sync();
+        }
+
+        // ── фулл вью: одна камера на весь экран ───────────────────────────────────
+        function liveCams() { return cams.filter(function (c) { return c.live; }); }
+
+        function openFocused() {
+            var id = focusedCam();
+            var c = (id && camById(id)) || liveCams()[0] || cams[0];
+            if (!c) { Lampa.Noty.show('Камер не найдено'); return; }
+            if (liveVideoOn() && !iosLiveNative()) enterFull(c.id);
+            else liveWatchPlay(c);
+        }
+
+        function focusedCam() {
+            try {
+                var el = $(last).closest('.qdl-watch-tile');
+                if (el.length) return +el.attr('data-cam');
+            } catch (e) {}
+            return 0;
+        }
+
+        // 🔴 Плитку на время фулл вью УНОСИМ В body. position:fixed внутри скролла Lampa
+        // не покрывает экран: у скролл-контейнера есть transform, а трансформированный предок
+        // становится содержащим блоком для fixed-потомков — плитка оставалась внутри ленты, и
+        // поверх неё было видно соседние камеры и шапку Lampa. Поймано скриншотом: функциональная
+        // проверка мерила ТОЛЬКО размер элемента, а он совпадал с вьюпортом по совпадению.
+        // Перенос узла эфир не рвёт — проверено живьём: currentTime шёл 15 → 19 с без сброса.
+        function takeFull(el) {
+            var node = el[0];
+            fullHome = { parent: node.parentNode, next: node.nextSibling };
+            document.body.appendChild(node);
+            el.addClass('qdl-watch-tile--full');
+        }
+
+        function restoreFull() {
+            if (!fullId) return;
+            var el = tiles[fullId];
+            if (el && el.length) {
+                el.removeClass('qdl-watch-tile--full');
+                var node = el[0];
+                if (fullHome && fullHome.parent) {
+                    if (fullHome.next && fullHome.next.parentNode === fullHome.parent)
+                        fullHome.parent.insertBefore(node, fullHome.next);
+                    else
+                        fullHome.parent.appendChild(node);
+                }
+            }
+            fullHome = null;
+        }
+
+        function enterFull(id) {
+            var el = tiles[id];
+            var c = camById(id);
+            if (!el || !el.length || !c) return;
+            if (!c.live) { wake(c); Lampa.Noty.show('Камера сейчас не в эфире'); return; }
+
+            fullId = id;
+            takeFull(el);
+            // Остальные — на паузу (гасим и декодер, и сеть), но НЕ уничтожаем: возврат в сетку
+            // должен быть мгновенным, а не «подождите три секунды».
+            // 🔴 Слот, который ещё НЕ развернулся в плеер (ждёт свои 500 мс разбега), паузить
+            // нечем — его надо снять совсем, иначе таймер сработает уже ПОСЛЕ входа в фулл вью
+            // и заведёт декодер за оверлеем. Ловится только живьём: вход сразу после открытия
+            // раздела (headless livegrid.mjs, 01.09.2026 — три соседа играли под полноэкранной).
+            Object.keys(players).forEach(function (pid) {
+                if (+pid === id) return;
+                if (players[pid].pending) stopPlayer(pid);   // ещё не поднялся — сохранять нечего
+                else setPaused(pid, true);
+            });
+            startPlayer(c, 0);
+            setPaused(id, false);
+            unmute(id, true);
+            // Перенос узла в редких движках ставит медиа на паузу — поднимаем обратно.
+            setTimeout(function () {
+                var p = players[id];
+                if (p && p.video && p.video.paused) { try { p.video.play(); } catch (e) {} }
+            }, 120);
+            Lampa.Controller.toggle('content');
+        }
+
+        function exitFull() {
+            var id = fullId;
+            unmute(id, false);
+            restoreFull();
+            fullId = 0;
+            var el = tiles[id];
+            if (el && el.length) last = el[0];
+            Object.keys(players).forEach(function (pid) { setPaused(pid, false); });
+            sync();
+            Lampa.Controller.toggle('content');
+        }
+
+        function switchFull(dir) {
+            var list = liveCams();
+            if (list.length < 2) return;
+            var i = 0;
+            for (var k = 0; k < list.length; k++) if (list[k].id === fullId) i = k;
+            var next = list[(i + dir + list.length) % list.length];
+            unmute(fullId, false);
+            setPaused(fullId, true);
+            restoreFull();                  // прежнюю вернули в сетку, новую уносим в body
+            fullId = next.id;
+            var el = tiles[next.id];
+            if (el && el.length) { takeFull(el); last = el[0]; }
+            startPlayer(next, 0);
+            setPaused(next.id, false);
+            unmute(next.id, true);
         }
 
         function refresh() {
             // плеер открыт оверлеем (activity остаётся «активной») — сетку под ним не обновляем
-            try { if (Lampa.Player.opened && Lampa.Player.opened()) return; } catch (e) {}
+            if (playerOpened()) return;
             network.silent(withUid(API + '/qdl/live/watch'), function (r) {
                 if (comp.destroyed || !r || !r.cameras) return;
-                r.cameras.forEach(function (c) {
-                    var el = body.find('.qdl-watch-tile[data-cam="' + c.id + '"]');
-                    if (!el.length) return;
-                    el.attr('data-live', c.live ? '1' : '0');   // свежий статус для iOS-пути (замыкание тайла — снимок)
-                    el.find('.qdl-watch-badge').html(badgeHtml(c));
-                    // живой кадр дышит только у эфирных — остальным нечего обновлять
-                    if (c.live) el.find('img').attr('src', withUid(API + '/qdl/live/watch/thumb?camera=' + c.id + '&t=' + Date.now()));
+
+                var alive = {};
+                r.cameras.forEach(function (n) {
+                    alive[String(n.id)] = 1;
+                    var c = camById(n.id);
+                    var el = tiles[n.id];
+                    if (!c || !el || !el.length) return;   // новая камера появится при следующем входе: перестройка DOM уронила бы фокус пульта
+                    c.live = n.live; c.running = n.running; c.path = n.path;
+                    el.attr('data-live', n.live ? '1' : '0');   // свежий статус для iOS-пути (замыкание тайла — снимок)
+                    el.find('.qdl-watch-badge').html(badgeHtml(n));
+                    // Живой кадр дышит только там, где НЕ играет видео: под работающим потоком
+                    // его всё равно не видно, а трафик он ест.
+                    if (n.live && !players[n.id])
+                        el.find('.qdl-watch-frame').attr('src', withUid(API + '/qdl/live/watch/thumb?camera=' + n.id + '&t=' + Date.now()));
                 });
+
+                // Mac-рекордер отключился → сервер перестал его отдавать. Плитку не сносим (это
+                // выбило бы фокус), но гасим её плеер и честно пишем «не в эфире».
+                cams.forEach(function (c) {
+                    if (alive[String(c.id)]) return;
+                    c.live = false; c.path = null;
+                    stopPlayer(c.id);
+                    var el = tiles[c.id];
+                    if (el && el.length) { el.attr('data-live', '0'); el.find('.qdl-watch-badge').html(badgeHtml(c)); }
+                    if (fullId === c.id) exitFull();
+                });
+
+                sync();
             }, function () {});
         }
 
         this.render = function () { return html; };
+
         this.start = function () {
             startTimer();   // вернулись на экран (в т.ч. Back с другого) — сетка снова дышит
             Lampa.Controller.add('content', {
                 toggle: function () { focusBack(scroll, last); },
-                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
-                right: function () { Navigator.move('right'); },
-                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
-                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
-                back: function () { Lampa.Activity.backward(); }
+                left: function () {
+                    if (fullId) { switchFull(-1); return; }
+                    if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu');
+                },
+                right: function () {
+                    if (fullId) { switchFull(1); return; }
+                    Navigator.move('right');
+                },
+                up: function () {
+                    if (fullId) return;
+                    if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head');
+                },
+                down: function () {
+                    if (fullId) return;
+                    if (Navigator.canmove('down')) Navigator.move('down');
+                },
+                back: function () {
+                    if (fullId) { exitFull(); return; }
+                    Lampa.Activity.backward();
+                }
+            });
+            Lampa.Controller.toggle('content');
+            sync();
+        };
+
+        // pause = ушли ВПЕРЁД на другой экран: глушим таймер, висящий прогрев эфира, ещё НЕ
+        // заигравший скрытый iOS-<video> и — обязательно — ВСЕ живые плееры сетки.
+        // Уже играющий/PiP iOS-элемент не трогаем: зритель им пользуется.
+        function killPendingIosVideo() { if (iosLiveVideo && !iosLiveVideo.__qdlStarted) iosLiveStop(); }
+
+        function leave() {
+            // 🔴 Развёрнутая плитка лежит на body и переживёт уход с экрана — вернуть её
+            // обязательно, иначе камера останется висеть поверх следующего экрана.
+            restoreFull();
+            fullId = 0;
+            stopTimer();
+            clearTimeout(syncTimer);
+            clearInterval(visTimer); visTimer = null;
+            liveDayCancel();
+            killPendingIosVideo();
+            stopAll();
+        }
+
+        this.pause = function () { leave(); };
+        this.stop = function () { leave(); };
+        this.destroy = function () {
+            comp.destroyed = true;
+            leave();
+            if (io) { try { io.disconnect(); } catch (e) {} io = null; }
+            tiles = {}; visible = {};
+            network.clear(); scroll.destroy(); html.remove();
+        };
+    }
+    // ── D1versy Live → DETECTION: лента скриншотов детектора (qdl 2.95) ──
+    // Сплошная лента, как на странице /detection регистратора (решение владельца): свежие сверху,
+    // старые подтягиваются прокруткой. Замер 01.09.2026 — ~170 срабатываний в час (кадр пишется
+    // на КАЖДОМ тике детектора, пока человек в кадре), за сутки это тысячи карточек, поэтому
+    // фильтры по дню/камере/типу здесь не украшение.
+    //
+    // Механика бесконечной ленты — копия ComponentRecFeed вместе с её граблями: ручной
+    // Lampa.Layer.visible и activity.toggle() ТОЛЬКО на первой странице.
+    //
+    // 🔴 Курсор берём из ответа сервера (r.cursor), а не «минимальный показанный id»: в режиме дня
+    // страница может целиком выпасть за окно локальных суток, и считать курсор было бы не по чему.
+
+    var LIVE_MONTHS_JS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+    var LIVE_WDAYS_JS = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+
+    /// Подпись дня для списка выбора. Считаем на клиенте: /qdl/live/days закрыт правом «rec»,
+    /// а Detection живёт под правом «live» — устройство с одним только эфиром получило бы ошибку.
+    function liveDayName(ds, today) {
+        var p = String(ds || '').split('-');
+        if (p.length !== 3) return ds || '';
+        var d = new Date(+p[0], +p[1] - 1, +p[2]);
+        var t = String(today || '').split('-');
+        if (t.length === 3) {
+            var diff = Math.round((d - new Date(+t[0], +t[1] - 1, +t[2])) / 86400000);
+            if (diff === 0) return 'Сегодня';
+            if (diff === -1) return 'Вчера';
+            if (diff === -2) return 'Позавчера';
+        }
+        return d.getDate() + ' ' + LIVE_MONTHS_JS[d.getMonth()] + ', ' + LIVE_WDAYS_JS[d.getDay()];
+    }
+
+    function ComponentLiveDetect(object) {
+        var comp = this;
+        var network = new Lampa.Reguest();
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+        var html = $('<div></div>');
+        var body = $('<div></div>');
+        var grid = $('<div class="qdl-det-grid"></div>');
+        var dayBtn = null, camBtn = null, typeBtn = null;
+        var last;
+
+        var items = [], seen = {}, camList = [];
+        var cursor = 0, loading = false, hasNext = true, lastDay = '', emptyRuns = 0;
+        var fCam = 0, fType = '', fDate = '';
+        var today = '';
+        var view = null, viewIdx = -1;
+        var LIMIT = 30;
+        var PREFETCH_AHEAD = 6;
+
+        this.create = function () {
+            if (!qdlAllowed('live')) { denySection(); return this.render(); }
+
+            injectCss();
+            this.activity.loader(true);
+            scroll.minus();
+            html.append(scroll.render());
+            scroll.body().append(body);
+            // Страховка для мыши/тача; на пульте раньше срабатывает prefetch по фокусу.
+            scroll.onEnd = function () { comp.load(false); };
+            body.append(headBar());
+            body.append(grid);
+            this.load(true);
+            return this.render();
+        };
+
+        function mkBtn(text) {
+            var el = $('<div class="selector qdl-btn-focus" style="padding:.65em 1.1em;background:rgba(255,255,255,.08);border-radius:.6em;font-size:1.3em;white-space:nowrap"></div>');
+            el.text(text);
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
+            return el;
+        }
+
+        function camName(id) {
+            for (var i = 0; i < camList.length; i++) if (camList[i].id === id) return camList[i].name;
+            return 'Камера ' + id;
+        }
+
+        function labels() {
+            if (dayBtn) dayBtn.text('📅 ' + (fDate ? liveDayName(fDate, today) : 'Все даты'));
+            if (camBtn) camBtn.text('📷 ' + (fCam ? camName(fCam) : 'Все камеры'));
+            if (typeBtn) typeBtn.text('🎯 ' + (fType === 'human' ? 'Человек' : (fType === 'motion' ? 'Движение' : 'Всё')));
+        }
+
+        function headBar() {
+            var bar = $('<div style="display:flex;align-items:center;gap:.7em;padding:1.2em 1.4em .5em;flex-wrap:wrap"></div>');
+            dayBtn = mkBtn('');
+            camBtn = mkBtn('');
+            typeBtn = mkBtn('');
+            labels();
+
+            dayBtn.on('hover:enter', pickDay);
+            camBtn.on('hover:enter', pickCam);
+            typeBtn.on('hover:enter', pickType);
+
+            return bar.append(dayBtn).append(camBtn).append(typeBtn);
+        }
+
+        function pickDay() {
+            var list = [{ title: 'Все даты', date: '' }];
+            var base = today || fDate;
+            for (var i = 0; i < 14; i++) {
+                var d = liveShift(base, -i);
+                list.push({ title: liveDayName(d, today), date: d });
+            }
+            Lampa.Select.show({
+                title: 'Какой день показать?',
+                items: list.map(function (x) { return { title: x.title, date: x.date, selected: x.date === fDate }; }),
+                onSelect: function (a) { Lampa.Controller.toggle('content'); fDate = a.date; reload(); },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }
+
+        function pickCam() {
+            var list = [{ title: 'Все камеры', cam: 0 }];
+            camList.forEach(function (c) { list.push({ title: c.name, cam: c.id }); });
+            Lampa.Select.show({
+                title: 'Камера',
+                items: list.map(function (x) { return { title: x.title, cam: x.cam, selected: x.cam === fCam }; }),
+                onSelect: function (a) { Lampa.Controller.toggle('content'); fCam = a.cam; reload(); },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }
+
+        function pickType() {
+            var list = [{ title: 'Всё', kind: '' }, { title: 'Человек', kind: 'human' }, { title: 'Движение', kind: 'motion' }];
+            Lampa.Select.show({
+                title: 'Что показывать',
+                items: list.map(function (x) { return { title: x.title, kind: x.kind, selected: x.kind === fType }; }),
+                onSelect: function (a) { Lampa.Controller.toggle('content'); fType = a.kind; reload(); },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }
+
+        function reload() {
+            closeView();
+            grid.empty();
+            items = []; seen = {}; cursor = 0; hasNext = true; lastDay = ''; emptyRuns = 0;
+            last = dayBtn ? dayBtn[0] : null;
+            labels();
+            comp.activity.loader(true);
+            comp.load(true);
+        }
+
+        this.load = function (first) {
+            if (loading || (!first && !hasNext)) return;
+            loading = true;
+
+            var q = '/qdl/live/detect?limit=' + LIMIT;
+            if (!first && cursor) q += '&before=' + cursor;
+            if (fCam) q += '&camera=' + fCam;
+            if (fType) q += '&type=' + fType;
+            if (fDate) q += '&date=' + encodeURIComponent(fDate);
+
+            network.silent(withUid(API + q),
+                function (r) {
+                    if (comp.destroyed) return;
+                    loading = false;
+                    comp.activity.loader(false);
+                    r = r || {};
+                    if (r.error) { if (first) comp.empty('⚠️ ' + r.error); return; }
+
+                    if (r.today) today = r.today;
+                    if (r.cameras && r.cameras.length) camList = r.cameras;
+                    hasNext = !!(r.hasNext && r.cursor);
+                    if (r.cursor) cursor = r.cursor;
+                    labels();
+
+                    var added = 0;
+                    (r.items || []).forEach(function (it) {
+                        if (seen[it.id]) return;
+                        seen[it.id] = true;
+                        items.push(it);
+                        appendCard(it, items.length - 1);
+                        added++;
+                    });
+
+                    // 🔥 Обязательно: Scroll сам зовёт scrollEnded только когда экран не заполнен,
+                    // без этого первая страница осталась бы с заглушками вместо превью.
+                    try { Lampa.Layer.visible(scroll.render(true)); } catch (e) {}
+
+                    if (first && !added)
+                        comp.empty(fDate || fCam || fType ? 'По этому фильтру срабатываний нет' : 'Срабатываний ещё не было');
+
+                    // 🔥 toggle ТОЛЬКО на первой странице: на догрузке он через collectionFocus
+                    // ставит фокус на первый элемент и утаскивает скролл в начало ленты.
+                    if (first) comp.activity.toggle();
+
+                    // В режиме дня страница может целиком лечь за окно локальных суток (её события
+                    // принадлежат соседнему дню) — тянем дальше, но не бесконечно.
+                    emptyRuns = added ? 0 : emptyRuns + 1;
+                    if (!added && hasNext && emptyRuns < 5) comp.load(false);
+                },
+                function () {
+                    if (comp.destroyed) return;
+                    loading = false;
+                    comp.activity.loader(false);
+                    if (first) comp.empty('Видеорегистратор не отвечает');
+                });
+        };
+
+        // Догружаем заранее — за несколько карточек до конца, чтобы пульт не упирался в ожидание.
+        this.prefetch = function (el) {
+            if (loading || !hasNext) return;
+            var kids = grid.children();
+            var i = kids.index(el);
+            if (i >= 0 && i >= kids.length - PREFETCH_AHEAD) comp.load(false);
+        };
+
+        function appendCard(it, idx) {
+            if (it.day && it.day !== lastDay) {
+                lastDay = it.day;
+                grid.append($('<div class="qdl-det-day">' + esc(it.dayLabel || it.day) + '</div>'));
+            }
+
+            var kind = it.type === 'human' ? 'ЧЕЛОВЕК' : 'ДВИЖЕНИЕ';
+            var conf = it.confidence ? ('  ' + it.confidence + '%') : '';
+            var el = $(
+                '<div class="selector qdl-det-card" data-idx="' + idx + '">' +
+                  '<img class="qdl-det-img">' +
+                  '<div class="qdl-det-type qdl-det-type--' + esc(it.type) + '">' + kind + esc(conf) + '</div>' +
+                  '<div class="qdl-det-bar">' +
+                    '<div class="qdl-det-name">' + esc(it.cameraName) + '</div>' +
+                    '<div class="qdl-det-time">' + esc(it.time) + '</div>' +
+                  '</div>' +
+                '</div>'
+            );
+
+            var img = el.find('img');
+            // w=640 — плитке этого с запасом, а оригинал весит ~340 КБ (замер): в гриде их десятки.
+            img.attr('src', withUid(API + '/qdl/live/detect/thumb?w=640&id=' + it.id));
+            img.on('error', function () { this.src = './img/img_broken.svg'; });
+
+            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); comp.prefetch(el); });
+            el.on('hover:touch hover:hover', function () { last = markLast(el); });
+            el.on('hover:enter', function () {
+                // Просмотр уже открыт (фокус остался на этой карточке) → OK открывает запись.
+                if (view) { openRecording(items[viewIdx]); return; }
+                openView(idx);
+            });
+            el.on('hover:long', function () { openRecording(it); });
+
+            grid.append(el);
+        }
+
+        // ── полноэкранный просмотр кадра ─────────────────────────────────────────
+        function openView(idx) {
+            if (idx < 0 || idx >= items.length) return;
+            viewIdx = idx;
+            var it = items[idx];
+
+            if (!view) {
+                view = $('<div class="qdl-det-view"><img><div class="qdl-det-head"></div><div class="qdl-det-foot"></div></div>');
+                $('body').append(view);
+            }
+
+            var img = view.find('img');
+            // Без w= — оригинал байт в байт: экономим на контейнере, а не на качестве.
+            img.attr('src', withUid(API + '/qdl/live/detect/thumb?id=' + it.id));
+            img.off('error').on('error', function () { this.src = './img/img_broken.svg'; });
+
+            view.find('.qdl-det-head').text(
+                (it.type === 'human' ? 'Человек' : 'Движение') + (it.confidence ? '  ·  ' + it.confidence + '%' : '') +
+                '   ·   ' + it.cameraName + '   ·   ' + (it.dayLabel || it.day) + ', ' + it.time);
+            view.find('.qdl-det-foot').text(
+                (idx + 1) + ' из ' + items.length + '   ·   ◀ ▶ листать' +
+                (it.recording ? '   ·   OK — открыть запись' : '') + '   ·   Назад — выйти');
+
+            preload(idx + 1);
+            if (idx >= items.length - 5) comp.load(false);
+        }
+
+        function preload(i) {
+            if (i < 0 || i >= items.length) return;
+            try { var im = new Image(); im.src = withUid(API + '/qdl/live/detect/thumb?id=' + items[i].id); } catch (e) {}
+        }
+
+        function moveView(dir) {
+            var next = viewIdx + dir;
+            if (next < 0 || next >= items.length) return;
+            openView(next);
+        }
+
+        function closeView() {
+            if (!view) return;
+            view.remove();
+            view = null;
+            // Фокус возвращаем на ту карточку, до которой долистали в просмотре (§CO).
+            var el = grid.find('.qdl-det-card[data-idx="' + viewIdx + '"]');
+            if (el.length) last = el[0];
+            viewIdx = -1;
+        }
+
+        function openRecording(it) {
+            if (!it) return;
+            if (!it.recording) { Lampa.Noty.show('К этому кадру запись не привязана'); return; }
+            if (!qdlAllowed('rec')) { Lampa.Noty.show('Раздел записей недоступен на этом устройстве'); return; }
+            closeView();
+            livePlay({ id: it.camera, name: it.cameraName },
+                     [{ id: it.recording, start: it.time, end: it.dayLabel || it.day, seconds: 0 }], 0);
+        }
+
+        this.empty = function (text) {
+            grid.append($('<div class="qdl-det-day">' + esc(text) + '</div>'));
+            comp.activity.loader(false);
+            comp.activity.toggle();
+        };
+
+        this.render = function () { return html; };
+
+        this.start = function () {
+            Lampa.Controller.add('content', {
+                toggle: function () { focusBack(scroll, last); },
+                left: function () {
+                    if (view) { moveView(-1); return; }
+                    if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu');
+                },
+                right: function () {
+                    if (view) { moveView(1); return; }
+                    Navigator.move('right');
+                },
+                up: function () {
+                    if (view) return;
+                    if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head');
+                },
+                down: function () {
+                    if (view) return;
+                    if (Navigator.canmove('down')) Navigator.move('down');
+                },
+                back: function () {
+                    if (view) { closeView(); Lampa.Controller.toggle('content'); return; }
+                    Lampa.Activity.backward();
+                }
             });
             Lampa.Controller.toggle('content');
         };
-        // pause = ушли ВПЕРЁД на другой экран: глушим таймер, висящий прогрев эфира и
-        // ещё НЕ заигравший скрытый iOS-<video> (иначе он заиграл бы и открыл фуллскрин поверх
-        // нового экрана). Уже играющий/PiP — не трогаем: зритель им пользуется.
-        function killPendingIosVideo() { if (iosLiveVideo && !iosLiveVideo.__qdlStarted) iosLiveStop(); }
-        this.pause = function () { stopTimer(); liveDayCancel(); killPendingIosVideo(); };
-        this.stop = function () { stopTimer(); liveDayCancel(); killPendingIosVideo(); };
+
+        // Lampa на forward-навигации зовёт pause(), а не destroy(): висящий запрос обязан умереть
+        // здесь, иначе доживший ответ дорисует ленту поверх чужого экрана. Оверлей просмотра живёт
+        // на body и обязан уехать вместе с экраном.
+        this.pause = function () { network.clear(); closeView(); };
+        this.stop = function () { network.clear(); closeView(); };
         this.destroy = function () {
             comp.destroyed = true;
-            liveDayCancel();
-            stopTimer();
-            killPendingIosVideo();   // играющий/PiP живёт на body и переживает экран — закроется сам по Done/выходу из PiP
-            network.clear(); scroll.destroy(); html.remove();
+            network.clear();
+            closeView();
+            scroll.destroy();
+            html.remove();
         };
     }
 
@@ -6424,6 +7320,7 @@
         Lampa.Component.add('qdl_live_camera', ComponentLiveCamera);
         Lampa.Component.add('qdl_rec_feed', ComponentRecFeed);
         Lampa.Component.add('qdl_live_watch', ComponentLiveWatch);
+        Lampa.Component.add('qdl_live_detect', ComponentLiveDetect);
         Lampa.Component.add('jut_catalog', ComponentJutCatalog);
         Lampa.Component.add('jut_title', ComponentJutTitle);
         Lampa.Component.add('jut_episodes', ComponentJutEpisodes);

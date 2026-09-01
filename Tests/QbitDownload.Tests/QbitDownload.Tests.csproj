@@ -100,6 +100,7 @@
     <Compile Include="..\..\Modules\QbitDownload\Admin.cs" Link="Module\Admin.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Controller.cs" Link="Module\Controller.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Live.cs" Link="Module\Live.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\LiveDetect.cs" Link="Module\LiveDetect.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Replica.cs" Link="Module\Replica.cs" />
     <Compile Include="..\..\Modules\QbitDownload\ReplicaSync.cs" Link="Module\ReplicaSync.cs" />
     <Compile Include="..\..\Modules\QbitDownload\ReplicaRotate.cs" Link="Module\ReplicaRotate.cs" />

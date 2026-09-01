@@ -227,10 +227,28 @@ public partial class QbitController
         };
     }
 
-    /// <summary>id → имя. Наружу отдаём ТОЛЬКО это: ip/логины камер клиенту не нужны.</summary>
-    async Task<List<KeyValuePair<int, string>>> LiveCameraList(CancellationToken ct)
+    /// <summary>Камера регистратора в нашем виде. Наружу уходят ТОЛЬКО эти поля: ip/логины клиенту не нужны.</summary>
+    sealed class LiveCam
     {
-        var list = new List<KeyValuePair<int, string>>();
+        public int id;
+        public string name;
+        public string protocol;   // rtsp|onvif|mjpeg|hls|upload
+        public bool isLive;       // осмысленно только у upload: рекордер сейчас пушит или нет
+
+        public bool IsUpload => string.Equals(protocol, "upload", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Кого показывать в сетке эфира. Ровно правило оригинального Live View регистратора
+    /// (frontend/src/lib/cameraVisibility.ts::isCameraVisibleOnLiveView): mac-рекордер существует,
+    /// только пока приложение на маке пушит. Обычные камеры видны всегда — даже упавшие.
+    /// </summary>
+    static bool LiveWatchVisible(LiveCam c) => c != null && (!c.IsUpload || c.isLive);
+
+    /// <summary>Все камеры регистратора с протоколом и признаком «сейчас пушит».</summary>
+    async Task<List<LiveCam>> LiveCameraListFull(CancellationToken ct)
+    {
+        var list = new List<LiveCam>();
         if (await LiveApiJson("/api/cameras/", ct).ConfigureAwait(false) is not JArray arr)
             return list;
 
@@ -241,10 +259,22 @@ public partial class QbitController
                 continue;
 
             string name = ((string)c["name"] ?? "").Trim();
-            list.Add(new KeyValuePair<int, string>(id, name.Length > 0 ? name : "Камера " + id));
+            list.Add(new LiveCam
+            {
+                id = id,
+                name = name.Length > 0 ? name : "Камера " + id,
+                protocol = ((string)c["protocol"] ?? "").Trim(),
+                isLive = (bool?)c["is_live"] ?? false
+            });
         }
         return list;
     }
+
+    /// <summary>id → имя. Совместимый вид для экранов записей (им протокол не нужен).</summary>
+    async Task<List<KeyValuePair<int, string>>> LiveCameraList(CancellationToken ct)
+        => (await LiveCameraListFull(ct).ConfigureAwait(false))
+            .Select(c => new KeyValuePair<int, string>(c.id, c.name))
+            .ToList();
 
     /// <summary>
     /// Записи камеры, НАЧАВШИЕСЯ внутри UTC-окна (= локальные сутки). Регистратор умеет фильтр
@@ -1122,17 +1152,26 @@ public partial class QbitController
 
         var ct = HttpContext.RequestAborted;
 
-        List<KeyValuePair<int, string>> cams;
+        List<LiveCam> cams;
         JObject[] statuses;
         try
         {
-            cams = await LiveCameraList(ct).ConfigureAwait(false);
-            if (cams.Count == 0)
+            var all = await LiveCameraListFull(ct).ConfigureAwait(false);
+            if (all.Count == 0)
                 return LiveErr("Регистратор не отдал список камер");
+
+            // Ровно правило оригинального Live View (isCameraVisibleOnLiveView): mac-рекордер
+            // существует, только пока приложение на маке пушит, и его плитка «не в эфире»
+            // не оживёт никогда — это были две мёртвые клетки из шести.
+            // 🔴 RTSP-камеры не прячем НИКОГДА, даже при ready:false: у оригинала они висят
+            // с «Connecting…», и это честнее исчезающей плитки.
+            cams = all.Where(LiveWatchVisible).ToList();
+            if (cams.Count == 0)
+                return LiveJsonOut(new JObject { ["cameras"] = new JArray() });
 
             statuses = await Task.WhenAll(cams.Select(async c =>
             {
-                try { return await LiveApiJson($"/api/streams/{c.Key}/status", ct).ConfigureAwait(false) as JObject; }
+                try { return await LiveApiJson($"/api/streams/{c.id}/status", ct).ConfigureAwait(false) as JObject; }
                 catch (OperationCanceledException) { throw; }
                 catch { return null; }   // статус одной камеры упал → она «не в эфире», сетка живёт
             })).ConfigureAwait(false);
@@ -1151,10 +1190,14 @@ public partial class QbitController
             bool ready = st != null && ((bool?)st["ready"] ?? false);
             items.Add(new JObject
             {
-                ["id"] = cams[i].Key,
-                ["name"] = cams[i].Value,
+                ["id"] = cams[i].id,
+                ["name"] = cams[i].name,
                 ["live"] = ready,
-                ["running"] = st != null && ((bool?)st["is_running"] ?? false)
+                ["running"] = st != null && ((bool?)st["is_running"] ?? false),
+                ["upload"] = cams[i].IsUpload,
+                // Готовый путь плейлиста для тех, кто уже в эфире: ffmpeg на регистраторе крутит
+                // потоки 24/7, поэтому клиенту незачем дёргать /watch/start на каждую плитку.
+                ["path"] = ready ? $"/qdl/live/watch/hls/{cams[i].id}/index.m3u8" : null
             });
         }
 

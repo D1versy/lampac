@@ -89,6 +89,70 @@ public static class LiveAccess
 
     public static RecView ParseLiveRec(string json) => ParseLiveRec(JToken.Parse(json));
 
+    // ── D1versy Live → Detection (qdl 2.95) ───────────────────────────────
+
+    static readonly Type CamT = typeof(QbitController).GetNestedType("LiveCam", BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("QbitController+LiveCam not found");
+
+    /// <summary>Собрать приватный LiveCam — им проверяется правило видимости плитки.</summary>
+    public static object Cam(int id, string name, string protocol, bool isLive)
+    {
+        object c = Activator.CreateInstance(CamT);
+        CamT.GetField("id", IF).SetValue(c, id);
+        CamT.GetField("name", IF).SetValue(c, name);
+        CamT.GetField("protocol", IF).SetValue(c, protocol);
+        CamT.GetField("isLive", IF).SetValue(c, isLive);
+        return c;
+    }
+
+    public static bool LiveWatchVisible(object cam) => (bool)Access.Call("LiveWatchVisible", cam);
+
+    /// <summary>Вид на приватный вложенный LiveEvt (срабатывание детектора).</summary>
+    public sealed class EvtView
+    {
+        readonly object _raw;
+        internal EvtView(object raw) => _raw = raw;
+
+        public bool IsNull => _raw == null;
+        static readonly Type T = typeof(QbitController).GetNestedType("LiveEvt", BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("QbitController+LiveEvt not found");
+
+        object F(string n) => T.GetField(n, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance).GetValue(_raw);
+
+        public int Id => (int)F("id");
+        public int Camera => (int)F("camera");
+        public string Kind => (string)F("type");
+        public double Confidence => (double)F("confidence");
+        public DateTime StartUtc => (DateTime)F("startUtc");
+        public int Recording => (int)F("recording");
+        public bool HasThumb => (bool)F("hasThumb");
+    }
+
+    public static EvtView ParseLiveEvt(JToken t) => new EvtView(Access.Call("ParseLiveEvt", t));
+
+    public static EvtView ParseLiveEvt(string json) => ParseLiveEvt(JToken.Parse(json));
+
+    /// <summary>Уменьшёнка кадра детекции. null = «отдай оригинал».</summary>
+    public static byte[] LiveThumbResize(byte[] src, int w) => (byte[])Access.Call("LiveThumbResize", src, w);
+
+    /// <summary>Курсор следующей страницы ленты Detection. kept — id уже отданных событий.</summary>
+    public static int LiveDetectCursor(int[] kept, int rawMin)
+    {
+        Type evtT = typeof(QbitController).GetNestedType("LiveEvt", BindingFlags.NonPublic);
+        Type listT = typeof(System.Collections.Generic.List<>).MakeGenericType(evtT);
+        object list = Activator.CreateInstance(listT);
+        var addM = listT.GetMethod("Add");
+
+        foreach (int id in kept)
+        {
+            object e = Activator.CreateInstance(evtT);
+            evtT.GetField("id", IF).SetValue(e, id);
+            addM.Invoke(list, new[] { e });
+        }
+
+        return (int)Access.Call("LiveDetectCursor", list, rawMin);
+    }
+
     // ── инстанс-методы: подпись сегментов и гейт прав ─────────────────────
 
     /// <summary>
