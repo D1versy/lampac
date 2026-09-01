@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.90';
+window.qdl_fork_version = '2.91';
 
    // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
@@ -41,6 +41,17 @@ lampainit_invc.appload = function appload() {
     var lan = /^https?:\/\/(localhost|127\.0\.0\.1|\[?::1\]?|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(L);
     var base = lan ? L.replace(/:\d+$/, '') + ':9140' : L;
     Lampa.Utils.putScriptAsync([base + '/xsmart/xsmart.js?v={version}']);
+  })();
+  // ⏳ ВРЕМЕННО — раздел «test» (обзор сетевой папки со звуками, контейнер sounds-proxy).
+  // Удаление раздела целиком: E:\Media-server\sounds\README.md. Здесь достаточно снести
+  // этот блок и пересобрать образ; остановленный контейнер и так гасит раздел — putScriptAsync
+  // тихо падает, пункт меню не появляется, остальная Lampa работает.
+  // 🔴 ТОЛЬКО ДОМА: наружу /sounds/* не разведён (в Caddyfile блока нет), поэтому и грузим
+  // плагин только с LAN-адреса — снаружи запроса не будет вовсе.
+  (function () {
+    var L = '{localhost}';
+    if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[?::1\]?|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(L)) return;
+    Lampa.Utils.putScriptAsync([L.replace(/:\d+$/, '') + ':9141/sounds/sounds.js?v={version}']);
   })();
   // qdl 2.50: десктоп-адаптации ТОЛЬКО для windows/mac (плавный скролл колесом, ранняя
   // подгрузка, ресинк фокуса) — ТВ/мобилка файл даже не скачивают; откат = убрать строку
