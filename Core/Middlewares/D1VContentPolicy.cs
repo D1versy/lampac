@@ -55,13 +55,17 @@ public class D1VContentPolicy
     // как «просто пропал пункт меню» (поймал xsmartcheck при первом включении CSP).
     // Снаружи адрес тот же, что у Lampa (Caddy проксирует /xsmart/*) — там хватает 'self'.
     // Развилка ниже намеренно повторяет isLanHost() из lampainit-invc.js: одно понятие «дом».
+    //
+    // ⏳ {sounds} — ВРЕМЕННО, ровно та же история для раздела «test» (контейнер sounds-proxy,
+    // порт 9141): плагин, список папки и сам звук приходят с чужого для CSP origin. Удаляется
+    // вместе с разделом — E:\Media-server\sounds\README.md.
     const string DefaultPolicy =
         "default-src 'self'; " +
-        "script-src 'self' {xsmart} 'unsafe-inline' 'unsafe-eval'; " +
+        "script-src 'self' {xsmart} {sounds} 'unsafe-inline' 'unsafe-eval'; " +
         "style-src 'self' {xsmart} 'unsafe-inline'; " +
         "img-src 'self' {xsmart} data: blob: https://img.youtube.com; " +
-        "media-src 'self' {xsmart} blob:; " +
-        "connect-src 'self' {xsmart} ws: wss:; " +
+        "media-src 'self' {xsmart} {sounds} blob:; " +
+        "connect-src 'self' {xsmart} {sounds} ws: wss:; " +
         "frame-src 'self'; " +
         "font-src 'self'; " +
         "manifest-src 'self'; " +
@@ -95,6 +99,7 @@ public class D1VContentPolicy
                 : (conf.csp ?? DefaultPolicy);
 
             policy = ExpandXsmart(policy, httpContext);
+            policy = ExpandSounds(policy, httpContext);   // ⏳ временно, см. {sounds} выше
 
             if (!string.IsNullOrWhiteSpace(policy))
             {
@@ -123,6 +128,22 @@ public class D1VContentPolicy
         string origin = IsLanHost(host) ? $"http://{host}:9140" : string.Empty;
 
         return policy.Replace("{xsmart}", origin).Replace("  ", " ");
+    }
+
+    /// <summary>
+    /// ⏳ ВРЕМЕННО: origin контейнера sounds-proxy вместо плейсхолдера {sounds}.
+    /// Дома это тот же хост на порту 9141, снаружи — наш же адрес (Caddy разводит /sounds/*),
+    /// там подставлять нечего. Удаляется вместе с разделом «test».
+    /// </summary>
+    static string ExpandSounds(string policy, HttpContext ctx)
+    {
+        if (policy == null || policy.IndexOf("{sounds}", StringComparison.Ordinal) < 0)
+            return policy;
+
+        string host = ctx.Request.Host.Host;
+        string origin = IsLanHost(host) ? $"http://{host}:9141" : string.Empty;
+
+        return policy.Replace("{sounds}", origin).Replace("  ", " ");
     }
 
     static bool IsLanHost(string host)
