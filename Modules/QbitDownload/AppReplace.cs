@@ -30,6 +30,9 @@ namespace QbitDownload;
 //                 (https://imasdk.googleapis.com/js/sdkloader/ima3.js) и крутит VAST из data.vast_url.
 //                 Штатного выключателя нет: disable_features.ads в текущем бандле не читается
 //                 (0 вхождений) — только патч. Заменяем ветку на безусловный запуск плеера.
+//   grid-dedup-* — экран «Ещё» (полноэкранная сетка) рисовал одну и ту же карточку по два раза:
+//                  дедуп по id при догрузке страницы + насос, догружающий короткую страницу.
+//                  Оба патча тупые, вся политика — в qdl.js (qdl 2.94).
 // Якоря — неминглящиеся литералы бандла (пин tree в LampaWeb/ModInit). Смена tree →
 // якорь тихо не найдётся (warn в лог), остатки прячет CSS-фолбэк в lampainit-invc.js.
 public static class AppPatch
@@ -225,6 +228,38 @@ public static class AppPatch
         new P("adult-flag",
             "if (adult_block) data.movie.adult = true;",
             "data.movie.adult = false;/*qdl-cut:adult-flag*/"),
+        // ── qdl 2.94: дубли карточек на экране «Ещё» (category_full) ───────────────────
+        // Жалоба владельца: в «Сейчас смотрят» → «Ещё» каждый фильм двумя строчками по 6 карточек.
+        // Серверную половину закрыл RowFilter (страница 1:1, без добора соседних). Здесь — вторая
+        // половина, которую серверу не закрыть в принципе: страницы кешируются НЕЗАВИСИМО
+        // (Staticache, 3 ч), а ?sort=now_playing — живой поток, поэтому свежая p1 и остывшая p2
+        // законно содержат одну карточку. В бандле дедупа нет вовсе: Arrays.unique применяется
+        // ровно один раз и к номерам страниц, а не к карточкам.
+        //
+        // Первый патч — регистрация первой страницы и взвод насоса. Второй — фильтрация догрузки.
+        // 🔴 Второй ПЕРЕПРИСВАИВАЕТ локальную new_data, а НЕ мутирует new_data.results: на попадании
+        // в клиентский кеш secuses(cached, true) отдаёт ТОТ ЖЕ объект, что лежит в памяти Request
+        // (патч swr выше дописывает в него метку). Укороченный results поселился бы в кеше — и
+        // карточки исчезли бы навсегда, а требование владельца прямо обратное: не терять.
+        // Переменная new_data используется только в этих двух строках бандла.
+        //
+        // 🔴 Насос обязателен и обязан быть ОТЛОЖЕННЫМ. Scroll.isEnd() на незаполненном гриде
+        // отдаёт true, но onEnd зовётся только из scrollEnded(), а тот на таком гриде достижим
+        // ровно один раз — из hover:focus первой карточки через startScroll. И ровно в этот момент
+        // Next.onLoadNext себя запрещает гардом builded_time < Date.now()-1000. Единственный шанс
+        // догрузиться приходится на секунду, которую бандл сам себе закрыл. Задержку держит qdl.js.
+        //
+        // Выключатели рантайма (второй патч бандла не нужен): window.lampa_settings.qdl_grid_dedup
+        // = false и Lampa.Storage 'qdl_grid_dedup_off'. Оба якоря уникальны (по 1 вхождению).
+        new P("grid-dedup-build",
+            "this.loaded.push(data.results);",
+            "try { if (typeof window.qdl_grid_build === 'function') window.qdl_grid_build(this, data.results); } catch (e) {} " +
+            "this.loaded.push(data.results);/*qdl-cut:grid-dedup-build*/"),
+        new P("grid-dedup-next",
+            "var split_total = Math.ceil(new_data.results.length / _this.limit_view);",
+            "try { if (typeof window.qdl_grid_next === 'function') " +
+            "new_data = { results: window.qdl_grid_next(_this, new_data.results) || new_data.results }; } catch (e) {} " +
+            "var split_total = Math.ceil(new_data.results.length / _this.limit_view);/*qdl-cut:grid-dedup-next*/"),
     };
 
     public static void Attach() => EventListener.AppReplace += OnAppReplace;

@@ -2,7 +2,6 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 
 namespace CubProxy;
 
@@ -14,6 +13,14 @@ namespace CubProxy;
 //
 // Решение владельца — резать по ГОДУ, порог руками, отдельно для кино и сериалов.
 //
+// 🔴 qdl 2.94: наша страница N — это РОВНО апстримная страница N, один к одному. До 2.94 здесь
+// был добор соседних страниц (N, N+1, N+2) до целевых 20 карточек, и он давал дубли: хвост
+// нашей страницы N брался с апстримной N+1, а наша N+1 начиналась с той же N+1 с нуля. Замер
+// боевого сервера: перекрытие 4 / 8 / 5 карточек из 20 между соседними страницами — владелец
+// видел это в «Ещё» как «каждый фильм двумя строчками по 6 карточек». Короткую страницу лечит
+// КЛИЕНТ (патчи grid-dedup-build/grid-dedup-next + насос gridPump в qdl.js), возвращать добор
+// сюда нельзя.
+//
 // 🔴 Почему функция ЧИСТАЯ и лежит отдельным файлом: её линкуют в Tests/QbitDownload.Tests
 // (Compile Include=… Link=…, образец JacRed\ProxyFallback.cs). Обращений к CubProxy.ModInit
 // быть не должно — в тестовой сборке он конфликтует с QbitDownload.ModInit. Конфиг приходит
@@ -23,21 +30,19 @@ public static class RowFilter
     /// <summary>Порог. enabled=false — фильтр не применяется вовсе.</summary>
     public readonly record struct Conf(bool enabled, int movieYear, int tvYear);
 
-    /// <summary>Сколько отфильтрованных карточек стараемся набрать на одну страницу ответа.</summary>
-    public const int Target = 20;
-
     /// <summary>
-    /// Ниже этого — отдаём ИСХОДНОЕ тело нетронутым.
-    /// 🔴 Не косметика, а защита от двух молчаливых поломок:
-    ///  • Api.partNext (app.min.js) выбрасывает ряд с пустым results СОВСЕМ — ряд исчезает с главной;
-    ///  • экран «Дальше» (category_full) грузит следующую страницу только от scroll.onEnd, а
-    ///    Scroll.isEnd() на незаполненном гриде даёт false — короткая первая страница = экран,
-    ///    который НИКОГДА не догрузит вторую.
+    /// Ниже этого — отдаём ИСХОДНОЕ тело нетронутым (со старьём внутри: это меньшее зло).
+    /// 🔴 Api.partNext выбрасывает ряд с пустым results СОВСЕМ — «Сейчас смотрят» просто
+    /// исчезает с главной, и это выглядит не как поломка, а как «нет такого ряда». Прямой
+    /// прыжок на страницу через Pagination строит грид через Items.onBuild, а там
+    /// пустой results даёт экран «Пусто».
+    ///
+    /// ⚠️ Второе прежнее обоснование («короткая страница = экран, который не догрузится»)
+    /// с qdl 2.94 живёт НА КЛИЕНТЕ: патчи grid-dedup-build / grid-dedup-next + насос gridPump
+    /// в qdl.js. Лечить его добором соседних страниц НЕЛЬЗЯ — именно добор давал перекрытие
+    /// 8 карточек из 20.
     /// </summary>
     public const int Floor = 5;
-
-    /// <summary>Максимум страниц апстрима на одну нашу (замер: при 2020/2010 выживает 60%, т.е. ~1.7).</summary>
-    public const int MaxPages = 3;
 
     // Ряды «что сейчас / новинки». Всё остальное не трогаем:
     //  • sort=top — под ним ходят ВСЕ жанровые ряды и аниме-топы;
@@ -91,39 +96,6 @@ public static class RowFilter
     }
 
     /// <summary>
-    /// Адрес соседней страницы апстрима для добора: page текущего запроса + offset.
-    /// Параметра page может не быть вовсе (первая страница ряда) — тогда база 1.
-    /// Кандидаты всегда несут sort=, то есть "?" в адресе уже есть, и дописываем через "&amp;".
-    /// </summary>
-    public static string NextPageUrl(string url, int offset)
-    {
-        if (string.IsNullOrEmpty(url) || offset <= 0)
-            return url;
-
-        int page = 1;
-        int at = url.IndexOf("page=", StringComparison.OrdinalIgnoreCase);
-
-        if (at >= 0)
-        {
-            // именно параметр, а не хвост чужого имени вроде "?mypage=2"
-            char before = at == 0 ? '?' : url[at - 1];
-            if (before == '?' || before == '&')
-            {
-                int end = at + 5;
-                while (end < url.Length && char.IsDigit(url[end]))
-                    end++;
-
-                if (end > at + 5 && int.TryParse(url.Substring(at + 5, end - at - 5), out int cur) && cur > 0)
-                    page = cur;
-
-                return url.Substring(0, at + 5) + (page + offset) + url.Substring(end);
-            }
-        }
-
-        return url + (url.Contains('?') ? "&" : "?") + "page=" + (page + offset);
-    }
-
-    /// <summary>
     /// Оставляем ли карточку.
     /// 🔴 Признак сериала — наличие first_air_date, а НЕ last_air_date: последний есть у всех
     /// 100 карточек ряда, включая фильмы, и дискриминатором не годится (проверено на боевом).
@@ -151,62 +123,42 @@ public static class RowFilter
         => !string.IsNullOrEmpty(date) && date.Length >= 4 && int.TryParse(date.Substring(0, 4), out int y) ? y : null;
 
     /// <summary>
-    /// Сколько карточек страницы переживёт фильтр. Нужен контроллеру, чтобы решить,
-    /// добирать ли следующую страницу апстрима, ещё до сборки итогового тела.
-    /// -1 — тело не наша форма (фильтровать нечего).
+    /// Итоговое тело ОДНОЙ страницы. null — «оставить исходное нетронутым» (не наша форма,
+    /// фильтр выключен, резать нечего, или после фильтра осталось меньше Floor).
+    ///
+    /// 🔴 Кап на количество отдаваемых карточек здесь ЗАПРЕЩЁН (qdl 2.94). Наша страница N —
+    /// это ровно апстримная N, и всё, что мы обрежем, не появится больше НИГДЕ: следующий
+    /// запрос клиента уйдёт на N+1. Прежний Target=20 был безобиден только в паре с добором,
+    /// где обрезанный хвост показывался на следующей нашей странице — ценой перекрытия.
     /// </summary>
-    public static int CountKept(string json, Conf conf)
+    public static string Build(string json, Conf conf)
     {
-        var results = ResultsOf(json, out _);
-        return results == null ? -1 : results.Count(c => Keep(c, conf));
-    }
-
-    /// <summary>
-    /// Итоговое тело. null — «оставить исходное нетронутым» (не наша форма, фильтр выключен,
-    /// резать нечего, или после фильтра осталось меньше Floor).
-    /// pages — страницы апстрима по порядку, первая обязательна.
-    /// </summary>
-    public static string Build(IReadOnlyList<string> pages, Conf conf)
-    {
-        if (!conf.enabled || pages == null || pages.Count == 0)
+        if (!conf.enabled)
             return null;
 
-        var first = ResultsOf(pages[0], out JObject root);
-        if (first == null)
+        var results = ResultsOf(json, out JObject root);
+        if (results == null)
             return null;
 
         var kept = new List<JToken>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        int firstCount = first.Count;
 
-        foreach (string page in pages)
+        foreach (var card in results)
         {
-            var results = ResultsOf(page, out _);
-            if (results == null)
+            if (!Keep(card, conf))
                 continue;
 
-            foreach (var card in results)
-            {
-                if (kept.Count >= Target)
-                    break;
-                if (!Keep(card, conf))
-                    continue;
+            // Страховка: CUB иногда повторяет карточку внутри одной страницы. Дедуп МЕЖДУ
+            // страницами живёт на клиенте (gridNext в qdl.js) — здесь состояния нет и не будет.
+            string id = (card as JObject)?["id"]?.ToString();
+            if (id != null && !seen.Add(id))
+                continue;
 
-                // Дедуп обязателен: добор тянет соседние страницы апстрима, а CUB между
-                // вызовами переставляет выдачу — одна карточка легко попадает на обе.
-                string id = (card as JObject)?["id"]?.ToString();
-                if (id != null && !seen.Add(id))
-                    continue;
-
-                kept.Add(card);
-            }
-
-            if (kept.Count >= Target)
-                break;
+            kept.Add(card);
         }
 
         // Ничего не вырезалось — не переписываем тело зря (и не трогаем Content-Length).
-        if (pages.Count == 1 && kept.Count == firstCount)
+        if (kept.Count == results.Count)
             return null;
 
         if (kept.Count < Floor)

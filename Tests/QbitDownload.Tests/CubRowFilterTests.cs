@@ -12,7 +12,10 @@ namespace QbitDownload.Tests;
 // Что здесь под защитой, кроме самой отсечки:
 //  • список кандидатов — фильтр обязан не трогать топы, жанры, коллекции и детали карточки;
 //  • no-op на чужой форме тела (/blocked отдаёт МАССИВ, а не объект);
-//  • нижний порог Floor — без него ряд молча исчезает с главной, а экран «Дальше» залипает;
+//  • нижний порог Floor — без него ряд молча исчезает с главной (Api.partNext выбрасывает ряд
+//    с пустым results целиком);
+//  • 🔴 qdl 2.94: наша страница = РОВНО одна апстримная. Соседние страницы не пересекаются и
+//    ничего не теряют — тесты ниже покраснеют, если кто-то вернёт добор или кап по количеству;
 //  • неприкосновенность total_pages — на ней висит вся пагинация.
 public class CubRowFilterTests
 {
@@ -118,7 +121,7 @@ public class CubRowFilterTests
             Movie(7, "1956-12-28"), Tv(8, "2022-01-01"), Movie(9, "2021-03-03"),
             Movie(10, "2012-01-01"), Tv(11, "2015-01-01"));
 
-        string body = RowFilter.Build(new[] { page }, Conf);
+        string body = RowFilter.Build(page, Conf);
 
         Assert.NotNull(body);
         Assert.Equal(new[] { "1", "3", "6", "8", "9", "11" }, Ids(body));
@@ -132,7 +135,7 @@ public class CubRowFilterTests
         string page = Page(Movie(1, "2026-01-01"), Movie(2, "1971-01-01"), Tv(3, "2024-01-01"),
                            Tv(4, "2023-01-01"), Movie(5, "2025-01-01"), Movie(6, "2022-01-01"));
 
-        var o = JObject.Parse(RowFilter.Build(new[] { page }, Conf));
+        var o = JObject.Parse(RowFilter.Build(page, Conf));
 
         Assert.Equal(15, (int)o["total_pages"]);
         Assert.Equal(281, (int)o["total_results"]);
@@ -141,43 +144,40 @@ public class CubRowFilterTests
 
     [Fact]
     public void Выключенный_фильтр_не_трогает_тело()
-        => Assert.Null(RowFilter.Build(new[] { Page(Movie(1, "1971-01-01")) }, new RowFilter.Conf(false, 2020, 2010)));
+        => Assert.Null(RowFilter.Build(Page(Movie(1, "1971-01-01")), new RowFilter.Conf(false, 2020, 2010)));
 
     [Fact]
     public void Резать_нечего_тело_не_переписываем()
     {
         // Экономия не косметическая: не переписав тело, мы не трогаем Content-Length.
         string page = Page(Movie(1, "2026-01-01"), Tv(2, "2024-01-01"));
-        Assert.Null(RowFilter.Build(new[] { page }, Conf));
+        Assert.Null(RowFilter.Build(page, Conf));
     }
 
     [Fact]
     public void Чужая_форма_тела_остаётся_нетронутой()
     {
         // /blocked отдаёт МАССИВ — на нём фильтр обязан быть строго no-op
-        Assert.Null(RowFilter.Build(new[] { "[{\"id\":1,\"release_date\":\"1971-01-01\"}]" }, Conf));
-        Assert.Null(RowFilter.Build(new[] { "{\"ok\":true}" }, Conf));
-        Assert.Null(RowFilter.Build(new[] { "не json" }, Conf));
-        Assert.Null(RowFilter.Build(new[] { "" }, Conf));
+        Assert.Null(RowFilter.Build("[{\"id\":1,\"release_date\":\"1971-01-01\"}]", Conf));
+        Assert.Null(RowFilter.Build("{\"ok\":true}", Conf));
+        Assert.Null(RowFilter.Build("не json", Conf));
+        Assert.Null(RowFilter.Build("", Conf));
         Assert.Null(RowFilter.Build(null, Conf));
-
-        Assert.Equal(-1, RowFilter.CountKept("[]", Conf));
-        Assert.Equal(-1, RowFilter.CountKept("мусор", Conf));
     }
 
     [Fact]
     public void Осталось_меньше_порога_отдаём_исходное_тело()
     {
-        // 🔴 Ради этого инварианта всё и написано. Без него:
-        //  • Api.partNext выбрасывает ряд с коротким/пустым results — ряд ИСЧЕЗАЕТ с главной;
-        //  • экран «Дальше» грузит вторую страницу только от scroll.onEnd, а Scroll.isEnd()
-        //    на незаполненном гриде даёт false — экран залипает навсегда.
-        // Тест обязан ПОКРАСНЕТЬ, если убрать проверку Floor в RowFilter.Build.
+        // 🔴 Ради этого инварианта всё и написано: Api.partNext выбрасывает ряд с пустым
+        // results СОВСЕМ — ряд ИСЧЕЗАЕТ с главной, и это выглядит не как поломка, а как
+        // «нет такого ряда». Тест обязан ПОКРАСНЕТЬ, если убрать проверку Floor в Build.
+        // (Второе прежнее обоснование — «короткая страница не догрузится» — с 2.94 живёт на
+        //  клиенте: патчи grid-dedup-* и насос gridPump в qdl.js.)
         var cards = new List<string>();
         for (int i = 0; i < 20; i++)
             cards.Add(Movie(i + 1, i < RowFilter.Floor - 1 ? "2026-01-01" : "1990-01-01"));
 
-        Assert.Null(RowFilter.Build(new[] { Page(cards.ToArray()) }, Conf));
+        Assert.Null(RowFilter.Build(Page(cards.ToArray()), Conf));
     }
 
     [Fact]
@@ -187,78 +187,10 @@ public class CubRowFilterTests
         for (int i = 0; i < 20; i++)
             cards.Add(Movie(i + 1, i < RowFilter.Floor ? "2026-01-01" : "1990-01-01"));
 
-        string body = RowFilter.Build(new[] { Page(cards.ToArray()) }, Conf);
+        string body = RowFilter.Build(Page(cards.ToArray()), Conf);
 
         Assert.NotNull(body);
         Assert.Equal(RowFilter.Floor, Ids(body).Count);
-    }
-
-    // ── добор страниц ───────────────────────────────────────────────────────────────────────
-
-    [Fact]
-    public void Добор_склеивает_страницы_до_цели()
-    {
-        var p1 = new List<string>();
-        var p2 = new List<string>();
-        for (int i = 0; i < 20; i++)
-        {
-            p1.Add(Movie(i + 1, i < 12 ? "2026-01-01" : "1990-01-01"));    // 12 живых
-            p2.Add(Movie(100 + i, i < 12 ? "2025-01-01" : "1990-01-01"));  // ещё 12
-        }
-
-        string body = RowFilter.Build(new[] { Page(p1.ToArray()), Page(p2.ToArray()) }, Conf);
-        var ids = Ids(body);
-
-        Assert.Equal(RowFilter.Target, ids.Count);          // добрали ровно до цели, не больше
-        Assert.Equal("1", ids[0]);                          // порядок первой страницы сохранён
-        Assert.Contains("100", ids);                        // хвост пришёл со второй
-    }
-
-    [Fact]
-    public void Добор_дедуплицирует_по_id()
-    {
-        // CUB между запросами переставляет выдачу — одна карточка легко попадает на обе страницы.
-        var p1 = new List<string>();
-        for (int i = 0; i < 20; i++)
-            p1.Add(Movie(i + 1, i < 10 ? "2026-01-01" : "1990-01-01"));
-
-        // вторая страница целиком повторяет живые карточки первой
-        var p2 = new List<string>();
-        for (int i = 0; i < 10; i++)
-            p2.Add(Movie(i + 1, "2026-01-01"));
-
-        var ids = Ids(RowFilter.Build(new[] { Page(p1.ToArray()), Page(p2.ToArray()) }, Conf));
-
-        Assert.Equal(10, ids.Count);
-        Assert.Equal(ids.Count, ids.Distinct().Count());
-    }
-
-    [Theory]
-    [InlineData("https://tmdb.cub.red/?sort=now_playing&page=1&email=", 1, "https://tmdb.cub.red/?sort=now_playing&page=2&email=")]
-    [InlineData("https://tmdb.cub.red/?sort=now_playing&page=1&email=", 2, "https://tmdb.cub.red/?sort=now_playing&page=3&email=")]
-    // страницы в адресе нет — база 1, дописываем
-    [InlineData("https://tmdb.cub.red/?sort=latest&email=", 1, "https://tmdb.cub.red/?sort=latest&email=&page=2")]
-    // многозначная страница
-    [InlineData("https://tmdb.cub.red/?sort=latest&page=12", 1, "https://tmdb.cub.red/?sort=latest&page=13")]
-    public void NextPageUrl_считает_соседнюю_страницу(string url, int offset, string expected)
-        => Assert.Equal(expected, RowFilter.NextPageUrl(url, offset));
-
-    [Fact]
-    public void NextPageUrl_не_ведётся_на_чужой_параметр()
-    {
-        // "mypage=2" — не наш параметр: страницу дописываем отдельно, а чужой не трогаем
-        string next = RowFilter.NextPageUrl("https://tmdb.cub.red/?sort=latest&mypage=2", 1);
-        Assert.Contains("mypage=2", next);
-        Assert.EndsWith("page=2", next);
-    }
-
-    // ── счётчик для контроллера ─────────────────────────────────────────────────────────────
-
-    [Fact]
-    public void CountKept_считает_выживших()
-    {
-        string page = Page(Movie(1, "2026-01-01"), Movie(2, "1971-01-01"), Tv(3, "2011-01-01"));
-        Assert.Equal(2, RowFilter.CountKept(page, Conf));
     }
 
     [Fact]
@@ -267,7 +199,77 @@ public class CubRowFilterTests
         string page = Page(Movie(1, "2026-01-01"), Movie(2, "1971-01-01"), Tv(3, "2024-01-01"),
                            Tv(4, "2023-01-01"), Movie(5, "2025-01-01"), Movie(6, "2022-01-01"));
 
-        var o = JsonConvert.DeserializeObject<JObject>(RowFilter.Build(new[] { page }, Conf));
+        var o = JsonConvert.DeserializeObject<JObject>(RowFilter.Build(page, Conf));
         Assert.IsType<JArray>(o["results"]);
+    }
+
+    // ── страница 1:1, без добора (qdl 2.94) ─────────────────────────────────────────────────
+
+    /// <summary>Каталог из pages страниц по perPage карточек; выживает каждая survivalEvery-я.</summary>
+    static List<string> Catalog(int pages, int perPage, int survivalEvery)
+    {
+        var all = new List<string>();
+        int id = 1;
+        for (int p = 0; p < pages; p++)
+        {
+            var cards = new List<string>();
+            for (int i = 0; i < perPage; i++, id++)
+                cards.Add(Movie(id, id % survivalEvery == 0 ? "1990-01-01" : "2026-01-01"));
+            all.Add(Page(cards.ToArray()));
+        }
+        return all;
+    }
+
+    static List<string> Survivors(string page)
+        => ((JArray)JObject.Parse(page)["results"])
+            .Where(c => RowFilter.Keep(c, Conf)).Select(c => c["id"].ToString()).ToList();
+
+    [Fact]
+    public void Соседние_страницы_не_пересекаются()
+    {
+        // 🔴 Тот самый инвариант, ради которого убран добор. На боевом до 2.94 перекрытие
+        // соседних страниц было 4 / 8 / 5 карточек из 20, и владелец видел в «Ещё» каждый
+        // фильм двумя строчками. Тест обязан покраснеть, если кто-то вернёт склейку страниц.
+        var catalog = Catalog(pages: 5, perPage: 20, survivalEvery: 5);
+        var shown = catalog.Select(p => Ids(RowFilter.Build(p, Conf))).ToList();
+
+        for (int i = 0; i + 1 < shown.Count; i++)
+            Assert.Empty(shown[i].Intersect(shown[i + 1]));
+    }
+
+    [Fact]
+    public void Проход_каталога_без_потерь_и_без_дублей()
+    {
+        // Требование владельца целиком: не терять И не дублировать. Проверяем состав И ПОРЯДОК.
+        var catalog = Catalog(pages: 5, perPage: 20, survivalEvery: 5);
+        var shown = catalog.SelectMany(p => Ids(RowFilter.Build(p, Conf))).ToList();
+        var expected = catalog.SelectMany(p => Survivors(p)).ToList();
+
+        Assert.Equal(expected, shown);
+        Assert.Equal(shown.Count, shown.Distinct().Count());
+    }
+
+    [Fact]
+    public void Кап_на_количество_отдаваемых_карточек_отсутствует()
+    {
+        // 🔴 Мина, ради которой Target удалён насовсем: при схеме 1:1 любой кап — это ВЕЧНАЯ
+        // потеря карточек, потому что следующий запрос клиента уйдёт на страницу N+1, а не
+        // на остаток N. Прежний Target=20 был безобиден только в паре с добором.
+        // Живых заведомо БОЛЬШЕ прежнего Target=20 — иначе тест зелёный и с капом.
+        var cards = new List<string>();
+        for (int i = 0; i < 60; i++)
+            cards.Add(Movie(i + 1, i % 3 == 0 ? "1990-01-01" : "2026-01-01"));
+
+        Assert.Equal(40, Ids(RowFilter.Build(Page(cards.ToArray()), Conf)).Count);
+    }
+
+    [Fact]
+    public void Повтор_внутри_страницы_снимается()
+    {
+        // Страховка от самого CUB: он иногда отдаёт одну карточку дважды в пределах страницы.
+        string page = Page(Movie(1, "2026-01-01"), Movie(2, "2025-01-01"), Movie(1, "2026-01-01"),
+                           Movie(3, "2024-01-01"), Movie(4, "2023-01-01"), Movie(5, "2022-01-01"));
+
+        Assert.Equal(new[] { "1", "2", "3", "4", "5" }, Ids(RowFilter.Build(page, Conf)));
     }
 }

@@ -121,6 +121,19 @@ public class AppPatchTests
       cache: {
         life: day * 2
       }
+      onBuild: function onBuild(data) {
+        if (!data.results.length) return this.empty();
+        this.total_pages = data.total_pages || 1;
+        this.loaded.push(data.results);
+        this.emit('pushLoaded');
+      },
+        this.emit('next', function (new_data) {
+          _this.next_wait = false;
+          var split_total = Math.ceil(new_data.results.length / _this.limit_view);
+          for (var i = 0; i < split_total; i++) {
+            _this.loaded.push(new_data.results.slice(i * _this.limit_view, (i + 1) * _this.limit_view));
+          }
+        });
     ";
 
     [Fact]
@@ -148,6 +161,8 @@ public class AppPatchTests
         Assert.Contains("/*qdl-cut:broadcast-share*/", result);
         Assert.Contains("/*qdl-cut:adult-block*/", result);
         Assert.Contains("/*qdl-cut:adult-flag*/", result);
+        Assert.Contains("/*qdl-cut:grid-dedup-build*/", result);
+        Assert.Contains("/*qdl-cut:grid-dedup-next*/", result);
     }
 
     [Fact]
@@ -474,5 +489,43 @@ public class AppPatchTests
         string result = AppPatch.PatchAppJs(js);
         Assert.DoesNotContain("new NoticeCub()", result);
         Assert.DoesNotContain("Timer.add(time_extract, extract);", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_GridDedup_HooksBothPointsWithoutMutatingResponse()
+    {
+        // Экран «Ещё» рисовал одну карточку по два раза: страницы кешируются независимо
+        // (Staticache 3 ч), а ?sort=now_playing — живой поток. Дедупа в бандле нет вовсе.
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        // 1. обе точки подцеплены, штатные вызовы бандла целы
+        Assert.Contains("window.qdl_grid_build === 'function'", result);
+        Assert.Contains("window.qdl_grid_next === 'function'", result);
+        Assert.Contains("this.loaded.push(data.results);", result);
+        Assert.Contains("var split_total = Math.ceil(new_data.results.length / _this.limit_view);", result);
+
+        // 2. 🔴 тело ответа НЕ мутируется: на попадании в клиентский кеш secuses(cached, true)
+        //    отдаёт ТОТ ЖЕ объект, что лежит в памяти Request — укороченный results поселился
+        //    бы в кеше, и карточки исчезли бы навсегда. Переприсваиваем локальную new_data.
+        Assert.DoesNotContain("new_data.results = window.qdl_grid_next", result);
+        Assert.Contains("new_data = { results: window.qdl_grid_next(_this, new_data.results) || new_data.results }", result);
+
+        // 3. падение хука не имеет права ронять сборку и догрузку страницы
+        Assert.Contains("try { if (typeof window.qdl_grid_build", result);
+        Assert.Contains("try { if (typeof window.qdl_grid_next", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_GridDedup_Idempotent()
+    {
+        // Staticache может прогнать патч по уже пропатченному телу; оба replacement содержат
+        // собственный якорь, поэтому гард Contains(replacement) обязан отработать.
+        string once = AppPatch.PatchAppJs(AllAnchors);
+        string twice = AppPatch.PatchAppJs(once);
+
+        Assert.Equal(once, twice);
+        Assert.Equal(1, Count(twice, "/*qdl-cut:grid-dedup-build*/"));
+        Assert.Equal(1, Count(twice, "/*qdl-cut:grid-dedup-next*/"));
+        Assert.Equal(1, Count(twice, "window.qdl_grid_build(this, data.results)"));
     }
 }

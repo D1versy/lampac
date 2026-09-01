@@ -416,41 +416,14 @@ public class CubProxyController : BaseController
                     if (result.success && result.response.StatusCode == HttpStatusCode.OK &&
                         (HttpContext.Response.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) ?? false))
                     {
-                        try
-                        {
-                            string first = Encoding.UTF8.GetString(raw);
-                            int kept = RowFilter.CountKept(first, fconf);
-
-                            if (kept >= 0)
-                            {
-                                var pages = new List<string> { first };
-
-                                // 🔴 Добор соседних страниц апстрима — не про «красивее», а про
-                                // работоспособность: экран «Дальше» (category_full) грузит
-                                // следующую страницу только от scroll.onEnd, а Scroll.isEnd() на
-                                // незаполненном гриде возвращает false. Отдать одну короткую
-                                // страницу = отдать экран, который НИКОГДА не догрузится.
-                                for (int i = 1; i < RowFilter.MaxPages && kept < RowFilter.Target; i++)
-                                {
-                                    string next = await Http.Get(
-                                        RowFilter.NextPageUrl(requri, i),
-                                        headers: headers,
-                                        timeoutSeconds: 10,
-                                        proxy: proxy,
-                                        statusCodeOK: true
-                                    ).ConfigureAwait(false);
-
-                                    int k = RowFilter.CountKept(next, fconf);
-                                    if (k < 0)
-                                        break;   // страница кончилась или пришло не то — не настаиваем
-
-                                    pages.Add(next);
-                                    kept += k;
-                                }
-
-                                body = RowFilter.Build(pages, fconf);
-                            }
-                        }
+                        // 🔴 РОВНО ОДНА страница апстрима, один к одному (qdl 2.94). Здесь стоял
+                        // добор соседних страниц (N, N+1, N+2) до целевых 20 карточек — он и давал
+                        // дубли: хвост нашей страницы N брался с апстримной N+1, а наша N+1
+                        // начиналась с той же N+1 с нуля. Замер боевого сервера: 4 / 8 / 5 повторов
+                        // из 20 между соседними страницами, владелец видел это в «Ещё» как «каждый
+                        // фильм двумя строчками». Короткую страницу лечит КЛИЕНТ (патчи
+                        // grid-dedup-build/grid-dedup-next + насос gridPump в qdl.js), а НЕ добор.
+                        try { body = RowFilter.Build(Encoding.UTF8.GetString(raw), fconf); }
                         catch { body = null; }   // фильтр не имеет права уронить выдачу каталога
                     }
 

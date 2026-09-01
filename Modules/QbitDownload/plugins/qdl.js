@@ -1844,6 +1844,137 @@
         } catch (e) {}
     }
 
+    // ───────── Дедуп и насос полноэкранной сетки: экран «Ещё» (qdl 2.94) ─────────
+    // Жалоба владельца: в «Сейчас смотрят» → «Ещё» каждый фильм показан двумя строчками по 6
+    // карточек. Серверную половину закрыл RowFilter (наша страница = ровно одна апстримная,
+    // добор соседних убран — он и давал перекрытие 4-8 карточек из 20). Здесь вторая половина,
+    // серверу недоступная: страницы кешируются НЕЗАВИСИМО (Staticache, 3 ч), а ?sort=now_playing —
+    // живой поток, поэтому свежая p1 и остывшая p2 законно содержат одну карточку.
+    //
+    // 🔴 Насос отложенный, и это не перестраховка. Scroll.isEnd() на незаполненном гриде отдаёт
+    // TRUE, но onEnd зовётся только из scrollEnded(), а тот на таком гриде достижим ровно один
+    // раз — из hover:focus первой карточки через startScroll. Ровно в этот момент Next.onLoadNext
+    // себя запрещает гардом builded_time < Date.now()-1000: единственный шанс догрузиться
+    // приходится на секунду, которую бандл сам себе закрыл. Отсюда GRID_PUMP_MS > 1000.
+    //
+    // 🔴 Урок ComponentRecFeed: окно сдвигаем на то, что ОТДАЛ сервер, а не на то, что нарисовали.
+    // Здесь это буквально: object.page двигает бандл, мы его не трогаем.
+
+    var GRID_PUMP_MAX = 8;      // подряд идущих АВТО-подтяжек без прироста карточек
+    var GRID_PUMP_MS  = 1150;   // > гарда builded_time (1000 мс) + запас
+    var GRID_SEEN_CAP = 5000;   // 86 страниц по ~12 карточек ≈ 1000; кап — от бесконечной сессии
+
+    function gridOff() {
+        try { if (window.lampa_settings && window.lampa_settings.qdl_grid_dedup === false) return true; } catch (e) {}
+        try { return !!Lampa.Storage.get('qdl_grid_dedup_off', false); } catch (e) { return false; }
+    }
+
+    // 🔴 Ключ — тип + id. У TMDB нумерация РАЗДЕЛЬНАЯ для фильмов и сериалов: голый id склеил бы
+    // два разных тайтла, и один из них молча потерялся бы. Признак типа — как в RowFilter.Keep.
+    // Нет id — карточку НЕ выбрасываем никогда: терять нельзя (прямое требование владельца).
+    function gridKey(c) {
+        if (!c || typeof c !== 'object') return null;
+        if (c.id === undefined || c.id === null || c.id === '') return null;
+        return (c.media_type || (c.first_air_date ? 'tv' : 'movie')) + ':' + c.id;
+    }
+
+    function gridMark(comp, results) {
+        if (!comp.qdl_seen) { comp.qdl_seen = {}; comp.qdl_seen_n = 0; }
+        for (var i = 0; i < (results || []).length; i++) {
+            var k = gridKey(results[i]);
+            if (k && !comp.qdl_seen[k] && comp.qdl_seen_n < GRID_SEEN_CAP) { comp.qdl_seen[k] = 1; comp.qdl_seen_n++; }
+        }
+    }
+
+    // Контракт с патчем grid-dedup-build: первая страница уже отфильтрована сервером, её только
+    // регистрируем — и взводим насос, потому что после фильтра она могла оказаться короткой.
+    function gridBuild(comp, results) {
+        try {
+            window.__qdl_grid_hit = 1;
+            if (gridOff() || !comp) return;
+            gridMark(comp, results);
+            comp.qdl_auto = 0;
+            gridPumpLater(comp);
+        } catch (e) {}
+    }
+
+    // Контракт с патчем grid-dedup-next: вернуть массив БЕЗ уже показанных карточек.
+    function gridNext(comp, results) {
+        try { window.__qdl_grid_hit = 1; } catch (e) {}
+        if (gridOff() || !comp || !results || !results.length) return results;
+        try {
+            if (!comp.qdl_seen) { comp.qdl_seen = {}; comp.qdl_seen_n = 0; }
+            var out = [];
+            for (var i = 0; i < results.length; i++) {
+                var k = gridKey(results[i]);
+                if (k && comp.qdl_seen[k]) continue;
+                out.push(results[i]);
+            }
+            gridMark(comp, out);
+            if (out.length) comp.qdl_auto = 0;   // прирост есть — пагинацию дальше ведёт зритель
+            gridPumpLater(comp);
+            return out;
+        } catch (e) { return results; }
+    }
+
+    function gridFilled(comp) {
+        try { return !!comp.scroll.isFilled(); } catch (e) { return true; }   // не знаем — считаем заполненным
+    }
+
+    function gridAlive(comp) {
+        try {
+            if (!comp || comp.destroyed) return false;
+            var el = comp.scroll.render(true);
+            return !!(el && el.isConnected !== false);
+        } catch (e) { return false; }
+    }
+
+    function gridPumpLater(comp) {
+        if (!comp || comp.qdl_pump_t) return;              // один таймер на компонент
+        comp.qdl_pump_t = setTimeout(function () {
+            comp.qdl_pump_t = 0;
+            try { gridPump(comp); } catch (e) {}
+        }, GRID_PUMP_MS);
+    }
+
+    function gridPump(comp) {
+        if (gridOff() || !gridAlive(comp)) return;
+
+        // 1. Слить очередь: Items.onPushLoaded отдаёт ОДНУ порцию (limit_view=6) на событие
+        // скролла, а на незаполненном гриде скролла не бывает — порции зависли бы в loaded.
+        // Жёсткий guard — страховка от неверного isFilled() на неотрисованном экране.
+        var guard = 0;
+        while (comp.loaded && comp.loaded.length && !gridFilled(comp) && guard++ < 12) comp.emit('pushLoaded');
+
+        if (gridFilled(comp)) return;                      // заполнились — дальше решает зритель
+        if (comp.loaded && comp.loaded.length) return;     // ещё есть что рисовать
+        if (!(comp.object && comp.object.page < comp.total_pages)) return;   // страницы кончились
+
+        // 2. 🔴 Бюджет — главная защита от вечного цикла: после дедупа страница может добавить
+        // 0 карточек, грид не вырастет, isFilled() останется false. Считаем только НАШИ
+        // подтяжки — любой прирост обнуляет счётчик в gridNext.
+        comp.qdl_auto = (comp.qdl_auto || 0) + 1;
+        if (comp.qdl_auto > GRID_PUMP_MAX) return;
+
+        comp.emit('loadNext');
+        gridPumpLater(comp);                               // страница вернулась пустой — следующий круг
+    }
+
+    function initGridDedup() {
+        if (window.__qdl_grid) return;                     // повторная загрузка qdl.js — одни хуки
+        window.__qdl_grid = true;
+        window.qdl_grid_build = gridBuild;                 // контракт с патчем grid-dedup-build
+        window.qdl_grid_next = gridNext;                   // контракт с патчем grid-dedup-next
+        // Диагностика (образец initSwr): патч мог не доехать — сменился tree или не чищен Staticache.
+        try {
+            var t = setTimeout(function () {
+                if (!window.__qdl_grid_hit)
+                    console.warn('qdl grid: бандл ни разу не спросил window.qdl_grid_* — патчи не доехали?');
+            }, 30000);
+            if (t && typeof t.unref === 'function') t.unref();
+        } catch (e) {}
+    }
+
     // ТВ (нативный плеер) тянет оригинал (EAC3 ок), всё остальное (десктоп/мобайл-браузер) — HLS (звук→AAC).
     // ВАЖНО: Platform.is('browser') слишком узок (на Linux-десктопе platform='' → false). Берём инверсию tv().
     function isBrowser() {
@@ -6322,6 +6453,7 @@
         try { initSelectFix(); } catch (e) {}            // фикс скролла селектбоксов (upstream mheight-баг)
         try { initTimelineMirror(); } catch (e) {}       // аварийный фолбэк зеркала (режим 'auto', см. qdl 2.18)
         try { initSwr(); } catch (e) {}                  // свежесть рядов каталога поверх клиентского кеша (qdl 2.63)
+        try { initGridDedup(); } catch (e) {}            // дедуп карточек и насос экрана «Ещё» (qdl 2.94)
         try { initTimecodeBridge(); } catch (e) {}       // перерисовка экрана серий по pull серверных таймкодов
         try { initContinueRefresh(); } catch (e) {}      // «Продолжить» на полной карточке — свежая после возврата
         try { initHistoryRouting(); } catch (e) {}       // вход в jut-карточку из «Истории просмотров»
