@@ -65,9 +65,20 @@ function fakeIO(w, state) {
 function stubMedia(w) {
   const proto = w.HTMLMediaElement.prototype;
   Object.defineProperty(proto, 'paused', { configurable: true, get() { return this.__paused !== false; } });
+  // currentTime/readyState в jsdom не реализованы вовсе — а сторож эфира смотрит ИМЕННО на них:
+  // «висит» это не отсутствие <video>, а картинка, которая не движется. Управляем ими из теста.
+  Object.defineProperty(proto, 'currentTime', {
+    configurable: true, get() { return this.__t || 0; }, set(v) { this.__t = v; },
+  });
+  Object.defineProperty(proto, 'readyState', { configurable: true, get() { return this.__rs || 0; } });
   proto.play = function () { this.__paused = false; return Promise.resolve(); };
   proto.pause = function () { this.__paused = true; };
   proto.load = function () {};
+}
+
+/** Живой эфир: у каждого играющего <video> есть декодированный кадр и время идёт вперёд. */
+function flow(m, sec) {
+  videos(m).each((_, v) => { if (!v.paused) { v.__rs = 4; v.__t = (v.__t || 0) + (sec || 1); } });
 }
 
 /** В jsdom вся геометрия нулевая, а fitQuad считает по ней — подставляем измеримый экран. */
@@ -122,6 +133,8 @@ function mount(opts) {
   if (opts.noIO !== true) fakeIO(r.w, Object.assign(io, opts.io || {}));
   // Глобальная настройка эфира приезжает с сервера ключом live.video в /qdl/features.
   if (opts.card !== null) r.qdl.setCard(opts.card || { live: { video: true } });
+  // Сторож фулл вью считает секундами — тесту столько ждать нельзя, ускоряем его пороги.
+  if (opts.guard) r.qdl.setLiveGuard(opts.guard);
   if (opts.before) opts.before(r);
 
   const inst = new r.qdl.ComponentLiveWatch({});
@@ -479,5 +492,114 @@ test('открытый нативный плеер поверх сетки гл�
 test('без права live экран не строится', () => {
   const m = mount({ perms: {} });
   assert.strictEqual(tiles(m).length, 0);
+  m.inst.destroy();
+});
+
+// ─────────────────────── сторож фулл вью (qdl 2.98) ───────────────────────
+// Просьба владельца: «когда я открываю фулл вью, хочу чтобы была проверка, и если висит —
+// перезапускался». Зависший поток НЕ даёт ошибок: hls.js молчит, <video> на месте, просто
+// картинка стоит. Поэтому всё здесь меряется движением currentTime, а не наличием узла.
+
+const FAST = { beat: 20, soft: 60, stale: 60, tick: 20, dead: 120, again: 150, young: 30, wake: 0 };
+
+/** Открыть первую камеру на весь экран на живой сетке. */
+async function openFull(m) {
+  await sleep(1700);
+  flow(m, 5);
+  m.r.$(quad(m)[0]).trigger('hover:enter');
+  await sleep(60);
+  return full(m).find('video')[0];
+}
+
+test('фулл вью: замерший поток перезапускается сам', async () => {
+  const m = mount({ cams: LIVE, guard: FAST });
+  const before = await openFull(m);
+  assert.ok(before, 'развёрнутая камера играет');
+
+  // Картинку больше не двигаем — ровно то, что видит владелец: «висит».
+  await sleep(400);
+
+  const after = full(m).find('video')[0];
+  assert.ok(after, 'плеер на месте');
+  assert.notStrictEqual(after, before, 'плеер не пересобран — камера так и висит');
+  assert.ok(m.calls.starts.some((u) => /camera=3(&|$)/.test(u)), 'поток на регистраторе тоже разбудили');
+  m.inst.destroy();
+});
+
+test('фулл вью: живой поток никто не перезапускает', async () => {
+  const m = mount({ cams: LIVE, guard: FAST });
+  const before = await openFull(m);
+
+  // 20 циклов сторожа при исправной картинке: ложный перезапуск здорового эфира — исход
+  // хуже самого бага, зритель получал бы чёрный экран каждые несколько секунд.
+  for (let i = 0; i < 20; i++) { flow(m, 1); await sleep(20); }
+
+  assert.strictEqual(full(m).find('video')[0], before, 'плеер тот же самый');
+  assert.strictEqual(m.calls.starts.length, 0, 'и регистратор не тревожили');
+  m.inst.destroy();
+});
+
+test('🔴 в сетке зависшие плитки НЕ перезапускаются — это осознанная граница', async () => {
+  // На слабом ТВ владельца из четырёх плиток поднимаются две («это не страшно, телевизор
+  // слабый»). Автоперезапуск там стал бы вечным циклом «создать декодер — не дали — снести».
+  const m = mount({ cams: LIVE, guard: FAST });
+  await sleep(1700);
+  const before = videos(m).toArray();
+  assert.strictEqual(before.length, 4);
+
+  await sleep(400);   // никто не двигает картинку — сетка «висит» целиком
+
+  assert.deepStrictEqual(videos(m).toArray(), before, 'плееры сетки не пересобирали');
+  assert.strictEqual(m.calls.starts.length, 0, 'и регистратор не будили');
+  m.inst.destroy();
+});
+
+test('фулл вью на мёртвой плитке забирает декодеры соседей, на живой — только паузит', async () => {
+  // Пауза декодер НЕ освобождает, его освобождает только destroy: если открытая камера не
+  // показывает картинку, соседи и есть та стена, в которую она упирается.
+  const dead = mount({ cams: LIVE, guard: FAST });
+  await sleep(1700);
+  assert.strictEqual(videos(dead).length, 4);
+  dead.r.$(quad(dead)[0]).trigger('hover:enter');
+  await sleep(60);
+  assert.strictEqual(videos(dead).length, 1, 'соседи снесены, декодеры у полноэкранной');
+  dead.inst.destroy();
+
+  const live = mount({ cams: LIVE, guard: FAST });
+  await openFull(live);
+  assert.strictEqual(videos(live).length, 4, 'здоровой камере хватает своего — соседи целы');
+  tiles(live).filter((_, el) => !live.r.$(el).hasClass('qdl-watch-tile--full')).each((_, el) => {
+    const v = live.r.$(el).find('video')[0];
+    if (v) assert.strictEqual(v.paused, true, 'но стоят на паузе');
+  });
+  live.inst.destroy();
+});
+
+test('выключенный глобально эфир сторож не воскрешает', async () => {
+  // Тумблер могли выключить с другого устройства прямо во время просмотра: sync() гасит
+  // плееры, и сторож обязан молчать — иначе он поднимал бы видео каждые десять секунд.
+  const m = mount({ cams: LIVE, guard: FAST });
+  await openFull(m);
+
+  m.r.qdl.setCard({ live: { video: false } });
+  m.inst.start();                       // так это и приезжает: следующий /qdl/features
+  assert.strictEqual(videos(m).length, 0, 'эфир погашен');
+
+  await sleep(400);                     // сторож успел бы дважды
+  assert.strictEqual(videos(m).length, 0, 'и остался погашенным');
+  m.inst.destroy();
+});
+
+test('сторож умирает вместе с экраном: после ухода перезапусков нет', async () => {
+  const m = mount({ cams: LIVE, guard: FAST });
+  await openFull(m);
+
+  m.inst.pause();                       // ушли вперёд на другой экран
+  assert.strictEqual(videos(m).length, 0, 'плееров не осталось');
+  const starts = m.calls.starts.length;
+
+  await sleep(400);                     // сторож, если бы выжил, успел бы дважды
+  assert.strictEqual(videos(m).length, 0, 'фоновый сторож ничего не поднял');
+  assert.strictEqual(m.calls.starts.length, starts, 'и регистратор из фона не будил');
   m.inst.destroy();
 });

@@ -4598,6 +4598,20 @@
     //     живых декодера (та же грабля, что убила таймер сетки в §AL2).
     var LIVE_MAX_PLAYERS = 4;
 
+    // Пороги сторожей эфира. Вынесены в объект, чтобы тесты гоняли их за миллисекунды, а не
+    // за минуты (тот же приём, что у поллера прогресса — setProgressConf).
+    var LIVE_GUARD = {
+        beat: 2000,       // как часто плеер смотрит на себя сам
+        soft: 5000,       // развёрнутая камера: столько терпим замерший currentTime
+        stale: 4000,      // картинка не двигалась дольше — плеер уже не считается живым
+        softGrid: 15000,  // плитка в сетке: там торопиться некуда
+        tick: 2000,       // как часто сторож фулл вью смотрит на развёрнутую камеру
+        dead: 10000,      // нет картинки столько → первый жёсткий перезапуск
+        again: 15000,     // и дальше каждые столько, бесконечно (выбор владельца)
+        young: 3000,      // плеер моложе этого ещё раскачивается, под нож не идёт
+        wake: 15000       // 🔴 пол по /watch/start на камеру: регистратор пишет видео 24/7
+    };
+
     // Настройка ОДНА на весь дом (решение владельца: «я у себя включил — и оно на все девайсы»):
     // значение живёт на сервере и приезжает ключом live.video в /qdl/features, который клиент
     // и так перечитывает каждые 60 с. Переключается в настройках, раздел «D1Vision».
@@ -4651,7 +4665,20 @@
         // под видео лежит тот же кадр отдельной картинкой — что бы ни отвалилось, серого нет.
         if (poster) { try { video.poster = poster; } catch (e) {} }
 
-        var st = { video: video, hls: null, dead: false, retry: null, watch: null, seen: -1, still: 0 };
+        var st = { video: video, hls: null, dead: false, retry: null, watch: null, seen: -1,
+                   born: Date.now(), lastMove: Date.now(), lastStep: 0, urgent: false, step: 0 };
+
+        /// Есть ли у плитки ДЕКОДИРОВАННАЯ картинка. Отдельно от alive(), потому что соседи в
+        /// фулл вью стоят на паузе намеренно — они не «мертвы», у них просто нажата пауза.
+        st.ok = function () {
+            return !st.dead && (video.readyState || 0) >= 2 && (video.currentTime || 0) > 0;
+        };
+
+        /// Идёт ли поток ПРЯМО СЕЙЧАС. Наличие <video> в DOM не доказывает ничего: камера может
+        /// висеть на первом кадре, и fatal-ошибки при этом нет — hls.js просто молчит.
+        st.alive = function () {
+            return st.ok() && !video.paused && Date.now() - st.lastMove < LIVE_GUARD.stale;
+        };
 
         st.destroy = function () {
             st.dead = true;
@@ -4672,7 +4699,7 @@
             if (p && p.catch) p.catch(function () { say('Нажми, чтобы включить'); });
         }
 
-        video.addEventListener('playing', function () { st.still = 0; say(''); });
+        video.addEventListener('playing', function () { st.lastMove = Date.now(); say(''); });
 
         box.appendChild(video);
         // Надпись показываем, только если картинки долго нет: на горячем потоке видео
@@ -4723,16 +4750,45 @@
         }, function () { return st.dead; });
 
         // Сторож: ffmpeg может встать, а плеер об этом не узнает — ошибки нет, просто нет данных.
+        // 🔴 Buffer-stall у hls.js НЕ fatal и в обработчик ERROR выше не попадает вовсе, поэтому
+        // единственный честный признак — currentTime перестал расти.
         st.watch = setInterval(function () {
-            if (st.dead || video.paused) return;
+            if (st.dead) return;
             var t = video.currentTime || 0;
-            if (t > st.seen + 0.1) { st.seen = t; st.still = 0; return; }
-            if (++st.still < 3) return;                 // 3 x 5 с = 15 с тишины
-            st.still = 0;
+            if (t > st.seen + 0.1) { st.seen = t; st.lastMove = Date.now(); st.step = 0; return; }
+
+            if (video.paused) {
+                // В сетке пауза — так и задумано (соседи развёрнутой камеры). А вот на самой
+                // развёрнутой это отбитый автоплей: жмём play(), а не лечим то, что не сломано.
+                if (st.urgent) play();
+                st.lastMove = Date.now();
+                return;
+            }
+
+            var wait = st.urgent ? LIVE_GUARD.soft : LIVE_GUARD.softGrid;
+            if (Date.now() - st.lastMove < wait) return;
+            // 🔴 Ступени пейсим ОТДЕЛЬНЫМ счётчиком: если двигать им же lastMove, зависший плеер
+            // выглядел бы живым для alive() — сторож фулл вью такую камеру не перезапустит никогда.
+            if (Date.now() - st.lastStep < wait) return;
+            st.lastStep = Date.now();
             say('Переподключаюсь…');
-            if (st.hls) { try { st.hls.startLoad(); } catch (e) {} }
-            else { try { video.load(); play(); } catch (e) {} }
-        }, 5000);
+            // Ступень 1 — прыжок к живому краю: зависший буфер одним startLoad() не лечится,
+            // плеер так и остаётся стоять на своей позиции. Ступень 2 — пересборка SourceBuffer.
+            if (st.hls) {
+                try {
+                    if ((st.step++ % 2) === 0) {
+                        if (st.hls.liveSyncPosition) video.currentTime = st.hls.liveSyncPosition;
+                        st.hls.startLoad();
+                    }
+                    else st.hls.recoverMediaError();
+                } catch (e) {}
+            }
+            else { try { video.load(); } catch (e) {} }
+            play();
+            // Прыжок к живому краю двигает currentTime САМ — если не сдвинуть отметку, следующий
+            // тик примет этот скачок за ожившую картинку и сторож фулл вью решит, что всё хорошо.
+            st.seen = video.currentTime || 0;
+        }, LIVE_GUARD.beat);
 
         return st;
     }
@@ -4759,6 +4815,9 @@
         var visTimer = null;   // фолбек-пересчёт видимости там, где нет IntersectionObserver
         var fullId = 0;       // какая камера развёрнута на весь экран (0 — сетка)
         var fullHome = null;  // куда вернуть развёрнутую плитку: {parent, next}
+        var fullTimer = null; // сторож развёрнутой камеры (в сетке его нет — см. fullGuard)
+        var fullSince = 0;    // когда развёрнутая камера последний раз показывала картинку
+        var fullTries = 0;    // сколько раз её уже перезапускали
         var liveCols = 2;     // сколько колонок сейчас в панели (на телефоне одна)
         var onResize = null;
 
@@ -4963,7 +5022,9 @@
             } catch (e) { return 0; }
         }
 
-        function startPlayer(c, idx) {
+        /// after(player) — на СОЗДАННЫЙ плеер, а не на слот: разбег стартов делает плеер
+        /// асинхронным, и «включить звук сразу после startPlayer» иначе уходит в пустоту.
+        function startPlayer(c, idx, after) {
             if (players[c.id]) return;
             var el = tiles[c.id];
             if (!el || !el.length) return;
@@ -4980,6 +5041,7 @@
                 if (comp.destroyed || players[c.id] !== slot) return;
                 players[c.id] = liveMakePlayer(el[0], withUid(API + c.path), function (t) { note(el, t); },
                                                withUid(API + '/qdl/live/watch/thumb?camera=' + c.id));
+                if (after) { try { after(players[c.id]); } catch (e) {} }
             }, (idx || 0) * 500);
         }
 
@@ -5025,9 +5087,12 @@
             });
         }
 
-        function wake(c) {
+        /// force — перезапуск развёрнутой камеры: вдруг лёг сам поток на регистраторе.
+        /// 🔴 Пол троттлинга остаётся при любом force: регистратор пишет видео 24/7, и долбить
+        /// его стартами нельзя — перезапуск это про клиент, а не про рекордер.
+        function wake(c, force) {
             var now = Date.now();
-            if (wokeAt[c.id] && now - wokeAt[c.id] < 20000) return;
+            if (wokeAt[c.id] && now - wokeAt[c.id] < (force ? LIVE_GUARD.wake : 20000)) return;
             wokeAt[c.id] = now;
             network.silent(withUid(API + '/qdl/live/watch/start?camera=' + encodeURIComponent(c.id)),
                 function (st) {
@@ -5156,6 +5221,80 @@
             fullHome = null;
         }
 
+        /// Раздать ресурсы развёрнутой камере. Владелец выбрал «гасить соседей только когда
+        /// нужно»: пока открытая камера показывает картинку, соседи стоят на паузе и возврат
+        /// в сетку мгновенный.
+        /// 🔴 А вот если картинки нет — пауза декодер НЕ освобождает (её освобождает только
+        /// destroy), и на слабом ТВ владельца, где из четырёх плиток поднимаются две, открытой
+        /// камере взять декодер попросту неоткуда: она висит без единой ошибки в консоли.
+        /// Тогда соседей сносим совсем и пересобираем плеер начисто.
+        function giveFull(id, c) {
+            var p = players[id];
+            var stuck = !p || (p.ok ? !p.ok() && Date.now() - p.born > LIVE_GUARD.young : false);
+
+            Object.keys(players).forEach(function (pid) {
+                if (+pid === id) return;
+                // 🔴 Слот, который ещё НЕ развернулся в плеер (ждёт свои 500 мс разбега), паузить
+                // нечем — его надо снять совсем, иначе таймер сработает уже ПОСЛЕ входа в фулл вью
+                // и заведёт декодер за оверлеем. Ловится только живьём: вход сразу после открытия
+                // раздела (headless livegrid.mjs, 01.09.2026 — три соседа играли под полноэкранной).
+                if (stuck || players[pid].pending) stopPlayer(pid);
+                else setPaused(pid, true);
+            });
+
+            if (stuck) stopPlayer(id);
+            startPlayer(c, 0, function (np) { np.urgent = true; unmute(id, true); });
+            if (players[id]) players[id].urgent = true;
+            setPaused(id, false);
+            unmute(id, true);
+            fullSince = Date.now();
+            fullTries = 0;
+        }
+
+        /// Сторож развёрнутой камеры (просьба владельца: «когда открываю фулл вью, хочу чтобы
+        /// была проверка, и если висит — перезапускался»). Смотрит не на наличие <video>, а на
+        /// то, что картинка ДВИЖЕТСЯ: зависший поток ошибок не даёт вовсе.
+        /// 🔴 В сетке такого сторожа нет НАМЕРЕННО: там на слабом ТВ две плитки из четырёх не
+        /// заводятся по железу («это не страшно, телевизор слабый»), и автоперезапуск стал бы
+        /// вечным циклом «создать декодер — не дали — снести» на том же железе.
+        function fullGuard() {
+            if (comp.destroyed || !fullId || playerOpened()) return;
+            // Тумблер эфира выключили с другого устройства прямо во время просмотра — sync()
+            // уже погасил плееры, и поднимать их обратно сторожу нечего: он бы воскрешал
+            // выключенное видео каждые десять секунд.
+            if (!liveVideoOn()) return;
+            var id = fullId, c = camById(id), el = tiles[id];
+            var p = players[id];
+            if (p) p.urgent = true;
+            if (p && p.alive && p.alive()) { fullSince = Date.now(); return; }
+            if (!c || !el || !el.length) return;
+            if (Date.now() - fullSince < (fullTries ? LIVE_GUARD.again : LIVE_GUARD.dead)) return;
+
+            fullTries++;
+            fullSince = Date.now();
+            wake(c, true);      // вдруг лёг сам поток: старт идемпотентен и вернёт свежий path
+            // Соседи ещё держат декодеры и буферы — теперь они точно нужнее здесь.
+            Object.keys(players).forEach(function (pid) { if (+pid !== id) stopPlayer(pid); });
+            stopPlayer(id);
+            startPlayer(c, 0, function (np) {
+                np.urgent = true; unmute(id, true); note(el, 'Перезапускаю…');
+            });
+            note(el, 'Перезапускаю…');
+        }
+
+        function startFullGuard() {
+            stopFullGuard();
+            fullSince = Date.now();
+            fullTries = 0;
+            fullTimer = setInterval(fullGuard, LIVE_GUARD.tick);
+        }
+
+        function stopFullGuard() {
+            if (fullTimer) { clearInterval(fullTimer); fullTimer = null; }
+            // Вернулись в сетку — плеерам снова можно жить по ленивому порогу.
+            Object.keys(players).forEach(function (pid) { if (players[pid]) players[pid].urgent = false; });
+        }
+
         function enterFull(id) {
             var el = tiles[id];
             var c = camById(id);
@@ -5164,20 +5303,8 @@
 
             fullId = id;
             takeFull(el);
-            // Остальные — на паузу (гасим и декодер, и сеть), но НЕ уничтожаем: возврат в сетку
-            // должен быть мгновенным, а не «подождите три секунды».
-            // 🔴 Слот, который ещё НЕ развернулся в плеер (ждёт свои 500 мс разбега), паузить
-            // нечем — его надо снять совсем, иначе таймер сработает уже ПОСЛЕ входа в фулл вью
-            // и заведёт декодер за оверлеем. Ловится только живьём: вход сразу после открытия
-            // раздела (headless livegrid.mjs, 01.09.2026 — три соседа играли под полноэкранной).
-            Object.keys(players).forEach(function (pid) {
-                if (+pid === id) return;
-                if (players[pid].pending) stopPlayer(pid);   // ещё не поднялся — сохранять нечего
-                else setPaused(pid, true);
-            });
-            startPlayer(c, 0);
-            setPaused(id, false);
-            unmute(id, true);
+            giveFull(id, c);
+            startFullGuard();
             // Перенос узла в редких движках ставит медиа на паузу — поднимаем обратно.
             setTimeout(function () {
                 var p = players[id];
@@ -5189,6 +5316,7 @@
 
         function exitFull() {
             var id = fullId;
+            stopFullGuard();
             unmute(id, false);
             restoreFull();
             fullId = 0;
@@ -5211,9 +5339,9 @@
             fullId = next.id;
             var el = tiles[next.id];
             if (el && el.length) { takeFull(el); last = el[0]; }
-            startPlayer(next, 0);
-            setPaused(next.id, false);
-            unmute(next.id, true);
+            // Стрелка лечится так же, как первый вход: следующей камере тоже может не хватать
+            // декодера, и ждать десять секунд сторожа тут незачем.
+            giveFull(next.id, next);
         }
 
         function refresh() {
@@ -5295,6 +5423,7 @@
             // обязательно, иначе камера останется висеть поверх следующего экрана.
             restoreFull();
             fullId = 0;
+            stopFullGuard();
             stopTimer();
             clearTimeout(syncTimer);
             clearInterval(visTimer); visTimer = null;
