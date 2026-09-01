@@ -180,7 +180,7 @@
             // 🔴 align-items:start — плитка НЕ растягивается по высоте ряда. Иначе любой ряд,
             // ставший выше содержимого, растянул бы плитку, а картинка внутри (object-fit:contain)
             // получила бы чёрные поля сверху и снизу — жалоба владельца с айфона.
-            '.qdl-watch-grid{display:grid;grid-template-columns:repeat(2,1fr);justify-content:center;align-items:start;gap:.25em;padding:0}' +
+            '.qdl-watch-grid{display:grid;grid-template-columns:repeat(2,1fr);justify-content:center;align-items:start;gap:.25em;padding:0;overflow:hidden}' +
             // 🔴 На телефоне размер плитки задаётся ОТ ШИРИНЫ ЭКРАНА, а не от контейнера и не
             // через aspect-ratio. У владельца на айфоне плитки выходили втрое выше нужного, и
             // кадр висел в чёрном поле по центру (скриншоты 01.09.2026); в эмуляции телефона —
@@ -188,10 +188,11 @@
             // виновата среда самого приложения. Явные width/height в vw снимают вопрос целиком:
             // они не зависят ни от ширины ленты, ни от inline-стилей fitQuad, ни от поддержки
             // aspect-ratio движком.
+            // Медиазапрос оставлен страховкой для обычного узкого браузера. На приложении
+            // iPhone он НЕ срабатывает (вьюпорт там шире 600 px) — там раскладку задаёт
+            // fitQuad инлайном по платформе, см. комментарий в нём.
             '@media (max-width:600px){' +
-              '.qdl-watch-grid,.qdl-watch-off{grid-template-columns:1fr;gap:.5em;padding:0 .5em;justify-content:start}' +
-              '.qdl-watch-grid,.qdl-watch-off{grid-auto-rows:auto}' +
-              '.qdl-watch-tile{width:calc(100vw - 1em);height:calc((100vw - 1em) * 0.5625);aspect-ratio:auto;max-width:none}' +
+              '.qdl-watch-grid,.qdl-watch-off{grid-template-columns:1fr;gap:.5em;padding:0 .5em;justify-content:start;grid-auto-rows:auto}' +
             '}' +
             // Камеры не в эфире — отдельным блоком под живой четвёркой (возврат поведения
             // до 2.95: «снизу чтобы были даже неактивные отключённые стримы»).
@@ -4844,30 +4845,44 @@
                 var node = grid[0];
                 if (!node || !node.parentNode) return;
 
-                liveCols = (window.innerWidth || 1280) <= 600 ? 1 : 2;
-
-                // Телефон: плитки идут друг за другом во всю ширину, высоту диктует их 16/9.
-                if (liveCols === 1) {
-                    grid.removeClass('qdl-watch-grid--fit');
-                    node.style.gridAutoRows = '';
-                    node.style.gridTemplateColumns = '';
-                    offGrid[0].style.gridTemplateColumns = '';
-                    return;
-                }
-
-                var box = node.getBoundingClientRect();
-                if (box.top <= 0 || !node.clientWidth) return;   // ещё не показали — посчитаем позже
-
+                // 🔴 Ширину берём у ВЬЮПОРТА ДОКУМЕНТА, а не у контейнера: на айфоне лента
+                // Lampa оказалась шире экрана, и расчёт по node.clientWidth давал плитки,
+                // которые уезжали за край (владелец: «могу свайпать влево-вправо»).
+                var vw = document.documentElement.clientWidth || window.innerWidth || 1280;
                 var cs = window.getComputedStyle(node);
                 var gap = parseFloat(cs.columnGap) || 4;
                 var rowGap = parseFloat(cs.rowGap) || gap;
 
+                // 🔴 Телефон определяем ПЛАТФОРМОЙ, а не порогом ширины: у приложения на iPhone
+                // вьюпорт оказался шире 600 px, из-за чего и медиазапрос, и прежний порог молчали —
+                // офлайн-камеры вставали в два столбца, а панель уезжала за экран.
+                var phone = window.d1vision_platform === 'ios' || vw <= 600;
+                liveCols = phone ? 1 : 2;
+
+                // Телефон: плитки идут друг за другом во всю ширину экрана, высоту даёт 16:9.
+                if (phone) {
+                    var pw = Math.max(120, Math.floor(vw - gap * 2));
+                    grid.removeClass('qdl-watch-grid--fit');
+                    node.style.gridAutoRows = '';
+                    node.style.gridTemplateColumns = pw + 'px';
+                    node.style.maxWidth = vw + 'px';
+                    offGrid[0].style.gridTemplateColumns = pw + 'px';
+                    offGrid[0].style.maxWidth = vw + 'px';
+                    return;
+                }
+
+                node.style.maxWidth = '';
+                offGrid[0].style.maxWidth = '';
+
+                var box = node.getBoundingClientRect();
+                if (box.top <= 0) return;   // ещё не показали — посчитаем позже
+
                 // 🔴 Держим плитку РОВНО 16:9 — тогда кадр виден целиком, без обрезки
                 // (жалоба владельца: «на IPCamLive они не обрезаются»). Поэтому берём
-                // меньшее из двух: сколько даёт ширина ленты и сколько остаётся по высоте.
+                // меньшее из двух: сколько даёт ширина экрана и сколько остаётся по высоте.
                 var avail = (window.innerHeight || 720) - box.top;
                 var byHeight = Math.floor(((avail - rowGap) / 2) * 16 / 9);
-                var byWidth = Math.floor((node.clientWidth - gap) / 2);
+                var byWidth = Math.floor((vw - gap) / 2);
                 var w = Math.max(160, Math.min(byWidth, byHeight));
                 var h = Math.round(w * 9 / 16);
 

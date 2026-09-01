@@ -388,14 +388,24 @@ test('фулл вью: одна камера на весь экран, оста�
   m.inst.destroy();
 });
 
-test('🔴 на телефоне размер плитки задан от ширины ЭКРАНА, а не контейнера', () => {
-  // Регресс: на айфоне плитки выходили втрое выше нужного и кадр висел в чёрном поле
-  // (скриншоты владельца). Эмуляция телефона этого не воспроизводила, поэтому размер
-  // задан явными width/height в vw — они не зависят ни от ширины ленты, ни от inline-стилей.
-  const css = H.qdlSource();
-  const media = /@media \(max-width:600px\)\{[^@]*?\.qdl-watch-tile\{width:calc\(100vw[^}]*height:calc\(\(100vw[^}]*\}/.test(css);
-  assert.ok(media, 'нет телефонного правила с width/height от 100vw');
-  assert.ok(/aspect-ratio:auto/.test(css), 'на телефоне aspect-ratio должен быть снят — высоту задаём сами');
+test('🔴 на айфоне раскладка телефонная, даже если вьюпорт шире 600', () => {
+  // Регресс: у приложения на iPhone вьюпорт оказался ШИРЕ 600 px — медиазапрос молчал,
+  // офлайн-камеры вставали в два столбца, а панель уезжала за экран (свайп вбок).
+  const m = mount();
+  Object.defineProperty(m.r.w, 'innerWidth', { configurable: true, value: 1024 });
+  Object.defineProperty(m.r.w.document.documentElement, 'clientWidth', { configurable: true, value: 900 });
+  m.r.w.d1vision_platform = 'ios';
+
+  const g = stubGrid(m, { top: 120, width: 900 });
+  const off = m.root.find('.qdl-watch-off')[0];
+  m.inst.start();
+
+  assert.match(g.style.gridTemplateColumns, /^\d+px$/, 'одна колонка фиксированной ширины: ' + g.style.gridTemplateColumns);
+  assert.strictEqual(g.style.gridAutoRows, '', 'высоту ряда на телефоне не навязываем — её даёт 16:9');
+  assert.ok(!m.r.$(g).hasClass('qdl-watch-grid--fit'));
+  assert.strictEqual(g.style.maxWidth, '900px', 'сетка не шире экрана — иначе появляется свайп вбок');
+  assert.match(off.style.gridTemplateColumns, /^\d+px$/, 'офлайн-камеры тоже в одну колонку');
+  m.inst.destroy();
 });
 
 test('🔴 развёрнутая камера остаётся НАД сеткой даже под фокусом', () => {
