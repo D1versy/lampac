@@ -50,6 +50,7 @@ public static class TestEnv
             Perms.ResetForConfigReload();   // троттлинг «когда видели» относился к прежнему cachePath
             Groups.ResetForConfigReload();  // индекс uid → группа — тоже статика поверх cachePath
             QbitController.DropListCache();
+            QbitController.DropProgressCache();  // снимок /qdl/progress — тоже статика (2 с, но между тестами это вечность)
             QbitController.SeriesIndexDrop();   // индекс групп сезонов — тоже статика поверх cachePath
             // Снимок «что уже скачано» держится 10 с, а тесты меняют каталог загрузок
             // быстрее — без сброса следующий тест читал бы снимок предыдущего.

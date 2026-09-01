@@ -637,6 +637,13 @@ public partial class QbitController
         if (gid != null)
             card["group"] = new JObject { ["gid"] = gid, ["name"] = Groups.NameOf(gid), ["members"] = Groups.MembersOf(gid).Count };
 
+        // Настройки живого прогресса (qdl 2.93) — свежесть и жёсткость гейта диктует сервер.
+        // 🔴 Отдельным ключом, а НЕ внутри card["features"]: тот объект клиент обходит через
+        // qdlAllowed как булеву карту прав, и числа в нём читались бы как «право включено».
+        // Едет сюда, потому что loadFeatures в qdl.js уже ходит на старте и каждые 60 с и
+        // кеширует ответ — значит новое значение доезжает до флота за минуту без пересборки.
+        card["progress"] = ProgressClientConf();
+
         SetHeadersNoCache();
         return ContentTo(card.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
     }

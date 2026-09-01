@@ -33,12 +33,13 @@ function fakeReq(files) {
   };
 }
 
-// Прогон watch() до конца: confirmPartial → watchByHash → fetchEpisodes(ok) → старт плеера.
-function watchWith(item, card, over) {
+// Прогон watch() до конца: watchByHash → fetchEpisodes(ok) → gatePartial → старт плеера.
+// files необязателен и строго последний: гейт с 2.93 смотрит на прогресс ФАЙЛА, а не карточки.
+function watchWith(item, card, over, files) {
   const seen = [];
   const lampa = H.makeLampa(Object.assign(
     { Favorite: { _added: seen, add(where, c) { seen.push({ where, card: c }); } } },
-    fakeReq([{ index: 0, name: 'file.mkv' }]),
+    fakeReq(files || [{ index: 0, name: 'file.mkv' }]),
     over || {}));
   const { qdl } = H.loadQdl({ lampa });
   qdl.watch(item, card);
@@ -232,10 +233,13 @@ test('jut-маркер без TMDB id всё равно попадает в ис
   assert.strictEqual(hist[0].card.title, 'Ван-Пис');
 });
 
-test('недокачанная раздача не пишет историю до подтверждения', () => {
-  // диалог «ещё качается» висит, ответа нет — плеер не стартовал, значит и истории нет
+test('недокачанная раздача не пишет историю (qdl 2.93 — играть нельзя вовсе)', () => {
+  // Гейт жёсткий: диалог «Дождитесь загрузки» пути в плеер не даёт, значит и истории нет.
+  // Прогресс берётся у ФАЙЛА (гейт переехал внутрь watchByHash), поэтому недокачанность
+  // задаём на нём, а не на карточке.
   const hist = watchWith({ hash: 'h', progress: 0.4, meta: { id: 5 } }, { id: 5 },
-    { Select: { show() {}, listener: { follow() {}, send() {} } } });
+    { Select: { show() {}, listener: { follow() {}, send() {} } } },
+    [{ index: 0, name: 'file.mkv', progress: 0.4 }]);
   assert.strictEqual(hist.length, 0);
 });
 
@@ -246,10 +250,10 @@ test('воронки «Загрузок» и jut.su не обходят noteHist
   // Требование: каждая из четырёх точек старта несёт вызов noteHistory рядом.
   const src = H.qdlSource();
 
-  // экран серий
-  assert.match(src, /this\.play = function \(i\) \{[\s\S]{0,200}?noteHistory\(/);
+  // экран серий (окно расширено: перед noteHistory встал гейт недокачанной серии, qdl 2.93)
+  assert.match(src, /this\.play = function \(i\) \{[\s\S]{0,500}?noteHistory\(/);
   // одиночный файл и фолбэк «серий не нашли»
-  assert.match(src, /function watchByHash\(hash, name, card\)[\s\S]{0,800}?noteHistory\(card\)/);
+  assert.match(src, /function watchByHash\(hash, name, card, gateItem\)[\s\S]{0,1400}?noteHistory\(card\)/);
   // онлайн jut.su
   assert.match(src, /function jutPlay\([\s\S]{0,900}?noteHistory\(jutHistoryCard\(slug/);
   // и сама воронка одна — не расползлась копиями

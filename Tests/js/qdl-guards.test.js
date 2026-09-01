@@ -37,52 +37,128 @@ function rig(opts) {
 
 const last = (a) => a[a.length - 1];
 
-// ─────────────────────────────── confirmPartial ───────────────────────────────
+// ─────────────────────────────── gatePartial (qdl 2.93) ───────────────────────────────
+// Был confirmPartial с пунктом «Смотреть всё равно». Стал ЖЁСТКИЙ гейт: у диалога один пункт
+// и пути в плеер из него нет. Причина — последовательная загрузка в qBittorrent не включается
+// нигде, файл на диске дырявый, и «всё равно» почти всегда давало отказ плеера или мусор.
 
-test('confirmPartial: progress 1 / без progress / local → run сразу, без Select', () => {
+test('gatePartial: progress 1 / без progress / local → run сразу, без Select', () => {
   const { qdl, calls } = rig();
   let runs = 0;
-  qdl.confirmPartial({ progress: 1 }, () => runs++);
-  qdl.confirmPartial({}, () => runs++);
-  qdl.confirmPartial({ progress: 0.2, local: true }, () => runs++);
-  qdl.confirmPartial({ progress: 0.2, state: 'local' }, () => runs++);
+  qdl.gatePartial({ progress: 1 }, () => runs++);
+  qdl.gatePartial({}, () => runs++);                          // нет данных → fail-open
+  qdl.gatePartial({ progress: 0.2, local: true }, () => runs++);
+  qdl.gatePartial({ progress: 0.2, state: 'local' }, () => runs++);
   assert.strictEqual(runs, 4);
   assert.strictEqual(calls.selects.length, 0);
 });
 
-test('confirmPartial: progress 0.5 → Select с «50%», ok → run', () => {
+// 🔴 Порог 0.999, а не 1: взвешенный прогресс готовой группы сезонов не даёт ровной единицы,
+// и на строгом сравнении «дождитесь загрузки» вылезало бы на полностью скачанном сериале.
+test('gatePartial: 0.9995 считается готовым и играет без диалога', () => {
   const { qdl, calls } = rig();
   let runs = 0;
-  qdl.confirmPartial({ progress: 0.5 }, () => runs++);
-  assert.strictEqual(runs, 0, 'до подтверждения не играем');
-  assert.strictEqual(calls.selects.length, 1);
-  assert.ok(calls.selects[0].title.indexOf('50%') !== -1);
-  calls.selects[0].onSelect(calls.selects[0].items[0]);   // «Смотреть всё равно»
+  qdl.gatePartial({ progress: 0.9995 }, () => runs++);
   assert.strictEqual(runs, 1);
+  assert.strictEqual(calls.selects.length, 0);
 });
 
-test('confirmPartial: «Отмена» → run не вызван + возврат фокуса', () => {
+test('gatePartial: progress 0.5 → «Дождитесь загрузки», один пункт, в плеер не пускает', () => {
   const { qdl, calls } = rig();
   let runs = 0;
-  qdl.confirmPartial({ progress: 0.3 }, () => runs++);
-  calls.selects[0].onSelect(calls.selects[0].items[1]);   // «Отмена»
-  assert.strictEqual(runs, 0);
+  qdl.gatePartial({ progress: 0.5 }, () => runs++);
+  assert.strictEqual(runs, 0, 'играть нельзя');
+  assert.strictEqual(calls.selects.length, 1);
+  assert.ok(calls.selects[0].title.indexOf('Дождитесь загрузки') !== -1, 'формулировка владельца');
+  assert.ok(calls.selects[0].title.indexOf('50%') !== -1, 'сколько уже скачано');
+  assert.strictEqual(calls.selects[0].items.length, 1, 'запасного пути в плеер нет');
+  calls.selects[0].onSelect(calls.selects[0].items[0]);
+  assert.strictEqual(runs, 0, 'единственный пункт НЕ запускает воспроизведение');
   assert.deepStrictEqual(calls.toggles, ['content']);
   calls.selects[0].onBack();
   assert.strictEqual(calls.toggles.length, 2);
 });
 
+// Живой прогресс поллера ПОБЕЖДАЕТ снимок — ровно этим чинится «докачалось, а клиент всё
+// равно спрашивает»: /qdl/list кешируется 30 с, а qdl_progress на активности не обновляется.
+test('gatePartial: живое «докачано» перекрывает устаревший снимок → играем без диалога', () => {
+  const { qdl, calls } = rig();
+  qdl.pgReset();
+  qdl.pgApply({ ok: true, stamp: 's1', active: 0, pending: 0, items: [] });   // хеша нет в items = готов
+  let runs = 0;
+  qdl.gatePartial({ hash: 'a1', progress: 0.4 }, () => runs++);
+  assert.strictEqual(runs, 1);
+  assert.strictEqual(calls.selects.length, 0);
+  qdl.pgReset();
+});
+
+test('gatePartial: живое «ещё качается» перекрывает снимок progress:1', () => {
+  const { qdl, calls } = rig();
+  qdl.pgReset();
+  qdl.pgApply({ ok: true, stamp: 's1', active: 1, pending: 0, items: [{ h: 'a1', p: 0.4, s: 'downloading' }] });
+  let runs = 0;
+  qdl.gatePartial({ hash: 'a1', progress: 1 }, () => runs++);
+  assert.strictEqual(runs, 0);
+  assert.strictEqual(calls.selects.length, 1);
+  qdl.pgReset();
+});
+
+// ok:false — это «не знаю», а не «всё скачано»: лёгший qBit и реплика не должны ни запирать, ни врать
+test('gatePartial: ok:false не меняет вердикт — остаёмся на снимке', () => {
+  const { qdl, calls } = rig();
+  qdl.pgReset();
+  qdl.pgApply({ ok: false, poll: 5, active: 0, pending: 0, items: [] });
+  let runs = 0;
+  qdl.gatePartial({ hash: 'a1', progress: 0.4 }, () => runs++);
+  assert.strictEqual(runs, 0, 'снимок говорит «качается» — верим ему');
+  assert.strictEqual(calls.selects.length, 1);
+  qdl.pgReset();
+});
+
+// Киллсвитч partialPlayBlock:false — страховка на случай, если гейт где-то ошибётся
+test('gatePartial: block:false с сервера снимает блокировку целиком', () => {
+  const { qdl, calls } = rig();
+  qdl.pgReset();
+  qdl.setProgressConf({ block: false });
+  let runs = 0;
+  qdl.gatePartial({ progress: 0.5 }, () => runs++);
+  assert.strictEqual(runs, 1);
+  assert.strictEqual(calls.selects.length, 0);
+  qdl.setProgressConf({ block: true });
+  qdl.pgReset();
+});
+
 // ─────────────────────────────── watch / openDownload ───────────────────────────────
 
-test('watch: недокачанный item → гейт; скачанный → сразу список серий (/qdl/episodes)', () => {
-  const { qdl, calls } = rig();
+// 🔴 С 2.93 гейт живёт ВНУТРИ watchByHash, после fetchEpisodes: до неё ещё неизвестно, фильм это
+// или сериал. Поэтому /qdl/episodes спрашивается ВСЕГДА, а диалог решается по прогрессу самого
+// файла. Раньше гейт стоял до развилки — и сериал, у которого нужная серия давно скачана,
+// ругался карточным (взвешенным по размеру) прогрессом.
+test('watch: /qdl/episodes спрашивается всегда; гейт — по прогрессу ФАЙЛА', () => {
+  const { qdl, calls } = rig({
+    respond: (u) => (u.indexOf('/qdl/episodes?hash=a1') !== -1 ? [{ index: 0, name: 'a.mkv', progress: 0.4 }]
+      : u.indexOf('/qdl/episodes?hash=b2') !== -1 ? [{ index: 0, name: 'b.mkv', progress: 1 }]
+        : undefined),
+  });
   qdl.watch({ hash: 'a1', progress: 0.4, name: 'X' });
-  assert.strictEqual(calls.selects.length, 1, 'гейт показан');
-  assert.strictEqual(calls.reqs.filter((u) => u.indexOf('/qdl/episodes') !== -1).length, 0);
+  assert.strictEqual(calls.selects.length, 1, 'файл недокачан → гейт');
+  assert.strictEqual(calls.reqs.filter((u) => u.indexOf('/qdl/episodes?hash=a1') !== -1).length, 1);
 
   qdl.watch({ hash: 'b2', progress: 1, name: 'Y' });
   assert.strictEqual(calls.selects.length, 1, 'второго Select нет');
   assert.strictEqual(calls.reqs.filter((u) => u.indexOf('/qdl/episodes?hash=b2') !== -1).length, 1);
+});
+
+// Снятие card-level гейта для сериала — обратная сторона того же переноса
+test('watch: сериал с карточным 0.92 уходит на экран серий БЕЗ диалога', () => {
+  const { qdl, calls } = rig({
+    respond: (u) => (u.indexOf('/qdl/episodes') !== -1
+      ? [{ index: 0, name: 'S01E01.mkv', progress: 1 }, { index: 1, name: 'S01E02.mkv', progress: 0.3 }]
+      : undefined),
+  });
+  qdl.watch({ hash: 'a1', progress: 0.92, name: 'Сериал' });
+  assert.strictEqual(calls.selects.length, 0, 'карточного гейта у сериала больше нет');
+  assert.strictEqual(calls.pushes.filter((a) => a.component === 'qdl_episodes').length, 1);
 });
 
 test('openDownload: с TMDB-метой → полная карточка с qdl_hash/qdl_progress', () => {

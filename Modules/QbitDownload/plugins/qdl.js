@@ -68,6 +68,9 @@
                 qdlCard = r;
                 try { Lampa.Storage.set('qdl_features', r.features); } catch (e) {}
             }
+            // Настройки живого прогресса (qdl 2.93) — отдельным ключом, НЕ внутри features:
+            // тот объект читается qdlAllowed как булева карта прав, числа в нём стали бы «правом».
+            if (r && r.progress) setProgressConf(r.progress);
             if (done) done();
         }, function () { if (done) done(); });
     }
@@ -172,6 +175,10 @@
             '.qdl-row-focus.focus{box-shadow:0 0 0 .2em #fff}' +
             // экран серий: текущая (продолжаемая) серия подсвечена синим
             '.qdl-ep--cur{background:rgba(25,100,210,.22) !important}' +
+            // серия ещё качается: приглушаем, но строку ОСТАВЛЯЕМ — иначе сериал выглядит
+            // короче, чем есть, и непонятно, качается ли что-то (решение владельца 01.09.2026)
+            '.qdl-ep--wait .qdl-ep-name,.qdl-ep--wait .qdl-ep-num{opacity:.45}' +
+            '.qdl-ep--wait .qdl-ep-dl{opacity:.9;color:#ffd166}' +
             '.qdl-btn-focus.focus{background:#fff !important;color:#000 !important;opacity:1 !important}' +
             '.qdl-btn-green.focus{background:#19b531 !important;box-shadow:0 0 0 .15em #fff}' +
             // svg-иконки в наших плоских кнопках (jut.su и т.п.) и в строках экрана серий
@@ -900,6 +907,195 @@
         } catch (e) { done(false); }   // синхронный throw из req не должен заклинить _epPending навсегда
     }
 
+    // ───────── Живой прогресс загрузок (qdl 2.93) ─────────
+    // Один модуль-уровневый таймер на весь плагин + реестр подписчиков. Экраны подписываются
+    // в start() и ОТПИСЫВАЮТСЯ в pause()/stop()/destroy().
+    //
+    // 🔴 Почему отписка в pause() обязательна. Lampa при навигации ВПЕРЁД не зовёт destroy():
+    // компонент висит в стеке до pages_save_total (та же мина, что у сетки камер — см.
+    // комментарий у ComponentLiveWatch.startTimer). Без отписки три сложенных копии «Загрузок»
+    // держали бы опрос вечно. Ключ реестра — токен, а не сам компонент: один инстанс
+    // стартует/паузится многократно, и протухшее замыкание не должно воскресать.
+    //
+    // Требование владельца — «опрашивать только пока идут активные загрузки»:
+    //   active > 0            → быстрый опрос (poll, по умолчанию 5 с)
+    //   active = 0, pending>0 → медленный пульс (idle, 30 с) с бюджетом (10 мин), потом молчим
+    //   ничего не качается    → таймера НЕТ ВОВСЕ
+    // Пробуждение после молчания: вход на экран-подписчик, пуш 'qdl_noti' по сокету, выход из
+    // плеера и страховочный тик loadFeatures.
+    //
+    // 🔴 У pgGet ТРИ исхода, а не два. Спутать «данных нет» с «готово» — это молча играющий
+    // недокачанный фильм; спутать наоборот — вечное «дождитесь загрузки» на скачанном.
+    var DONE = 0.999;                  // тот же порог, что на сервере (Progress.cs ProgressDone)
+    var _pgSubs = {};                  // token -> {hash, fn}
+    var _pgSeq = 0;
+    var _pgTimer = null;
+    var _pgState = null;               // {ok, stamp, active, pending, byHash:{}, files:{}}
+    var _pgConf = { poll: 5, idle: 30, budget: 10, block: true };
+    var _pgInterval = 0;               // текущий интервал таймера, мс
+    var _pgIdleSince = 0;              // когда ушли в медленный пульс (0 = не в нём)
+    var _pgBusy = false;               // in-flight гард (как notiPollBusy)
+    var _pgFails = 0;
+    var _pgNet = null;
+
+    function setProgressConf(c) {
+        if (!c) return;
+        if (typeof c.poll === 'number') _pgConf.poll = c.poll;
+        if (typeof c.idle === 'number') _pgConf.idle = c.idle;
+        if (typeof c.budget === 'number') _pgConf.budget = c.budget;
+        if (typeof c.block === 'boolean') _pgConf.block = c.block;
+        try { Lampa.Storage.set('qdl_progress_cfg', _pgConf); } catch (e) {}
+    }
+    (function () {   // на старте — из кеша, чтобы первый экран не ждал ответа /qdl/features
+        try { var c = Lampa.Storage.get('qdl_progress_cfg', null); if (c) setProgressConf(c); } catch (e) {}
+    })();
+
+    /// Жёсткая блокировка недокачанного включена? Киллсвитч partialPlayBlock с сервера.
+    function pgBlockEnabled() { return _pgConf.block !== false; }
+
+    function pgHasSubs() { for (var k in _pgSubs) if (_pgSubs.hasOwnProperty(k)) return true; return false; }
+
+    // hash последнего подписчика, которому нужен per-file прогресс (экран серий/карточка).
+    // Один за тик: сводка общая, а files сервер отдаёт только для запрошенной раздачи.
+    function pgWantedHash() {
+        var h = null;
+        for (var k in _pgSubs) if (_pgSubs.hasOwnProperty(k) && _pgSubs[k].hash) h = _pgSubs[k].hash;
+        return h;
+    }
+
+    // 🔴 Таймер здесь НЕ заводится — только один немедленный тик. Интервал создаёт pgApply,
+    // когда УЗНАЕТ, что качать есть что: это и есть буквальное «опрашивать только пока идут
+    // активные загрузки». Побочно это же снимает вечный таймер там, где сервер не отвечает.
+    // Провалившийся первый тик подберёт страховочный pgKick из 60-секундного тика loadFeatures.
+    function pgSubscribe(hash, fn) {
+        var token = 'p' + (++_pgSeq);
+        _pgSubs[token] = { hash: hash || null, fn: fn || null };
+        if (_pgConf.poll > 0) { _pgIdleSince = 0; pgTick(); }
+        return token;
+    }
+
+    function pgUnsubscribe(token) {
+        if (!token || !_pgSubs[token]) return;
+        delete _pgSubs[token];
+        // 🔴 _pgState НЕ выбрасываем: возврат на экран обязан рисоваться мгновенно по последнему
+        // известному, а не «пусто → через секунду цифра».
+        if (!pgHasSubs()) pgStopTimer();
+    }
+
+    function pgStopTimer() {
+        if (_pgTimer) { clearInterval(_pgTimer); _pgTimer = null; }
+        _pgInterval = 0;
+        try { if (_pgNet) _pgNet.clear(); } catch (e) {}
+    }
+
+    function pgReschedule(ms) {
+        if (!pgHasSubs() || !(ms > 0)) { pgStopTimer(); return; }
+        if (_pgTimer && _pgInterval === ms) return;   // тот же интервал — таймер не пересоздаём
+        if (_pgTimer) clearInterval(_pgTimer);
+        _pgInterval = ms;
+        _pgTimer = setInterval(pgTick, ms);
+    }
+
+    function pgKick() {
+        if (!pgHasSubs() || _pgConf.poll <= 0) return;
+        _pgIdleSince = 0;
+        pgTick();   // интервал (или его отсутствие) решит pgApply по ответу
+    }
+
+    function pgTick() {
+        if (_pgBusy || _pgConf.poll <= 0) return;
+        // Плеер открыт оверлеем (активность остаётся «активной») — экран под ним не обновляем.
+        // Тот же гард, что у сетки камер: плейлист уже передан плееру, менять его на лету нельзя.
+        try { if (Lampa.Player.opened && Lampa.Player.opened()) return; } catch (e) {}
+
+        var h = pgWantedHash();
+        var url = API + '/qdl/progress' + (h ? '?hash=' + h : '');
+        _pgBusy = true;
+        try {
+            if (!_pgNet) _pgNet = new Lampa.Reguest();
+            _pgNet.silent(withUid(url),
+                function (r) { _pgBusy = false; _pgFails = 0; pgApply(r); },
+                function () {
+                    _pgBusy = false;
+                    _pgFails++;
+                    // Ни одного тоста: поллер — фоновая мебель.
+                    // Ретраим ТОЛЬКО если уже знали, что качать есть что. Иначе молчим до
+                    // следующего пробуждения — долбить мёртвый сервер впустую незачем.
+                    var busy = _pgState && (_pgState.active > 0 || _pgState.pending > 0);
+                    if (!busy) { pgStopTimer(); return; }
+                    if (_pgFails >= 3) pgReschedule(Math.min((_pgInterval || _pgConf.poll * 1000) * 2, 60000));
+                });
+        } catch (e) { _pgBusy = false; }
+    }
+
+    function pgApply(r) {
+        // 🔴 ok:false — это «не знаю», а не «всё скачано». Вердикт гейтов не трогаем вовсе:
+        // сюда попадают лёгший qBittorrent, киллсвитч на сервере и сервер-реплика.
+        if (!r || r.ok === false) {
+            if (r && r.poll === 0) { pgStopTimer(); _pgConf.poll = 0; }   // серверный киллсвитч
+            return;
+        }
+        if (typeof r.poll === 'number' || typeof r.block === 'boolean') setProgressConf(r);
+
+        var prev = _pgState;
+        var byHash = {}, i;
+        for (i = 0; i < (r.items || []).length; i++) {
+            var it = r.items[i];
+            if (it && it.h) byHash[it.h] = { p: typeof it.p === 'number' ? it.p : 0, s: it.s };
+        }
+        var st = {
+            ok: true, stamp: r.stamp,
+            active: r.active || 0, pending: r.pending || 0,
+            byHash: byHash, files: r.files || {}
+        };
+
+        // Раздача пропала из items = докачалась. Сбрасываем ЕЁ кеш серий, чтобы приехали свежие
+        // имена и замена донор→основная. ⚠️ Не dropEpCache() без аргумента: это убило бы
+        // мемоизацию, ради которой она и заведена (путь «карточка → Смотреть» зовёт /qdl/episodes трижды).
+        if (prev && prev.ok)
+            for (var oh in prev.byHash)
+                if (prev.byHash.hasOwnProperty(oh) && !byHash[oh]) dropEpCache(oh);
+
+        var same = !!prev && prev.stamp === st.stamp && prev.stamp !== undefined;
+        _pgState = st;
+
+        // интервал: активные → быстро, стоящие → медленный пульс с бюджетом, пусто → молчим
+        if (st.active > 0) {
+            _pgIdleSince = 0;
+            pgReschedule(_pgConf.poll * 1000);
+        } else if (st.pending > 0 && _pgConf.idle > 0) {
+            if (!_pgIdleSince) _pgIdleSince = Date.now();
+            var over = _pgConf.budget > 0 && (Date.now() - _pgIdleSince) > _pgConf.budget * 60000;
+            if (over) pgStopTimer(); else pgReschedule(_pgConf.idle * 1000);
+        } else {
+            _pgIdleSince = 0;
+            pgStopTimer();   // ничего не качается — таймера нет вовсе (требование владельца)
+        }
+
+        if (same) return;   // состояние то же → DOM не трогаем, фокус пульта не рискует
+        for (var k in _pgSubs)
+            if (_pgSubs.hasOwnProperty(k) && _pgSubs[k].fn) { try { _pgSubs[k].fn(st); } catch (e) {} }
+    }
+
+    /// null = данных нет (fail-open); {p,s} = состояние; отсутствие хеша при ok:true = ГОТОВО.
+    function pgGet(h) {
+        if (!_pgState || !_pgState.ok || !h) return null;
+        return _pgState.byHash[h] || { p: 1, s: 'done' };
+    }
+
+    /// Прогресс конкретного файла раздачи, 0..1. null = сервер про него не рассказывал.
+    function pgFile(h, index) {
+        if (!_pgState || !_pgState.ok || !h || !(index >= 0)) return null;
+        var arr = _pgState.files && _pgState.files[h];
+        if (!arr) return null;
+        for (var i = 0; i < arr.length; i++)
+            if (arr[i] && arr[i][0] === index) return arr[i][1];
+        return null;
+    }
+
+    function pgStopAll() { _pgSubs = {}; pgStopTimer(); }
+    function pgReset() { pgStopAll(); _pgState = null; _pgIdleSince = 0; _pgBusy = false; _pgFails = 0; _pgNet = null; }
+
     // ───────── Прогрев кеша сервера (голова+хвост файла в page cache + ffprobe-кеш) ─────────
     // fire-and-forget: голый fetch, не req (ответ не важен, Reguest и 45-с таймаут — лишние)
     function warmup(hash, index) {
@@ -1168,16 +1364,52 @@
     // audioHash — раздача, для которой выбрана озвучка: audio-id ('eN' встроенная / 'd<id>' студия)
     // специфичен для КОНКРЕТНОГО рипа, поэтому к файлам ДРУГОЙ раздачи (донор) его не применяем —
     // иначе несуществующая дорожка → не тот язык или отказ HLS. Чужим — дефолтная дорожка (null).
-    function buildPlaylist(hash, vids, audio, audioHash) {
-        return vids.map(function (f) {
+    // readyFn (qdl 2.93, необязательный) — фильтр «эту серию можно играть». Недокачанные не
+    // должны попадать в плейлист вообще, иначе авто-переход внутри плеера прыгнет в дырявый файл.
+    //
+    // 🔴 Возврат несёт КАРТУ индексов свойством qdlMap[j] = индекс в исходном vids. Фильтровать
+    // сам массив vids нельзя: `i` в comp.play(i), vids.indexOf(cur) и rows[i] — это индекс
+    // в vids, и любое смещение развалило бы все три разом. Карта именно СВОЙСТВОМ массива, а не
+    // объектом {list, map}: возврат buildPlaylist индексируют напрямую и код, и тесты.
+    function buildPlaylist(hash, vids, audio, audioHash, readyFn) {
+        var list = [], map = [];
+        vids.forEach(function (f, i) {
+            if (readyFn && !readyFn(f)) return;
             // 2.78: у чужой раздачи (донор охоты, соседний сезон склеенной карточки) свои id
             // дорожек — но своя запомненная озвучка у неё тоже есть, и она лучше дефолта
             var fh = srcHash(f, hash);
             var a = (audioHash == null || fh === audioHash) ? audio : (getAudioPref(fh) || null);
             var item = { title: baseName(f.name) + (f.source === 'donor' ? ' · врем.' : ''), url: streamUrl(srcHash(f, hash), f.index, a) };
             try { item.timeline = pickTimeline(hash, f); } catch (e) {}
-            return item;
+            map.push(i);
+            list.push(item);
         });
+        list.qdlMap = map;
+        return list;
+    }
+
+    // ───────── Готовность серии (qdl 2.93) ─────────
+    // Владелец: «если это сериал, то только серии которые загружены можно смотреть».
+    // Источник правды — живой per-file прогресс поллера, фолбэк — снимок из /qdl/episodes
+    // (там progress лежит на каждой серии с самого начала, клиент его просто не читал).
+    // Нет данных вовсе → серия играбельна: гейт обязан ошибаться в сторону «пустить».
+    // ⚠️ srcHash обязателен: серия донора и серия соседнего сезона несут СВОЙ hash.
+    function epProgress(f, hash) {
+        if (!f) return -1;
+        var live = pgFile(srcHash(f, hash), f.index);
+        if (live !== null && typeof live === 'number') return live;
+        return (typeof f.progress === 'number') ? f.progress : -1;
+    }
+
+    function epReady(f, hash) {
+        var p = epProgress(f, hash);
+        return p < 0 ? true : p >= DONE;
+    }
+
+    function epWaitNotice(f, hash) {
+        var p = epProgress(f, hash);
+        var pct = p >= 0 ? ' — ' + Math.round(p * 100) + '%' : '';
+        try { Lampa.Noty.show('Серия ещё качается' + pct + '. Дождитесь загрузки'); } catch (e) {}
     }
 
     // ───────── Зеркало прогресса устройства: file_view ↔ нативное KV AndroidJS (см. claude/06 §AM) ─────────
@@ -1766,28 +1998,65 @@
         });
     }
 
-    function watchByHash(hash, name, card) {
+    // gateItem — необязательный, строго последний: карточка загрузки, если у вызывающего она
+    // под рукой. Нужен только как фолбэк, когда список файлов не приехал.
+    //
+    // 🔴 Гейт живёт ЗДЕСЬ, а не в watch(): решение «фильм или сериал» принимается только после
+    // fetchEpisodes, а до 2.93 гейт стоял раньше — и сериал, у которого нужная серия давно
+    // скачана, ругался карточным прогрессом. У склеенной карточки он к тому же взвешен по
+    // размеру (SeriesMerge.cs), то есть 11 готовых серий из 12 читались как «92%».
+    // Сериал теперь уходит на экран серий БЕЗ диалога: там гейтит каждая строка отдельно.
+    //
+    // Бонус однофайловой ветки: прогресс берётся у САМОГО ФАЙЛА (per-file из /qdl/episodes),
+    // а не у торрента — они расходятся всегда, когда в раздаче лежат сэмплы и субтитры.
+    function watchByHash(hash, name, card, gateItem) {
         fetchEpisodes(hash, function (files) {
             var vids = mergedVideoFiles(files);
             // сериал уходит на экран серий — историю там запишет play(), в момент старта конкретной серии
-            if (vids.length > 1) chooseEpisode(hash, name, false, card);
-            else {
+            if (vids.length > 1) { chooseEpisode(hash, name, false, card); return; }
+            var f = vids[0] || null;
+            var gate = f ? { hash: srcHash(f, hash), progress: f.progress } : gateItem;
+            gatePartial(gate, function () {
                 noteHistory(card);
-                playLocal(vids.length ? srcHash(vids[0], hash) : hash, vids.length ? vids[0].index : -1, name, vids.length ? vids[0].name : null, vids.length ? vids[0] : null);
-            }
-        }, function () { noteHistory(card); playLocal(hash, -1, name); });
+                playLocal(f ? srcHash(f, hash) : hash, f ? f.index : -1, name, f ? f.name : null, f);
+            });
+        }, function () {
+            // список файлов не приехал — гейтим по тому, что знает вызывающий (обычно ничего → fail-open)
+            gatePartial(gateItem, function () { noteHistory(card); playLocal(hash, -1, name); });
+        });
     }
 
-    // гейт недокачанного: раздача с progress<1 — предупредить, что видна только скачанная часть.
-    // Для сериала предупреждение покажется даже если выбранная серия скачана (per-file прогресс вне скоупа)
-    function confirmPartial(item, run) {
-        var p = (item && typeof item.progress === 'number') ? item.progress : 1;   // нет данных → fail-open
-        if (p >= 1 || (item && (item.local || item.state === 'local'))) { run(); return; }
-        var pct = Math.round(p * 100);
+    // ───────── Гейт недокачанного (qdl 2.93) ─────────
+    // Владелец: «сейчас когда мы загружаем фильм можно попробовать его посмотреть — нужно
+    // выводить надпись „дождитесь загрузки“». Решение — ЖЁСТКАЯ блокировка, и вот почему:
+    // последовательная загрузка (sequentialDownload/firstLastPiecePrio) в qBittorrent у нас не
+    // включается нигде, куски приезжают «редкие первыми», файл на диске дырявый, а /qdl/stream
+    // отдаёт его как есть без проверки доступности кусков. Заголовок (а у mp4 ещё и индекс в
+    // хвосте) на 40% — лотерея: плеер либо не стартует, либо доигрывает до первой дыры.
+    // Сам модуль это уже признаёт: транскод отказывает недокачанному, а под падения ffmpeg на
+    // таких файлах написан негатив-кеш HLS. Киллсвитч на лету — partialPlayBlock:false.
+    //
+    // 🔴 Живое состояние ПОБЕЖДАЕТ снимок. Ровно этим чинится жалоба «докачалось, а клиент
+    // всё равно спрашивает»: /qdl/list кешируется 30 с, а qdl_progress на активности —
+    // снимок момента открытия карточки и не обновляется никогда.
+    //
+    // -1 = данных нет (fail-open). Отдельный сентинел нужен потому, что 0 — валидный прогресс:
+    // невозможность выразить «неизвестно» и породила три места с `?? 1`.
+    function livePartial(item) {
+        if (!item) return -1;
+        if (item.local || item.state === 'local') return 1;   // транскод/jut/XSMART — готов по построению
+        var live = item.hash ? pgGet(item.hash) : null;
+        if (live && typeof live.p === 'number') return live.p;
+        return (typeof item.progress === 'number') ? item.progress : -1;
+    }
+
+    function gatePartial(item, run) {
+        var p = livePartial(item);
+        if (p < 0 || p >= DONE || !pgBlockEnabled()) { run(); return; }
         Lampa.Select.show({
-            title: 'Ещё качается (' + pct + '%) — показана будет только скачанная часть',
-            items: [{ title: 'Смотреть всё равно', ok: true }, { title: 'Отмена' }],
-            onSelect: function (a) { if (a.ok) run(); else Lampa.Controller.toggle('content'); },
+            title: 'Дождитесь загрузки — скачано ' + Math.round(p * 100) + '%',
+            items: [{ title: 'Понятно' }],
+            onSelect: function () { Lampa.Controller.toggle('content'); },
             onBack: function () { Lampa.Controller.toggle('content'); }
         });
     }
@@ -1800,9 +2069,8 @@
         // историю ведём своей карточкой, иначе скачанное аниме в неё вообще не попадёт.
         if ((!hcard || !hcard.id) && item && item.jut && item.jut.slug)
             hcard = jutHistoryCard(item.jut.slug, item.jut.titleRu || item.name);
-        confirmPartial(item, function () {
-            watchByHash(item.hash, (item.meta && item.meta.title) || item.name, hcard);
-        });
+        // гейт — внутри watchByHash: до неё ещё неизвестно, фильм это или сериал (см. её шапку)
+        watchByHash(item.hash, (item.meta && item.meta.title) || item.name, hcard, item);
     }
 
     // ───────── Открытие загрузки: НАСТОЯЩАЯ полная карточка (вся инфа), но в режиме «одна кнопка» ─────────
@@ -1819,7 +2087,12 @@
                 method: m.media_type === 'tv' ? 'tv' : 'movie',
                 card: m, source: m.source || 'tmdb',
                 qdl_hash: item.hash,   // маркер: открыто из «Загрузок» → addButton оставит одну кнопку «Смотреть»
-                qdl_progress: (typeof item.progress === 'number' ? item.progress : 1)   // для гейта недокачанного на карточке
+                // ⚠️ ТОЛЬКО подсказка для первой отрисовки подписи/чипа — НИКОГДА для гейта.
+                // Это снимок момента открытия карточки, он не обновляется, и именно на него
+                // жаловался владелец («докачалось, а клиент не знает»). Правду про прогресс
+                // с qdl 2.93 знает поллер (pgGet). Поле оставлено: его читает восстановленная
+                // активность, у которой поллер ещё пуст.
+                qdl_progress: (typeof item.progress === 'number' ? item.progress : 1)
             });
         } else {
             // нет TMDB id (jut.su, безымянные раздачи) → свой экран карточки: постер, описание,
@@ -1835,8 +2108,30 @@
     function badge(val, label) {
         return '<span style="display:inline-flex;align-items:center;gap:.35em;background:rgba(255,255,255,.14);padding:.3em .65em;border-radius:.45em;margin:0 .5em .5em 0;font-size:1em"><b>' + esc(val) + '</b><span style="opacity:.55;font-size:.78em">' + esc(label) + '</span></span>';
     }
-    function chip(txt) {
-        return '<span style="display:inline-block;background:rgba(255,255,255,.1);padding:.3em .65em;border-radius:.45em;margin:0 .5em .5em 0;font-size:1em">' + esc(txt) + '</span>';
+    // cls необязателен и строго второй: чип с классом можно потом найти и обновить на месте
+    function chip(txt, cls) {
+        return '<span' + (cls ? ' class="' + cls + '"' : '') + ' style="display:inline-block;background:rgba(255,255,255,.1);padding:.3em .65em;border-radius:.45em;margin:0 .5em .5em 0;font-size:1em">' + esc(txt) + '</span>';
+    }
+
+    // Живой прогресс карточки «Загрузок», 0..1. У склеенной (несколько сезонов одной раздачей)
+    // считаем ВЗВЕШЕННО ПО РАЗМЕРУ — точное зеркало MergeSeriesGroup на сервере.
+    // ⚠️ Наивное среднее здесь уже стреляло: докачанный 20-гигабайтный сезон рядом с пустым
+    // одногигабайтным давало «50%» на готовом сериале (claude/06 §CM).
+    function livePct(t) {
+        if (!t) return 0;
+        var ps = cardParts(t);
+        if (!ps) {
+            var l = pgGet(t.hash);
+            return (l && typeof l.p === 'number') ? l.p : (t.progress || 0);
+        }
+        var size = 0, weighted = 0;
+        ps.forEach(function (p) {
+            var lp = pgGet(p.hash);
+            var pp = (lp && typeof lp.p === 'number') ? lp.p : (p.progress || 0);
+            var sz = p.size || 0;
+            size += sz; weighted += sz * pp;
+        });
+        return size > 0 ? Math.min(1, weighted / size) : (t.progress || 0);
     }
 
     // ───────── Экран серий (замена селектбокса) ─────────
@@ -1893,8 +2188,13 @@
         } catch (e) {}
     }
     function epMark(pct) { return pct >= 90 ? '✓ ' : (pct >= 5 ? '► ' + Math.round(pct) + '% · ' : ''); }
-    function epMeta(f) {
-        return [liveSize(f && f.size), (f && f.source === 'donor') ? 'временная — заменится основной' : '']
+    // hash необязателен: без него подстрочник считается по снимку f.progress (так зовут тесты
+    // и старые места). ⚠️ Про ЗАГРУЗКУ, не про просмотр — просмотр рисует epMark.
+    function epMeta(f, hash) {
+        var p = f ? epProgress(f, hash) : -1;
+        return [liveSize(f && f.size),
+                (f && f.source === 'donor') ? 'временная — заменится основной' : '',
+                (p >= 0 && p < DONE) ? 'качается — ' + Math.round(p * 100) + '%' : '']
             .filter(Boolean).join('   ·   ');
     }
 
@@ -2006,18 +2306,27 @@
         this.play = function (i) {
             var vids = comp.vids, f = vids[i];
             if (!f) return;
+            // 🔴 Гейт ДО noteHistory: запертая серия не должна попадать в «Историю просмотров».
+            // Тост, а не Select: по строке тыкают случайно, а она и так помечена визуально.
+            if (!epReady(f, hash)) { epWaitNotice(f, hash); return; }
             noteHistory(hcard || activityCard());
             var go = function (audio) {
                 // озвучка выбрана для основной раздачи (vids[0]) — донорским файлам buildPlaylist даст дефолт
-                var playlist = buildPlaylist(hash, vids, audio, srcHash(vids[0], hash));
-                // 🔴 Играем ОТДЕЛЬНЫЙ объект, а не playlist[i]: плейлист обязан лежать НА объекте
+                // Недокачанные в плейлист не попадают: иначе авто-переход внутри плеера прыгнет в дырявый файл.
+                var playlist = buildPlaylist(hash, vids, audio, srcHash(vids[0], hash),
+                                             function (x) { return epReady(x, hash); });
+                // 🔴 Индекс в плейлисте ИЩЕМ по карте, а не предполагаем: playlist отфильтрован,
+                // а i — индекс в vids. Без этого «серия 3» играла бы четвёртую (мина смещения).
+                var j = playlist.qdlMap ? playlist.qdlMap.indexOf(i) : i;
+                if (j < 0 || !playlist.length) { epWaitNotice(f, hash); return; }
+                // 🔴 Играем ОТДЕЛЬНЫЙ объект, а не playlist[j]: плейлист обязан лежать НА объекте
                 // до play (нативная ветка сериализует data синхронно внутри Player.play, а
                 // Player.playlist() до нативов не доезжает — см. jutPlay), но item.playlist на
                 // элементе самого массива дал бы цикл и JSON.stringify бросил бы. url — ТА ЖЕ
                 // строка: нативы ищут текущий индекс точным сравнением. timeline — общий ref
                 // с элементом плейлиста: его и пишет прогресс (обратной ссылки в нём нет).
-                var item = { title: playlist[i].title, url: playlist[i].url };
-                if (playlist[i].timeline) item.timeline = playlist[i].timeline;
+                var item = { title: playlist[j].title, url: playlist[j].url };
+                if (playlist[j].timeline) item.timeline = playlist[j].timeline;
                 item.playlist = playlist;
                 Lampa.Player.play(item);
                 Lampa.Player.playlist(playlist);     // веб-плеер: ручное переключение серий остаётся
@@ -2026,25 +2335,48 @@
             if (comp.audioReady) go(comp.audio); else askAudio(go);
         };
 
+        // Только докачанные — общий фильтр для «что продолжать», автоплея и подсветки текущей.
+        // ⚠️ filter сохраняет ССЫЛКИ, а pickContinue/refreshMarks сравнивают через === , поэтому
+        // отфильтрованный массив совместим с ними без единой правки самих функций.
+        function readyVids() {
+            return comp.vids.filter(function (f) { return epReady(f, hash); });
+        }
+
         function rowEl(f, i) {
-            var meta = epMeta(f);
             var num = epNumber(f);   // номер серии крупно слева: длинные имена файлов обрезаются (репорт с iPhone)
             var el = $(
                 '<div class="selector qdl-row-focus" style="display:flex;align-items:center;gap:1.2em;padding:.9em 1.2em;margin:.35em 1.4em;background:rgba(255,255,255,.06);border-radius:.8em">' +
                   '<div class="qdl-ep-num" style="flex:none;min-width:1.7em;text-align:center;font-size:1.8em;font-weight:700;opacity:.9">' + (num !== null ? num : i + 1) + '</div>' +
                   '<div style="flex:1;min-width:0">' +
-                    '<div style="font-size:1.5em;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="qdl-ep-mark"></span><span class="qdl-ep-name"></span></div>' +
-                    (meta ? '<div style="opacity:.65;font-size:1.15em;margin-top:.25em">' + esc(meta) + '</div>' : '') +
+                    // 🔴 .qdl-ep-dl — про ЗАГРУЗКУ, .qdl-ep-mark — про ПРОСМОТР. Два разных процента
+                    // в одном узле уже однажды стоили путаницы; смешивать их нельзя.
+                    '<div style="font-size:1.5em;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="qdl-ep-dl"></span><span class="qdl-ep-mark"></span><span class="qdl-ep-name"></span></div>' +
+                    '<div class="qdl-ep-meta" style="opacity:.65;font-size:1.15em;margin-top:.25em"></div>' +
                   '</div>' +
                   '<div class="qdl-ep-play" style="opacity:.45;padding-right:.3em">' + WATCH_ICON + '</div>' +
                 '</div>'
             );
+            // data-* нужны живому обновлению: строку находим по ним и патчим текст, а не пересобираем
+            // (иначе фокус пульта уезжает — тот же приём, что у сетки камер).
+            el.attr('data-hash', srcHash(f, hash));
+            el.attr('data-index', String(f.index));
             el.find('.qdl-ep-name').text(baseName(f.name) + (f.source === 'donor' ? ' · врем.' : ''));
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:touch hover:hover', function () { last = markLast(el); });
             el.on('hover:enter', function () { comp.play(i); });
             rows.push({ el: el, f: f });
+            paintRowDownload(el, f);
             return el;
+        }
+
+        // Отметка загрузки строки + запертость. Зовётся при сборке и на каждом тике поллера.
+        function paintRowDownload(el, f) {
+            var ready = epReady(f, hash);
+            var p = epProgress(f, hash);
+            el.find('.qdl-ep-dl').text(ready ? '' : '⬇ ' + Math.round(Math.max(0, p) * 100) + '% ');
+            el.find('.qdl-ep-meta').text(epMeta(f, hash));
+            el.toggleClass('qdl-ep--wait', !ready);
+            el.find('.qdl-ep-play').css('opacity', ready ? .45 : .15);
         }
 
         this.build = function () {
@@ -2107,16 +2439,23 @@
             if (object.qdl_autoplay && vids.length) {
                 object.qdl_autoplay = false;   // одноразово: возврат из плеера не перезапускает плей
                 var vw = function (f) { return pickTimeline(hash, f); };
-                // 🔥 Было `comp.play(cur ? vids.indexOf(cur) : 0)`: когда продолжать нечего,
-                // «Продолжить» МОЛЧА запускала первый файл списка — ровно симптом жалобы
-                // 14.08.2026. Нечего продолжать → первая НЕпросмотренная (по номеру, не по
-                // индексу); досмотрено всё → начинаем сначала, но вслух.
-                var cur = chooseContinue(vids, vw) || firstUnwatched(vids, vw);
-                if (!cur) {
-                    cur = sortEpisodes(vids)[0];
-                    try { Lampa.Noty.show('Всё просмотрено — включаю с начала'); } catch (e) {}
+                // 2.93: выбираем только из ДОКАЧАННЫХ — иначе «Продолжить» с карточки молча
+                // уводила бы в серию, которая всё равно не сыграет.
+                var pool = readyVids();
+                if (!pool.length) {
+                    try { Lampa.Noty.show('Серии ещё качаются — дождитесь загрузки'); } catch (e) {}
+                } else {
+                    // 🔥 Было `comp.play(cur ? vids.indexOf(cur) : 0)`: когда продолжать нечего,
+                    // «Продолжить» МОЛЧА запускала первый файл списка — ровно симптом жалобы
+                    // 14.08.2026. Нечего продолжать → первая НЕпросмотренная (по номеру, не по
+                    // индексу); досмотрено всё → начинаем сначала, но вслух.
+                    var cur = chooseContinue(pool, vw) || firstUnwatched(pool, vw);
+                    if (!cur) {
+                        cur = sortEpisodes(pool)[0];
+                        try { Lampa.Noty.show('Всё просмотрено — включаю с начала'); } catch (e) {}
+                    }
+                    comp.play(vids.indexOf(cur));   // обратно в индекс НЕотфильтрованного vids
                 }
-                comp.play(vids.indexOf(cur));
             }
         };
 
@@ -2124,7 +2463,9 @@
         this.refreshMarks = function () {
             if (!rows.length) return;
             var view = function (f) { return pickTimeline(hash, f); };
-            var cur = chooseContinue(comp.vids, view);
+            // «текущая» считается по докачанным: подсветка и стартовый фокус не должны садиться
+            // на запертую строку — нажатие по ней даст только тост.
+            var cur = chooseContinue(readyVids(), view);
             rows.forEach(function (r) {
                 r.el.find('.qdl-ep-mark').text(epMark((view(r.f) || {}).percent || 0));
                 r.el.toggleClass('qdl-ep--cur', !!cur && r.f === cur);
@@ -2135,11 +2476,24 @@
             }
         };
 
+        // Живая разблокировка строк по мере докачки (qdl 2.93). DOM не пересобираем — патчим
+        // текст найденных узлов, иначе фокус пульта уезжает на первую строку.
+        this.refreshDownload = function () {
+            if (!rows.length) return;
+            rows.forEach(function (r) { paintRowDownload(r.el, r.f); });
+            comp.refreshMarks();   // докачавшаяся серия могла изменить, куда указывает «продолжить»
+        };
+
         this.render = function () { return html; };
         this.start = function () {
             // возврат на экран (в т.ч. из плеера/другой активности) — восстановить бакет таймкодов
             if (comp.tlbucket) { activeEpisodesComp = comp; setTlBucket(comp.tlbucket); }
             comp.refreshMarks();
+            // 🔴 Подписка именно в start(), а отписка в pause(): Lampa при навигации ВПЕРЁД
+            // не зовёт destroy(), компонент висит в стеке — без этого каждая сложенная копия
+            // экрана продолжала бы опрашивать сервер из фона (мина ComponentLiveWatch).
+            if (!comp.pgToken) comp.pgToken = pgSubscribe(hash, function () { comp.refreshDownload(); });
+            comp.refreshDownload();
             Lampa.Controller.add('content', {
                 toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
@@ -2150,9 +2504,11 @@
             });
             Lampa.Controller.toggle('content');
         };
-        this.pause = function () {};
-        this.stop = function () {};
+        function pgOff() { if (comp.pgToken) { pgUnsubscribe(comp.pgToken); comp.pgToken = null; } }
+        this.pause = function () { pgOff(); };
+        this.stop = function () { pgOff(); };
         this.destroy = function () {
+            pgOff();   // идемпотентно: на выселении из стека pause не приходит
             if (activeEpisodesComp === comp) activeEpisodesComp = null;
             if (comp.tlbucket) clearTlBucket(comp.tlbucket);
             scroll.destroy(); html.remove();
@@ -2168,7 +2524,7 @@
         this.create = function () {
             scroll.minus();   // без этого на ТВ у .scroll нет высоты — контент не скроллится
             var m = item.meta || {};
-            var pct = Math.round((item.progress || 0) * 100);
+            var pct = Math.round(livePct(item) * 100);
             var kind = m.media_type === 'tv' ? 'Сериал' : 'Фильм';
             var rt = m.runtime ? (Math.floor(m.runtime / 60) + ':' + ('0' + (m.runtime % 60)).slice(-2)) : '';
             var meta1 = [m.year, (m.countries && m.countries.length ? m.countries.slice(0, 2).join(', ') : ''), kind, rt].filter(Boolean).join('   ·   ');
@@ -2179,7 +2535,8 @@
             if (m.age) badges += chip(/\d$/.test(String(m.age)) ? m.age + '+' : m.age);
             if (m.status) badges += chip(m.status === 'Released' ? 'Выпущен' : (m.status === 'Ended' ? 'Завершён' : (m.status === 'Returning Series' ? 'Идёт' : m.status)));
             if (m.number_of_seasons) badges += chip('Сезонов: ' + m.number_of_seasons);
-            badges += chip(pct < 100 ? pct + '% загружено' : '✓ загружено');
+            // текст сохранён дословно; класс нужен, чтобы обновлять чип на месте по тику поллера
+            badges += chip(pct < 100 ? pct + '% загружено' : '✓ загружено', 'qdl-chip-dl');
 
             var bg = m.backdrop_path ? tmdbImg('t/p/w1280' + m.backdrop_path) : '';
             var bgDiv = bg
@@ -2233,9 +2590,12 @@
                     if (!bar.length) return;
                     var btn = bar.find('.qdl-continue');
                     var vids = mergedVideoFiles(files);
-                    // фильм/одна серия — продолжать нечего, хватит «Смотреть»
+                    // фильм/одна серия — продолжать нечего, хватит «Смотреть».
+                    // 2.93: цель ищем только среди ДОКАЧАННЫХ — «Продолжить · Серия 5» не должна
+                    // вести в серию, которая всё равно упрётся в гейт экрана серий.
+                    var ready = vids.filter(function (f) { return epReady(f, item.hash); });
                     var target = vids.length < 2 ? null
-                        : chooseContinue(vids, function (f) { return pickTimeline(item.hash, f); });
+                        : chooseContinue(ready, function (f) { return pickTimeline(item.hash, f); });
                     // Всё досмотрели → кнопка обязана уйти. Узел удаляем без починки навигатора:
                     // toggle() этого экрана пересобирает коллекцию через collectionSet.
                     if (!target) { if (btn.length) btn.remove(); return; }
@@ -2243,9 +2603,10 @@
                     if (btn.length) { btn.children('span').text('Продолжить · ' + epShort(target.name)); return; }
                     var b = $('<div class="qdl-continue selector" style="display:inline-flex;align-items:center;gap:.55em;padding:.75em 2em;border-radius:.6em;font-size:1.4em">' + CONTINUE_ICON + '<span></span></div>');
                     b.children('span').text('Продолжить · ' + epShort(target.name));
-                    b.on('hover:enter', function () {
-                        confirmPartial(item, function () { chooseEpisode(item.hash, (m.title || item.name), true); });
-                    });
+                    // Кнопка есть только у сериала (target считается при vids.length >= 2), а его
+                    // карточный прогресс взвешен по размеру — гейтить им нечего. Гейт стоит
+                    // построчно на экране серий (qdl 2.93).
+                    b.on('hover:enter', function () { chooseEpisode(item.hash, (m.title || item.name), true); });
                     b.on('hover:focus', function (e) { scroll.update($(e.target), true); });
                     bar.prepend(b);
                     navAppend(bar, b);
@@ -2272,6 +2633,9 @@
             // ДО Controller.add: toggle() пересобирает коллекцию навигатора из DOM, поэтому
             // добавленная/удалённая здесь кнопка попадает в неё сама — navAppend не нужен
             if (comp.refreshContinue) comp.refreshContinue();
+            // подписка в start / отписка в pause — см. мину «Lampa не зовёт destroy вперёд»
+            if (!comp.pgToken) comp.pgToken = pgSubscribe(item.hash, function () { comp.refreshChip(); });
+            comp.refreshChip();
             Lampa.Controller.add('content', {
                 toggle: function () { focusBack(scroll, false); },
                 up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
@@ -2282,11 +2646,21 @@
             });
             Lampa.Controller.toggle('content');
         };
-        this.pause = function () {};
-        this.stop = function () {};
+        // текст чипа тот же, меняется только число — узел не пересоздаём (фокус пульта жив)
+        this.refreshChip = function () {
+            try {
+                var c = html.find('.qdl-chip-dl');
+                if (!c.length) return;
+                var p = Math.round(livePct(item) * 100);
+                c.text(p < 100 ? p + '% загружено' : '✓ загружено');
+            } catch (e) {}
+        };
+        function pgOff() { if (comp.pgToken) { pgUnsubscribe(comp.pgToken); comp.pgToken = null; } }
+        this.pause = function () { pgOff(); };
+        this.stop = function () { pgOff(); };
         // destroyed — не косметика: на него смотрят три async-колбэка (кнопка «Продолжить»,
         // enrich→saveMeta→Activity.replace). Флаг никогда не выставлялся, и гарды были мертвы.
-        this.destroy = function () { comp.destroyed = true; scroll.destroy(); html.remove(); };
+        this.destroy = function () { pgOff(); comp.destroyed = true; scroll.destroy(); html.remove(); };
     }
 
     // ───────── Грид «Загрузки» (вертикальные карточки-постеры) ─────────
@@ -2303,6 +2677,7 @@
         var body = $('<div class="category-full mapping--grid cols--6"></div>');
         var last;
         var builtStamp = -1;   // colStamp на момент build: разошёлся — грид устарел
+        this.items = [];       // карточки грида — по ним refreshBadges обновляет проценты
 
         this.create = function () {
             injectCss();   // .qdl-col-card: экран, открытый первым после загрузки, иначе без стилей
@@ -2320,6 +2695,7 @@
 
         this.build = function (list, collections) {
             builtStamp = colStamp;
+            comp.items = [];
             var g = groupDownloads(list || [], collections || []);
 
             if (object.collection_id) {
@@ -2369,23 +2745,31 @@
             body.append(el);
         };
 
+        // Бейдж состояния загрузки. Вынесен из append, чтобы его можно было перерисовывать
+        // на месте по тику поллера — карточка при этом остаётся ТЕМ ЖЕ узлом, фокус пульта жив.
+        this.dlBadge = function (t) {
+            var css = 'position:absolute;left:.4em;top:.4em;color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5;';
+            if (t.local || t.state === 'local')
+                return '<div class="qdl-dl-badge" style="' + css + 'background:rgba(30,120,220,.9)">MP4</div>';
+            var pct = Math.round(livePct(t) * 100);
+            return pct < 100
+                ? '<div class="qdl-dl-badge" style="' + css + 'background:rgba(0,0,0,.75)">' + pct + '%</div>'
+                : '<div class="qdl-dl-badge" style="' + css + 'background:rgba(20,160,40,.9)">✓</div>';
+        };
+
         this.append = function (t, ctx) {
             var meta = t.meta || {};
-            var pct = Math.round((t.progress || 0) * 100);
 
             // обычная ВЕРТИКАЛЬНАЯ карточка-постер (без card--collection!)
             var el = Lampa.Template.get('card', { title: meta.title || t.name, release_year: meta.year || '' });
+            el.attr('data-hash', t.hash);   // по нему живое обновление находит карточку
 
             var img = el.find('.card__img');
             img.attr('src', posterUrl(t));
             img.on('error', function () { this.src = PX1; });
 
             var view = el.find('.card__view'); if (!view.length) view = el;
-            view.append(t.local || t.state === 'local'
-                ? '<div style="position:absolute;left:.4em;top:.4em;background:rgba(30,120,220,.9);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">MP4</div>'
-                : pct < 100
-                    ? '<div style="position:absolute;left:.4em;top:.4em;background:rgba(0,0,0,.75);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">' + pct + '%</div>'
-                    : '<div style="position:absolute;left:.4em;top:.4em;background:rgba(20,160,40,.9);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5">✓</div>');
+            view.append(comp.dlBadge(t));
 
             // 2.78: карточка склеена из нескольких раздач — говорим об этом вслух. Иначе
             // «одна карточка вместо двух» выглядит как пропавший сезон.
@@ -2406,6 +2790,7 @@
             el.on('hover:long', function () { quickMenu(t, ctx); });
 
             body.append(el);
+            comp.items.push(t);   // реестр для refreshBadges: обходим карточки, а не весь DOM
 
             // нет метаданных → ищем в TMDB + тянем полные детали, кэшируем, обновляем карточку
             if (!t.meta) {
@@ -2421,10 +2806,29 @@
             else healPoster(t, img);   // мета есть, но постер на сервере не скачался → ретрай
         };
 
+        // Живые проценты (qdl 2.93): DOM не перестраиваем — подменяем один бейдж на карточку.
+        // ⚠️ t.progress тоже обновляем: openDownload кладёт его на активность как подсказку
+        // для первой отрисовки подписи «Смотреть · N%».
+        this.refreshBadges = function () {
+            try {
+                (comp.items || []).forEach(function (t) {
+                    var el = body.find('.card[data-hash="' + t.hash + '"]');
+                    if (!el.length) return;
+                    var p = livePct(t);
+                    t.progress = p;
+                    var b = el.find('.qdl-dl-badge');
+                    if (b.length) b.replaceWith(comp.dlBadge(t));
+                });
+            } catch (e) {}
+        };
+
         this.render = function () { return html; };
         this.start = function () {
             // коллекции менялись, пока грид был в фоне (мутация в под-гриде и т.п.) → перерисовать
             if (builtStamp !== -1 && builtStamp !== colStamp) { Lampa.Activity.replace(); return; }
+            // подписка ПОСЛЕ раннего выхода: иначе подписали бы компонент, который сейчас заменят
+            if (!comp.pgToken) comp.pgToken = pgSubscribe(null, function () { comp.refreshBadges(); });
+            comp.refreshBadges();
             Lampa.Controller.add('content', {
                 toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
@@ -2435,9 +2839,10 @@
             });
             Lampa.Controller.toggle('content');
         };
-        this.pause = function () {};
-        this.stop = function () {};
-        this.destroy = function () { network.clear(); scroll.destroy(); html.remove(); };
+        function pgOff() { if (comp.pgToken) { pgUnsubscribe(comp.pgToken); comp.pgToken = null; } }
+        this.pause = function () { pgOff(); };
+        this.stop = function () { pgOff(); };
+        this.destroy = function () { pgOff(); network.clear(); scroll.destroy(); html.remove(); };
     }
 
     // ───────── Уведомления о скачанных сериях (тост + центр уведомлений) ─────────
@@ -2566,7 +2971,12 @@
     // долетело ли событие app 'ready'. Если document без addEventListener (старый WebView) — try/catch.
     try {
         document.addEventListener('lwsEvent', function (e) {
-            try { if (e && e.detail && e.detail.name === 'qdl_noti') pollNotifications(); } catch (err) {}
+            try {
+                if (e && e.detail && e.detail.name === 'qdl_noti') {
+                    pollNotifications();
+                    pgKick();   // серверный пуш «что-то докачалось» — будим замолчавший поллер прогресса
+                }
+            } catch (err) {}
         });
     } catch (e) {}
 
@@ -3412,8 +3822,10 @@
             // на обычной карточке — пути, где openDownload/prewarmForCard не звались.
             // Дубль с prewarmForCard безвреден: сервер дедупит и очередь, и «уже прогрет».
             if (vids.length === 1) { warmup(srcHash(vids[0], hash), vids[0].index); return; }   // фильм/один файл
-            var target = chooseContinue(vids, function (f) { return pickTimeline(hash, f); });
-            var warm = target || vids[0];
+            // 2.93: только докачанные — иначе кнопка ведёт в серию, которую экран серий запрёт
+            var ready = vids.filter(function (f) { return epReady(f, hash); });
+            var target = chooseContinue(ready, function (f) { return pickTimeline(hash, f); });
+            var warm = target || ready[0] || vids[0];
             warmup(srcHash(warm, hash), warm.index);
             var exist = $('.qdl-continue-btn', render);
             if (!target) { if (exist.length) { exist.remove(); orderButtons(cont); } return; }
@@ -3421,8 +3833,10 @@
             var label = 'Продолжить · ' + epShort(target.name);
             var b = $('<div class="full-start__button selector qdl-continue-btn">' + CONTINUE_ICON + '<span>' + esc(label) + '</span></div>');
             b.on('hover:enter', function () {
-                // через экран серий с автоплеем: «назад» из плеера вернёт в список серий
-                confirmPartial(gateItem, function () { chooseEpisode(hash, name, true, card || (gateItem && gateItem.meta)); });
+                // через экран серий с автоплеем: «назад» из плеера вернёт в список серий.
+                // Гейта здесь нет намеренно: кнопка живёт только у сериала (vids.length >= 2),
+                // а недокачанные серии запирает сам экран серий — построчно (qdl 2.93).
+                chooseEpisode(hash, name, true, card || (gateItem && gateItem.meta));
             });
             cont.prepend(b);
             navAppend(cont, b);   // приехала async → в коллекции навигатора её ещё нет
@@ -3435,6 +3849,12 @@
     // первом открытии. Досматриваем серию — «Продолжить» обязана переехать на следующую.
     // Ловим два момента возврата: старт восстановленной активности и закрытие плеера
     // (плеер активность не меняет, поэтому одного 'activity' мало).
+    // qdl 2.93: сюда же переехала подписка «текущей карточки» на живой прогресс. addButton —
+    // обработчик события, у него нет ни pause, ни destroy, поэтому подписывать из него нельзя.
+    // Здесь ОДИН слот, следующий за передним планом: утечь больше чем одной подпиской физически
+    // не может. Свежий процент рисует подпись «Смотреть · 62%» и кормит гейт.
+    var _pgCardToken = null;
+
     function initContinueRefresh() {
         if (window.__qdl_continue_refresh) return;
         window.__qdl_continue_refresh = true;
@@ -3449,12 +3869,38 @@
                 if (!cont.length) cont = $('.full-start-new__buttons', render);
                 if (!cont.length) return;
                 var movie = act.card || {};
-                addContinueButton(render, cont, hash, movie.title || movie.name || '',
-                                  { progress: (typeof act.qdl_progress === 'number' ? act.qdl_progress : 1) }, movie);
+                addContinueButton(render, cont, hash, movie.title || movie.name || '', { hash: hash }, movie);
             } catch (e) {}
         };
-        try { Lampa.Listener.follow('activity', function (e) { if (e && e.type === 'start') sync(); }); } catch (e) {}
-        try { Lampa.Player.listener.follow('destroy', function () { sync(); }); } catch (e) {}
+        var follow = function () {
+            try {
+                var act = Lampa.Activity.active() || {};
+                var hash = act.qdl_hash || null;
+                if (_pgCardToken) { pgUnsubscribe(_pgCardToken); _pgCardToken = null; }
+                if (!hash) return;
+                _pgCardToken = pgSubscribe(hash, function () { paintCardWatch(); });
+                paintCardWatch();
+            } catch (e) {}
+        };
+        try { Lampa.Listener.follow('activity', function (e) { if (e && e.type === 'start') { sync(); follow(); } }); } catch (e) {}
+        try { Lampa.Player.listener.follow('destroy', function () { sync(); pgKick(); }); } catch (e) {}
+    }
+
+    // «Смотреть» на карточке из «Загрузок» → «Смотреть · 62%», пока раздача не готова.
+    // Патчим текст того же узла: на кнопке живёт фокус пульта, пересоздание его бы уронило.
+    // ✅ Безопасно для порядка кнопок: buttonRank сортирует по КЛАССАМ, а ensureOrderObserver
+    // слушает {childList:true} без subtree — text() на внуке его не будит.
+    function paintCardWatch() {
+        try {
+            var act = Lampa.Activity.active() || {};
+            if (!act.qdl_hash || !act.activity) return;
+            var sp = $('.qdl-watch-btn span', act.activity.render());
+            if (!sp.length) return;
+            var live = pgGet(act.qdl_hash);
+            var p = live && typeof live.p === 'number' ? live.p
+                  : (typeof act.qdl_progress === 'number' ? act.qdl_progress : 1);
+            sp.text(p >= DONE ? 'Смотреть' : 'Смотреть · ' + Math.round(p * 100) + '%');
+        } catch (e) {}
     }
 
     function addButton(e) {
@@ -3488,10 +3934,12 @@
                 render.addClass('qdl-only');                 // CSS прячет все прочие кнопки
                 if (!$('.qdl-watch-btn', render).length) {
                     var w = $('<div class="full-start__button selector qdl-watch-btn">' + WATCH_ICON + '<span>Смотреть</span></div>');
+                    // 🔴 Поля progress здесь БОЛЬШЕ НЕТ. Снимок qdl_progress брался в момент
+                    // открытия карточки и не обновлялся никогда — отсюда и «докачалось, а
+                    // клиент всё равно спрашивает». Прогресс берёт watchByHash: живой у поллера,
+                    // иначе per-file из /qdl/episodes, иначе fail-open.
                     w.on('hover:enter', function () {
-                        // progress прокинут из openDownload; нет поля (восстановленная активность) → fail-open
-                        confirmPartial({ hash: active.qdl_hash, progress: (typeof active.qdl_progress === 'number' ? active.qdl_progress : 1) },
-                            function () { watchByHash(active.qdl_hash, movie.title || movie.name, movie); });
+                        watchByHash(active.qdl_hash, movie.title || movie.name, movie, { hash: active.qdl_hash });
                     });
                     // удержание (long-press) на кнопке → меню управления (следить/удалить) — для дискаверабилити
                     w.on('hover:long', function () {
@@ -3502,10 +3950,11 @@
                     });
                     cont.prepend(w);
                     orderButtons(cont);
+                    paintCardWatch();   // первый процент — сразу, не дожидаясь тика поллера
                 }
                 // сериал с прогрессом просмотра → вторая кнопка «Продолжить: Серия N»
                 addContinueButton(render, cont, active.qdl_hash, movie.title || movie.name,
-                    { hash: active.qdl_hash, progress: (typeof active.qdl_progress === 'number' ? active.qdl_progress : 1) }, movie);
+                    { hash: active.qdl_hash }, movie);
                 return;   // НЕ добавляем «Скачать», прочие кнопки скрыты
             }
 
@@ -5883,6 +6332,10 @@
         // Права перечитываем на живом клиенте: владелец выдаёт их в админке, пока аппка уже открыта.
         // Заодно это пульс устройства — по нему свежая строка всплывает в списке /admin/d1v.
         try { setInterval(function () { loadFeatures(onFeatures); }, 60000); } catch (e) {}
+        // Страховка поллера прогресса: он гасит таймер насухо, когда качать нечего, и просыпается
+        // по входу на экран / пушу / выходу из плеера. Этот тик — последний пояс на случай,
+        // если все три сигнала пропали, а подписчик на экране остался.
+        try { setInterval(function () { if (!_pgTimer && pgHasSubs()) pgKick(); }, 60000); } catch (e) {}
     }
 
     if (window.appready) start();

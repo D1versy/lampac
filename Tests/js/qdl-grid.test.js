@@ -254,3 +254,67 @@ test('устаревший грид: после мутации коллекци�
   comp.start();
   assert.strictEqual(calls.replaces, 1, 'стамп разошёлся → Activity.replace');
 });
+
+// ─────────────────────────── живые проценты (qdl 2.93) ───────────────────────────
+// Владелец: «проценты загрузки на клиенте не обновляются». Раньше бейдж рисовался один раз
+// в append() и замерзал на всё время жизни активности в стеке Lampa.
+
+const HALF = { hash: HA, name: 'Half.mkv', progress: 0.4, has_poster: true, meta: { id: 9, media_type: 'movie', title: 'Половинка', year: 2020, poster_path: '/h.jpg' } };
+
+test('бейдж прогресса обновляется по тику поллера, карточка остаётся ТЕМ ЖЕ узлом', () => {
+  const { comp, html, qdl } = mount({}, { list: [HALF], collections: [] });
+  qdl.pgReset();
+
+  const badge = () => html.find('.qdl-dl-badge');
+  assert.strictEqual(badge().text(), '40%');
+  const node = html.find('.card')[0];
+
+  qdl.pgApply({ ok: true, stamp: '1', active: 1, pending: 0, items: [{ h: HA, p: 0.77, s: 'downloading' }] });
+  comp.refreshBadges();
+  assert.strictEqual(badge().text(), '77%', 'процент поехал');
+  assert.strictEqual(html.find('.card')[0], node, 'DOM не пересобран — фокус пульта жив');
+
+  qdl.pgApply({ ok: true, stamp: '2', active: 0, pending: 0, items: [] });   // докачалось
+  comp.refreshBadges();
+  assert.strictEqual(badge().text(), '✓');
+  qdl.pgReset();
+});
+
+test('грид подписывается в start и отписывается в pause (мина «нет destroy вперёд»)', () => {
+  const { comp, qdl } = mount({}, { list: [HALF], collections: [] });
+  qdl.pgReset();
+
+  comp.start();
+  assert.strictEqual(Object.keys(qdl.pgState().subs).length, 1);
+  comp.start();
+  assert.strictEqual(Object.keys(qdl.pgState().subs).length, 1, 'повторный start не удваивает');
+
+  comp.pause();
+  assert.strictEqual(Object.keys(qdl.pgState().subs).length, 0);
+  comp.destroy();
+  assert.strictEqual(Object.keys(qdl.pgState().subs).length, 0, 'destroy идемпотентен');
+  qdl.pgReset();
+});
+
+// 🔴 Взвешенный по РАЗМЕРУ, как MergeSeriesGroup на сервере. Наивное среднее здесь уже стреляло:
+// докачанный 20-гигабайтный сезон рядом с пустым одногигабайтным давал «50%» на готовом сериале.
+test('livePct склеенной карточки взвешен по размеру и совпадает с сервером', () => {
+  const { qdl } = mount({}, { list: [], collections: [] });
+  qdl.pgReset();
+
+  const merged = {
+    hash: HA, progress: 0,
+    parts: [
+      { hash: HA, size: 20 * 1024 * 1024 * 1024, progress: 1 },
+      { hash: HB, size: 1 * 1024 * 1024 * 1024, progress: 0 },
+    ],
+  };
+  // то же соотношение 20:1, что у серверного SeriesMergeTests.Прогресс_склеенной_карточки_взвешен_по_размеру
+  // (20000/21000): клиент и сервер обязаны давать одно число, иначе бейдж и гейт разойдутся
+  assert.ok(Math.abs(qdl.livePct(merged) - 20 / 21) < 1e-9, 'вес по размеру, а не среднее');
+
+  // живой прогресс частей побеждает снимок
+  qdl.pgApply({ ok: true, stamp: '1', active: 1, pending: 0, items: [{ h: HB, p: 0.5, s: 'downloading' }] });
+  assert.ok(Math.abs(qdl.livePct(merged) - (20 + 0.5) / 21) < 1e-9);
+  qdl.pgReset();
+});
