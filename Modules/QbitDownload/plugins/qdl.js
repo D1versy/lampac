@@ -14,6 +14,10 @@
     var BOX_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M21 16.5v-9L12 3 3 7.5v9L12 21l9-4.5z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M3.3 7.6L12 12l8.7-4.4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 12v9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
     var BELL = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 8a6 6 0 1112 0c0 7 3 9 3 9H3s3-2 3-9z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.3 21a1.94 1.94 0 003.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     var CAM = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.8 7.4l14.4-3.3 1.3 5.6L4.1 13 2.8 7.4z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M6.5 12.2V15a3 3 0 003 3h1.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="18.5" cy="18" r="2.6" stroke="currentColor" stroke-width="2"/><path d="M18 9.9l3.2 1.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+    // Detection: рамка сканирования с лупой — смысловой аналог ScanSearch у оригинального
+    // интерфейса регистратора. Стиль общий с CAM/HEALTH_ICON/D1V_ICON: 24x24, currentColor,
+    // stroke-width 2 — иначе кнопка выбивалась бы из ряда наших иконок.
+    var DETECT_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 8V5.5A2.5 2.5 0 015.5 3H8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M16 3h2.5A2.5 2.5 0 0121 5.5V8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M21 16v2.5a2.5 2.5 0 01-2.5 2.5H16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M8 21H5.5A2.5 2.5 0 013 18.5V16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="11" cy="11" r="3.2" stroke="currentColor" stroke-width="2"/><path d="M13.4 13.4L17 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
     var REC = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/></svg>';
     var ANIME = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="4" width="18" height="14" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M10 8.5l4.5 2.5L10 13.5v-5z" fill="currentColor"/><path d="M8 21h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
@@ -164,17 +168,35 @@
             // сетка эфира: по центру и во всю ширину (рут-em клампится на 10.6px → телефон ~36em:
             // фикс-ширина давала одну колонку слева с мёртвым полем справа). flex-grow растягивает
             // колонки, кап 38em не даёт одинокой плитке распухнуть на весь ТВ.
-            // Сетка эфира — жёсткие ДВЕ колонки, как раскладка «Quad» у оригинального Live View
-            // регистратора (4 камеры = 2x2). На телефоне корневой em клампится, две колонки
-            // превращаются в кашу — там одна, ровно как у оригинала.
-            '.qdl-watch-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:1em;padding:1.2em 1.4em}' +
-            '.qdl-watch-grid>div:not(.qdl-watch-tile){grid-column:1/-1}' +
-            '@media (max-width:600px){.qdl-watch-grid{grid-template-columns:1fr}}' +
-            '.qdl-watch-tile{position:relative;border-radius:.8em;overflow:hidden;background:#111;min-width:0;transition:transform .1s}' +
-            // тайл сетки эфира: без своего focus-правила он никак не подсвечивается пультом
-            '.qdl-watch-tile.focus{box-shadow:0 0 0 .22em #fff;transform:scale(1.04);z-index:1}' +
+            // Сетка эфира — жёсткие ДВЕ колонки (4 камеры = 2x2). Ширину колонки считает
+            // fitQuad() в рантайме: квадрат обязан ВЛЕЗАТЬ в экран целиком, а вычислить это
+            // в CSS нельзя — над сеткой стоят шапка Lampa и наша кнопка, и их высота
+            // зависит от корневого em, который Lampa пересчитывает под ширину экрана.
+            // На телефоне корневой em клампится, две колонки превращаются в кашу — там одна.
+            // Панель занимает ВЕСЬ экран (требование владельца): две колонки во всю ширину,
+            // высоту ряда задаёт fitQuad так, чтобы два ряда легли ровно во вьюпорт. Кадр при
+            // этом чуть подрезается по вертикали (object-fit:cover) — область контента у Lampa
+            // на 57 px ниже 16:9, и без подрезки пришлось бы оставлять поля по бокам.
+            '.qdl-watch-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:.25em;padding:0}' +
+            '@media (max-width:600px){.qdl-watch-grid{grid-template-columns:1fr;gap:.5em;padding:0 .5em}}' +
+            // Камеры не в эфире — отдельным блоком под живой четвёркой (возврат поведения
+            // до 2.95: «снизу чтобы были даже неактивные отключённые стримы»).
+            '.qdl-watch-offtitle{padding:1.3em 1.4em .4em;font-size:1.3em;font-weight:600;opacity:.75}' +
+            '.qdl-watch-off{display:grid;grid-template-columns:repeat(2,1fr);justify-content:center;gap:1em;padding:0 1.4em 2em}' +
+            '@media (max-width:600px){.qdl-watch-off{grid-template-columns:1fr}}' +
+            '.qdl-watch-tile{position:relative;border-radius:.8em;overflow:hidden;background:#111;min-width:0}' +
+            // 🔴 Фокус рисуем рамкой ВНУТРИ плитки, отдельным узлом поверх видео. Прежние
+            // box-shadow + scale(1.04) на полноэкранной панели не годятся: тень у плитки,
+            // прижатой к краю экрана, обрезается, а масштаб выталкивает её за вьюпорт —
+            // со стороны это выглядит как «фокус не виден, навигации нет» (жалоба владельца).
+            '.qdl-watch-ring{position:absolute;left:0;top:0;right:0;bottom:0;border:.25em solid transparent;border-radius:inherit;pointer-events:none;z-index:3}' +
+            '.qdl-watch-tile.focus{z-index:1}' +
+            '.qdl-watch-tile.focus .qdl-watch-ring{border-color:#fff}' +
             // кадр-подложка задаёт высоту плитки и виден, пока поток не поднялся
-            '.qdl-watch-frame{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#0a0a0a}' +
+            '.qdl-watch-frame{display:block;width:100%;height:100%;aspect-ratio:16/9;object-fit:cover;background:#0a0a0a}' +
+            // высоту ряда навязывает fitQuad — тогда 16/9 у кадра перестаёт командовать
+            '.qdl-watch-grid--fit .qdl-watch-frame{aspect-ratio:auto}' +
+            '.qdl-watch-grid--fit .qdl-watch-tile{border-radius:0}' +
             '.qdl-watch-tile video{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;background:#000}' +
             '.qdl-watch-note{position:absolute;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:1.2em;opacity:.8;text-shadow:0 .1em .3em #000;pointer-events:none;z-index:1}' +
             '.qdl-watch-bar{position:absolute;left:0;right:0;bottom:0;padding:.6em .8em;background:linear-gradient(0deg,rgba(0,0,0,.85),rgba(0,0,0,0));display:flex;align-items:center;gap:.6em;z-index:2}' +
@@ -236,6 +258,12 @@
             '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}' +
             // Автопилот jut.su. Выключен — приглушённый контур; включён — зелёный, как «Смотреть».
             // Кнопка стоит между заголовком и значками, поэтому нужны свои поля.
+            // Detection в шапке: размер svg ОБЯЗАН быть задан явно — без правила ниже
+            // иконка схлопывается в нулевую ширину и кнопка становится невидимой
+            // (ровно это и случилось на первой выкатке: узел в DOM есть, а на экране пусто).
+            '.qdl-det-btn{opacity:.85;transition:opacity .2s,transform .2s}' +
+            '.qdl-det-btn svg{width:1.5em;height:1.5em;display:block}' +
+            '.qdl-det-btn.focus{opacity:1;transform:scale(1.08)}' +
             '.qdl-jut-skip{margin:0 .2em 0 .8em;opacity:.45;transition:opacity .2s,color .2s,transform .2s}' +
             '.qdl-jut-skip svg{width:1.5em;height:1.5em;display:block}' +
             '.qdl-jut-skip.qdl-jut-skip--on{opacity:1;color:#19b531}' +
@@ -4538,21 +4566,31 @@
     //     живых декодера (та же грабля, что убила таймер сетки в §AL2).
     var LIVE_MAX_PLAYERS = 4;
 
-    // На iPhone дефолт «выкл»: WKWebView собран без снятого mediaTypesRequiringUserActionForPlayback,
-    // автоплей там запрещён, и плитки-видео честно не заведутся. Тап по плитке уводит в нативный
-    // плеер iOS (liveWatchPlayIOS) — этот путь не трогаем.
-    function liveVideoOn() {
-        var def = window.d1vision_platform !== 'ios';
-        try {
-            var v = Lampa.Storage.get('qdl_live_video', def ? '1' : '0');
-            if (v === true || v === 1 || v === '1') return true;
-            if (v === false || v === 0 || v === '0') return false;
-        } catch (e) {}
-        return def;
+    // Настройка ОДНА на весь дом (решение владельца: «я у себя включил — и оно на все девайсы»):
+    // значение живёт на сервере и приезжает ключом live.video в /qdl/features, который клиент
+    // и так перечитывает каждые 60 с. Переключается в настройках, раздел «D1Vision».
+    function liveVideoGlobal() {
+        try { if (qdlCard && qdlCard.live) return qdlCard.live.video !== false; } catch (e) {}
+        return true;   // файла на сервере нет / права ещё не приехали — эфир включён
     }
 
+    // 🔴 На iPhone это вопрос не настройки, а системы: WKWebView собран без снятого
+    // mediaTypesRequiringUserActionForPlayback, автоплей запрещён, и глобальное «включено»
+    // не сделает видео возможным. Там плитки остаются кадрами, а тап уводит в нативный
+    // плеер iOS (liveWatchPlayIOS) — этот путь не трогаем.
+    function liveVideoOn() {
+        if (window.d1vision_platform === 'ios') return false;
+        return liveVideoGlobal();
+    }
+
+    /// Зеркалим ответ сервера в кеш прав, чтобы открытый экран эфира подхватил смену сразу,
+    /// не дожидаясь следующего опроса /qdl/features.
     function liveVideoSet(on) {
-        try { Lampa.Storage.set('qdl_live_video', on ? '1' : '0'); } catch (e) {}
+        try {
+            if (!qdlCard) qdlCard = {};
+            qdlCard.live = qdlCard.live || {};
+            qdlCard.live.video = !!on;
+        } catch (e) {}
     }
 
     // hls.js приезжает АСИНХРОННО: бандл Lampa грузит ./vender/hls/hls.js через putScriptAsync,
@@ -4666,7 +4704,9 @@
         var network = new Lampa.Reguest();
         var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
         var html = $('<div></div>');
-        var body = $('<div class="qdl-watch-grid"></div>');   // раскладка — в injectCss (2 колонки)
+        var body = $('<div></div>');
+        var grid = $('<div class="qdl-watch-grid"></div>');     // камеры в эфире: квадрат по центру
+        var offGrid = $('<div class="qdl-watch-off"></div>');    // не в эфире: блок под квадратом
         var last;
         var timer = null;
         var haveTiles = false;
@@ -4681,7 +4721,8 @@
         var visTimer = null;   // фолбек-пересчёт видимости там, где нет IntersectionObserver
         var fullId = 0;       // какая камера развёрнута на весь экран (0 — сетка)
         var fullHome = null;  // куда вернуть развёрнутую плитку: {parent, next}
-        var videoBtn = null;
+        var liveCols = 2;     // сколько колонок сейчас в панели (на телефоне одна)
+        var onResize = null;
 
         // Таймер живёт только пока экран активен: Lampa на forward-навигации НЕ зовёт destroy
         // (компонент висит в стеке до pages_save_total), и без stop в pause() каждая копия сетки
@@ -4707,14 +4748,27 @@
             if (comp.destroyed) return;
             cams = r.cameras || [];
 
-            body.append(headBar());
+            body.append(grid);   // кнопка Detection живёт в шапке Lampa (ensureLiveDetectBtn)
 
             if (r.error)
                 body.append(liveMsg('⚠️ ' + r.error));
             else if (!cams.length)
                 body.append(liveMsg('Камер не найдено.'));
-            else
-                cams.forEach(function (c) { body.append(tile(c)); });
+            else {
+                // Эфирные — в квадрат, остальные отдельным блоком ниже (возврат поведения до 2.95).
+                // 🔴 Деление делается ОДИН раз, при построении: камера, поднявшаяся в эфир между
+                // обновлениями, получает свежий бейдж на месте, но переезжает наверх только при
+                // следующем входе в раздел. Перестройка DOM уронила бы фокус пульта — та же
+                // причина, по которой refresh() никогда не перерисовывает сетку (§AL2).
+                var off = [];
+                cams.forEach(function (c) { if (c.live) grid.append(tile(c)); else off.push(c); });
+
+                if (off.length) {
+                    body.append($('<div class="qdl-watch-offtitle">Не в эфире</div>'));
+                    body.append(offGrid);
+                    off.forEach(function (c) { offGrid.append(tile(c)); });
+                }
+            }
 
             // статусы и кадры дышат сами; DOM не перестраиваем — фокус пульта не теряется
             haveTiles = cams.length > 0;
@@ -4723,8 +4777,61 @@
 
             this.activity.loader(false);
             this.activity.toggle();
+            fitQuad();
+            // 🔴 Повторяем несколько раз: Lampa показывает активность и досчитывает высоту
+            // скролла (scroll.minus) уже ПОСЛЕ нашего построения, поэтому первый замер даёт
+            // и нули, и просто устаревший top. Ловилось живьём: ряд получался 222 px вместо
+            // 264, и панель не доходила до низа экрана на 80 px.
+            [0, 250, 800, 2000].forEach(function (t) { setTimeout(fitQuad, t); });
+            if (!onResize) {
+                onResize = function () { fitQuad(); };
+                try { window.addEventListener('resize', onResize); } catch (e) {}
+            }
             sync();
         };
+
+        // ── панель камер занимает ВЕСЬ экран ──────────────────────────────────────
+        // Требование владельца: «панелька из 4х видео на весь экран если на телевизоре,
+        // и друг за другом на айфоне». Ширину дают две колонки во всю ширину ленты, а высоту
+        // ряда считаем здесь: (что осталось от вьюпорта под сеткой − зазор) / 2. Посчитать это
+        // в CSS нельзя — сверху стоит шапка Lampa, её высота зависит от корневого em, который
+        // Lampa пересчитывает под ширину экрана.
+        //
+        // 🔴 Кадр при этом подрезается по вертикали (object-fit:cover), и это осознанно:
+        // область контента у Lampa примерно на высоту шапки ниже 16:9, а четыре 16:9-плитки
+        // в две колонки дают ровно 16:9. Либо небольшая подрезка, либо поля по бокам —
+        // владелец просил «на весь экран».
+        function fitQuad() {
+            if (comp.destroyed) return;
+            try {
+                var node = grid[0];
+                if (!node || !node.parentNode) return;
+
+                liveCols = (window.innerWidth || 1280) <= 600 ? 1 : 2;
+
+                // Телефон: плитки идут друг за другом во всю ширину, высоту диктует их 16/9.
+                if (liveCols === 1) {
+                    grid.removeClass('qdl-watch-grid--fit');
+                    node.style.gridAutoRows = '';
+                    offGrid[0].style.gridTemplateColumns = '';
+                    return;
+                }
+
+                var box = node.getBoundingClientRect();
+                if (box.top <= 0 || !node.clientWidth) return;   // ещё не показали — посчитаем позже
+
+                var cs = window.getComputedStyle(node);
+                var rowGap = parseFloat(cs.rowGap) || parseFloat(cs.columnGap) || 4;
+
+                var avail = (window.innerHeight || 720) - box.top;
+                var h = Math.max(90, Math.floor((avail - rowGap) / 2));
+
+                grid.addClass('qdl-watch-grid--fit');
+                node.style.gridAutoRows = h + 'px';
+                // Не в эфире — статичные кадры под панелью, им столько места не нужно.
+                offGrid[0].style.gridTemplateColumns = 'repeat(2, ' + Math.round(h * 16 / 9 * 0.6) + 'px)';
+            } catch (e) {}
+        }
 
         function badgeHtml(c) {
             return c.live
@@ -4732,43 +4839,12 @@
                 : '<span style="background:rgba(255,255,255,.16);color:#ddd;padding:.12em .55em;border-radius:.35em;font-size:.85em">не в эфире</span>';
         }
 
-        function mkBtn(text) {
-            var el = $('<div class="selector qdl-btn-focus" style="padding:.65em 1.1em;background:rgba(255,255,255,.08);border-radius:.6em;font-size:1.3em;white-space:nowrap"></div>');
-            el.text(text);
-            el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); scheduleSync(); });
-            el.on('hover:touch hover:hover', function () { last = markLast(el); });
-            return el;
-        }
-
-        function videoLabel() { return liveVideoOn() ? '📡 Видео: вкл' : '📡 Видео: выкл'; }
-
-        function headBar() {
-            var bar = $('<div style="display:flex;align-items:center;gap:.7em;padding:1.2em 0 .5em;flex-wrap:wrap"></div>');
-            var full = mkBtn('⛶ На весь экран');
-            var det = mkBtn('🎯 Detection');
-            videoBtn = mkBtn(videoLabel());
-
-            full.on('hover:enter', function () { openFocused(); });
-            det.on('hover:enter', function () {
-                Lampa.Activity.push({ url: '', title: 'Detection', component: 'qdl_live_detect', page: 1 });
-            });
-            videoBtn.on('hover:enter', function () {
-                var on = !liveVideoOn();
-                liveVideoSet(on);
-                videoBtn.text(videoLabel());
-                if (!on) { if (fullId) exitFull(); stopAll(); }
-                sync();
-                Lampa.Noty.show(on ? 'Эфир в плитках включён' : 'Эфир в плитках выключен');
-            });
-
-            return bar.append(full).append(det).append(videoBtn);
-        }
-
         function tile(c) {
             var el = $(
                 '<div class="selector qdl-watch-tile" data-cam="' + c.id + '">' +
                   '<img class="qdl-watch-frame">' +
                   '<div class="qdl-watch-note"></div>' +
+                  '<div class="qdl-watch-ring"></div>' +
                   '<div class="qdl-watch-bar">' +
                     '<div class="qdl-watch-name">' + esc(c.name) + '</div>' +
                     '<div class="qdl-watch-badge">' + badgeHtml(c) + '</div>' +
@@ -4876,7 +4952,11 @@
             try { q = p.video.play(); } catch (e) {}
             // Со звуком автоплей может быть запрещён политикой браузера — тихо возвращаем немой.
             if (q && q.catch) q.catch(function () {
-                try { p.video.muted = true; p.video.play(); } catch (e) {}
+                try {
+                    p.video.muted = true;
+                    var again = p.video.play();
+                    if (again && again.catch) again.catch(function () {});
+                } catch (e) {}
             });
         }
 
@@ -4915,6 +4995,9 @@
             cams.forEach(function (c) {
                 var el = tiles[c.id];
                 if (!el || !el.length || !visible[String(c.id)]) return;
+                // Не в эфире: будим поток на регистраторе, но слот декодера не занимаем —
+                // иначе мёртвая плитка из нижней секции вытеснила бы живую камеру.
+                if (!c.live) { wake(c); return; }
                 cand.push({ c: c, d: tileDist(el[0]) });
             });
             cand.sort(function (a, b) { return a.d - b.d; });
@@ -4934,7 +5017,7 @@
 
         function scheduleSync() {
             clearTimeout(syncTimer);
-            syncTimer = setTimeout(sync, 200);
+            syncTimer = setTimeout(function () { fitQuad(); sync(); }, 200);
         }
 
         function watchVisibility() {
@@ -4966,22 +5049,6 @@
 
         // ── фулл вью: одна камера на весь экран ───────────────────────────────────
         function liveCams() { return cams.filter(function (c) { return c.live; }); }
-
-        function openFocused() {
-            var id = focusedCam();
-            var c = (id && camById(id)) || liveCams()[0] || cams[0];
-            if (!c) { Lampa.Noty.show('Камер не найдено'); return; }
-            if (liveVideoOn() && !iosLiveNative()) enterFull(c.id);
-            else liveWatchPlay(c);
-        }
-
-        function focusedCam() {
-            try {
-                var el = $(last).closest('.qdl-watch-tile');
-                if (el.length) return +el.attr('data-cam');
-            } catch (e) {}
-            return 0;
-        }
 
         // 🔴 Плитку на время фулл вью УНОСИМ В body. position:fixed внутри скролла Lampa
         // не покрывает экран: у скролл-контейнера есть transform, а трансформированный предок
@@ -5037,7 +5104,8 @@
             // Перенос узла в редких движках ставит медиа на паузу — поднимаем обратно.
             setTimeout(function () {
                 var p = players[id];
-                if (p && p.video && p.video.paused) { try { p.video.play(); } catch (e) {} }
+                if (!p || !p.video || !p.video.paused) return;
+                try { var again = p.video.play(); if (again && again.catch) again.catch(function () {}); } catch (e) {}
             }, 120);
             Lampa.Controller.toggle('content');
         }
@@ -5123,6 +5191,7 @@
                 },
                 up: function () {
                     if (fullId) return;
+                    // Из верхнего ряда уходить некуда, кроме шапки — а Detection теперь там.
                     if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head');
                 },
                 down: function () {
@@ -5135,7 +5204,8 @@
                 }
             });
             Lampa.Controller.toggle('content');
-            sync();
+            fitQuad();     // вернулись из настроек/другого экрана — размеры могли устареть
+            sync();        // и глобальный тумблер эфира мог смениться на другом устройстве
         };
 
         // pause = ушли ВПЕРЁД на другой экран: глушим таймер, висящий прогрев эфира, ещё НЕ
@@ -5162,6 +5232,7 @@
             comp.destroyed = true;
             leave();
             if (io) { try { io.disconnect(); } catch (e) {} io = null; }
+            if (onResize) { try { window.removeEventListener('resize', onResize); } catch (e) {} onResize = null; }
             tiles = {}; visible = {};
             network.clear(); scroll.destroy(); html.remove();
         };
@@ -6106,17 +6177,18 @@
     function startHeaderNotiWatcher() {
         ensureHeaderNoti();
         ensureJutAutopilot();
+        ensureLiveDetectBtn();
         var deb = null;
         function onMut() {
             if (deb) return;
-            deb = setTimeout(function () { deb = null; ensureHeaderNoti(); ensureJutAutopilot(); }, 300);
+            deb = setTimeout(function () { deb = null; ensureHeaderNoti(); ensureJutAutopilot(); ensureLiveDetectBtn(); }, 300);
         }
         try {
             var headEl = document.querySelector('.head') || document.body;   // узкий observer
             new MutationObserver(onMut).observe(headEl, { childList: true, subtree: true });
         } catch (e) {}
         [500, 1500, 3000, 6000].forEach(function (t) {
-            setTimeout(function () { ensureHeaderNoti(); ensureJutAutopilot(); }, t);
+            setTimeout(function () { ensureHeaderNoti(); ensureJutAutopilot(); ensureLiveDetectBtn(); }, t);
         });
     }
 
@@ -6157,6 +6229,49 @@
         } catch (e) {}
     }
 
+    // ── Detection в шапке Lampa ──────────────────────────────────────────────────
+    // ⚠️ Класс кнопки — `qdl-det-btn`, а НЕ `qdl-det-head`: последний уже занят шапкой
+    // полноэкранного просмотра детекций (`position:absolute;left:0;right:0`). Совпадение имён
+    // клало кнопку в левый верхний угол под «назад» и схлопывало её иконку в нулевую ширину —
+    // в DOM элемент есть, на экране пусто. Ловится только замером живого клиента.
+    // Владелец: «detection в хедере». Иконка живёт там же, где кнопка автопилота jut.su —
+    // сразу за названием раздела, слева от значков. Видна ТОЛЬКО на экранах эфира и самой
+    // ленты детекций и только при праве «эфир»: в остальных местах она бессмысленна.
+    // Побочно это закрывает и прежнюю просьбу «вверх с плиток попадает на Detection»:
+    // «вверх» из сетки штатно уводит в шапку (Controller.toggle('head')), а там она и есть.
+    var LIVE_HEAD_PAGES = { qdl_live_watch: 1, qdl_live_detect: 1 };
+
+    function liveDetectVisibility() {
+        try {
+            var act = Lampa.Activity.active() || {};
+            var show = !!LIVE_HEAD_PAGES[act.component] && qdlAllowed('live');
+            dedupe('.qdl-det-btn').css('display', show ? '' : 'none');
+        } catch (e) {}
+    }
+
+    function ensureLiveDetectBtn() {
+        try {
+            if (dedupe('.qdl-det-btn').length) { liveDetectVisibility(); return; }
+            // 🔴 Кладём в ряд значков (.head__actions), а не за названием раздела: вставленная
+            // после .head__title кнопка ложится ПОД «назад» в левом верхнем углу — замер
+            // живого клиента дал ей box [29,0,55,55], то есть ровно место стрелки, и на экране
+            // её не видно вовсе. Ряд значков — проверенное место, там же живёт колокольчик.
+            // ⚠️ .first(): вставка в НАБОР клонирует узел (та же грабля, что у колокольчика).
+            var actions = $('.head .head__actions').first();
+            if (!actions.length) return;
+            injectCss();
+
+            var btn = $('<div class="head__action selector qdl-det-btn">' + DETECT_ICON + '</div>');
+            btn.data('controller', 'head');   // поздняя иконка в хедере иначе не фокусируется пультом
+            btn.on('hover:enter', function () {
+                Lampa.Activity.push({ url: '', title: 'Detection', component: 'qdl_live_detect', page: 1 });
+            });
+
+            actions.prepend(btn);   // первым в ряду: раздел свой, а не системный
+            liveDetectVisibility();
+        } catch (e) {}
+    }
+
     function ensureJutAutopilot() {
         try {
             if (dedupe('.qdl-jut-skip').length) { jutAutopilotVisibility(); return; }
@@ -6188,7 +6303,10 @@
         // поэтому слушаем ещё и закрытие плеера (тот же приём, что в initContinueRefresh).
         try {
             Lampa.Listener.follow('activity', function (e) {
-                if (e && e.type === 'start') { ensureJutAutopilot(); jutAutopilotVisibility(); }
+                if (e && e.type === 'start') {
+                    ensureJutAutopilot(); jutAutopilotVisibility();
+                    ensureLiveDetectBtn(); liveDetectVisibility();
+                }
             });
         } catch (e) {}
         try { Lampa.Player.listener.follow('destroy', jutAutopilotVisibility); } catch (e) {}
@@ -7244,10 +7362,20 @@
 
     function renderD1Vision(body) {
         var list = body.find('.qdl-d1v-list');
+        // Значение эфира показываем сразу из кеша прав, а ниже уточняем у сервера: раздел
+        // открывают редко, но настройка общая — на другом устройстве её могли уже поменять.
+        var video = liveVideoGlobal();
+        var lastFilter = null;
 
         var paint = function (f) {
+            lastFilter = f;
             list.html(
-                '<div class="settings-param-title"><span>Каталог</span></div>'
+                '<div class="settings-param-title"><span>Эфир</span></div>'
+                + d1vRow('liveVideo', 'Видео в плитках камер', video ? 'Включено' : 'Выключено',
+                    'Живая картинка прямо в сетке раздела «D1versy Live». Настройка общая для всех устройств. '
+                    + 'На iPhone плитки всё равно остаются кадрами — там автоплей запрещён самой системой, '
+                    + 'а тап по плитке открывает нативный плеер.')
+                + '<div class="settings-param-title"><span>Каталог</span></div>'
                 + d1vRow('enabled', 'Фильтр по году выпуска', f.enabled ? 'Включён' : 'Выключен',
                     'Убирает из рядов «Сейчас смотрят», «Новинки» и «В хорошем качестве» всё старее указанных годов. Топы, жанровые подборки и коллекции не трогает.')
                 + d1vRow('movieYear', 'Фильмы не старше', String(f.movieYear), 'Год выпуска. Всё, что вышло раньше, в рядах не показывается.')
@@ -7278,6 +7406,21 @@
             };
 
             try {
+                list.find('[data-action="liveVideo"]').on('hover:enter click', function () {
+                    var next = !video;
+                    // 🔴 post() сам дописывает uid в query: гейт «действий» читает его ТОЛЬКО
+                    // оттуда, и без этого сервер отказал бы даже устройству с грантом (2.67).
+                    post(API + '/qdl/live/video', { on: next }, function (r) {
+                        if (r && r.success) {
+                            video = next;
+                            liveVideoSet(next);          // зеркало в кеш прав — экран эфира подхватит сам
+                            paint(lastFilter);
+                            try { Lampa.Noty.show('Сохранено для всех устройств'); } catch (e) {}
+                        }
+                        // Отказ показываем ПРИЧИНОЙ: отозванное право иначе читается как поломка.
+                        else { try { Lampa.Noty.show((r && r.error) || 'Не удалось сохранить'); } catch (e) {} }
+                    }, function () { try { Lampa.Noty.show('Сервер недоступен'); } catch (e) {} });
+                });
                 list.find('[data-action="enabled"]').on('hover:enter click', function () {
                     save({ enabled: !f.enabled, movieYear: f.movieYear, tvYear: f.tvYear });
                 });
@@ -7288,6 +7431,12 @@
         };
 
         list.html('<div class="settings-param"><div class="settings-param__name">Читаю настройки…</div></div>');
+        req(API + '/qdl/live/video', function (v) {
+            if (!v || typeof v.video !== 'boolean' || v.video === video) return;
+            video = v.video;
+            liveVideoSet(video);
+            if (lastFilter) paint(lastFilter);   // список уже нарисован — обновляем строку на месте
+        }, function () {});
         req(API + '/qdl/catalog-filter', function (r) {
             if (r && typeof r.movieYear === 'number') paint(r);
             else list.html('<div class="settings-param"><div class="settings-param__name">❌ Сервер вернул не то</div></div>');

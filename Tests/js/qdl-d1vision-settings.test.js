@@ -16,7 +16,7 @@ const H = require('./harness');
 const FILTER = { ver: 1, enabled: false, movieYear: 2020, tvYear: 2010 };
 
 /** Lampa с записью вызовов SettingsApi/Template + подставным ответом /qdl/catalog-filter. */
-function settingsLampa(filter, over) {
+function settingsLampa(filter, over, video) {
   const calls = [];
   const lampa = H.makeLampa(Object.assign({
     SettingsApi: {
@@ -30,6 +30,7 @@ function settingsLampa(filter, over) {
       this.timeout = () => {};
       this.clear = () => {};
       this.silent = (url, ok, err) => {
+        if (url.indexOf('/qdl/live/video') !== -1) { if (video !== undefined) ok(video); return; }
         if (url.indexOf('/qdl/catalog-filter') !== -1) { if (filter) ok(filter); else if (err) err(); }
       };
     },
@@ -247,4 +248,98 @@ test('d1vision: год из ввода уходит числом', async () => {
   assert.strictEqual(fetches.length, 1);
   assert.match(fetches[0], /tvYear=2024/);
   assert.match(fetches[0], /movieYear=2020/, 'соседнее поле обязано уехать неизменным');
+});
+
+// ───────────────────── эфир: глобальный тумблер (qdl 2.96) ─────────────────────
+//
+// Владелец: «настройки глобальны для всех — я у себя включил, и оно на все девайсы».
+// Значение серверное (live-video.json), едет клиенту ключом live.video в /qdl/features
+// и правится отсюда. Раньше это была кнопка на самом экране эфира и Lampa.Storage.
+
+test('эфир: строка рисуется значением из карты прав', () => {
+  const { lampa } = settingsLampa(FILTER);
+  const { qdl } = H.loadQdl({ lampa });
+  qdl.setCard({ live: { video: false } });
+
+  const L = makeList();
+  qdl.renderD1Vision(L.body);
+
+  const html = L.html[L.html.length - 1];
+  assert.match(html, /Видео в плитках камер/);
+  assert.match(html, /Выключено/);
+  assert.match(html, /общая для всех устройств/, 'пользователь обязан видеть, что настройка не личная');
+  assert.match(html, /iPhone/, 'и что на айфоне это ограничение системы, а не поломка');
+});
+
+test('эфир: ответ сервера уточняет строку, даже если карта прав устарела', () => {
+  // Другое устройство выключило эфир минуту назад — /qdl/features ещё не перечитан.
+  const { lampa } = settingsLampa(FILTER, null, { video: false });
+  const { qdl } = H.loadQdl({ lampa });
+  qdl.setCard({ live: { video: true } });
+
+  const L = makeList();
+  qdl.renderD1Vision(L.body);
+
+  assert.match(L.html[L.html.length - 1], /Выключено/, 'показываем правду сервера, а не кеш');
+});
+
+test('🔴 эфир: переключение шлёт POST на /qdl/live/video С uid — иначе гейт «действий» откажет', async () => {
+  const fetches = [];
+  const { lampa } = settingsLampa(FILTER, null, { video: true });
+  lampa.Storage.set('lampac_unic_id', 'sajnp6ml');
+
+  const { qdl } = H.loadQdl({
+    lampa,
+    fetch: (url, init) => {
+      fetches.push({ url: String(url), body: (init && init.body) || '' });
+      return Promise.resolve({ json: () => Promise.resolve({ success: true, video: false }) });
+    },
+  });
+
+  const L = makeList();
+  qdl.renderD1Vision(L.body);
+  L.handlers.liveVideo();
+  await new Promise((r) => setImmediate(r));
+
+  assert.strictEqual(fetches.length, 1);
+  assert.match(fetches[0].url, /\/qdl\/live\/video/);
+  assert.match(fetches[0].url, /uid=sajnp6ml/, 'RequestInfo.getuid читает ТОЛЬКО query');
+  assert.match(fetches[0].body, /on=false/, 'тумблер инвертирует текущее значение');
+});
+
+test('эфир: успешная запись сразу отражается и в строке, и в карте прав', async () => {
+  const { lampa } = settingsLampa(FILTER, null, { video: true });
+  const { qdl } = H.loadQdl({
+    lampa,
+    fetch: () => Promise.resolve({ json: () => Promise.resolve({ success: true, video: false }) }),
+  });
+
+  const L = makeList();
+  qdl.renderD1Vision(L.body);
+  assert.match(L.html[L.html.length - 1], /Включено/);
+
+  L.handlers.liveVideo();
+  await new Promise((r) => setImmediate(r));
+
+  assert.match(L.html[L.html.length - 1], /Выключено/, 'строка перерисована');
+  // 🔴 Зеркало в карте прав — то, по чему экран эфира гасит плееры БЕЗ похода на сервер.
+  assert.strictEqual(qdl.liveVideoGlobal(), false);
+});
+
+test('эфир: отказ сервера показан причиной', async () => {
+  const notys = [];
+  const { lampa } = settingsLampa(FILTER, { Noty: { show: (m) => notys.push(m) } }, { video: true });
+
+  const { qdl } = H.loadQdl({
+    lampa,
+    fetch: () => Promise.resolve({ json: () => Promise.resolve({ error: 'нет права управления' }) }),
+  });
+
+  const L = makeList();
+  qdl.renderD1Vision(L.body);
+  L.handlers.liveVideo();
+  await new Promise((r) => setImmediate(r));
+
+  assert.ok(notys.some((m) => /нет права управления/.test(m)), JSON.stringify(notys));
+  assert.strictEqual(qdl.liveVideoGlobal(), true, 'отказ не должен менять значение у клиента');
 });

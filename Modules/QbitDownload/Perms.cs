@@ -644,6 +644,10 @@ public partial class QbitController
         // кеширует ответ — значит новое значение доезжает до флота за минуту без пересборки.
         card["progress"] = ProgressClientConf();
 
+        // Эфир: глобальная настройка «видео в плитках» (qdl 2.96). Тем же каналом и по той же
+        // причине, что и progress выше — владелец переключает у себя, применяется всем.
+        card["live"] = new JObject { ["video"] = LiveVideoConf.Enabled };
+
         SetHeadersNoCache();
         return ContentTo(card.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
     }

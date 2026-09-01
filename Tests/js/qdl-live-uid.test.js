@@ -84,8 +84,10 @@ test('статический запрет: ни одна ссылка на qdl/l
   let m;
   while ((m = rx.exec(src)) !== null) {
     const line = src.slice(src.lastIndexOf('\n', m.index) + 1, src.indexOf('\n', m.index));
-    // req() дописывает uid сам — это законный путь; всё остальное обязано быть в withUid().
-    if (/withUid\s*\(/.test(line) || /\breq\s*\(/.test(line)) continue;
+    // req() и post() дописывают uid сами — обе первой строкой зовут withUid (post — с 2.67,
+    // когда гейт «действий» начал читать uid ТОЛЬКО из query). Это законные пути;
+    // всё остальное обязано быть в withUid().
+    if (/withUid\s*\(/.test(line) || /\breq\s*\(/.test(line) || /\bpost\s*\(/.test(line)) continue;
     bad.push(line.trim());
   }
 

@@ -91,22 +91,6 @@ public static class LiveAccess
 
     // ── D1versy Live → Detection (qdl 2.95) ───────────────────────────────
 
-    static readonly Type CamT = typeof(QbitController).GetNestedType("LiveCam", BindingFlags.NonPublic)
-        ?? throw new InvalidOperationException("QbitController+LiveCam not found");
-
-    /// <summary>Собрать приватный LiveCam — им проверяется правило видимости плитки.</summary>
-    public static object Cam(int id, string name, string protocol, bool isLive)
-    {
-        object c = Activator.CreateInstance(CamT);
-        CamT.GetField("id", IF).SetValue(c, id);
-        CamT.GetField("name", IF).SetValue(c, name);
-        CamT.GetField("protocol", IF).SetValue(c, protocol);
-        CamT.GetField("isLive", IF).SetValue(c, isLive);
-        return c;
-    }
-
-    public static bool LiveWatchVisible(object cam) => (bool)Access.Call("LiveWatchVisible", cam);
-
     /// <summary>Вид на приватный вложенный LiveEvt (срабатывание детектора).</summary>
     public sealed class EvtView
     {

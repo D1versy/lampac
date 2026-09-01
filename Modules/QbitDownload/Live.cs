@@ -238,13 +238,6 @@ public partial class QbitController
         public bool IsUpload => string.Equals(protocol, "upload", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>
-    /// Кого показывать в сетке эфира. Ровно правило оригинального Live View регистратора
-    /// (frontend/src/lib/cameraVisibility.ts::isCameraVisibleOnLiveView): mac-рекордер существует,
-    /// только пока приложение на маке пушит. Обычные камеры видны всегда — даже упавшие.
-    /// </summary>
-    static bool LiveWatchVisible(LiveCam c) => c != null && (!c.IsUpload || c.isLive);
-
     /// <summary>Все камеры регистратора с протоколом и признаком «сейчас пушит».</summary>
     async Task<List<LiveCam>> LiveCameraListFull(CancellationToken ct)
     {
@@ -1134,6 +1127,56 @@ public partial class QbitController
 
     #endregion
 
+    #region глобальная настройка «видео в плитках»
+
+    // Владелец: «настройки глобальны для всех — я у себя включил, и оно на все девайсы
+    // распространяется». Поэтому значение серверное, а не в Lampa.Storage: ровно тот же приём,
+    // что у фильтра каталога 2.89 (CatalogFilter.cs), включая запись через WriteNow — правку
+    // делают раз в полгода, а хост падает по питанию ~23 раза в месяц, терять её в окне
+    // дебаунса не за что.
+    //
+    // Клиентам едет ключом card["live"] в /qdl/features: loadFeatures и так ходит на старте и
+    // каждые 60 с, поэтому смена доезжает до всего флота за минуту без пересборки.
+    // 🔴 Именно отдельным ключом, а НЕ внутри card["features"] — тот объект клиент обходит
+    // через qdlAllowed как булеву карту прав, и настройка читалась бы как «право включено».
+    public static class LiveVideoConf
+    {
+        static readonly object _lock = new();
+
+        static string StorePath => System.IO.Path.Combine(ModInit.conf?.cachePath ?? "/qdl-data", "live-video.json");
+
+        /// <summary>Живое видео в плитках сетки. Файла нет — включено.</summary>
+        public static bool Enabled => (bool?)JsonStore.ReadObject(StorePath)?["video"] ?? true;
+
+        public static bool Save(bool on)
+        {
+            lock (_lock)
+            {
+                JsonStore.WriteNow(StorePath, new JObject { ["ver"] = 1, ["video"] = on });
+                return on;
+            }
+        }
+    }
+
+    /// <summary>Текущее значение — открыто всем: секрета нет, по нему клиент решает, поднимать ли плееры.</summary>
+    [HttpGet, AllowAnonymous]
+    [Route("qdl/live/video")]
+    public ActionResult LiveVideoGet() => LiveJsonOut(new JObject { ["video"] = LiveVideoConf.Enabled });
+
+    /// <summary>Переключение — только с правом «действия» (та же дверь, что у фильтра каталога).</summary>
+    [HttpPost, AllowAnonymous]
+    [Route("qdl/live/video")]
+    public ActionResult LiveVideoSet(bool on)
+    {
+        var denied = ManageDenied();
+        if (denied != null) return denied;
+
+        LiveVideoConf.Save(on);
+        return LiveJsonOut(new JObject { ["success"] = true, ["video"] = on });
+    }
+
+    #endregion
+
     #region /qdl/live/watch — D1versy Live: ЭФИР (живая сетка камер)
 
     // Живой просмотр у регистратора уже есть: POST /api/streams/{id}/start поднимает (или находит
@@ -1156,18 +1199,13 @@ public partial class QbitController
         JObject[] statuses;
         try
         {
-            var all = await LiveCameraListFull(ct).ConfigureAwait(false);
-            if (all.Count == 0)
-                return LiveErr("Регистратор не отдал список камер");
-
-            // Ровно правило оригинального Live View (isCameraVisibleOnLiveView): mac-рекордер
-            // существует, только пока приложение на маке пушит, и его плитка «не в эфире»
-            // не оживёт никогда — это были две мёртвые клетки из шести.
-            // 🔴 RTSP-камеры не прячем НИКОГДА, даже при ready:false: у оригинала они висят
-            // с «Connecting…», и это честнее исчезающей плитки.
-            cams = all.Where(LiveWatchVisible).ToList();
+            // 🔴 Отдаём ВСЕ камеры, включая те, что не в эфире (2.95 прятал mac-рекордеры —
+            // владелец вернул их назад: «снизу чтобы были даже неактивные отключённые стримы»).
+            // Делит экран на «в эфире» / «не в эфире» клиент, по полю live: сортировка ниже
+            // уже ставит эфирные первыми, то есть порядок как раз тот, что ему нужен.
+            cams = await LiveCameraListFull(ct).ConfigureAwait(false);
             if (cams.Count == 0)
-                return LiveJsonOut(new JObject { ["cameras"] = new JArray() });
+                return LiveErr("Регистратор не отдал список камер");
 
             statuses = await Task.WhenAll(cams.Select(async c =>
             {

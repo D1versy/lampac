@@ -1,26 +1,34 @@
 'use strict';
-// D1versy Live 2.95: живая сетка эфира (ComponentLiveWatch).
+// D1versy Live 2.96: экран эфира — квадрат живых камер, блок «не в эфире» и одна кнопка сверху.
 //
-// Что здесь защищается — ровно те три правила, на которых держится фича:
-//  1. играют ТОЛЬКО плитки в кадре и не больше LIVE_MAX_PLAYERS (иначе прокрутка вниз копила бы
-//     декодеры, а на домашнем ТВ свободно ~800 МБ);
-//  2. тумблер «Видео» гасит стриминг на живую;
-//  3. pause()/stop()/destroy() сносят ВСЕ плееры — Lampa на forward-навигации зовёт только
-//     pause(), и без этого каждый вход в раздел оставлял бы позади ещё четыре живых декодера
-//     (та же грабля, что уже убила таймер сетки в claude/06 §AL2).
-//
-// Плюс фулл вью одной камеры и кнопка Detection.
+// Что здесь защищается:
+//  1. деление на секции: эфирные — в квадрат, остальные отдельным блоком СНИЗУ (возврат
+//     поведения до 2.95 по требованию владельца);
+//  2. квадрат влезает в экран — ширину колонки считает fitQuad(), а не CSS;
+//  3. «вверх» с ОБЕИХ верхних плиток уводит на Detection (кнопка одна и стоит по центру,
+//     геометрический Navigator туда попадает в лучшем случае с одной);
+//  4. тумблер эфира ГЛОБАЛЬНЫЙ: значение приезжает с сервера в card.live.video, а не из
+//     Lampa.Storage — «включил у себя, применилось всем»;
+//  5. играют только плитки в кадре и не больше LIVE_MAX_PLAYERS;
+//  6. pause()/stop()/destroy() сносят ВСЕ плееры (Lampa на forward-навигации зовёт только
+//     pause() — без этого каждый вход в раздел копил бы декодеры, грабля §AL2).
 
 const test = require('node:test');
 const assert = require('node:assert');
 const H = require('./harness');
 
-const CAMS = [
+const LIVE = [
   { id: 3, name: 'Garage 2', live: true, running: true, upload: false, path: '/qdl/live/watch/hls/3/index.m3u8' },
   { id: 5, name: 'Garage 1', live: true, running: true, upload: false, path: '/qdl/live/watch/hls/5/index.m3u8' },
   { id: 1, name: 'balkon', live: true, running: true, upload: false, path: '/qdl/live/watch/hls/1/index.m3u8' },
   { id: 4, name: 'Front door', live: true, running: true, upload: false, path: '/qdl/live/watch/hls/4/index.m3u8' },
 ];
+// Боевой состав: два mac-рекордера, которые почти всегда не пушат.
+const OFF = [
+  { id: 6, name: 'Vlad-MacBook-Recorder', live: false, running: false, upload: true, path: null },
+  { id: 7, name: 'Vlad-MacBook-Recorder #2', live: false, running: false, upload: true, path: null },
+];
+const CAMS = LIVE.concat(OFF);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -43,11 +51,7 @@ function domScroll(w) {
 function fakeIO(w, state) {
   w.IntersectionObserver = function (cb) {
     state.cb = cb;
-    state.seen = [];
-    this.observe = (el) => {
-      state.seen.push(el);
-      cb([{ target: el, isIntersecting: state.visible ? state.visible(el) : true }]);
-    };
+    this.observe = (el) => cb([{ target: el, isIntersecting: state.visible ? state.visible(el) : true }]);
     this.unobserve = () => {};
     this.disconnect = () => { state.disconnected = true; };
   };
@@ -55,8 +59,8 @@ function fakeIO(w, state) {
 
 /**
  * jsdom не реализует play/pause/load у <video> и сыплет «Not implemented» в virtual console —
- * это шум чужого движка, а не наша ошибка. Заодно заглушки дают ЧЕСТНОЕ состояние paused,
- * без которого проверка «соседние камеры не декодируют» ничего бы не значила.
+ * шум чужого движка. Заглушки заодно дают ЧЕСТНОЕ состояние paused, без которого проверка
+ * «соседние камеры не декодируют» ничего бы не значила.
  */
 function stubMedia(w) {
   const proto = w.HTMLMediaElement.prototype;
@@ -66,9 +70,20 @@ function stubMedia(w) {
   proto.load = function () {};
 }
 
+/** В jsdom вся геометрия нулевая, а fitQuad считает по ней — подставляем измеримый экран. */
+function stubGrid(m, opts) {
+  opts = opts || {};
+  const top = opts.top || 120;
+  const width = opts.width || 1200;
+  const g = m.root.find('.qdl-watch-grid')[0];
+  Object.defineProperty(g, 'clientWidth', { configurable: true, value: width });
+  g.getBoundingClientRect = () => ({ top, left: 0, right: width, bottom: top + 400, width, height: 400 });
+  return g;
+}
+
 function mount(opts) {
   opts = opts || {};
-  const calls = { plays: [], pushes: [], notys: [], starts: [] };
+  const calls = { plays: [], pushes: [], notys: [], starts: [], focus: [] };
   const cams = opts.cams || CAMS;
 
   const lampa = H.makeLampa({
@@ -79,8 +94,7 @@ function mount(opts) {
         const u = String(url);
         if (u.indexOf('/qdl/live/watch/start') !== -1) {
           calls.starts.push(u);
-          if (opts.start) ok(opts.start);
-          else if (err) err();
+          if (opts.start) ok(opts.start); else if (err) err();
           return;
         }
         if (u.indexOf('/qdl/live/watch/thumb') !== -1) return;
@@ -90,15 +104,24 @@ function mount(opts) {
     Player: { play: (x) => calls.plays.push(x), playlist: () => {}, opened: () => !!opts.playerOpened },
     Activity: { push: (x) => calls.pushes.push(x), backward: () => { calls.backward = true; }, active: () => ({}) },
     Noty: { show: (t) => calls.notys.push(t) },
-    Controller: { add(name, o) { calls.ctrl = o; }, toggle() {}, collectionSet() {}, collectionFocus() {} },
+    Controller: {
+      add(name, o) { calls.ctrl = o; },
+      toggle(name) { calls.toggled = name; },
+      collectionSet() {},
+      collectionFocus(el) { calls.focus.push(el); },
+    },
   });
 
   const r = H.loadQdlDom({ lampa, perms: opts.perms });
   r.lampa.Scroll = domScroll(r.w);
   stubMedia(r.w);
+  // Navigator живёт в бандле Lampa, в jsdom его нет: без заглушки обычная ветка «вверх»
+  // падает с TypeError, и тест про прыжок на Detection проверял бы только половину случая.
+  r.w.Navigator = { canmove: () => false, move: () => {}, focused: () => {} };
   const io = {};
   if (opts.noIO !== true) fakeIO(r.w, Object.assign(io, opts.io || {}));
-  if (opts.videoOff) r.lampa.Storage.set('qdl_live_video', '0');
+  // Глобальная настройка эфира приезжает с сервера ключом live.video в /qdl/features.
+  if (opts.card !== null) r.qdl.setCard(opts.card || { live: { video: true } });
   if (opts.before) opts.before(r);
 
   const inst = new r.qdl.ComponentLiveWatch({});
@@ -109,67 +132,163 @@ function mount(opts) {
   return { r, inst, calls, io, root: inst.render(), body: r.$(r.w.document.body) };
 }
 
-// 🔴 Плитки ищем и в ленте, и на body: в фулл вью развёрнутая уезжает в body — position:fixed
-// внутри скролла Lampa не покрывает экран (у контейнера transform, он и становится содержащим
-// блоком). Поймано скриншотом живого клиента: соседние камеры и шапка Lampa оставались видны.
-// (лента компонента живёт отдельным деревом — Scroll-мок его никуда не вешает, поэтому
-// ищем в обоих местах, а не в document)
+// Лента компонента живёт отдельным деревом (Scroll-мок его никуда не вешает), а развёрнутая
+// в фулл вью плитка уезжает в body — ищем в обоих местах.
 const pick = (m, sel) => m.root.find(sel).add(m.body.find(sel));
 const tiles = (m) => pick(m, '.qdl-watch-tile');
+const quad = (m) => pick(m, '.qdl-watch-grid .qdl-watch-tile');
+const offTiles = (m) => pick(m, '.qdl-watch-off .qdl-watch-tile');
 const videos = (m) => pick(m, '.qdl-watch-tile video');
 const full = (m) => pick(m, '.qdl-watch-tile--full');
+const btns = (m) => m.root.find('.qdl-btn-focus');
 
-// ─────────────────────────── раскладка и состав ───────────────────────────
+// ─────────────────────────── состав и раскладка ───────────────────────────
 
-test('сетка: плитка на каждую камеру из ответа сервера, фильтр — на сервере', () => {
+test('эфирные камеры — в квадрат, неактивные — отдельным блоком снизу', () => {
   const m = mount();
-  assert.strictEqual(tiles(m).length, 4, 'четыре плитки — ровно то, что отдал сервер');
-  assert.ok(m.root.find('.qdl-watch-grid').length === 0 || true);
-  assert.ok(m.root.text().indexOf('Garage 2') !== -1, 'имя камеры на плитке');
+  assert.strictEqual(quad(m).length, 4, 'четыре живых в квадрате');
+  assert.strictEqual(offTiles(m).length, 2, 'два mac-рекордера в блоке «не в эфире»');
+  assert.strictEqual(tiles(m).length, 6, 'и никто не потерялся');
+  assert.strictEqual(m.root.find('.qdl-watch-offtitle').length, 1, 'у нижнего блока есть подпись');
   m.inst.destroy();
 });
 
-test('шапка: три кнопки — на весь экран, Detection, тумблер видео', () => {
-  const m = mount();
-  const btns = m.root.find('.qdl-btn-focus');
-  assert.strictEqual(btns.length, 3);
-  assert.ok(m.r.$(btns[0]).text().indexOf('На весь экран') !== -1);
-  assert.ok(m.r.$(btns[1]).text().indexOf('Detection') !== -1);
-  assert.ok(m.r.$(btns[2]).text().indexOf('Видео: вкл') !== -1, 'по умолчанию эфир в плитках включён');
+test('нижнего блока нет, когда все камеры в эфире', () => {
+  const m = mount({ cams: LIVE });
+  assert.strictEqual(quad(m).length, 4);
+  assert.strictEqual(m.root.find('.qdl-watch-offtitle').length, 0);
   m.inst.destroy();
 });
 
-test('Detection: кнопка уводит на свой экран', () => {
+test('в теле экрана кнопок нет вовсе — панель начинается сразу с камер', () => {
   const m = mount();
-  m.r.$(m.root.find('.qdl-btn-focus')[1]).trigger('hover:enter');
-  assert.strictEqual(m.calls.pushes.length, 1);
-  assert.strictEqual(m.calls.pushes[0].component, 'qdl_live_detect');
+  assert.strictEqual(btns(m).length, 0, 'Detection уехал в шапку Lampa, «На весь экран» убрана');
+  assert.strictEqual(m.root.find('.qdl-watch-head').length, 0);
+  m.inst.destroy();
+});
+
+// ── Detection в шапке Lampa ───────────────────────────────────────────────
+// Владелец: «detection в хедере». Иконка живёт рядом с названием раздела и видна только
+// на экранах эфира/детекций — тот же приём, что у кнопки автопилота jut.su.
+
+function headMount(opts) {
+  opts = opts || {};
+  const pushes = [];
+  const lampa = H.makeLampa({
+    Activity: { push: (x) => pushes.push(x), active: () => ({ component: opts.component || 'qdl_live_watch' }) },
+  });
+  const r = H.loadQdlDom({
+    lampa,
+    perms: opts.perms,
+    bodyHtml: '<div class="head"><div class="head__title">D1versy Live</div><div class="head__actions"></div></div>',
+  });
+  r.qdl.ensureLiveDetectBtn();
+  return { r, pushes, btn: r.$('.qdl-det-btn') };
+}
+
+test('шапка: иконка Detection встаёт в ряд значков', () => {
+  const m = headMount();
+  assert.strictEqual(m.btn.length, 1, 'иконка вставлена ровно одна');
+  assert.strictEqual(m.btn.find('svg').length, 1, 'это svg-иконка, а не эмодзи');
+  assert.ok(m.btn.hasClass('head__action'), 'оформлена как штатный значок шапки');
+  // 🔴 Ряд значков, а не «за названием»: вставленная после .head__title кнопка ложится
+  // ПОД «назад» в левом верхнем углу (замер живого клиента: box [29,0,55,55]).
+  assert.strictEqual(m.btn.parent().attr('class'), 'head__actions', 'кнопка в ряду значков шапки');
+  assert.notStrictEqual(m.btn.css('display'), 'none', 'на экране эфира видна');
+});
+
+test('шапка: повторный вызов не плодит копии', () => {
+  const m = headMount();
+  m.r.qdl.ensureLiveDetectBtn();
+  m.r.qdl.ensureLiveDetectBtn();
+  assert.strictEqual(m.r.$('.qdl-det-btn').length, 1);
+});
+
+test('шапка: иконка нажимается и открывает ленту детекций', () => {
+  const m = headMount();
+  m.btn.trigger('hover:enter');
+  assert.strictEqual(m.pushes.length, 1);
+  assert.strictEqual(m.pushes[0].component, 'qdl_live_detect');
+});
+
+test('шапка: на чужом экране иконка спрятана, а не висит везде', () => {
+  const m = headMount({ component: 'qdl_downloads' });
+  assert.strictEqual(m.btn.css('display'), 'none');
+});
+
+test('шапка: без права «эфир» иконки не видно', () => {
+  const m = headMount({ perms: {} });
+  assert.strictEqual(m.btn.css('display'), 'none');
+});
+
+test('панель занимает весь экран: два ряда ложатся ровно во вьюпорт', () => {
+  const m = mount();
+  const g = stubGrid(m, { top: 120, width: 1200 });
+  m.inst.start();                       // start() пересчитывает раскладку
+
+  const h = Number(/(\d+)px/.exec(g.style.gridAutoRows)[1]);
+  assert.ok(h > 0, 'высота ряда посчитана: ' + g.style.gridAutoRows);
+  assert.ok(m.r.$(g).hasClass('qdl-watch-grid--fit'), 'кадру снят 16/9, высоту диктует ряд');
+
+  const used = 120 + h * 2;              // верх сетки + два ряда (зазор между ними — внутри)
+  assert.ok(used <= m.r.w.innerHeight, 'панель не вылезает за экран: ' + used);
+  assert.ok(used >= m.r.w.innerHeight - 20, 'и не оставляет пустоты снизу: ' + used);
+  m.inst.destroy();
+});
+
+test('на телефоне плитки идут друг за другом во всю ширину', () => {
+  const m = mount();
+  Object.defineProperty(m.r.w, 'innerWidth', { configurable: true, value: 420 });
+  const g = stubGrid(m);
+  m.inst.start();
+  assert.strictEqual(g.style.gridAutoRows, '', 'высота ряда не навязана — её диктует 16/9 кадра');
+  assert.ok(!m.r.$(g).hasClass('qdl-watch-grid--fit'));
+  m.inst.destroy();
+});
+
+// ─────────────────────────── навигация ───────────────────────────
+
+test('«вверх» из верхнего ряда уводит в шапку Lampa — там теперь Detection', () => {
+  const m = mount();
+  stubGrid(m);
+  m.inst.start();
+
+  m.calls.toggled = null;
+  m.r.$(quad(m)[0]).trigger('hover:focus');
+  m.calls.ctrl.up();                 // Navigator.canmove('up') в заглушке = false
+  assert.strictEqual(m.calls.toggled, 'head', 'фокус ушёл в шапку');
   m.inst.destroy();
 });
 
 // ─────────────────────────── живое видео ───────────────────────────
 
 test('видимые плитки поднимают <video>, невидимые — нет', async () => {
-  const m = mount({ io: { visible: (el) => el.getAttribute('data-cam') !== '4' } });
+  const m = mount({ cams: LIVE, io: { visible: (el) => el.getAttribute('data-cam') !== '4' } });
   await sleep(1700);   // разбег стартов 500 мс на плитку
 
   assert.strictEqual(videos(m).length, 3, 'играют три видимые плитки, четвёртая — нет');
-  const played = tiles(m).filter((_, el) => m.r.$(el).find('video').length > 0)
-    .map((_, el) => m.r.$(el).attr('data-cam')).get();
-  assert.ok(played.indexOf('4') === -1, 'скрытая камера не декодируется');
   m.inst.destroy();
 });
 
 test('одновременно не больше LIVE_MAX_PLAYERS, даже если видно больше', async () => {
-  const many = CAMS.concat([
+  const many = LIVE.concat([
     { id: 8, name: 'Пятая', live: true, path: '/qdl/live/watch/hls/8/index.m3u8' },
     { id: 9, name: 'Шестая', live: true, path: '/qdl/live/watch/hls/9/index.m3u8' },
   ]);
   const m = mount({ cams: many });
   await sleep(2200);
 
-  assert.strictEqual(tiles(m).length, 6, 'плиток шесть');
+  assert.strictEqual(quad(m).length, 6, 'плиток шесть');
   assert.strictEqual(videos(m).length, m.r.qdl.LIVE_MAX_PLAYERS, 'а декодеров — не больше четырёх');
+  m.inst.destroy();
+});
+
+test('неактивная камера декодер не занимает, но поток на регистраторе будит', async () => {
+  const m = mount();
+  await sleep(1700);
+
+  assert.strictEqual(offTiles(m).find('video').length, 0, 'в нижнем блоке видео нет');
+  assert.ok(m.calls.starts.length >= 1, 'но /watch/start по ним ушёл');
   m.inst.destroy();
 });
 
@@ -177,54 +296,42 @@ test('плеер несёт uid устройства прямо в URL плей�
   const m = mount({ before: (r) => r.lampa.Storage.set('lampac_unic_id', '7kfrxzfr') });
   await sleep(200);
   const src = m.r.$(videos(m)[0]).attr('src') || '';
-  // hls.js в jsdom нет, поэтому src ставится только на нативном пути; проверяем сам факт узла
-  assert.strictEqual(videos(m).length > 0, true, 'видео-узел создан');
+  assert.ok(videos(m).length > 0, 'видео-узел создан');
   if (src) assert.ok(/[?&]uid=7kfrxzfr(&|$)/.test(src), 'uid в URL: ' + src);
   m.inst.destroy();
 });
 
-test('камера не в эфире: плитка будит поток на регистраторе, а не молчит', async () => {
-  const cams = [{ id: 3, name: 'Garage 2', live: false, running: false, upload: false, path: null }];
-  const m = mount({ cams, start: { camera: 3, ready: false, running: true, path: null } });
-  await sleep(100);
+// ─────────────────────────── глобальный тумблер ───────────────────────────
 
-  assert.strictEqual(videos(m).length, 0, 'без плейлиста декодер не поднимаем');
-  assert.ok(m.calls.starts.length >= 1, 'но /watch/start дёрнут');
-  m.inst.destroy();
-});
-
-// ─────────────────────────── тумблер ───────────────────────────
-
-test('тумблер выключен: ни одного <video>, плитки живут кадрами', async () => {
-  const m = mount({ videoOff: true });
+test('глобальное «выключено» с сервера гасит эфир в плитках', async () => {
+  const m = mount({ card: { live: { video: false } } });
   await sleep(300);
 
+  assert.strictEqual(videos(m).length, 0, 'ни одного декодера');
+  assert.strictEqual(quad(m).length, 4, 'а плитки на месте — просто кадрами');
+  assert.strictEqual(m.root.find('.qdl-watch-frame').length, 6);
+  m.inst.destroy();
+});
+
+test('смена настройки на другом устройстве подхватывается без перезахода', async () => {
+  const m = mount({ card: { live: { video: false } } });
+  await sleep(300);
   assert.strictEqual(videos(m).length, 0);
-  assert.ok(m.r.$(m.root.find('.qdl-btn-focus')[2]).text().indexOf('Видео: выкл') !== -1);
-  assert.ok(m.root.find('.qdl-watch-frame').length === 4, 'кадры-подложки на месте');
+
+  // так это и приезжает: следующий /qdl/features обновляет карту прав
+  m.r.qdl.setCard({ live: { video: true } });
+  m.inst.start();
+  await sleep(1700);
+  assert.ok(videos(m).length > 0, 'эфир поднялся сам');
   m.inst.destroy();
 });
 
-test('тумблер переключается на живую: гасит и поднимает без перезахода в раздел', async () => {
-  const m = mount();
-  await sleep(1700);
-  assert.ok(videos(m).length > 0, 'сначала играет');
-
-  const btn = m.r.$(m.root.find('.qdl-btn-focus')[2]);
-  btn.trigger('hover:enter');
-  assert.strictEqual(videos(m).length, 0, 'выключили — декодеров не осталось');
-  assert.strictEqual(m.r.lampa.Storage.get('qdl_live_video'), '0', 'состояние сохранено на устройстве');
-  assert.ok(btn.text().indexOf('Видео: выкл') !== -1);
-
-  btn.trigger('hover:enter');
-  await sleep(1700);
-  assert.ok(videos(m).length > 0, 'включили — поднялись обратно');
-  m.inst.destroy();
-});
-
-test('с выключенным тумблером Enter по плитке ведёт в нативный плеер, как раньше', () => {
-  const m = mount({ videoOff: true, start: { ready: true, running: true, path: '/qdl/live/watch/hls/3/index.m3u8' } });
-  m.r.$(tiles(m)[0]).trigger('hover:enter');
+test('с выключенным эфиром Enter по плитке ведёт в нативный плеер, как раньше', () => {
+  const m = mount({
+    card: { live: { video: false } },
+    start: { ready: true, running: true, path: '/qdl/live/watch/hls/3/index.m3u8' },
+  });
+  m.r.$(quad(m)[0]).trigger('hover:enter');
   assert.strictEqual(m.calls.plays.length, 1, 'открылся нативный плеер');
   assert.ok(String(m.calls.plays[0].url).indexOf('/qdl/live/watch/hls/3/index.m3u8') !== -1);
   m.inst.destroy();
@@ -233,39 +340,38 @@ test('с выключенным тумблером Enter по плитке ве�
 // ─────────────────────────── фулл вью ───────────────────────────
 
 test('фулл вью: одна камера на весь экран, остальные на паузе', async () => {
-  const m = mount();
+  const m = mount({ cams: LIVE });
   await sleep(1700);
   assert.strictEqual(videos(m).length, 4);
 
-  const home = tiles(m)[0].parentNode;
-  m.r.$(tiles(m)[0]).trigger('hover:enter');
+  const home = quad(m)[0].parentNode;
+  m.r.$(quad(m)[0]).trigger('hover:enter');
   await sleep(50);
 
   const f = full(m);
   assert.strictEqual(f.length, 1, 'развёрнута ровно одна плитка');
   assert.strictEqual(m.r.$(f[0]).attr('data-cam'), '3');
+  // 🔴 position:fixed внутри скролла Lampa не покрывает экран (у контейнера transform),
+  // поэтому плитка уезжает в body — поймано скриншотом живого клиента.
   assert.strictEqual(f[0].parentNode, m.r.w.document.body, 'развёрнутая плитка уехала в body');
-
   assert.strictEqual(m.r.$(f[0]).find('video')[0].paused, false, 'развёрнутая камера играет');
 
-  const others = tiles(m).filter((_, el) => !m.r.$(el).hasClass('qdl-watch-tile--full'));
-  others.each((_, el) => {
+  tiles(m).filter((_, el) => !m.r.$(el).hasClass('qdl-watch-tile--full')).each((_, el) => {
     const v = m.r.$(el).find('video')[0];
     if (v) assert.strictEqual(v.paused, true, 'соседняя камера не декодирует');
   });
 
-  // Back возвращает в сетку — и плитку на её место в ленте
   m.calls.ctrl.back();
   assert.strictEqual(full(m).length, 0);
-  assert.strictEqual(tiles(m)[0].parentNode, home, 'плитка вернулась в сетку');
+  assert.strictEqual(quad(m)[0].parentNode, home, 'плитка вернулась в сетку');
   assert.ok(!m.calls.backward, 'Back из фулл вью не выходит из раздела');
   m.inst.destroy();
 });
 
 test('в фулл вью стрелки переключают камеру, а не двигают фокус', async () => {
-  const m = mount();
+  const m = mount({ cams: LIVE });
   await sleep(1700);
-  m.r.$(tiles(m)[0]).trigger('hover:enter');
+  m.r.$(quad(m)[0]).trigger('hover:enter');
   await sleep(20);
 
   m.calls.ctrl.right();
@@ -276,28 +382,18 @@ test('в фулл вью стрелки переключают камеру, а 
   m.inst.destroy();
 });
 
-test('кнопка «На весь экран» разворачивает камеру под фокусом', async () => {
-  const m = mount();
-  await sleep(600);
-  m.r.$(tiles(m)[1]).trigger('hover:focus');
-  m.r.$(m.root.find('.qdl-btn-focus')[0]).trigger('hover:enter');
-
-  assert.strictEqual(m.r.$(full(m)[0]).attr('data-cam'), '5');
-  m.inst.destroy();
-});
-
 test('уход с экрана возвращает развёрнутую плитку: иначе камера висит поверх чужого экрана', async () => {
-  const m = mount();
+  const m = mount({ cams: LIVE });
   await sleep(1700);
-  const home = tiles(m)[0].parentNode;
+  const home = quad(m)[0].parentNode;
 
-  m.r.$(tiles(m)[0]).trigger('hover:enter');
+  m.r.$(quad(m)[0]).trigger('hover:enter');
   await sleep(50);
   assert.strictEqual(full(m)[0].parentNode, m.r.w.document.body);
 
   m.inst.pause();
   assert.strictEqual(full(m).length, 0, 'класс снят');
-  assert.strictEqual(tiles(m)[0].parentNode, home, 'плитка вернулась в ленту');
+  assert.strictEqual(quad(m)[0].parentNode, home, 'плитка вернулась в ленту');
   assert.strictEqual(videos(m).length, 0, 'и плееров не осталось');
   m.inst.destroy();
 });

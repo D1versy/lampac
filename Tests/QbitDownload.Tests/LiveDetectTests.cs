@@ -17,51 +17,46 @@ public class LiveDetectTests
     static readonly TimeZoneInfo Msk =
         TimeZoneInfo.CreateCustomTimeZone("D1V-Test-Detect-Plus3", TimeSpan.FromHours(3), "UTC+3", "UTC+3");
 
-    // ── Кого показываем в сетке эфира ────────────────────────────────────────
+    // ── Глобальный тумблер «видео в плитках» (qdl 2.96) ──────────────────────
     //
-    // Исходная жалоба: «сейчас отображается плитка из 6 превью, а надо 4, как в оригинале».
-    // Шесть — это 4 RTSP-камеры плюс два mac-рекордера, которые ничего не пушат. Оригинальный
-    // Live View прячет ровно их (isCameraVisibleOnLiveView).
+    // Владелец: «настройки глобальны для всех — я у себя включил, и оно на все девайсы».
+    // Поэтому значение серверное, как фильтр каталога, а не Lampa.Storage у устройства.
+    // 🔴 Плитка «6 превью → 4» из 2.95 откачена в ту же ревизию: неактивные камеры снова едут
+    // клиенту (он показывает их отдельным блоком снизу), поэтому серверного правила видимости
+    // больше нет — и тестов на него тоже.
 
     [Fact]
-    public void Обычная_камера_видна_даже_когда_не_в_эфире()
+    public void Без_файла_эфир_в_плитках_включён()
     {
-        Assert.True(LiveAccess.LiveWatchVisible(LiveAccess.Cam(3, "Garage 2", "rtsp", isLive: false)));
-        Assert.True(LiveAccess.LiveWatchVisible(LiveAccess.Cam(5, "Garage 1", "rtsp", isLive: true)));
+        TestEnv.FreshCache();
+        Assert.True(QbitController.LiveVideoConf.Enabled);
     }
 
     [Fact]
-    public void Mac_рекордер_виден_только_пока_пушит()
+    public void Выключение_переживает_перечитывание()
     {
-        Assert.False(LiveAccess.LiveWatchVisible(LiveAccess.Cam(6, "Vlad-MacBook-Recorder", "upload", isLive: false)));
-        Assert.True(LiveAccess.LiveWatchVisible(LiveAccess.Cam(6, "Vlad-MacBook-Recorder", "upload", isLive: true)));
+        TestEnv.FreshCache();
+        QbitController.LiveVideoConf.Save(false);
+
+        // 🔴 Именно false: значение по умолчанию — true, и «потерянная» запись читалась бы как
+        // включённый эфир, то есть тумблер молча не работал бы ровно в одну сторону.
+        Assert.False(QbitController.LiveVideoConf.Enabled);
+
+        QbitController.LiveVideoConf.Save(true);
+        Assert.True(QbitController.LiveVideoConf.Enabled);
     }
 
     [Fact]
-    public void Протокол_сравнивается_без_регистра()
+    public void Значение_лежит_на_томе_отдельным_файлом()
     {
-        Assert.False(LiveAccess.LiveWatchVisible(LiveAccess.Cam(7, "rec", "UPLOAD", isLive: false)));
-    }
+        TestEnv.FreshCache();
+        QbitController.LiveVideoConf.Save(false);
 
-    [Fact]
-    public void Боевой_состав_регистратора_даёт_ровно_четыре_плитки()
-    {
-        // Снимок /api/cameras/ на 01.09.2026: 4 RTSP + 2 mac-рекордера офлайн.
-        var all = new List<object>
-        {
-            LiveAccess.Cam(3, "Garage 2", "rtsp", false),
-            LiveAccess.Cam(5, "Garage 1", "rtsp", false),
-            LiveAccess.Cam(1, "balkon", "rtsp", false),
-            LiveAccess.Cam(4, "Front door podkova", "rtsp", false),
-            LiveAccess.Cam(6, "Vlad-MacBook-Recorder", "upload", false),
-            LiveAccess.Cam(7, "Vlad-MacBook-Recorder #2", "upload", false)
-        };
+        string file = System.IO.Path.Combine(ModInit.conf.cachePath, "live-video.json");
+        Assert.True(System.IO.File.Exists(file), "ожидали live-video.json в cachePath");
 
-        int shown = 0;
-        foreach (var c in all)
-            if (LiveAccess.LiveWatchVisible(c)) shown++;
-
-        Assert.Equal(4, shown);
+        var root = Newtonsoft.Json.Linq.JObject.Parse(System.IO.File.ReadAllText(file));
+        Assert.False((bool)root["video"]);
     }
 
     // ── Разбор события детектора ─────────────────────────────────────────────
