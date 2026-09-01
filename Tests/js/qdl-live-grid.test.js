@@ -117,7 +117,7 @@ function mount(opts) {
   stubMedia(r.w);
   // Navigator живёт в бандле Lampa, в jsdom его нет: без заглушки обычная ветка «вверх»
   // падает с TypeError, и тест про прыжок на Detection проверял бы только половину случая.
-  r.w.Navigator = { canmove: () => false, move: () => {}, focused: () => {} };
+  r.w.Navigator = { canmove: () => false, move: () => {}, focused: (el) => { calls.marked = el; } };
   const io = {};
   if (opts.noIO !== true) fakeIO(r.w, Object.assign(io, opts.io || {}));
   // Глобальная настройка эфира приезжает с сервера ключом live.video в /qdl/features.
@@ -221,18 +221,35 @@ test('шапка: без права «эфир» иконки не видно', 
   assert.strictEqual(m.btn.css('display'), 'none');
 });
 
-test('панель занимает весь экран: два ряда ложатся ровно во вьюпорт', () => {
+test('панель занимает весь экран, а плитка остаётся 16:9 — кадр не обрезается', () => {
   const m = mount();
   const g = stubGrid(m, { top: 120, width: 1200 });
   m.inst.start();                       // start() пересчитывает раскладку
 
   const h = Number(/(\d+)px/.exec(g.style.gridAutoRows)[1]);
-  assert.ok(h > 0, 'высота ряда посчитана: ' + g.style.gridAutoRows);
-  assert.ok(m.r.$(g).hasClass('qdl-watch-grid--fit'), 'кадру снят 16/9, высоту диктует ряд');
+  const w = Number(/repeat\(2, (\d+)px\)/.exec(g.style.gridTemplateColumns)[1]);
+  assert.ok(h > 0 && w > 0, 'раскладка посчитана: ' + g.style.gridTemplateColumns + ' / ' + g.style.gridAutoRows);
+  assert.ok(m.r.$(g).hasClass('qdl-watch-grid--fit'), 'высоту ряда диктует fitQuad');
+
+  // 🔴 Главный контракт: пропорция кадра сохранена. Обрезка — это ровно то, на что
+  // владелец пожаловался («на IPCamLive они не обрезаются»).
+  assert.ok(Math.abs(h - (w * 9 / 16)) <= 1, `плитка не 16:9: ${w}x${h}`);
 
   const used = 120 + h * 2;              // верх сетки + два ряда (зазор между ними — внутри)
   assert.ok(used <= m.r.w.innerHeight, 'панель не вылезает за экран: ' + used);
-  assert.ok(used >= m.r.w.innerHeight - 20, 'и не оставляет пустоты снизу: ' + used);
+  assert.ok(w * 2 <= 1200, 'и не вылезает по ширине');
+  m.inst.destroy();
+});
+
+test('пока поток не пошёл, у плитки виден кадр камеры, а не пустой прямоугольник', async () => {
+  const m = mount({ cams: LIVE });
+  await sleep(300);
+
+  const v = videos(m)[0];
+  assert.ok(v, 'видео-узел создан');
+  assert.ok(/\/qdl\/live\/watch\/thumb\?camera=/.test(v.poster || ''), 'постер — снимок камеры: ' + v.poster);
+  // подложка тем же кадром остаётся на месте, даже если постер не поддержан движком
+  assert.strictEqual(m.root.find('.qdl-watch-frame').length, 4);
   m.inst.destroy();
 });
 
@@ -355,6 +372,9 @@ test('фулл вью: одна камера на весь экран, оста�
   // поэтому плитка уезжает в body — поймано скриншотом живого клиента.
   assert.strictEqual(f[0].parentNode, m.r.w.document.body, 'развёрнутая плитка уехала в body');
   assert.strictEqual(m.r.$(f[0]).find('video')[0].paused, false, 'развёрнутая камера играет');
+  // 🔴 Фокус обязан остаться на развёрнутой плитке: после переноса в body Lampa уводила его
+  // на соседнюю, и OK в фулл вью открывал НЕ ТУ камеру, а Back возвращал не туда.
+  assert.strictEqual(m.calls.marked, f[0], 'фокус переехал вместе с плиткой');
 
   tiles(m).filter((_, el) => !m.r.$(el).hasClass('qdl-watch-tile--full')).each((_, el) => {
     const v = m.r.$(el).find('video')[0];
@@ -366,6 +386,27 @@ test('фулл вью: одна камера на весь экран, оста�
   assert.strictEqual(quad(m)[0].parentNode, home, 'плитка вернулась в сетку');
   assert.ok(!m.calls.backward, 'Back из фулл вью не выходит из раздела');
   m.inst.destroy();
+});
+
+test('🔴 на телефоне размер плитки задан от ширины ЭКРАНА, а не контейнера', () => {
+  // Регресс: на айфоне плитки выходили втрое выше нужного и кадр висел в чёрном поле
+  // (скриншоты владельца). Эмуляция телефона этого не воспроизводила, поэтому размер
+  // задан явными width/height в vw — они не зависят ни от ширины ленты, ни от inline-стилей.
+  const css = H.qdlSource();
+  const media = /@media \(max-width:600px\)\{[^@]*?\.qdl-watch-tile\{width:calc\(100vw[^}]*height:calc\(\(100vw[^}]*\}/.test(css);
+  assert.ok(media, 'нет телефонного правила с width/height от 100vw');
+  assert.ok(/aspect-ratio:auto/.test(css), 'на телефоне aspect-ratio должен быть снят — высоту задаём сами');
+});
+
+test('🔴 развёрнутая камера остаётся НАД сеткой даже под фокусом', () => {
+  // Регресс: у `.qdl-watch-tile.focus{z-index:1}` специфичность выше, чем у одиночного
+  // `--full{z-index:900}`, и после переключения стрелкой сетка рисовалась ПОВЕРХ
+  // полноэкранной камеры (поймано на телевизоре).
+  const css = H.qdlSource();
+  const rule = /\.qdl-watch-tile--full\.focus\{[^}]*z-index:900/.test(css);
+  assert.ok(rule, 'в injectCss нет правила .qdl-watch-tile--full.focus{...z-index:900}');
+  assert.ok(/\.qdl-watch-tile--full\.focus \.qdl-watch-ring\{border-color:transparent/.test(css),
+    'рамка фокуса не должна обводить полноэкранную камеру');
 });
 
 test('в фулл вью стрелки переключают камеру, а не двигают фокус', async () => {

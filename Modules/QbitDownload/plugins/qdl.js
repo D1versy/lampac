@@ -177,14 +177,31 @@
             // высоту ряда задаёт fitQuad так, чтобы два ряда легли ровно во вьюпорт. Кадр при
             // этом чуть подрезается по вертикали (object-fit:cover) — область контента у Lampa
             // на 57 px ниже 16:9, и без подрезки пришлось бы оставлять поля по бокам.
-            '.qdl-watch-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:.25em;padding:0}' +
-            '@media (max-width:600px){.qdl-watch-grid{grid-template-columns:1fr;gap:.5em;padding:0 .5em}}' +
+            // 🔴 align-items:start — плитка НЕ растягивается по высоте ряда. Иначе любой ряд,
+            // ставший выше содержимого, растянул бы плитку, а картинка внутри (object-fit:contain)
+            // получила бы чёрные поля сверху и снизу — жалоба владельца с айфона.
+            '.qdl-watch-grid{display:grid;grid-template-columns:repeat(2,1fr);justify-content:center;align-items:start;gap:.25em;padding:0}' +
+            // 🔴 На телефоне размер плитки задаётся ОТ ШИРИНЫ ЭКРАНА, а не от контейнера и не
+            // через aspect-ratio. У владельца на айфоне плитки выходили втрое выше нужного, и
+            // кадр висел в чёрном поле по центру (скриншоты 01.09.2026); в эмуляции телефона —
+            // хоть с iPhone-UA, хоть с d1vision_platform=ios — раскладка была правильной, то есть
+            // виновата среда самого приложения. Явные width/height в vw снимают вопрос целиком:
+            // они не зависят ни от ширины ленты, ни от inline-стилей fitQuad, ни от поддержки
+            // aspect-ratio движком.
+            '@media (max-width:600px){' +
+              '.qdl-watch-grid,.qdl-watch-off{grid-template-columns:1fr;gap:.5em;padding:0 .5em;justify-content:start}' +
+              '.qdl-watch-grid,.qdl-watch-off{grid-auto-rows:auto}' +
+              '.qdl-watch-tile{width:calc(100vw - 1em);height:calc((100vw - 1em) * 0.5625);aspect-ratio:auto;max-width:none}' +
+            '}' +
             // Камеры не в эфире — отдельным блоком под живой четвёркой (возврат поведения
             // до 2.95: «снизу чтобы были даже неактивные отключённые стримы»).
             '.qdl-watch-offtitle{padding:1.3em 1.4em .4em;font-size:1.3em;font-weight:600;opacity:.75}' +
-            '.qdl-watch-off{display:grid;grid-template-columns:repeat(2,1fr);justify-content:center;gap:1em;padding:0 1.4em 2em}' +
-            '@media (max-width:600px){.qdl-watch-off{grid-template-columns:1fr}}' +
-            '.qdl-watch-tile{position:relative;border-radius:.8em;overflow:hidden;background:#111;min-width:0}' +
+            '.qdl-watch-off{display:grid;grid-template-columns:repeat(2,1fr);justify-content:center;align-items:start;gap:1em;padding:0 1.4em 2em}' +
+
+            // 🔴 Пропорцию держит САМА плитка, а не картинка внутри: так высота не зависит
+            // ни от загрузки кадра, ни от того, как движок разрешает height:100% у потомка.
+            // В режиме полноэкранной панели пропорцию задаёт ряд (см. --fit ниже).
+            '.qdl-watch-tile{position:relative;border-radius:.8em;overflow:hidden;background:#111;min-width:0;aspect-ratio:16/9}' +
             // 🔴 Фокус рисуем рамкой ВНУТРИ плитки, отдельным узлом поверх видео. Прежние
             // box-shadow + scale(1.04) на полноэкранной панели не годятся: тень у плитки,
             // прижатой к краю экрана, обрезается, а масштаб выталкивает её за вьюпорт —
@@ -193,19 +210,33 @@
             '.qdl-watch-tile.focus{z-index:1}' +
             '.qdl-watch-tile.focus .qdl-watch-ring{border-color:#fff}' +
             // кадр-подложка задаёт высоту плитки и виден, пока поток не поднялся
-            '.qdl-watch-frame{display:block;width:100%;height:100%;aspect-ratio:16/9;object-fit:cover;background:#0a0a0a}' +
-            // высоту ряда навязывает fitQuad — тогда 16/9 у кадра перестаёт командовать
-            '.qdl-watch-grid--fit .qdl-watch-frame{aspect-ratio:auto}' +
-            '.qdl-watch-grid--fit .qdl-watch-tile{border-radius:0}' +
-            '.qdl-watch-tile video{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;background:#000}' +
-            '.qdl-watch-note{position:absolute;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:1.2em;opacity:.8;text-shadow:0 .1em .3em #000;pointer-events:none;z-index:1}' +
+            // 🔴 contain, а НЕ cover: владелец про оригинальный Live View — «там они не
+            // обрезаются». У регистратора карточка ровно 16:9 и `object-fit:contain`
+            // (HlsPlayer.tsx), кадр виден целиком. Мы держим то же самое: fitQuad подбирает
+            // и ширину колонки, и высоту ряда так, чтобы плитка осталась 16:9.
+            '.qdl-watch-frame{display:block;width:100%;height:100%;object-fit:contain;background:#0a0a0a}' +
+            '.qdl-watch-grid--fit .qdl-watch-tile{aspect-ratio:auto;border-radius:0}' +
+            // 🔴 Фон ПРОЗРАЧНЫЙ: под видео лежит кадр камеры (.qdl-watch-frame), и пока поток
+            // не пошёл, зритель должен видеть именно его, а не серо-чёрный квадрат
+            // (требование владельца). Чёрная заливка перекрывала кадр до первого декодированного
+            // кадра — это и был «серый квадратик».
+            '.qdl-watch-tile video{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;background:transparent}' +
+            // Плашка состояния — в угол и мелко: она сообщает, а не занавешивает кадр.
+            '.qdl-watch-note{position:absolute;left:.6em;top:.6em;padding:.15em .6em;border-radius:.35em;background:rgba(0,0,0,.55);font-size:.95em;opacity:.9;pointer-events:none;z-index:2}' +
+            '.qdl-watch-note:empty{display:none}' +
             '.qdl-watch-bar{position:absolute;left:0;right:0;bottom:0;padding:.6em .8em;background:linear-gradient(0deg,rgba(0,0,0,.85),rgba(0,0,0,0));display:flex;align-items:center;gap:.6em;z-index:2}' +
             '.qdl-watch-name{flex:1;min-width:0;font-size:1.25em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
             // Фулл вью одной камеры — та же плитка, растянутая на экран. Fullscreen API тут не
             // годится: у релизного Android-клиента WebChromeClient ставится только в DEBUG,
             // то есть requestFullscreen() мёртв (SysView.kt).
             '.qdl-watch-tile--full{position:fixed;left:0;top:0;width:100%;height:100%;z-index:900;border-radius:0;transform:none}' +
-            '.qdl-watch-tile--full.focus{box-shadow:none;transform:none}' +
+            // 🔴 z-index ОБЯЗАН быть переуказан здесь: у правила `.qdl-watch-tile.focus{z-index:1}`
+            // специфичность выше, чем у одиночного `--full`, и развёрнутая камера уезжала под
+            // сетку — на экране получалась мозаика ПОВЕРХ полноэкранного видео. Ловится только
+            // после переключения стрелкой: при первом открытии Lampa успевает снять .focus сама.
+            '.qdl-watch-tile--full.focus{box-shadow:none;transform:none;z-index:900}' +
+            // и рамку фокуса на полный экран не рисуем — это была бы белая рамка вокруг всего экрана
+            '.qdl-watch-tile--full.focus .qdl-watch-ring{border-color:transparent}' +
             '.qdl-watch-tile--full video{object-fit:contain}' +
             '.qdl-watch-tile--full .qdl-watch-frame{width:100%;height:100%;aspect-ratio:auto;object-fit:contain}' +
             // ── Detection: лента скриншотов детектора ──
@@ -4608,17 +4639,22 @@
     /// Живой плеер одной плитки. box — DOM плитки, note(text) рисует надпись поверх кадра.
     /// Поведение при сбое — как у оригинального Live View: не подменяем картинку молча,
     /// а пишем «Переподключаюсь…» и грузим снова.
-    function liveMakePlayer(box, url, note) {
+    function liveMakePlayer(box, url, note, poster) {
         var video = document.createElement('video');
         video.muted = true;
         video.autoplay = true;
         video.setAttribute('playsinline', '');
         video.setAttribute('muted', '');
+        // Пока не пришёл первый декодированный кадр, показываем СНИМОК С КАМЕРЫ, а не пустой
+        // прямоугольник (требование владельца). Постер и прозрачный фон работают вместе:
+        // под видео лежит тот же кадр отдельной картинкой — что бы ни отвалилось, серого нет.
+        if (poster) { try { video.poster = poster; } catch (e) {} }
 
         var st = { video: video, hls: null, dead: false, retry: null, watch: null, seen: -1, still: 0 };
 
         st.destroy = function () {
             st.dead = true;
+            clearTimeout(st.hint);
             clearTimeout(st.retry);
             clearInterval(st.watch);
             if (st.hls) { try { st.hls.destroy(); } catch (e) {} st.hls = null; }
@@ -4636,10 +4672,11 @@
         }
 
         video.addEventListener('playing', function () { st.still = 0; say(''); });
-        video.addEventListener('waiting', function () { say('Соединяюсь…'); });
 
         box.appendChild(video);
-        say('Соединяюсь…');
+        // Надпись показываем, только если картинки долго нет: на горячем потоке видео
+        // появляется за секунду, и мигать плашкой ради этого незачем.
+        st.hint = setTimeout(function () { if (!st.dead && video.paused) say('Соединяюсь…'); }, 3000);
 
         if (video.canPlayType && video.canPlayType('application/vnd.apple.mpegurl')) {
             // Мак/айфон: HLS в <video> нативно, hls.js не нужен вовсе.
@@ -4813,6 +4850,7 @@
                 if (liveCols === 1) {
                     grid.removeClass('qdl-watch-grid--fit');
                     node.style.gridAutoRows = '';
+                    node.style.gridTemplateColumns = '';
                     offGrid[0].style.gridTemplateColumns = '';
                     return;
                 }
@@ -4821,15 +4859,23 @@
                 if (box.top <= 0 || !node.clientWidth) return;   // ещё не показали — посчитаем позже
 
                 var cs = window.getComputedStyle(node);
-                var rowGap = parseFloat(cs.rowGap) || parseFloat(cs.columnGap) || 4;
+                var gap = parseFloat(cs.columnGap) || 4;
+                var rowGap = parseFloat(cs.rowGap) || gap;
 
+                // 🔴 Держим плитку РОВНО 16:9 — тогда кадр виден целиком, без обрезки
+                // (жалоба владельца: «на IPCamLive они не обрезаются»). Поэтому берём
+                // меньшее из двух: сколько даёт ширина ленты и сколько остаётся по высоте.
                 var avail = (window.innerHeight || 720) - box.top;
-                var h = Math.max(90, Math.floor((avail - rowGap) / 2));
+                var byHeight = Math.floor(((avail - rowGap) / 2) * 16 / 9);
+                var byWidth = Math.floor((node.clientWidth - gap) / 2);
+                var w = Math.max(160, Math.min(byWidth, byHeight));
+                var h = Math.round(w * 9 / 16);
 
                 grid.addClass('qdl-watch-grid--fit');
+                node.style.gridTemplateColumns = 'repeat(2, ' + w + 'px)';
                 node.style.gridAutoRows = h + 'px';
                 // Не в эфире — статичные кадры под панелью, им столько места не нужно.
-                offGrid[0].style.gridTemplateColumns = 'repeat(2, ' + Math.round(h * 16 / 9 * 0.6) + 'px)';
+                offGrid[0].style.gridTemplateColumns = 'repeat(2, ' + Math.round(w * 0.6) + 'px)';
             } catch (e) {}
         }
 
@@ -4868,7 +4914,10 @@
             });
             el.on('hover:enter', function () {
                 if (Date.now() - iosTapAt < 1000) return;   // этот тап уже забрал нативный путь
-                if (fullId === c.id) { exitFull(); return; }
+                // 🔴 В фулл вью OK ЗАКРЫВАЕТ его, кто бы ни считался сфокусированным. Перенос
+                // плитки в body сбивает фокус Lampa на соседнюю, и без этой строки OK
+                // разворачивал другую камеру вместо выхода — «стрелки забагованы».
+                if (fullId) { exitFull(); return; }
                 if (liveVideoOn() && !iosLiveNative()) { enterFull(c.id); return; }
                 liveWatchPlay(c);   // тумблер выключен (и весь путь iOS) — прежний нативный плеер
             });
@@ -4914,7 +4963,8 @@
             // у оригинального CameraGrid).
             slot.timerId = setTimeout(function () {
                 if (comp.destroyed || players[c.id] !== slot) return;
-                players[c.id] = liveMakePlayer(el[0], withUid(API + c.path), function (t) { note(el, t); });
+                players[c.id] = liveMakePlayer(el[0], withUid(API + c.path), function (t) { note(el, t); },
+                                               withUid(API + '/qdl/live/watch/thumb?camera=' + c.id));
             }, (idx || 0) * 500);
         }
 
@@ -5010,7 +5060,9 @@
 
             var fresh = 0;
             cand.forEach(function (x) {
-                if (players[x.c.id]) return;
+                // Плитка вернулась из фулл вью — снимаем паузу идемпотентно: одиночный resume
+                // на выходе иногда не доезжает (замер: одна камера из четырёх осталась на паузе).
+                if (players[x.c.id]) { setPaused(x.c.id, false); return; }
                 startPlayer(x.c, fresh++);
             });
         }
@@ -5061,13 +5113,23 @@
             fullHome = { parent: node.parentNode, next: node.nextSibling };
             document.body.appendChild(node);
             el.addClass('qdl-watch-tile--full');
+            // 🔴 Перенос узла в body уводит фокус Lampa на соседнюю плитку (замер: развёрнута
+            // камера 1, а .focus висит на камере 3). Тогда OK в фулл вью открывал НЕ ТУ камеру,
+            // а Back возвращал не на ту плитку — это и читалось как «стрелки забагованы».
+            // Возвращаем фокус на саму развёрнутую плитку.
+            last = node;
+            markLast(el);
+            // Класс .focus Lampa сама на перенесённый узел не перевесит — делаем это руками,
+            // иначе после выхода подсветка остаётся на чужой плитке.
+            try { body.find('.qdl-watch-tile.focus').removeClass('focus'); } catch (e) {}
+            el.addClass('focus');
         }
 
         function restoreFull() {
             if (!fullId) return;
             var el = tiles[fullId];
             if (el && el.length) {
-                el.removeClass('qdl-watch-tile--full');
+                el.removeClass('qdl-watch-tile--full');   // .focus оставляем: плитка возвращается под фокус
                 var node = el[0];
                 if (fullHome && fullHome.parent) {
                     if (fullHome.next && fullHome.next.parentNode === fullHome.parent)
