@@ -180,6 +180,64 @@ public class ManageGateTests
         Assert.Equal(403, StatusOf(LiveAccess.ManageDenied(Ctl(uid: "неизвестное-устройство", cookie: cookie))));
     }
 
+    // ── глобальный фильтр каталога (qdl 2.89/2.90) ────────────────────────────────────────
+
+    [Fact]
+    public void Фильтр_каталога_без_права_действия_отдаёт_403()
+    {
+        // Прямое требование владельца: «если нету чекбокса на „действия“ и кто-то руками дёрнет —
+        // выдавало бы 403». Настройка ОБЩАЯ на весь сервер, поэтому сокрытие раздела в UI защитой
+        // не считается: закрывает именно сервер.
+        TestEnv.FreshCache();
+
+        Assert.Equal(403, StatusOf(Ctl(uid: Dev, path: "/qdl/catalog-filter").CatalogFilterSet(true, 2020, 2010)));
+        Assert.Equal(403, StatusOf(Ctl(path: "/qdl/catalog-filter").CatalogFilterSet(true, 2020, 2010)));
+    }
+
+    [Fact]
+    public void Фильтр_каталога_с_правом_сохраняется()
+    {
+        TestEnv.FreshCache();
+        Perms.Grant(Dev, Perms.FeatureManage, true);
+
+        Assert.Equal(200, StatusOf(Ctl(uid: Dev, path: "/qdl/catalog-filter").CatalogFilterSet(true, 2021, 2011)));
+
+        var saved = CatalogFilter.Load();
+        Assert.True(saved.Value<bool>("enabled"));
+        Assert.Equal(2021, saved.Value<int>("movieYear"));
+        Assert.Equal(2011, saved.Value<int>("tvYear"));
+    }
+
+    [Fact]
+    public void Фильтр_каталога_отвергает_год_вне_диапазона()
+    {
+        TestEnv.FreshCache();
+        Perms.Grant(Dev, Perms.FeatureManage, true);
+
+        Assert.Equal(400, StatusOf(Ctl(uid: Dev, path: "/qdl/catalog-filter").CatalogFilterSet(true, 1200, 2010)));
+        Assert.Equal(400, StatusOf(Ctl(uid: Dev, path: "/qdl/catalog-filter").CatalogFilterSet(true, 2020, 9999)));
+    }
+
+    [Fact]
+    public void Фильтр_каталога_на_реплике_не_редактируется()
+    {
+        // 🔴 qdl 2.90, решение владельца: «пусть это всё тянется с нашего основного сервера».
+        // Настройка приезжает манифестом из дома, поэтому локальная правка на реплике жила бы
+        // до ближайшего тика и молча откатывалась — худший вид поведения. Отказ ДО проверки
+        // права: на реплике грантов нет вовсе, и 403 «нет права управления» увёл бы диагностику
+        // не туда.
+        TestEnv.FreshCache();
+        Perms.Grant(Dev, Perms.FeatureManage, true);
+
+        string prev = ModInit.conf.replicaRole;
+        try
+        {
+            ModInit.conf.replicaRole = "replica";
+            Assert.Equal(403, StatusOf(Ctl(uid: Dev, path: "/qdl/catalog-filter").CatalogFilterSet(true, 2020, 2010)));
+        }
+        finally { ModInit.conf.replicaRole = prev; }
+    }
+
     [Fact]
     public void Киллсвитч_permsEnabled_false_открывает_управление_всем()
     {

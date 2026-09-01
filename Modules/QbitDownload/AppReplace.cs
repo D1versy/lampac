@@ -164,6 +164,20 @@ public static class AppPatch
             "qdl_swr_req.success = function (fresh) { if (!fresh) return; cacheSet(params, fresh); " +
             "Lampa.Listener.send('request_revalidate', { params: params, url: params.url, data: fresh, cached: cached }); }; " +
             "qdl_swr_req.error = function () {}; $.ajax(qdl_swr_req); } } catch (e) {}/*qdl-cut:swr*/"),
+        // list-cache: экран «Ещё» (category_full) кешировал свои страницы у КЛИЕНТА на двое суток,
+        // и догон SWR туда не достаёт — он подписан на событие 'line', а его шлёт только компонент
+        // РЯДА (items-line); полноэкранная сетка его не шлёт вовсе. Итог, пойманный владельцем на
+        // 2.89: на главной ряд уже отфильтрован, а внутри «Ещё» до двух суток висит старый снимок
+        // с карточками старше порога, и инкогнито не помогает — там свой профиль, а кеш общий.
+        //
+        // Режем срок до 15 минут (life у cub-источника — в МИНУТАХ: `var day = 60 * 24`).
+        // 🔴 Наружу это ничего не добавляет: наш Staticache держит тот же ответ 3 часа, клиент
+        // попадает в него локально за миллисекунды. Свежесть диктует сервер — тот же принцип,
+        // что принят для рядов в 2.63.
+        // Якорь уникален (одно вхождение): у соседних источников свои имена переменных.
+        new P("list-cache",
+            "      oncomplite(Utils$1.addSource(data, source$1));\n    }, onerror, false, {\n      cache: {\n        life: day * 2\n      }",
+            "      oncomplite(Utils$1.addSource(data, source$1));\n    }, onerror, false, {\n      cache: {\n        life: 15/*qdl-cut:list-cache*/\n      }"),
         // ── qdl 2.84: мёртвая «Трансляция» (broadcast) ────────────────────────────────
         // Иконка в шапке карточки и пункт «Поделиться» в панели плеера ведут в одну модалку,
         // которая шлёт Socket.send('devices') в WebSocket cub.rip. У нас он закрыт с qdl 2.19

@@ -116,6 +116,11 @@ public class AppPatchTests
         if (this.card.adult) {
           var warning = new Warning({ type: 'full-adult' });
         }
+      oncomplite(Utils$1.addSource(data, source$1));
+    }, onerror, false, {
+      cache: {
+        life: day * 2
+      }
     ";
 
     [Fact]
@@ -177,6 +182,32 @@ public class AppPatchTests
         Assert.Equal(once, twice);
         Assert.Equal(1, Count(twice, "/*qdl-cut:adult-block*/"));
         Assert.Equal(1, Count(twice, "/*qdl-cut:adult-flag*/"));
+    }
+
+    [Fact]
+    public void PatchAppJs_ListCache_CutsClientCacheOfMoreScreen()
+    {
+        // Экран «Ещё» (category_full) кешировал страницы у КЛИЕНТА на двое суток, а догон SWR
+        // туда не достаёт: он подписан на событие 'line', которое шлёт только компонент РЯДА.
+        // Владелец поймал это на 2.89 — на главной чисто, а внутри «Ещё» старый снимок.
+        // life у cub-источника считается в МИНУТАХ (`var day = 60 * 24`), поэтому 15 — это 15 мин.
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.Contains("life: 15/*qdl-cut:list-cache*/", result);
+        Assert.DoesNotContain("life: day * 2", result);
+        // сам запрос не тронут — режем ТОЛЬКО срок жизни кеша
+        Assert.Contains("oncomplite(Utils$1.addSource(data, source$1));", result);
+        Assert.Contains("}, onerror, false, {", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_ListCache_Idempotent()
+    {
+        string once = AppPatch.PatchAppJs(AllAnchors);
+        string twice = AppPatch.PatchAppJs(once);
+
+        Assert.Equal(once, twice);
+        Assert.Equal(1, Count(twice, "/*qdl-cut:list-cache*/"));
     }
 
     static readonly string AllAnchors = RawAnchors.Replace("\r\n", "\n");

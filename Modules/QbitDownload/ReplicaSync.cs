@@ -187,6 +187,29 @@ public partial class QbitController
             return;
         }
 
+        // ── настройка фильтра каталога приезжает из дома (qdl 2.90) ──────────────
+        // Пишем ТОЛЬКО при расхождении: JsonStore.WriteNow кладёт на диск сразу, а CubProxy
+        // перечитывает файл по mtime — лишняя запись каждые пять минут дёргала бы его впустую.
+        // Поле необязательное: старый дом его не отдаёт, и тогда своё значение не трогаем.
+        try
+        {
+            var cf = manifest["catalogFilter"] as JObject;
+            if (cf != null)
+            {
+                bool en = cf.Value<bool?>("enabled") ?? false;
+                int my = cf.Value<int?>("movieYear") ?? CatalogFilter.DefMovieYear;
+                int ty = cf.Value<int?>("tvYear") ?? CatalogFilter.DefTvYear;
+
+                var cur = CatalogFilter.Load();
+                if (cur.Value<bool?>("enabled") != en || cur.Value<int?>("movieYear") != my || cur.Value<int?>("tvYear") != ty)
+                {
+                    CatalogFilter.Save(en, my, ty);
+                    Console.WriteLine($"[QbitDownload] replica: фильтр каталога из дома — enabled={en}, кино≥{my}, сериалы≥{ty}");
+                }
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] replica: фильтр каталога: " + ex.Message); }
+
         var sources = manifest["sources"] as JObject;
         bool qbitOk = (sources?.Value<string>("qbit") ?? "fail") == "ok";
         bool localOk = (sources?.Value<string>("local") ?? "fail") == "ok";

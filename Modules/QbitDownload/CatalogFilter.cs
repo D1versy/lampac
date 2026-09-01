@@ -87,6 +87,11 @@ public partial class QbitController
     [Route("qdl/catalog-filter")]
     public ActionResult CatalogFilterSet(bool enabled, int movieYear, int tvYear)
     {
+        // 🔴 На реплике настройка НЕ редактируется: она приезжает из дома манифестом (qdl 2.90).
+        // Иначе локальная правка жила бы до ближайшего тика и молча откатывалась — худший вид
+        // поведения. Тот же принцип, что у бэкфилла истории: реплика не источник правды.
+        if (ReplicaMode) return StatusCode(403, new { success = false, error = "на реплике настройка приезжает из дома" });
+
         var mg = ManageDenied(); if (mg != null) return mg;
 
         if (!CatalogFilter.ValidYear(movieYear) || !CatalogFilter.ValidYear(tvYear))
