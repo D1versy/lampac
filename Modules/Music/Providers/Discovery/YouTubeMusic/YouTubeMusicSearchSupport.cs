@@ -269,10 +269,7 @@ internal static class YouTubeMusicSearchSupport
         if (string.IsNullOrWhiteSpace(videoId) || string.IsNullOrWhiteSpace(rawTitle))
             return null;
 
-        string artist = CleanArtist(video.Author.ChannelTitle);
-        string title = CleanTitle(rawTitle, artist, out var titleArtist);
-        if (string.IsNullOrWhiteSpace(artist))
-            artist = titleArtist;
+        ResolveArtistAndTitle(rawTitle, video.Author.ChannelTitle, out string artist, out string title);
 
         return new MusicTrack
         {
@@ -405,10 +402,7 @@ internal static class YouTubeMusicSearchSupport
         if (string.IsNullOrWhiteSpace(videoId) || string.IsNullOrWhiteSpace(rawTitle))
             return null;
 
-        string artist = CleanArtist(video.Author.ChannelTitle);
-        string title = CleanTitle(rawTitle, artist, out var titleArtist);
-        if (string.IsNullOrWhiteSpace(artist))
-            artist = titleArtist;
+        ResolveArtistAndTitle(rawTitle, video.Author.ChannelTitle, out string artist, out string title);
 
         return new MusicTrack
         {
@@ -436,10 +430,7 @@ internal static class YouTubeMusicSearchSupport
         if (string.IsNullOrWhiteSpace(videoId) || string.IsNullOrWhiteSpace(rawTitle))
             return null;
 
-        string artist = CleanArtist(GetNestedString(video, "Author", "ChannelTitle"));
-        string title = CleanTitle(rawTitle, artist, out var titleArtist);
-        if (string.IsNullOrWhiteSpace(artist))
-            artist = titleArtist;
+        ResolveArtistAndTitle(rawTitle, GetNestedString(video, "Author", "ChannelTitle"), out string artist, out string title);
 
         return new MusicTrack
         {
@@ -594,6 +585,42 @@ internal static class YouTubeMusicSearchSupport
         value = Regex.Replace(value, @"\s+", " ").Trim();
 
         return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    /// <summary>
+    /// d1v:yt-artist-from-title — артист ютубовской заливки живёт в ЗАГОЛОВКЕ, а не в канале.
+    ///
+    /// Апстрим брал разобранный из заголовка <c>titleArtist</c> ТОЛЬКО когда название канала пустое
+    /// (<c>if (string.IsNullOrWhiteSpace(artist)) artist = titleArtist;</c>), а пустым оно не бывает
+    /// никогда. У ремикс-/кавер-каналов это значит, что артистом навсегда становился заливщик:
+    /// «Amped Music» вместо «Daft Punk», «LateNightUpload» вместо «Michael Jackson».
+    ///
+    /// Цена была не косметическая. Радио (<c>MusicRadioService</c>) строит выдачу ИЗ АРТИСТОВ сидов,
+    /// поэтому на таких треках оно возвращало ноль: замер на боевом — сид как есть даёт
+    /// available=false за 1.4 с, тот же трек с artist_name=«Daft Punk» — 13 треков за 2.4 с.
+    ///
+    /// ⚠️ Граница честности: разбор верит порядку «Артист - Название», который на ютубе преобладает,
+    /// но не единственный. На перевёрнутых заголовках («Gangsta's Paradise – Coolio») артистом
+    /// станет название песни. Для ПОДБОРА это не потеря — <c>MusicRadioService.ExtractSeedArtists</c>
+    /// пробует и канал тоже, и лишний кандидат просто ничего не находит; для НАДПИСИ это остаётся
+    /// известной неточностью, которую офлайн-разбором не отличить.
+    /// </summary>
+    static void ResolveArtistAndTitle(string rawTitle, string channelTitle, out string artist, out string title)
+    {
+        string channel = CleanArtist(channelTitle);
+
+        title = CleanTitle(rawTitle, channel, out string titleArtist);
+        artist = channel;
+
+        string parsed = CleanArtist(titleArtist);
+        if (string.IsNullOrWhiteSpace(parsed) || SameArtist(parsed, channel))
+            return;
+
+        // Канал и артист разошлись → верим заголовку. Переразбор с уже НАЙДЕННЫМ артистом снимает
+        // с заголовка его префикс — ровно то, что CleanTitle делает, когда канал и артист совпали
+        // (иначе в названии осталось бы «Daft Punk - Harder, Better…» вместе с артистом рядом).
+        artist = parsed;
+        title = CleanTitle(rawTitle, parsed, out _);
     }
 
     static string CleanTitle(string rawTitle, string knownArtist, out string titleArtist)

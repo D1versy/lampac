@@ -188,7 +188,11 @@
     var MUSIC_RADIO_STATE = {
         pending: false,
         lastGeneration: '',
-        lastRequestAt: 0
+        lastRequestAt: 0,
+        // d1v:endless-fallback — очередь кончилась, пока долив радио был ещё в пути.
+        // Долив приходит асинхронно и сам ничего не запускает, поэтому без этой отметки
+        // музыка замолкала бы ровно в тот момент, когда продолжение уже приехало.
+        awaitingResume: false
     };
     var MUSIC_HISTORY_MARK_DELAY = 10000;
     var MUSIC_CLIENT_TRACE_ENABLED = '{client_debug_enabled}' === 'true';
@@ -1523,6 +1527,15 @@
 
     // пока пользователь не выбирал плеер для музыки, наследуем глобальный
     // плеер Lampa (если он есть в списке платформы), иначе встроенный
+    //
+    // 🔴 d1v:music-default-inner — НЕ переводить дефолт на собственный <audio> («Music Player»).
+    // Соблазн сильный: у того движка честный 'ended', учёт перемешивания и повтора и аккуратная
+    // мини-панель вместо видеоплеерной обвязки. Но в его разметке (lm-ios-player__btn,
+    // lm-ios-full-player__btn — 245 мест) НЕТ НИ ОДНОГО класса `selector`, а контроллер
+    // зарегистрирован пустым (`toggle: function () {}`). Значит фокус-коллекция не строится и
+    // пультом он не управляется вовсе: на телевизоре это обменяло бы «трек не переключается» на
+    // «плеером нельзя управлять». Пока под него не написан ТВ-интерфейс, дефолт остаётся
+    // встроенным, а надёжность перехода чинится на его стороне — см. d1v:embedded-ended-next.
     function defaultMusicPlayerId(values) {
         var globalPlayer = Lampa.Storage.field('player');
         return Object.prototype.hasOwnProperty.call(values, globalPlayer) ? globalPlayer : 'inner';
@@ -4347,8 +4360,13 @@
         return copy;
     }
 
+    // d1v:radio-autoplay-default — у апстрима дефолт был false, то есть автопродолжение существовало,
+    // но не включалось никогда: за 7 часов работы боевого сервера раздел не сделал НИ ОДНОГО запроса
+    // к /music/radio. Владелец просит поведение ютуба — музыка не заканчивается, пока её не выключат,
+    // — поэтому дефолт наш. Явное «выключить» в настройках по-прежнему сильнее: setRadioAutoplayEnabled
+    // пишет false, и Storage.get вернёт именно его, а не этот дефолт.
     function isRadioAutoplayEnabled() {
-        return Lampa.Storage.get(MUSIC.storage.radio_autoplay_enabled, false) === true;
+        return Lampa.Storage.get(MUSIC.storage.radio_autoplay_enabled, true) === true;
     }
 
     function setRadioAutoplayEnabled(enabled) {
@@ -4521,6 +4539,48 @@
         return additions.length;
     }
 
+    // d1v:endless-fallback — последнее средство, когда очередь кончилась, а продолжения нет.
+    //
+    // Штатно сюда не доходят: радио дотягивает очередь заранее, его триггер стоит на остатке ≤ 1,
+    // то есть ещё на предпоследнем треке. Досюда доводит ровно ПРОВАЛ подбора — у ремиксов и
+    // каверов SoundCloud-related сплошь и рядом пуст, и апстримное поведение в этом месте это
+    // тишина. Владелец просил «бесконечно, пока не выключу», поэтому последним средством
+    // плейлист начинается заново — с одной нотой, чтобы это не выглядело мистикой.
+    //
+    // Выключатель уважаем: выключил автопродолжение руками — конец очереди снова конец.
+    function continueEndlessPlayback(origin) {
+        if (!isRadioAutoplayEnabled()) return false;
+
+        var tracks = queueTracks();
+        if (tracks.length < 2) return false;
+
+        // Долив ещё в пути — не зацикливаем, а дожидаемся: иначе плейлист уходил бы на второй
+        // круг ровно за мгновение до того, как приедет продолжение.
+        if (MUSIC_RADIO_STATE.pending) {
+            MUSIC_RADIO_STATE.awaitingResume = true;
+            return false;
+        }
+
+        Lampa.Noty.show('Похожего не нашлось — включаю плейлист заново.');
+        return playQueueIndexAnyEngine(0, origin || 'endless-restart');
+    }
+
+    // d1v:endless-fallback — один вход «сыграть трек очереди по индексу» для обоих движков.
+    // Нужен, потому что продолжение обязано работать одинаково и во встроенном плеере, и в
+    // собственном <audio>, а точки входа у них разные.
+    function playQueueIndexAnyEngine(index, origin) {
+        var tracks = queueTracks();
+        if (index < 0 || index >= tracks.length) return false;
+
+        if (shouldUseStandaloneIosAudio()) {
+            var order = standaloneIosOrder();
+            return standaloneIosPlayIndex(order && order.length > index ? order[index] : index);
+        }
+
+        scheduleTrackPlayed(tracks[index]);
+        return playEmbeddedQueueIndexInPlace(index, origin || 'queue-index');
+    }
+
     // «Радио от трека»: сид = выбранный трек, ответ радио становится НОВОЙ
     // очередью — сид первым (нажал радио от песни → она и стартует, дальше
     // волна). При любой неудаче текущая очередь не трогается
@@ -4585,14 +4645,30 @@
         requestPost(MUSIC.endpoints.radio, payload, function (json) {
             MUSIC_RADIO_STATE.pending = false;
 
-            if (!json || !json.available || !Array.isArray(json.tracks) || !json.tracks.length)
-                return;
+            // Индекс первого долитого трека = длина очереди ДО долива. Считаем заранее:
+            // appendRadioTracksToManagedQueue отдаёт только количество.
+            var firstAdded = queueTracks().length;
+            var added = json && json.available && Array.isArray(json.tracks) && json.tracks.length
+                ? appendRadioTracksToManagedQueue(json.tracks)
+                : 0;
 
-            var added = appendRadioTracksToManagedQueue(json.tracks);
             if (added > 0)
                 Lampa.Noty.show('Радио добавило треки в очередь.');
+
+            // d1v:endless-fallback — очередь успела кончиться, пока ответ был в пути.
+            if (MUSIC_RADIO_STATE.awaitingResume) {
+                MUSIC_RADIO_STATE.awaitingResume = false;
+
+                if (added > 0) playQueueIndexAnyEngine(firstAdded, 'radio-resume');
+                else continueEndlessPlayback('radio-empty');
+            }
         }, function () {
             MUSIC_RADIO_STATE.pending = false;
+
+            if (MUSIC_RADIO_STATE.awaitingResume) {
+                MUSIC_RADIO_STATE.awaitingResume = false;
+                continueEndlessPlayback('radio-failed');
+            }
         });
     }
 
@@ -5526,7 +5602,10 @@
         }
 
         var nextIndex = standaloneIosNeighborIndex(1);
-        return nextIndex >= 0 && standaloneIosPlayIndex(nextIndex);
+        if (nextIndex >= 0) return standaloneIosPlayIndex(nextIndex);
+
+        // d1v:endless-fallback — очередь кончилась. Апстрим здесь просто останавливался.
+        return continueEndlessPlayback('standalone-ended');
     }
 
     function toggleStandaloneIosShuffle() {
@@ -9465,6 +9544,7 @@
 
         return {
             from_music_cluster: true,
+            qdl_no_autonext: true,   // d1v:music-owns-next — см. buildPlayback; это объект ПЕРВОГО трека
             music_track_id: track && track.id ? track.id : null,
             music_playback_mode: getPlaybackMode(),
             music_youtube_id: extractResolvedYouTubeTrackId(track, json),
@@ -9601,6 +9681,23 @@
         var image = trackImage(track);
         var playback = {
             from_music_cluster: true,
+            // d1v:music-owns-next — у перехода между треками ОДИН хозяин, и это мы.
+            //
+            // Без флага их двое. Ядро на 'ended' зовёт PlayerPlaylist.next() (наш патч
+            // qdl-cut:jut-autonext в AppReplace.cs, тумблер playlist_next по умолчанию включён),
+            // тот видит у соседа очереди url-ФУНКЦИЮ, взводит wait_for_loading_url = true и уходит
+            // в резолв на 2-16 с (холодный ютубовский трек). Следом наш обработчик того же 'ended'
+            // бампает MUSIC_EMBEDDED_IOS.switchToken — в clearEmbeddedIosLockscreenSupport или в
+            // playEmbeddedQueueIndexInPlace. Когда резолв возвращается, его токен уже устарел, и он
+            // выходит НЕ ВЫЗВАВ call() (resolvePlaybackUrl). А раз call() не вызван, ядро не зовёт
+            // destroy и wait_for_loading_url остаётся true НАВСЕГДА: с этого момента игнорируется
+            // любой PlayerPlaylist.next() — и автопереход, и кнопка ► на панели, до перезапуска
+            // плеера. На iPhone/Mac этого не видно: при собственном <audio> резолвер токен не берёт
+            // вовсе и гард выключен.
+            //
+            // Гейт узкий: флаг живёт только на музыкальных объектах воспроизведения. Ручное
+            // переключение кнопками панели идёт другим путём и не затрагивается.
+            qdl_no_autonext: true,
             music_track_id: track && track.id ? track.id : null,
             music_playback_mode: getPlaybackMode(),
             music_youtube_id: extractYouTubeTrackId(track),
@@ -9684,6 +9781,11 @@
     var musicPlayerPanelRebindToken = 0;
     var musicPlayerPanelEndedCleanup = 0;
     var musicPlayerPanelSyntheticEndKey = '';
+    // d1v:embedded-ended-next — отметка «очередь уже сдвинули». Настоящий 'ended' может прийти
+    // ПОСЛЕ того, как handleMusicPlayerPanelEffectiveEnd перемотал трек в конец и переключил
+    // сам: без отметки это дало бы двойной шаг и пропущенный трек. Сравнивать
+    // musicPlayerPanelSyntheticEndKey тут нельзя — после сдвига очереди ключ уже другой.
+    var musicPlayerPanelAdvancedAt = 0;
     var pendingInternalPlaylist = null;
     var pendingPlayedTrack = null;
     var historyPlaybackTrackId = '';
@@ -10113,10 +10215,31 @@
 
         applyMusicPlayerPanelFix(false);
 
-        if (playEmbeddedQueueOffset(1))
+        if (advanceEmbeddedQueueOnce('effective-end'))
             return true;
 
         updateEmbeddedIosPlaybackState();
+        return true;
+    }
+
+    /// d1v:embedded-ended-next
+    /// Один вход на оба пути перехода — «почти конец» по timeupdate и настоящий 'ended'.
+    /// Возвращает true, если очередь реально сдвинулась.
+    function advanceEmbeddedQueueOnce(origin) {
+        var now = Date.now();
+
+        // Два события на один и тот же конец трека — норма, а не аномалия: effective-end
+        // перематывает медиа в конец и ставит паузу, и браузер вслед за этим вполне может
+        // отдать ещё и 'ended'. Окно короче паузы между треками и длиннее разброса событий.
+        if (musicPlayerPanelAdvancedAt && now - musicPlayerPanelAdvancedAt < 1500)
+            return true;
+
+        // Конец очереди — не повод замолкать: продолжение доливает радио, а если оно ничего не
+        // нашло, continueEndlessPlayback заводит плейлист заново (d1v:endless-fallback).
+        if (!playEmbeddedQueueOffset(1) && !continueEndlessPlayback(origin)) return false;
+
+        musicPlayerPanelAdvancedAt = now;
+        traceEmbeddedIos('panel-advance', origin || '', true);
         return true;
     }
 
@@ -10569,6 +10692,25 @@
 
                 if (event && (event.type === 'ended' || event.type === 'error')) {
                     traceEmbeddedIos('panel-' + event.type, '', true);
+
+                    // d1v:embedded-ended-next — апстрим выходил отсюда, НЕ ТРОНУВ ОЧЕРЕДЬ, и через
+                    // 900 мс сносил мост. Единственный автопереход embedded-режима
+                    // (handleMusicPlayerPanelEffectiveEnd) висит на timeupdate и требует попадания
+                    // в окно 0.25 с перед КАТАЛОЖНОЙ длительностью: поток короче каталога, нулевой
+                    // duration_ms или последний timeupdate раньше окна — и трек кончался в тишину.
+                    // Настоящий 'ended' — самое надёжное свидетельство, что трек доигран, по нему
+                    // очередь и надо вести. Симптом владельца («проиграл первый трек и всё») — ровно
+                    // этот ранний return: в БД у трека записана ПОЛНАЯ длительность, то есть он
+                    // доиграл до конца и никто не переключил.
+                    //
+                    // 'error' сюда не берём: там переход делает maybeAutoSkipUnavailableTrack со
+                    // своим счётчиком подряд идущих мертвецов — иначе битая пачка пролистается
+                    // мгновенно и молча.
+                    if (event.type === 'ended' && advanceEmbeddedQueueOnce('ended')) {
+                        updateEmbeddedIosPlaybackState();
+                        return;
+                    }
+
                     clearEmbeddedIosLockscreenSupport(event.type);
                     updateEmbeddedIosPlaybackState();
                     scheduleMusicPlayerPanelEndCleanup(event.type);

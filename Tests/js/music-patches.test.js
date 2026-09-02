@@ -32,6 +32,7 @@ const cache = read('Services', 'Cache', 'MusicMetadataCacheService.cs');
 const mbrainz = read('Providers', 'Metadata', 'MusicBrainz', 'MusicBrainzMetadataProvider.cs');
 const playback = read('Controllers', 'PlaybackController.cs');
 const apiController = read('Controllers', 'ApiController.cs');
+const ytMusic = read('Providers', 'Discovery', 'YouTubeMusic', 'YouTubeMusicSearchSupport.cs');
 const manifest = read('manifest.json');
 
 // ── правки, которые были у нас ДО разбора: их сторожа не было вовсе ──────────
@@ -181,6 +182,112 @@ test('F3: ретрай MusicBrainz на месте и уважает шлюз', 
     'ретрай обязан ходить через шлюз 1 req/s, а не мимо него');
   assert.ok(body.includes('RetryAfter'), 'пропало уважение Retry-After');
   assert.ok(mbrainz.includes('retryAfterCap'), 'пропал кап ожидания — бюджет ручки 20 с');
+});
+
+// ── §DE: трек доигрывал и музыка замолкала; продолжения не было вовсе ────────
+
+test('DE1: артист ютубовской заливки берётся из заголовка, а не из канала', () => {
+  assert.ok(ytMusic.includes('d1v:yt-artist-from-title'), 'потерян маркер d1v:yt-artist-from-title');
+  assert.ok(ytMusic.includes('static void ResolveArtistAndTitle'), 'пропал общий разбор артиста и заголовка');
+  // Апстримная форма: titleArtist подставлялся ТОЛЬКО когда канал пуст, а пустым он не бывает.
+  // Радио строится ИЗ АРТИСТОВ сидов, поэтому на таких треках оно возвращало ноль (замер:
+  // сид как есть — available=false за 1.4 с, он же с настоящим артистом — 13 треков за 2.4 с).
+  assert.ok(!/if \(string\.IsNullOrWhiteSpace\(artist\)\)\s*\n\s*artist = titleArtist;/.test(ytMusic),
+    'вернулась апстримная форма: артистом снова станет название канала, а радио — пустым');
+  assert.strictEqual((ytMusic.match(/ResolveArtistAndTitle\(rawTitle,/g) || []).length, 3,
+    'не все три маппера (поиск / плейлист / загрузки канала) ходят через общий разбор');
+});
+
+test('DE2: очередь ведётся по настоящему ended', () => {
+  assert.ok(plugin.includes('d1v:embedded-ended-next'), 'потерян маркер d1v:embedded-ended-next');
+  assert.ok(plugin.includes('function advanceEmbeddedQueueOnce'), 'пропал общий вход перехода');
+
+  const idx = plugin.indexOf("if (event && (event.type === 'ended' || event.type === 'error'))");
+  assert.ok(idx > 0, 'не найдена ветка ended/error панельного обработчика');
+
+  const body = plugin.slice(idx, idx + 2200);
+  assert.ok(body.includes("advanceEmbeddedQueueOnce('ended')"),
+    'вернулся ранний return: трек доиграет до конца и музыка замолчит — ровно симптом владельца');
+  assert.ok(!/'error'[\s\S]{0,40}advanceEmbeddedQueueOnce/.test(body),
+    'переход повешен и на error — там своя ветка со счётчиком подряд идущих мертвецов');
+});
+
+test('DE2: 🔴 у перехода один хозяин — автопереход ядра для музыки заглушён', () => {
+  // Иначе их двое. Ядро на 'ended' зовёт PlayerPlaylist.next(), тот взводит
+  // wait_for_loading_url и уходит в резолв url-функции на 2-16 с; наш switchToken делает резолв
+  // устаревшим, resolvePlaybackUrl выходит без call(), ядро НИКОГДА не снимает флаг — и дальше
+  // игнорируется любой next(), включая кнопку ► на панели, до перезапуска плеера.
+  assert.ok(plugin.includes('d1v:music-owns-next'), 'потерян маркер d1v:music-owns-next');
+
+  // флаг обязан быть на ОБОИХ объектах: buildPlayback (соседи очереди) и buildResolvedPlayback
+  // (первый трек — ровно тот, на котором владелец и вставал)
+  assert.strictEqual((plugin.match(/qdl_no_autonext: true/g) || []).length, 2,
+    'qdl_no_autonext стоит не на обоих объектах воспроизведения');
+  for (const fn of ['function buildPlayback', 'function buildResolvedPlayback']) {
+    const idx = plugin.indexOf(fn);
+    assert.ok(idx > 0, 'не найдена ' + fn);
+    assert.ok(plugin.slice(idx, idx + 2600).includes('qdl_no_autonext: true'),
+      'в ' + fn + ' пропал флаг — вернётся гонка с автопереходом ядра');
+  }
+});
+
+test('DE2: двойной шаг закрыт отметкой времени, а не сравнением ключа', () => {
+  // effective-end перематывает медиа в конец и ставит паузу — браузер вслед может отдать ещё и
+  // ended. Сравнивать musicPlayerPanelSyntheticEndKey тут нельзя: после сдвига очереди в ключ
+  // входят уже другой trackId и другой индекс, то есть защита не сработала бы никогда.
+  assert.ok(plugin.includes('musicPlayerPanelAdvancedAt'), 'пропала отметка «очередь уже сдвинули»');
+
+  const idx = plugin.indexOf('function advanceEmbeddedQueueOnce');
+  assert.match(plugin.slice(idx, idx + 1200),
+    /musicPlayerPanelAdvancedAt && now - musicPlayerPanelAdvancedAt < \d+/,
+    'пропало окно защиты от двойного шага — трек будет пролистываться через один');
+});
+
+test('DE3: автопродолжение включено по умолчанию', () => {
+  assert.ok(plugin.includes('d1v:radio-autoplay-default'), 'потерян маркер d1v:radio-autoplay-default');
+  assert.match(plugin, /radio_autoplay_enabled, true\) === true/,
+    'вернулся апстримный дефолт false: за 7 часов боевой работы не случилось ни одного /music/radio');
+});
+
+test('DE3: конец очереди не заканчивается тишиной', () => {
+  assert.ok(plugin.includes('d1v:endless-fallback'), 'потерян маркер d1v:endless-fallback');
+  assert.ok(plugin.includes('function continueEndlessPlayback'), 'пропало последнее средство');
+  assert.ok(plugin.includes('function playQueueIndexAnyEngine'), 'пропал общий вход «сыграть по индексу»');
+
+  // 🔴 Оба движка обязаны звать его на конце очереди: собственный <audio> — дефолт в оболочках,
+  // встроенный видеоплеер остаётся у тех, кто выбрал его руками.
+  assert.ok(plugin.includes("continueEndlessPlayback('standalone-ended')"),
+    'собственный <audio> снова останавливается на конце очереди');
+  assert.match(plugin, /playEmbeddedQueueOffset\(1\) && !continueEndlessPlayback\(origin\)/,
+    'встроенный плеер снова останавливается на конце очереди');
+
+  // Долив приезжает асинхронно и сам ничего не запускает: без этого музыка молчала бы ровно
+  // в тот момент, когда продолжение уже пришло.
+  assert.ok(plugin.includes('awaitingResume'), 'пропало ожидание долива радио');
+  assert.ok(plugin.includes("playQueueIndexAnyEngine(firstAdded, 'radio-resume')"),
+    'долитые радио треки не запускаются после того, как очередь кончилась');
+});
+
+test('DE4: 🔴 дефолт музыки НЕ уводят на плеер без пультовой навигации', () => {
+  // Антирегрессия, а не правка. Собственный <audio> выглядит лучшим движком (честный 'ended',
+  // shuffle/repeat, аккуратная мини-панель), и соблазн сделать его дефолтом возникнет снова.
+  // Нельзя: в его разметке ноль классов `selector`, контроллер зарегистрирован пустым — фокус
+  // -коллекция не строится, и на телевизоре пультом им управлять невозможно.
+  assert.ok(plugin.includes('d1v:music-default-inner'), 'потерян маркер d1v:music-default-inner');
+
+  const idx = plugin.indexOf('function defaultMusicPlayerId');
+  const body = plugin.slice(idx, idx + 400);
+  assert.ok(!body.includes("return 'ios'"),
+    'дефолт уводит музыку на плеер, который не управляется пультом — на ТВ это хуже исходной жалобы');
+
+  // Сама предпосылка обязана оставаться верной: если у кнопок музыкального плеера появится
+  // `selector`, этот кейс покраснеет и заставит пересмотреть решение.
+  // 🔴 Ищем именно в атрибуте class, а не по всему файлу: иначе кейс ловит собственные
+  // комментарии, где эти же классы упомянуты прозой (уже наступали).
+  const btnClasses = plugin.match(/class="[^"]*lm-ios-(?:full-)?player__btn[^"]*"/g) || [];
+  assert.ok(btnClasses.length > 0, 'разметка кнопок музыкального плеера не найдена — кейс ослеп');
+  assert.deepStrictEqual(btnClasses.filter((cls) => cls.includes('selector')), [],
+    'у музыкального плеера появились selector-ы — вариант «сделать его дефолтом» пора пересмотреть');
 });
 
 // ── общее ───────────────────────────────────────────────────────────────────

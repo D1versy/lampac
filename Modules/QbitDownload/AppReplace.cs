@@ -65,11 +65,16 @@ public static class AppPatch
         new P("preroll",
             "function show$5(data, call) {",
             "function show$5(data, call) {return call();/*qdl-cut:preroll*/"),
-        // Автопилот jut.su: при ВЫКЛЮЧЕННОМ тумблере автопереход к следующей серии не нужен.
-        // Гейт именно здесь, потому что штатный выключатель `playlist_next` глобальный —
-        // выключив его, мы отняли бы автопереход у «Загрузок» и у всего остального.
-        // Флаг ставит qdl.js на сам элемент плейлиста, `work` — текущий элемент плеера.
-        // Ручное переключение серий (кнопки панели) при этом остаётся.
+        // Гейт «этим плейлистом автопереход ведём не мы»: штатный выключатель `playlist_next`
+        // глобальный, и выключив его, мы отняли бы автопереход у «Загрузок» и у всего остального.
+        // `work` — текущий элемент плеера. Ручное переключение (кнопки панели) остаётся всегда.
+        //
+        // Кто ставит флаг сегодня: раздел «Музыка» (Modules/Music/plugin.js, d1v:music-owns-next)
+        // — там переходом обязаны владеть мы одни, иначе PlayerPlaylist.next() ядра стартует свой
+        // резолв url-функции, наш switchToken делает его устаревшим, resolvePlaybackUrl выходит без
+        // call(), и ядро навсегда залипает в wait_for_loading_url = true (умирает и автопереход, и
+        // кнопка ► до перезапуска плеера).
+        // jut.su флаг больше НЕ ставит — это зафиксировано Tests/js/qdl-jut-autopilot.test.js.
         new P("jut-autonext",
             "if (Storage.field('playlist_next') && !$('body').hasClass('selectbox--open')) PlayerPlaylist.next();",
             "if (!(work && work.qdl_no_autonext) && Storage.field('playlist_next') && !$('body').hasClass('selectbox--open')) PlayerPlaylist.next();/*qdl-cut:jut-autonext*/"),
