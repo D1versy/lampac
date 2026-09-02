@@ -5686,6 +5686,12 @@
             el.on('hover:long', function () { openRecording(it); });
 
             grid.append(el);
+            // ⚠️ Без регистрации в коллекции фокуса лента кончается для ПУЛЬТА на последнем ряду
+            // первой страницы: карточки в DOM есть, а Navigator о них не знает — canmove('down') ложь.
+            // Мышь и тач бага не видят вовсе: они фокусят элемент напрямую, мимо коллекции.
+            // ⚠️ Только пока контроллер наш: ответ мог прийти, когда зритель ушёл в меню или в плеер —
+            // тогда карточки уехали бы в ЧУЖУЮ коллекцию; при возврате toggle соберёт всё заново.
+            try { if (!Lampa.Controller.own || Lampa.Controller.own(comp)) Lampa.Controller.collectionAppend(el); } catch (e) {}
         }
 
         // ── полноэкранный просмотр кадра ─────────────────────────────────────────
@@ -5755,6 +5761,8 @@
 
         this.start = function () {
             Lampa.Controller.add('content', {
+                // link обязателен: по нему Controller.own(comp) отличает «активны мы» от чужого экрана.
+                link: comp,
                 toggle: function () { focusBack(scroll, last); },
                 left: function () {
                     if (view) { moveView(-1); return; }
@@ -6204,6 +6212,9 @@
                 livePlay({ id: rec.camera, name: rec.cameraName }, [rec], 0);
             });
             body.append(el);
+            // ⚠️ Та же мина, что и в Detection: без collectionAppend пульт упирается в конец
+            // ПЕРВОЙ страницы, хотя лента в DOM уже длиннее. Только пока контроллер наш.
+            try { if (!Lampa.Controller.own || Lampa.Controller.own(comp)) Lampa.Controller.collectionAppend(el); } catch (e) {}
         }
 
         this.empty = function (text) {
@@ -6216,6 +6227,8 @@
 
         this.start = function () {
             Lampa.Controller.add('content', {
+                // link обязателен: по нему Controller.own(comp) отличает «активны мы» от чужого экрана.
+                link: comp,
                 toggle: function () { focusBack(scroll, last); },
                 left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
                 right: function () { Navigator.move('right'); },

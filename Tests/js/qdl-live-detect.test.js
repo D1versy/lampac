@@ -40,7 +40,7 @@ function domScroll(w) {
 
 function mount(opts) {
   opts = opts || {};
-  const calls = { urls: [], plays: [], selects: [], notys: [] };
+  const calls = { urls: [], plays: [], selects: [], notys: [], appended: [], foreign: false };
   const pages = opts.pages || [PAGE1];
   let page = 0;
 
@@ -60,7 +60,14 @@ function mount(opts) {
     Player: { play: (x) => calls.plays.push(x), playlist: () => {} },
     Select: { show: (o) => { calls.selects.push(o); }, listener: { follow() {}, send() {} } },
     Noty: { show: (t) => calls.notys.push(t) },
-    Controller: { add(name, o) { calls.ctrl = o; }, toggle() {}, collectionSet() {}, collectionFocus() {} },
+    Controller: {
+      add(name, o) { calls.ctrl = o; },
+      toggle() {}, collectionSet() {}, collectionFocus() {},
+      // Живой own(): «активен ли контроллер, зарегистрированный ЭТИМ экраном» — по нему
+      // Lampa отличает свой экран от чужого (Controller.own → active.link == link).
+      own: (link) => !calls.foreign && !!calls.ctrl && calls.ctrl.link === link,
+      collectionAppend: (el) => calls.appended.push(el),
+    },
     Layer: { visible() {}, update() {} },
   });
 
@@ -221,5 +228,36 @@ test('оверлей просмотра уезжает вместе с экра�
 
   m.inst.pause();
   assert.strictEqual(m.body.find('.qdl-det-view').length, 0, 'ушли вперёд — оверлей не остался поверх чужого экрана');
+  m.inst.destroy();
+});
+
+// ─────────────────── догрузка и пульт (qdl 2.99) ───────────────────
+//
+// Жалоба владельца с телевизора: «листаю вниз — на определённом моменте карточки просто не
+// подгружаются, на маке всё листается». Замер боевого клиента через CDP: в DOM 90 карточек,
+// в Navigator._collection — 63, canmove('down') = false. Мышь и тач фокусят элемент напрямую,
+// мимо коллекции, поэтому на маке и телефоне бага не видно вовсе.
+
+test('карточки догрузки уходят в коллекцию фокуса — иначе пульт упрётся в конец 1-й страницы', () => {
+  const m = mount({ pages: [PAGE1, { items: [evt(50), evt(49)], hasNext: false, cursor: 49 }] });
+  assert.strictEqual(m.calls.appended.length, 0,
+    'первая страница собирается через activity.toggle → collectionSet, дублировать её не надо');
+  m.inst.load(false);
+  assert.strictEqual(m.calls.appended.length, 2, 'обе карточки 2-й страницы зарегистрированы у навигатора');
+  assert.strictEqual(m.calls.appended[0][0], cards(m)[3], 'в коллекцию идёт сам DOM-узел карточки');
+  m.inst.destroy();
+});
+
+test('link контроллера на месте — без него own(comp) всегда ложь и регистрация не сработает', () => {
+  const m = mount();
+  assert.strictEqual(m.calls.ctrl.link, m.inst);
+  m.inst.destroy();
+});
+
+test('ответ, доживший до чужого экрана, не засоряет чужую коллекцию', () => {
+  const m = mount({ pages: [PAGE1, { items: [evt(50)], hasNext: false, cursor: 50 }] });
+  m.calls.foreign = true;              // зритель ушёл в меню/плеер: активен НЕ наш контроллер
+  m.inst.load(false);
+  assert.strictEqual(m.calls.appended.length, 0, 'при возврате toggle соберёт коллекцию заново');
   m.inst.destroy();
 });
