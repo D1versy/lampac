@@ -268,26 +268,50 @@ test('DE3: конец очереди не заканчивается тишин�
     'долитые радио треки не запускаются после того, как очередь кончилась');
 });
 
-test('DE4: 🔴 дефолт музыки НЕ уводят на плеер без пультовой навигации', () => {
-  // Антирегрессия, а не правка. Собственный <audio> выглядит лучшим движком (честный 'ended',
-  // shuffle/repeat, аккуратная мини-панель), и соблазн сделать его дефолтом возникнет снова.
-  // Нельзя: в его разметке ноль классов `selector`, контроллер зарегистрирован пустым — фокус
-  // -коллекция не строится, и на телевизоре пультом им управлять невозможно.
+test('DE4: дефолт музыки остаётся встроенным плеером', () => {
   assert.ok(plugin.includes('d1v:music-default-inner'), 'потерян маркер d1v:music-default-inner');
 
   const idx = plugin.indexOf('function defaultMusicPlayerId');
   const body = plugin.slice(idx, idx + 400);
   assert.ok(!body.includes("return 'ios'"),
-    'дефолт уводит музыку на плеер, который не управляется пультом — на ТВ это хуже исходной жалобы');
+    'дефолт музыки сменён — это решение принимает владелец, а не ребейз');
+});
 
-  // Сама предпосылка обязана оставаться верной: если у кнопок музыкального плеера появится
-  // `selector`, этот кейс покраснеет и заставит пересмотреть решение.
-  // 🔴 Ищем именно в атрибуте class, а не по всему файлу: иначе кейс ловит собственные
-  // комментарии, где эти же классы упомянуты прозой (уже наступали).
-  const btnClasses = plugin.match(/class="[^"]*lm-ios-(?:full-)?player__btn[^"]*"/g) || [];
-  assert.ok(btnClasses.length > 0, 'разметка кнопок музыкального плеера не найдена — кейс ослеп');
-  assert.deepStrictEqual(btnClasses.filter((cls) => cls.includes('selector')), [],
-    'у музыкального плеера появились selector-ы — вариант «сделать его дефолтом» пора пересмотреть');
+test('DE5: 🔴 полноэкранный плеер музыки достижим пультом', () => {
+  // Владелец: «оверлей поверх плейлиста, который к тому же не закрывается». Причина была не в
+  // логике закрытия, а в том, что в фокус-коллекцию не попадал НИ ОДИН элемент: у кнопок не было
+  // класса selector, а контроллер регистрировался с пустым `toggle: function () {}`. Экран
+  // открывался и становился ловушкой.
+  assert.ok(plugin.includes('d1v:music-four-buttons'), 'потерян маркер d1v:music-four-buttons');
+
+  // ровно четыре кнопки в основном ряду, и каждая фокусируемая
+  const actionsIdx = plugin.indexOf("'<div class=\"lm-ios-full-player__actions\">'");
+  assert.ok(actionsIdx > 0, 'не найден ряд кнопок плеера');
+  const actions = plugin.slice(actionsIdx, actionsIdx + 1400);
+  const buttons = actions.match(/data-action="(prev|playpause|next|queue|shuffle|repeat)"/g) || [];
+  assert.deepStrictEqual(buttons, [
+    'data-action="prev"', 'data-action="playpause"', 'data-action="next"', 'data-action="queue"',
+  ], 'состав ряда кнопок изменён — владелец просил ровно четыре: пред, пауза, след, плейлист');
+  assert.strictEqual((actions.match(/lm-ios-full-player__btn[^"]*selector/g) || []).length, 4,
+    'кнопка без selector = кнопка, до которой не дойти пультом');
+
+  // выход с экрана и вход в лист очереди — тоже пультом
+  assert.match(plugin, /lm-ios-full-player__tool selector" data-action="collapse"/,
+    'крестик снова не фокусируется — экран опять станет ловушкой');
+  assert.match(plugin, /lm-ios-full-player__sheet-row selector/,
+    'строки очереди не фокусируются — кнопка «плейлист» ведёт в тупик');
+
+  // 🔴 пульт жмёт hover:enter, а не click: без второй подписки кнопки молчат на OK
+  assert.match(plugin, /on\('click hover:enter', '\[data-action\]'/, 'кнопки плеера не слушают hover:enter');
+  assert.match(plugin, /row\.on\('click hover:enter'/, 'строки листа не слушают hover:enter');
+
+  // контроллер обязан строить коллекцию, а не быть заглушкой
+  const ctrlIdx = plugin.indexOf("Lampa.Controller.add('lampac_music_full_player'");
+  assert.ok(ctrlIdx > 0, 'контроллер полноэкранного плеера не найден');
+  const ctrl = plugin.slice(ctrlIdx, ctrlIdx + 1200);
+  assert.ok(!/toggle: function \(\) \{\}/.test(ctrl), 'вернулся пустой toggle — фокус-коллекция не строится');
+  assert.ok(ctrl.includes('Lampa.Controller.collectionSet'), 'коллекция не собирается');
+  assert.ok(ctrl.includes('sheetOpen'), 'фокус не уезжает в открытый лист очереди');
 });
 
 // ── общее ───────────────────────────────────────────────────────────────────

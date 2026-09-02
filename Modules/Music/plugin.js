@@ -5891,8 +5891,31 @@
         updateStandaloneIosFullPlayer();
 
         if (Lampa.Controller && typeof Lampa.Controller.add === 'function') {
+            // d1v:music-four-buttons — РЕАЛЬНАЯ фокус-коллекция вместо пустого toggle.
+            // Апстримный `toggle: function () {}` означал, что коллекция не строится вообще: на
+            // телевизоре не фокусировалось ничего, ни одна кнопка не нажималась, и выйти можно
+            // было только кнопкой Back — а стоило ей не дойти, экран превращался в ловушку.
+            // Ровно это владелец и назвал «оверлей не закрывается».
             Lampa.Controller.add('lampac_music_full_player', {
-                toggle: function () {},
+                toggle: function () {
+                    var root = player.get(0);
+
+                    // Лист очереди — это слой ПОВЕРХ кнопок. Пока он открыт, фокус обязан жить
+                    // в нём, иначе стрелки уводят на кнопки за листом и человек управляет тем,
+                    // чего не видит.
+                    var sheetOpen = player.hasClass('lm-ios-full-player--sheet-open');
+                    var focused = sheetOpen
+                        ? player.find('.lm-ios-full-player__sheet-row.selector').get(0)
+                        : (player.find('.lm-ios-full-player__actions .selector.focus').get(0)
+                            || player.find('[data-action="playpause"]').get(0));
+
+                    Lampa.Controller.collectionSet(root);
+                    Lampa.Controller.collectionFocus(focused || false, root);
+                },
+                left: function () { Lampa.Navigator.move('left'); },
+                right: function () { Lampa.Navigator.move('right'); },
+                up: function () { Lampa.Navigator.move('up'); },
+                down: function () { Lampa.Navigator.move('down'); },
                 back: function () {
                     closeStandaloneIosFullPlayer();
                 }
@@ -6285,6 +6308,21 @@
 
     // --- bottom-sheet: каркас, очередь ---
 
+    // d1v:music-four-buttons — пересобрать фокус-коллекцию полноэкранного плеера.
+    // Общий вход для обеих сторон: открыли лист очереди — фокус уезжает в него, закрыли —
+    // возвращается на кнопки. Через setTimeout, потому что строки листа дописывает вызывающий
+    // УЖЕ ПОСЛЕ showStandaloneIosSheet: собери коллекцию сразу — она окажется пустой.
+    function refocusStandaloneIosFullPlayer() {
+        if (!MUSIC_IOS_FULL_PLAYER_OPEN) return;
+
+        setTimeout(function () {
+            try {
+                if (MUSIC_IOS_FULL_PLAYER_OPEN && Lampa.Controller && typeof Lampa.Controller.toggle === 'function')
+                    Lampa.Controller.toggle('lampac_music_full_player');
+            } catch (e) {}
+        }, 0);
+    }
+
     function closeStandaloneIosSheet() {
         if (!MUSIC_IOS_FULL_PLAYER || !MUSIC_IOS_FULL_PLAYER.length) return;
 
@@ -6299,6 +6337,7 @@
         MUSIC_IOS_FULL_PLAYER.removeAttr('data-queue-key');
         MUSIC_IOS_FULL_PLAYER.removeAttr('data-current-index');
         MUSIC_IOS_FULL_PLAYER.removeAttr('data-scroll-current');
+        refocusStandaloneIosFullPlayer();   // d1v:music-four-buttons — фокус обратно на кнопки
     }
 
     function showStandaloneIosSheet(title) {
@@ -6312,6 +6351,9 @@
         player.addClass('lm-ios-full-player--sheet-open');
         bumpMusicHeatMetric('fullPlayerSheetOpen');
         logStandaloneIosFullEvent('sheet-open', title || '');
+        // d1v:music-four-buttons — фокус обязан переехать В лист. Строки рождаются ПОСЛЕ этого
+        // вызова (их дописывает вызывающий), поэтому пересборку коллекции откладываем на тик.
+        refocusStandaloneIosFullPlayer();
         return body;
     }
 
@@ -6326,7 +6368,10 @@
     function appendStandaloneIosSheetRow(body, options) {
         options = options || {};
 
-        var row = $('<div class="lm-ios-full-player__sheet-row"></div>');
+        // d1v:music-four-buttons — строка листа обязана быть selector, иначе кнопка «плейлист»
+        // ведёт в список, по которому пультом нельзя ни ходить, ни выбирать: та же ловушка,
+        // что была у самого оверлея, только на шаг глубже.
+        var row = $('<div class="lm-ios-full-player__sheet-row selector"></div>');
         var main = $('<div class="lm-ios-full-player__sheet-row-main"></div>');
         var title = $('<div class="lm-ios-full-player__sheet-row-title"></div>').text(options.title || '');
         var subtitle = $('<div class="lm-ios-full-player__sheet-row-subtitle"></div>').text(options.subtitle || '');
@@ -6340,7 +6385,7 @@
         if (options.trailing) row.append(trailing);
 
         if (options.onSelect) {
-            row.on('click', function (event) {
+            row.on('click hover:enter', function (event) {
                 event.preventDefault();
                 event.stopPropagation();
                 if (row.hasClass('disabled')) return;
@@ -7135,7 +7180,9 @@
             + '<div class="lm-ios-full-player__head">'
             + '<div class="lm-ios-full-player__tool" data-action="collapse">' + IOS_PLAYER_DOWN_ICON + '</div>'
             + '<div class="lm-ios-full-player__head-title">Сейчас играет</div>'
-            + '<div class="lm-ios-full-player__tool" data-action="collapse">' + IOS_PLAYER_CLOSE_ICON + '</div>'
+            // d1v:music-four-buttons — крестик ОБЯЗАН быть selector: пультом это единственный
+            // видимый выход, и без него экран был ловушкой («оверлей не закрывается»).
+            + '<div class="lm-ios-full-player__tool selector" data-action="collapse">' + IOS_PLAYER_CLOSE_ICON + '</div>'
             + '</div>'
             + '<div class="lm-ios-full-player__hero">'
             + '<div class="lm-ios-full-player__art"><img src="' + IMG_BG + '" alt=""></div>'
@@ -7148,29 +7195,29 @@
             + '<div class="lm-ios-full-player__time lm-ios-full-player__time--total">0:00</div>'
             + '</div>'
             + '</div>'
+            // d1v:music-four-buttons — ровно четыре кнопки: пред / пауза / след / плейлист.
+            // Было одиннадцать в три ряда (перемешать, повтор, «Очередь», «Источники», «Текст»,
+            // «В закладки», «Таймер», «Подборка», «Остановить») — владелец назвал это «слишком
+            // много элементов управления». «Очередь» поднята из ряда быстрых действий в основной,
+            // остальное убрано с экрана.
+            //
+            // 🔴 Класс `selector` обязателен на КАЖДОЙ: без него элемент не попадает в
+            // фокус-коллекцию Lampa, и пультом до кнопки не дойти. Именно поэтому оверлей
+            // «не закрывался» — крестик в шапке тоже был без него, и на телевизоре экран
+            // превращался в ловушку.
             + '<div class="lm-ios-full-player__actions">'
-            + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--mini" data-action="shuffle">' + IOS_PLAYER_SHUFFLE_ICON + '</div>'
-            + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--ghost" data-action="prev">' + IOS_PLAYER_PREV_ICON + '</div>'
-            + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--primary" data-action="playpause">' + IOS_PLAYER_PAUSE_ICON + '</div>'
-            + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--ghost" data-action="next">' + IOS_PLAYER_NEXT_ICON + '</div>'
-            + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--mini" data-action="repeat">' + IOS_PLAYER_REPEAT_ICON + '</div>'
-            + '</div>'
-            + '<div class="lm-ios-full-player__quick-actions">'
-            + '<div class="lm-ios-full-player__quick" data-action="queue">' + IOS_PLAYER_QUEUE_ICON + '<span>Очередь</span></div>'
-            + '<div class="lm-ios-full-player__quick" data-action="sources">' + IOS_PLAYER_SOURCE_ICON + '<span>Источники</span></div>'
-            + '<div class="lm-ios-full-player__quick" data-action="lyrics">' + IOS_PLAYER_LYRICS_ICON + '<span>Текст</span></div>'
-            + '<div class="lm-ios-full-player__quick" data-action="bookmark">' + BOOKMARK_ICON + '<span>В закладки</span></div>'
-            + '<div class="lm-ios-full-player__quick" data-action="timer">' + IOS_PLAYER_TIMER_ICON + '<span>Таймер</span></div>'
-            + '<div class="lm-ios-full-player__quick" data-action="radio">' + IOS_PLAYER_RADIO_ICON + '<span>Подборка</span></div>'
+            + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--ghost selector" data-action="prev">' + IOS_PLAYER_PREV_ICON + '</div>'
+            + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--primary selector" data-action="playpause">' + IOS_PLAYER_PAUSE_ICON + '</div>'
+            + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--ghost selector" data-action="next">' + IOS_PLAYER_NEXT_ICON + '</div>'
+            + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--mini selector" data-action="queue">' + IOS_PLAYER_QUEUE_ICON + '</div>'
             + '</div>'
             + '<div class="lm-ios-full-player__timer-status"></div>'
-            + '<div class="lm-ios-full-player__stop" data-action="stop">Остановить</div>'
             + '</div>'
             + '<div class="lm-ios-full-player__sheet">'
             + '<div class="lm-ios-full-player__sheet-panel">'
             + '<div class="lm-ios-full-player__sheet-head">'
             + '<div class="lm-ios-full-player__sheet-title"></div>'
-            + '<div class="lm-ios-full-player__sheet-close" data-action="sheet-close">' + IOS_PLAYER_CLOSE_ICON + '</div>'
+            + '<div class="lm-ios-full-player__sheet-close selector" data-action="sheet-close">' + IOS_PLAYER_CLOSE_ICON + '</div>'
             + '</div>'
             + '<div class="lm-ios-full-player__sheet-body"></div>'
             + '</div>'
@@ -7178,7 +7225,10 @@
             + '</div>'
         );
 
-        player.on('click', '[data-action]', function (event) {
+        // d1v:music-four-buttons — пульт жмёт не 'click', а 'hover:enter' по элементу в фокусе.
+        // Без второй подписки кнопки видны и даже фокусируются, но на OK не реагируют — то есть
+        // выглядят рабочими и молчат.
+        player.on('click hover:enter', '[data-action]', function (event) {
             event.preventDefault();
             event.stopPropagation();
             handleStandaloneIosPlayerAction($(this).attr('data-action'));
