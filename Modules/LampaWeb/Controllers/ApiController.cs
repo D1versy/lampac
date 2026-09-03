@@ -42,12 +42,21 @@ public class ApiController : BaseController
     #region Index
     // setHeadersNoCache + ?v= на lampainit.js: браузеры/WebView (ТВ) кэшировали вход и старый
     // lampainit.js (в нём наши патчи) — фиксы «не доезжали» до клиента без ручного Ctrl+F5.
-    // cacheVersion пересчитывается на каждый (ре)старт процесса → каждый деплой сбрасывает кэш сам.
+    //
+    // 🔴 d1v:index-no-staticache — серверного Staticache у входа НЕТ. Было
+    // [Staticache(5, always: true, setHeadersNoCache: true)] с пояснением «каждый рестарт сбрасывает
+    // кэш сам» — неверно: кеш дисковый (/lampac/cache/static) и рестарт переживает. В тело входа
+    // вшит LamInitVersion(), то есть адреса ВСЕХ наших плагинов; закешированный вход после деплоя
+    // до пяти минут раздавал клиентам старый bootstrap → старый music.js, и правка «не доезжала»
+    // (телевизор загрузил 2.101 через две минуты после выкатки 2.102, при свежем ответе на прямой
+    // запрос). Третья ловушка той же семьи после queryKeys у lampainit.js и состава LamInitVersion.
+    // Цена отказа от кеша — генерация 3 КБ строки на запрос, это микросекунды.
     [HttpGet, AllowAnonymous]
-    [Staticache(5, always: true, setHeadersNoCache: true)]
     [Route("/")]
     public ActionResult Index()
     {
+        SetHeadersNoCache();
+
         if (string.IsNullOrEmpty(ModInit.conf.index))
             return Content("api work", "text/plain; charset=utf-8");
 

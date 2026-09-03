@@ -410,7 +410,6 @@
     var IOS_PLAYER_NEXT_ICON = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M15 6h2v12h-2V6ZM6.5 7.2v9.6c0 .8.9 1.28 1.56.82L14 13.4a1 1 0 0 0 0-1.64L8.06 7.58c-.66-.46-1.56.02-1.56.82Z" fill="currentColor"/></svg>';
     var IOS_PLAYER_QUEUE_ICON = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 7.5h10M5 12h10M5 16.5h7M17.5 15v-5m0 0-2 2m2-2 2 2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     var IOS_PLAYER_CLOSE_ICON = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="m8.46 8.47 7.07 7.06m0-7.06-7.07 7.06" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
-    var IOS_PLAYER_DOWN_ICON = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="m7 10 5 5 5-5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     var IOS_PLAYER_SOURCE_ICON = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 7h10l-2.5 3M17 17H7l2.5-3M5.5 9.5A6.5 6.5 0 0 1 17 7m1.5 7.5A6.5 6.5 0 0 1 7 17" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     var IOS_PLAYER_TIMER_ICON = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 7v5l3 2M9 3h6M12 21a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     var IOS_PLAYER_LYRICS_ICON = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v3" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>';
@@ -5771,11 +5770,6 @@
             return;
         }
 
-        if (action === 'collapse') {
-            closeStandaloneIosFullPlayer();
-            return;
-        }
-
         if (action === 'sheet-close') {
             closeStandaloneIosSheet();
             return;
@@ -5816,8 +5810,7 @@
         }
 
         if (action === 'stop') {
-            closeStandaloneIosFullPlayer();
-            stopStandaloneIosAudioPlayback();
+            exitStandaloneIosFullPlayer();
             return;
         }
 
@@ -5897,6 +5890,50 @@
 
     // --- открытие/закрытие фулл-плеера, back-навигация ---
 
+    // d1v:music-player-owns-focus — пока плеер открыт, контроллер фокуса принадлежит ему.
+    // Трасса переключений с телевизора: через 19 мс после открытия раздел ПОД плеером дёргает
+    // Line.toggle (ряды дома — апстримные Lampa.Line со своим контроллером items_line), а через
+    // 12 с renderHome после loadStatsTopSummary зовёт activity.toggle() → content → снова
+    // items_line. Дальше стрелки ходят по невидимым карточкам, а Back уходит в раздел — ровно
+    // «навигация не работает и Back не работает» владельца. Источников несколько и все
+    // апстримные, поэтому лечим не у каждого: слушаем переключения контроллера и возвращаем свой.
+    // Временные слои НАД плеером (select, modal, loading…) не трогаем — закрываясь, они сами
+    // возвращают предыдущий контроллер, то есть наш.
+    var MUSIC_IOS_FULL_PLAYER_LAST_FOCUS = null;
+    var MUSIC_IOS_FULL_PLAYER_GUARD_BOUND = false;
+    var MUSIC_IOS_FULL_PLAYER_GUARD_TIMER = 0;
+    var MUSIC_IOS_FULL_PLAYER_TRANSIENT = {
+        select: 1, modal: 1, loading: 1, settings: 1, settings_component: 1, keyboard: 1,
+        youtube: 1, player: 1, player_panel: 1, notification: 1, console: 1, console_tabs: 1, console_body: 1,
+        lampac_music_full_player: 1
+    };
+
+    function bindStandaloneIosFullPlayerFocusGuard() {
+        if (MUSIC_IOS_FULL_PLAYER_GUARD_BOUND) return;
+        MUSIC_IOS_FULL_PLAYER_GUARD_BOUND = true;
+
+        try {
+            Lampa.Controller.listener.follow('toggle', function (event) {
+                var name = event && event.name ? String(event.name) : '';
+                if (!MUSIC_IOS_FULL_PLAYER_OPEN || !name || MUSIC_IOS_FULL_PLAYER_TRANSIENT[name]) return;
+                if (MUSIC_IOS_FULL_PLAYER_GUARD_TIMER) return;
+
+                // через тик: чужой toggle ещё не закончил собирать свою коллекцию, и перебивать
+                // его синхронно значит получить полусобранное состояние у обоих
+                MUSIC_IOS_FULL_PLAYER_GUARD_TIMER = setTimeout(function () {
+                    MUSIC_IOS_FULL_PLAYER_GUARD_TIMER = 0;
+                    if (!MUSIC_IOS_FULL_PLAYER_OPEN) return;
+
+                    var enabled = Lampa.Controller.enabled();
+                    var current = enabled && enabled.name ? String(enabled.name) : '';
+                    if (MUSIC_IOS_FULL_PLAYER_TRANSIENT[current]) return;
+
+                    Lampa.Controller.toggle('lampac_music_full_player');
+                }, 0);
+            });
+        } catch (e) {}
+    }
+
     function openStandaloneIosFullPlayer() {
         var player = ensureStandaloneIosFullPlayer();
 
@@ -5928,23 +5965,36 @@
                     // в нём, иначе стрелки уводят на кнопки за листом и человек управляет тем,
                     // чего не видит.
                     var sheetOpen = player.hasClass('lm-ios-full-player--sheet-open');
+                    // d1v:music-player-owns-focus — когда раздел под плеером перехватывал
+                    // контроллер, Lampa снимала класс focus; при возврате фокус вставал бы на
+                    // паузу вместо строки, на которой человек был. Поэтому помним последний.
+                    var last = MUSIC_IOS_FULL_PLAYER_LAST_FOCUS;
                     var focused = sheetOpen
                         ? player.find('.lm-ios-full-player__sheet-row.selector').get(0)
-                        : (player.find('.lm-ios-full-player__actions .selector.focus').get(0)
+                        : (player.find('.lm-au__body .selector.focus').get(0)
+                            || (last && root.contains(last) && last.offsetParent ? last : null)
                             || player.find('[data-action="playpause"]').get(0));
 
                     Lampa.Controller.collectionSet(root);
                     Lampa.Controller.collectionFocus(focused || false, root);
                 },
-                left: function () { Lampa.Navigator.move('left'); },
-                right: function () { Lampa.Navigator.move('right'); },
-                up: function () { Lampa.Navigator.move('up'); },
-                down: function () { Lampa.Navigator.move('down'); },
+                // d1v:music-dpad-zones — 🔴 навигатор Lampa это ГЛОБАЛЬНЫЙ `Navigator` из
+                // vender/navigator/navigator.js; поля Navigator у `window.Lampa` нет вовсе.
+                // С ним каждая стрелка падала TypeError — ровно «на пульте ничего не происходит»
+                // владельца, при живых кнопках и рабочем OK. Так же навигатор зовут апстримный
+                // контроллер раздела и qdl.js. Переходы между зонами экрана — в auroraDpad.
+                left: function () { auroraDpad(player, 'left'); },
+                right: function () { auroraDpad(player, 'right'); },
+                up: function () { auroraDpad(player, 'up'); },
+                down: function () { auroraDpad(player, 'down'); },
                 back: function () {
-                    closeStandaloneIosFullPlayer();
+                    // d1v:music-exit-stops — Back не сворачивает, а останавливает: сворачивать
+                    // некуда, мини-панели нет.
+                    exitStandaloneIosFullPlayer();
                 }
             });
             Lampa.Controller.toggle('lampac_music_full_player');
+            bindStandaloneIosFullPlayerFocusGuard();   // d1v:music-player-owns-focus
         }
     }
 
@@ -5952,6 +6002,7 @@
         bumpMusicHeatMetric('fullPlayerClose');
         logStandaloneIosFullEvent('close');
         MUSIC_IOS_FULL_PLAYER_OPEN = false;
+        MUSIC_IOS_FULL_PLAYER_LAST_FOCUS = null;
 
         if (MUSIC_IOS_FULL_PLAYER && MUSIC_IOS_FULL_PLAYER.length) {
             MUSIC_IOS_FULL_PLAYER.removeClass('lm-ios-full-player--visible');
@@ -5970,13 +6021,25 @@
         }
     }
 
+    // d1v:music-exit-stops — единственный выход из плеера: закрыть И остановить. Мини-панели
+    // больше нет, поэтому «свернуть» означало бы музыку без экрана управления. Владелец: «или мы
+    // слушаем что-то, или закрываем плеер, сворачивать нельзя». Сюда ведут крестик, Back на
+    // пульте (контроллер и перехват клавиш) и свайп вниз на телефоне.
+    function exitStandaloneIosFullPlayer() {
+        closeStandaloneIosFullPlayer();
+        stopStandaloneIosAudioPlayback();
+    }
+
     function currentStandaloneIosControllerName() {
         try {
             if (Lampa.Controller && typeof Lampa.Controller.enabled === 'function') {
                 var enabled = Lampa.Controller.enabled();
                 var name = enabled && enabled.name ? enabled.name : '';
 
-                if (name && name !== 'lampac_music_full_player') return name;
+                // d1v:music-exit-stops — «loading», «select», «modal» — временные слои; вернуть
+                // фокус в них после закрытия плеера нельзя, это контроллер без экрана.
+                if (name && name !== 'lampac_music_full_player'
+                    && name !== 'loading' && name !== 'select' && name !== 'modal') return name;
             }
         } catch (e) {}
 
@@ -6000,7 +6063,7 @@
 
         event.preventDefault();
         event.stopPropagation();
-        closeStandaloneIosFullPlayer();
+        exitStandaloneIosFullPlayer();   // d1v:music-exit-stops
     }
 
     // --- нативные свайпы: закрытие плеера и шита жестом ---
@@ -6069,7 +6132,7 @@
 
         setTimeout(function () {
             resetStandaloneIosFullGestureTransform(player);
-            closeStandaloneIosFullPlayer();
+            exitStandaloneIosFullPlayer();   // d1v:music-exit-stops — свайп вниз тоже останавливает
         }, 200);
     }
 
@@ -7202,11 +7265,14 @@
             + '<div class="lm-ios-full-player__shell">'
             + '<div class="lm-ios-full-player__grabber"></div>'
             + '<div class="lm-ios-full-player__head">'
-            + '<div class="lm-ios-full-player__tool" data-action="collapse">' + IOS_PLAYER_DOWN_ICON + '</div>'
+            // d1v:music-exit-stops — стрелки «свернуть» больше нет: сворачивать некуда (мини-панели
+            // нет), а крестик ОСТАНАВЛИВАЕТ музыку и закрывает экран. Слева — невидимая распорка
+            // той же ширины, чтобы заголовок остался по центру.
+            + '<div class="lm-ios-full-player__tool lm-ios-full-player__tool--spacer"></div>'
             + '<div class="lm-ios-full-player__head-title">Сейчас играет</div>'
             // d1v:music-four-buttons — крестик ОБЯЗАН быть selector: пультом это единственный
             // видимый выход, и без него экран был ловушкой («оверлей не закрывается»).
-            + '<div class="lm-ios-full-player__tool selector" data-action="collapse">' + IOS_PLAYER_CLOSE_ICON + '</div>'
+            + '<div class="lm-ios-full-player__tool selector" data-action="stop">' + IOS_PLAYER_CLOSE_ICON + '</div>'
             + '</div>'
             // d1v:music-aurora — раскладка по макету «Aurora Player». Две колонки на ТВ и
             // десктопе, вертикаль на телефоне; переключает КЛАСС на корне, а не отдельная
@@ -7288,6 +7354,11 @@
             event.preventDefault();
             event.stopPropagation();
             handleStandaloneIosPlayerAction($(this).attr('data-action'));
+        });
+
+        // d1v:music-player-owns-focus — последний фокус внутри плеера, см. контроллер
+        player.on('hover:focus', '.selector', function () {
+            MUSIC_IOS_FULL_PLAYER_LAST_FOCUS = this;
         });
 
         player.on('input', '.lm-ios-full-player__seek', function () {
@@ -7570,7 +7641,17 @@
                 var artist = (track && track.artist_name) || '';
                 var row = $('<div class="lm-au__row selector"></div>');
 
-                row.append($('<div class="lm-au__row-tile"></div>').text(artist.slice(0, 2).toUpperCase() || '♪'));
+                // d1v:music-queue-art — обложка трека, тем же путём, что в старом листе очереди
+                // (trackImage: наш /proxyimg либо SVG-заглушка). Инициалы остаются подложкой и
+                // видны, только пока картинка не загрузилась или не загрузилась вовсе. Владелец:
+                // «список треков без картинок, только сокращения СВ, СА — нужны картинки».
+                var tile = $('<div class="lm-au__row-tile"></div>').text(artist.slice(0, 2).toUpperCase() || '♪');
+                var art = $('<img alt="">').attr({ loading: 'lazy', decoding: 'async' });
+
+                art.on('error', function () { tile.addClass('lm-au__row-tile--fallback'); });
+                art.attr('src', trackImage(track) || IMG_BG);
+                tile.append(art);
+                row.append(tile);
 
                 var main = $('<div class="lm-au__row-main"></div>');
                 main.append($('<div class="lm-au__row-title"></div>').text((track && track.title) || 'Трек'));
@@ -7587,6 +7668,12 @@
                     standaloneIosPlayIndex(index);
                 });
 
+                // d1v:music-dpad-zones — фокус пульта подтягивает строку в видимую часть списка:
+                // очередь на 45 треков длиннее колонки, без этого фокус уезжает под край.
+                row.on('hover:focus', function () {
+                    try { this.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+                });
+
                 list.append(row);
             });
 
@@ -7601,6 +7688,86 @@
         list.children().each(function (index) {
             $(this).toggleClass('lm-au__row--active', index === current);
         });
+
+        // d1v:music-dpad-zones — сменился трек: текущую строку в центр списка, но НЕ когда
+        // человек в этот момент ходит по очереди пультом — иначе прокрутка уведёт фокус из вида.
+        var currentKey = String(current);
+        if (list.attr('data-au-current') !== currentKey) {
+            list.attr('data-au-current', currentKey);
+            var activeRow = list.children().get(current);
+            if (activeRow && !list.find('.selector.focus').length) {
+                try { activeRow.scrollIntoView({ block: 'center' }); } catch (e) {}
+            }
+        }
+    }
+
+    // d1v:music-dpad-zones — стрелка пульта: сперва обычный шаг навигатора, а если в этой стороне
+    // кандидата нет — явный переход между зонами экрана. Навигатор Lampa — глобальный `Navigator`
+    // со straightOnly: цель обязана лежать в полосе текущего элемента. На широкой раскладке
+    // транспорт стоит внизу левой колонки, очередь — справа сверху, крестик — в правом верхнем углу:
+    // при короткой очереди «вправо» с паузы не находит ничего, а «вверх» до крестика не доходит
+    // никогда. Зоны: шапка (крестик), транспорт (кнопки), очередь (строки).
+    function auroraDpad(player, direction) {
+        if (!player || !player.length) return;
+
+        try {
+            if (Navigator.canmove(direction)) {
+                Navigator.move(direction);
+                return;
+            }
+        } catch (e) {
+            return;
+        }
+
+        if (player.hasClass('lm-ios-full-player--sheet-open')) return;
+
+        var target = auroraDpadJump(player, direction);
+        if (target && Lampa.Controller && typeof Lampa.Controller.collectionFocus === 'function')
+            Lampa.Controller.collectionFocus(target, player.get(0));
+    }
+
+    function auroraDpadZone(player) {
+        var focused = player.find('.selector.focus').get(0);
+        if (!focused) return '';
+        if ($(focused).closest('.lm-au__queue').length) return 'queue';
+        if ($(focused).closest('.lm-ios-full-player__actions').length) return 'transport';
+        if ($(focused).closest('.lm-ios-full-player__head').length) return 'head';
+        return '';
+    }
+
+    function auroraDpadJump(player, direction) {
+        var zone = auroraDpadZone(player);
+        var phone = player.hasClass('lm-ios-full-player--phone');
+        var head = player.find('.lm-ios-full-player__head .selector').get(0);
+        var transport = player.find('[data-action="playpause"]').get(0)
+            || player.find('.lm-ios-full-player__actions .selector').get(0);
+        var queue = player.find('.lm-au__row--active').get(0) || player.find('.lm-au__row').get(0);
+        var queueFirst = player.find('.lm-au__row').get(0);
+        // широкая раскладка: очередь справа; телефон: очередь снизу
+        var toQueue = phone ? 'down' : 'right';
+        var fromQueue = phone ? 'up' : 'left';
+
+        if (!zone) return transport;
+
+        if (zone === 'transport') {
+            if (direction === toQueue) return queue;
+            if (direction === 'up') return head;
+            return null;
+        }
+
+        if (zone === 'queue') {
+            if (direction === fromQueue) return transport;
+            if (direction === 'up') return phone ? transport : head;
+            return null;
+        }
+
+        if (zone === 'head') {
+            if (direction === 'down') return phone ? transport : queueFirst;
+            if (direction === 'left') return transport;
+            return null;
+        }
+
+        return null;
     }
 
     function updateStandaloneIosFullPlayer() {
@@ -9497,7 +9664,12 @@
     }
 
     function selectFromStandaloneIosQueue(index) {
-        return standaloneIosPlayIndex(index);
+        if (!standaloneIosPlayIndex(index)) return false;
+
+        // d1v:music-no-minibar — любой старт трека показывает полноэкранный плеер: мини-панели
+        // нет, и переиспользованная очередь иначе играла бы «в никуда», без экрана управления.
+        openStandaloneIosFullPlayer();
+        return true;
     }
 
     function requestPlay(track, done, fail) {
@@ -17284,6 +17456,7 @@
                 color: rgba(255,255,255,0.85);\
             }\
             .lm-ios-full-player__tool svg { width: 1.15em; height: 1.15em; display: block; }\
+            .lm-ios-full-player__tool--spacer { visibility: hidden; }\
             .lm-ios-full-player__hero {\
                 max-width: 34em;\
                 width: 100%;\
@@ -17859,9 +18032,15 @@
                 cursor: pointer; text-align: left;\
             }\
             .lm-ios-full-player--aurora .lm-au__row-tile {\
-                width: 2.6em; height: 2.6em; border-radius: 0.44em; display: grid; place-items: center;\
-                font-weight: 700; font-size: 0.8em; color: #0c0d12; background: rgba(255,255,255,0.5);\
+                position: relative; overflow: hidden; width: 3.25em; height: 3.25em; border-radius: 0.55em;\
+                display: grid; place-items: center; font-weight: 700; font-size: 0.8em;\
+                color: #0c0d12; background: rgba(255,255,255,0.5);\
             }\
+            /* d1v:music-queue-art — обложка поверх инициалов; не загрузилась — прячется, остаются буквы */\
+            .lm-ios-full-player--aurora .lm-au__row-tile img {\
+                position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block;\
+            }\
+            .lm-ios-full-player--aurora .lm-au__row-tile--fallback img { display: none; }\
             .lm-ios-full-player--aurora .lm-au__row-main { min-width: 0; display: flex; flex-direction: column; gap: 0.16em; }\
             .lm-ios-full-player--aurora .lm-au__row-title {\
                 font-size: 0.88em; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
@@ -17872,7 +18051,7 @@
             .lm-ios-full-player--aurora .lm-au__row-dur { font-size: 0.74em; color: #7d8698; }\
             .lm-ios-full-player--aurora .lm-au__row--active { background: rgba(255,255,255,0.09); }\
             .lm-ios-full-player--aurora .lm-au__row--active .lm-au__row-title { color: #ffffff; }\
-            .lm-ios-full-player--aurora .lm-au__row--active .lm-au__row-tile { box-shadow: inset 0 0 0 0.12em var(--lm-au-red); }\
+            .lm-ios-full-player--aurora .lm-au__row--active .lm-au__row-tile { box-shadow: 0 0 0 0.14em var(--lm-au-red); }\
             /* транспорт по макету */\
             .lm-ios-full-player--aurora .lm-ios-full-player__actions {\
                 display: flex; align-items: center; justify-content: center; flex-wrap: wrap;\

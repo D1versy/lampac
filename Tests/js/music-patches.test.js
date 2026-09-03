@@ -49,6 +49,20 @@ test('music: наша схема кеширования music.js на месте
     'апстримный разбор If-None-Match вернулся в MusicJS');
 });
 
+test('index: 🔴 у входа нет серверного Staticache — в теле адреса всех плагинов', () => {
+  // Кеш дисковый и переживает рестарт; вход с вшитым LamInitVersion() до пяти минут после деплоя
+  // раздавал клиентам старый bootstrap, и правка плагина «не доезжала» (медиасервер claude/06 §DE).
+  // ⚠️ Это ApiController модуля LampaWeb (вход и lampainit.js), а не Music — тот выше как apiController.
+  const lampaWebApi = fs.readFileSync(path.join(H.REPO, 'Modules', 'LampaWeb', 'Controllers', 'ApiController.cs'), 'utf8').replace(/\r\n/g, '\n');
+  assert.ok(lampaWebApi.includes('d1v:index-no-staticache'), 'потерян маркер d1v:index-no-staticache');
+  const idx = lampaWebApi.indexOf('[Route("/")]');
+  assert.ok(idx > 0, 'не найден маршрут входа');
+  const before = lampaWebApi.slice(Math.max(0, idx - 400), idx);
+  assert.ok(!/\[Staticache\([^\]]*\)\]\s*$/.test(before.trimEnd()), 'на вход вернулся Staticache — bootstrap снова будет залипать после деплоя');
+  const body = lampaWebApi.slice(idx, idx + 400);
+  assert.ok(body.includes('SetHeadersNoCache();'), 'вход без no-cache заголовков — WebView закеширует его сам');
+});
+
 test('music: список Replace покрывает все плейсхолдеры plugin.js', () => {
   // Апстрим дописывает в plugin.js новые {плейсхолдеры} под свой ApiController. Пропущенный
   // уедет к клиенту литералом и уронит весь раздел синтаксической ошибкой — при зелёной сборке.
@@ -361,8 +375,8 @@ test('DE5: 🔴 полноэкранный плеер музыки достиж�
     'кнопка без selector = кнопка, до которой не дойти пультом');
   assert.ok(actions.includes('lm-au__break'), 'пропала распорка — на ТВ шаффл и повтор не уйдут во второй ряд');
 
-  // выход с экрана и вход в лист очереди — тоже пультом
-  assert.match(plugin, /lm-ios-full-player__tool selector" data-action="collapse"/,
+  // выход с экрана и вход в лист очереди — тоже пультом (с qdl 2.101 крестик = «остановить»)
+  assert.match(plugin, /lm-ios-full-player__tool selector" data-action="stop"/,
     'крестик снова не фокусируется — экран опять станет ловушкой');
   assert.match(plugin, /lm-ios-full-player__sheet-row selector/,
     'строки очереди не фокусируются — кнопка «плейлист» ведёт в тупик');
@@ -374,10 +388,119 @@ test('DE5: 🔴 полноэкранный плеер музыки достиж�
   // контроллер обязан строить коллекцию, а не быть заглушкой
   const ctrlIdx = plugin.indexOf("Lampa.Controller.add('lampac_music_full_player'");
   assert.ok(ctrlIdx > 0, 'контроллер полноэкранного плеера не найден');
-  const ctrl = plugin.slice(ctrlIdx, ctrlIdx + 1200);
+  const ctrl = plugin.slice(ctrlIdx, ctrlIdx + 2600);
   assert.ok(!/toggle: function \(\) \{\}/.test(ctrl), 'вернулся пустой toggle — фокус-коллекция не строится');
   assert.ok(ctrl.includes('Lampa.Controller.collectionSet'), 'коллекция не собирается');
   assert.ok(ctrl.includes('sheetOpen'), 'фокус не уезжает в открытый лист очереди');
+});
+
+test('DE10: 🔴 стрелки пульта ходят через глобальный Navigator, а не Lampa.Navigator', () => {
+  // Владелец: «на пульте не работает совсем навигация, ничего не происходит в плеере». Причина:
+  // контроллер звал Lampa.Navigator.move — а такого объекта в бандле Lampa НЕТ. Навигатор это
+  // глобальный `Navigator` из vender/navigator/navigator.js (так его зовут и апстримный раздел,
+  // и qdl.js). Каждая стрелка падала TypeError при живых кнопках и рабочем OK.
+  assert.ok(plugin.includes('d1v:music-dpad-zones'), 'потерян маркер d1v:music-dpad-zones');
+  // 🔴 Ищем ВЫЗОВ (с точкой после имени), а не слово: иначе сторож ловит собственную прозу —
+  // на этом уже спотыкались DE4 и DE7.
+  assert.ok(!/Lampa\.Navigator\./.test(plugin),
+    'вернулся вызов Lampa.Navigator — в бандле его нет, стрелки пульта снова умрут');
+
+  const ctrlIdx = plugin.indexOf("Lampa.Controller.add('lampac_music_full_player'");
+  const ctrl = plugin.slice(ctrlIdx, ctrlIdx + 3400);
+  for (const dir of ['left', 'right', 'up', 'down'])
+    assert.match(ctrl, new RegExp(dir + ": function \\(\\) \\{ auroraDpad\\(player, '" + dir + "'\\); \\}"),
+      'стрелка ' + dir + ' больше не идёт через auroraDpad');
+
+  // сперва обычный шаг навигатора, и только без кандидата — явный переход между зонами:
+  // straightOnly не найдёт очередь справа сверху с транспорта внизу слева при короткой очереди
+  const dpadIdx = plugin.indexOf('function auroraDpad(');
+  assert.ok(dpadIdx > 0, 'пропала auroraDpad');
+  const dpad = plugin.slice(dpadIdx, dpadIdx + 900);
+  assert.match(dpad, /Navigator\.canmove\(direction\)/, 'auroraDpad не спрашивает навигатор');
+  assert.match(dpad, /Navigator\.move\(direction\)/, 'auroraDpad не двигает фокус навигатором');
+  assert.ok(dpad.includes('auroraDpadJump'), 'пропал переход между зонами');
+
+  const jumpIdx = plugin.indexOf('function auroraDpadJump(');
+  const jump = plugin.slice(jumpIdx, jumpIdx + 1600);
+  for (const zone of ["'transport'", "'queue'", "'head'"])
+    assert.ok(jump.includes('zone === ' + zone), 'в переходах пропала зона ' + zone);
+  assert.ok(jump.includes("lm-ios-full-player--phone"), 'переходы не различают телефонную раскладку');
+
+  // длинная очередь: фокус подтягивает строку в видимую часть, текущий трек — в центр
+  assert.match(plugin, /row\.on\('hover:focus'[\s\S]{0,120}scrollIntoView/, 'строки очереди не прокручиваются под фокус');
+  assert.ok(plugin.includes('data-au-current'), 'текущий трек не подтягивается в центр очереди');
+});
+
+test('DE11: 🔴 пока плеер открыт, контроллер фокуса принадлежит ему', () => {
+  // Трасса с телевизора: через 19 мс после открытия раздел под плеером дёргает Line.toggle
+  // (items_line), через 12 с renderHome → activity.toggle() → content → items_line. Стрелки
+  // уходят к невидимым карточкам, Back — в раздел. Владелец: «навигация уебищная и через пульт
+  // кнопка назад не работает».
+  assert.ok(plugin.includes('d1v:music-player-owns-focus'), 'потерян маркер d1v:music-player-owns-focus');
+
+  const idx = plugin.indexOf('function bindStandaloneIosFullPlayerFocusGuard(');
+  assert.ok(idx > 0, 'пропал сторож контроллера плеера');
+  const body = plugin.slice(idx, idx + 1500);
+  assert.match(body, /Lampa\.Controller\.listener\.follow\('toggle'/, 'сторож не слушает переключения контроллера');
+  assert.ok(body.includes("Lampa.Controller.toggle('lampac_music_full_player')"), 'сторож не возвращает контроллер плеера');
+  assert.ok(body.includes('MUSIC_IOS_FULL_PLAYER_TRANSIENT[name]'), 'временные слои над плеером отбираются — select/loading сломаются');
+  assert.ok(body.includes('if (!MUSIC_IOS_FULL_PLAYER_OPEN'), 'сторож работает и при закрытом плеере — раздел не получит фокус назад');
+
+  // сторож обязан включаться при открытии плеера
+  const openIdx = plugin.indexOf('function openStandaloneIosFullPlayer(');
+  assert.ok(plugin.slice(openIdx, openIdx + 4000).includes('bindStandaloneIosFullPlayerFocusGuard()'), 'сторож не включается при открытии');
+
+  // список временных слоёв: без своего имени сторож зациклится, без select/modal/loading — сломает их
+  const tIdx = plugin.indexOf('var MUSIC_IOS_FULL_PLAYER_TRANSIENT');
+  assert.ok(tIdx > 0, 'пропал список временных слоёв');
+  const transient = plugin.slice(tIdx, tIdx + 400);
+  for (const n of ['select', 'modal', 'loading', 'lampac_music_full_player'])
+    assert.ok(new RegExp('\\b' + n + ': 1').test(transient), 'в списке временных слоёв нет ' + n);
+
+  // при возврате фокус встаёт на последний элемент плеера, а не всегда на паузу
+  assert.ok(plugin.includes("player.on('hover:focus', '.selector'"), 'последний фокус в плеере не запоминается');
+});
+
+test('DE8: выход из плеера — только остановка; кнопки «свернуть» нет', () => {
+  // Владелец: «сверху есть кнопка свернуть плеер — убери её. Или мы слушаем что-то, или
+  // закрываем плеер, сворачивать нельзя». Мини-панели нет, свернуть = музыка без экрана.
+  assert.ok(plugin.includes('d1v:music-exit-stops'), 'потерян маркер d1v:music-exit-stops');
+  assert.ok(!plugin.includes('data-action="collapse"'), 'вернулась кнопка «свернуть»');
+  assert.ok(!plugin.includes('IOS_PLAYER_DOWN_ICON'), 'вернулась стрелка вниз');
+
+  const exitIdx = plugin.indexOf('function exitStandaloneIosFullPlayer(');
+  assert.ok(exitIdx > 0, 'пропала exitStandaloneIosFullPlayer');
+  const exit = plugin.slice(exitIdx, exitIdx + 200);
+  assert.ok(exit.includes('closeStandaloneIosFullPlayer()') && exit.includes('stopStandaloneIosAudioPlayback()'),
+    'выход больше не закрывает И не останавливает');
+
+  // все три выхода ведут туда же: Back контроллера, перехват клавиш Back, свайп вниз, крестик
+  const ctrlIdx = plugin.indexOf("Lampa.Controller.add('lampac_music_full_player'");
+  const ctrl = plugin.slice(ctrlIdx, ctrlIdx + 3400);
+  assert.match(ctrl, /back: function \(\) \{[\s\S]{0,300}exitStandaloneIosFullPlayer\(\);/, 'Back контроллера снова сворачивает');
+  const keyIdx = plugin.indexOf('function handleStandaloneIosFullPlayerBack(');
+  assert.ok(plugin.slice(keyIdx, keyIdx + 700).includes('exitStandaloneIosFullPlayer()'), 'клавиша Back снова сворачивает');
+  const gestureIdx = plugin.indexOf('function closeStandaloneIosFullPlayerWithGesture(');
+  assert.ok(plugin.slice(gestureIdx, gestureIdx + 600).includes('exitStandaloneIosFullPlayer()'), 'свайп вниз снова сворачивает');
+  assert.match(plugin, /if \(action === 'stop'\) \{\s*exitStandaloneIosFullPlayer\(\);/, 'крестик не останавливает');
+
+  // переиспользованная очередь тоже открывает плеер — иначе музыка играет «в никуда»
+  const selIdx = plugin.indexOf('function selectFromStandaloneIosQueue(');
+  assert.ok(plugin.slice(selIdx, selIdx + 500).includes('openStandaloneIosFullPlayer()'),
+    'старт из переиспользованной очереди не открывает плеер');
+});
+
+test('DE9: строки очереди несут обложку трека', () => {
+  // Владелец: «в плейлисте список треков без картинок, только сокращения СВ, СА».
+  assert.ok(plugin.includes('d1v:music-queue-art'), 'потерян маркер d1v:music-queue-art');
+  const idx = plugin.indexOf('function renderAuroraQueue(');
+  assert.ok(idx > 0, 'пропала renderAuroraQueue');
+  const body = plugin.slice(idx, idx + 3000);
+  assert.match(body, /art\.attr\('src', trackImage\(track\) \|\| IMG_BG\)/, 'обложка строки не берётся из trackImage');
+  assert.ok(body.includes("lm-au__row-tile--fallback"), 'нет подложки на случай битой картинки');
+  // стили: картинка на всю плитку, при ошибке прячется
+  assert.match(plugin, /\.lm-au__row-tile img \{[^}]*object-fit: cover/, 'обложка не растянута на плитку');
+  assert.match(plugin, /\.lm-au__row-tile--fallback img \{ display: none; \}/, 'битая обложка не прячется');
 });
 
 // ── общее ───────────────────────────────────────────────────────────────────
