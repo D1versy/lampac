@@ -736,7 +736,18 @@ public class ApiController : BaseController
     }
 
     [HttpGet, AllowAnonymous]
-    [Staticache(20, always: true)]
+    // d1v:laminit-cache-key — ?v ОБЯЗАН входить в ключ серверного кеша.
+    //
+    // Было `[Staticache(20, always: true)]` без queryKeys: ключ = один только путь. Версия при
+    // этом считалась правильно (LamInitVersion подмешивает и lampainit.js, и lampainit-invc.js),
+    // но до ключа не доходила — и сервер продолжал отдавать СТАРОЕ тело новым клиентам. Правка
+    // lampainit-invc.js молча не доезжала: файл в образе новый, ответ прежний, рестарт не
+    // помогает (кеш дисковый, /lampac/cache/static). Потеряно на этом было полчаса вслепую.
+    //
+    // Комментарий ниже утверждает, что серверный кеш здесь «и так отключён через
+    // StatiCacheDisabled» — это верно только когда в теле есть {country}; без него кеш работает.
+    // Форма ключа взята у music.js: [Staticache(..., queryKeys = ["v"])].
+    [Staticache(20, always: true, queryKeys = ["v"])]
     [Route("lampainit.js")]
     public ActionResult LamInit()
     {

@@ -66,6 +66,12 @@ lampainit_invc.appload = function appload() {
   try {
     fetch('{localhost}/d1vision/hosts.json').then(function (r) { return r.json(); }).then(function (j) {
       if (j && j.brand) window.d1vision_brand = j.brand;
+      // d1v:music-player-server — плеер раздела «Музыка» назначает СЕРВЕР.
+      // Выбор жил в localStorage каждого устройства, поэтому починка плеера означала «зайди в
+      // настройки на каждом». Теперь это одна строка в init.conf: применяется на лету, ко всем
+      // клиентам сразу, и так же быстро откатывается. Пустое значение = не навязывать.
+      if (j && typeof j.musicPlayer === 'string' && j.musicPlayer)
+        window.d1vision_music_player = j.musicPlayer;
       applyBrandTitle();
     }).catch(function () {});
   } catch (e) {}

@@ -251,7 +251,11 @@ public partial class QbitController : BaseController
         {
             ["ver"] = 1,
             ["brand"] = ModInit.conf.brand ?? "D1Vision",
-            ["hosts"] = new JArray(hosts)
+            ["hosts"] = new JArray(hosts),
+            // d1v:music-player-server — плеер раздела «Музыка» выбирает сервер, а не устройство.
+            // Едет тем же каналом, что brand: правка init.conf применяется на лету. Пустая строка
+            // (дефолт) означает «не навязывать» — старые клиенты поле просто игнорируют.
+            ["musicPlayer"] = (ModInit.conf.musicPlayer ?? string.Empty).Trim()
         };
         return ContentTo(payload.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
     }

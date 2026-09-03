@@ -1543,6 +1543,16 @@
 
     function getMusicPlayerId() {
         var values = buildMusicPlayerValues();
+
+        // d1v:music-player-server — назначенный СЕРВЕРОМ плеер сильнее локального выбора.
+        // Значение приезжает в /d1vision/hosts.json (init.conf → QbitDownload.musicPlayer) и
+        // ложится в window.d1vision_music_player. Приоритет здесь и есть вся суть правки: пока
+        // решение жило в localStorage устройства, починить плеер можно было только руками на
+        // каждом телевизоре. Незнакомое значение игнорируем — иначе опечатка в init.conf увела
+        // бы раздел в несуществующий режим.
+        var forced = (window.d1vision_music_player || '') + '';
+        if (forced && Object.prototype.hasOwnProperty.call(values, forced)) return forced;
+
         var player = Lampa.Storage.get(MUSIC.storage.player, '') || '';
 
         return Object.prototype.hasOwnProperty.call(values, player) ? player : defaultMusicPlayerId(values);
