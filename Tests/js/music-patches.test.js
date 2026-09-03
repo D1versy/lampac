@@ -300,21 +300,27 @@ test('DE7: 🔴 раскладка «Aurora»: две формы, телефон
   for (const el of ['lm-au__body', 'lm-au__main', 'lm-au__queue-list', 'lm-au__row', 'lm-au__sub', 'lm-au__eq'])
     assert.ok(plugin.includes(el), 'пропал узел раскладки ' + el);
 
-  // 🔴 телефон определяется платформой и ориентацией, а НЕ порогом ширины: вьюпорт приложения
-  // на айфоне шире 600 px, и медиазапрос по ширине телефон не ловит (медиасервер claude/06 §DB)
+  // 🔴 телефон определяется платформой и короткой стороной, а НЕ порогом ширины: вьюпорт
+  // приложения на айфоне шире 600 px, и медиазапрос по ширине телефон не ловит (медиасервер
+  // claude/06 §DB); ориентация тоже не годится — телефон в ландшафте получал ТВ-раскладку (DF6)
   const idx = plugin.indexOf('function auroraIsPhone');
   assert.ok(idx > 0, 'пропала auroraIsPhone');
   const body = plugin.slice(idx, idx + 600);
   assert.ok(body.includes("window.d1vision_platform === 'ios'"), 'телефон больше не определяется платформой');
-  assert.ok(body.includes('window.innerHeight > window.innerWidth'), 'пропала проверка ориентации');
+  assert.ok(body.includes('Math.min(window.innerWidth, window.innerHeight) <= 520'), 'пропала проверка по короткой стороне');
   assert.ok(!/max-width:\s*\d+px[^}]*lm-au__/.test(plugin), 'раскладка Aurora завязана на порог ширины — та самая грабля §DB');
 
-  // 🔴 макет нарисован под 1440x810; жёсткие пиксели оттуда разъедутся на 1280x720 и 1920x1080
+  // 🔴 макет нарисован под 1440x810; жёсткие пиксели оттуда разъедутся на 1280x720 и 1920x1080.
+  // Блок полов HIG (d1v:music-phone-targets, qdl 2.104) — осознанное исключение: там пиксели
+  // стоят НИЖНЕЙ границей внутри max(em, px), и это единственная защита от масштаба Lampa на
+  // телефоне; их держит DF3. Срез обрезаем по его маркеру.
   const cssIdx = plugin.indexOf('d1v:music-aurora — макет');
   assert.ok(cssIdx > 0, 'не найден блок стилей Aurora');
+  const targetsIdx = plugin.indexOf('d1v:music-phone-targets', cssIdx);
+  assert.ok(targetsIdx > cssIdx, 'блок полов HIG должен идти ПОСЛЕ раскладки Aurora (иначе каскад)');
   // 🔴 Комментарии вырезаем ДО поиска: иначе кейс ловит собственную прозу вида «замер: 228px».
   // Ровно на этом уже спотыкался DE4 — сторож обязан смотреть на правила, а не на пояснения.
-  const css = plugin.slice(cssIdx, plugin.indexOf('</style>', cssIdx)).replace(/\/\*[\s\S]*?\*\//g, '');
+  const css = plugin.slice(cssIdx, targetsIdx).replace(/\/\*[\s\S]*?\*\//g, '');
   const hardPx = (css.match(/:\s*\d{2,}px/g) || []).filter((m) => !/1px/.test(m));
   assert.deepStrictEqual(hardPx, [], 'в раскладке появились жёсткие пиксели макета: ' + hardPx.join(', '));
 
@@ -323,7 +329,7 @@ test('DE7: 🔴 раскладка «Aurora»: две формы, телефон
 
   // очередь строится фокусируемыми строками, иначе пультом по ней не походить
   assert.ok(plugin.includes('lm-au__row selector'), 'строки очереди не фокусируются');
-  assert.match(plugin, /row\.on\('click hover:enter'/, 'строки очереди не слушают hover:enter');
+  assert.match(plugin, /row\.on\('hover:enter'/, 'строки очереди не слушают hover:enter');
 
   // список не должен пересобираться на каждом тике — это рвало бы фокус посреди навигации
   assert.ok(plugin.includes('data-au-key'), 'пропал ключ пересборки очереди');
@@ -386,9 +392,12 @@ test('DE5: 🔴 полноэкранный плеер музыки достиж�
   // bubbles=false, делегированный обработчик на корне его не видит (владелец: «предыдущий,
   // пауза, следующий, перемешать, повтор не работают»).
   assert.ok(plugin.includes('d1v:music-enter-direct'), 'потерян маркер d1v:music-enter-direct');
-  assert.match(plugin, /player\.find\('\[data-action\]'\)\.on\('click hover:enter'/, 'кнопки плеера не слушают hover:enter на себе');
-  assert.ok(!/\.on\('click hover:enter', '\[data-action\]'/.test(plugin), 'вернулась делегированная подписка — OK по кнопкам снова молчит');
-  assert.match(plugin, /row\.on\('click hover:enter'/, 'строки листа не слушают hover:enter');
+  // (с 2.104 подписка ТОЛЬКО на hover:enter — см. DF1; здесь важно, что она прямая)
+  assert.match(plugin, /player\.find\('\[data-action\]'\)\.on\('hover:enter'/, 'кнопки плеера не слушают hover:enter на себе');
+  // (корень полноэкранного плеера — `player`; у мёртвой мини-панели `bar` делегированная подписка
+  // есть и не мешает: она display:none !important с d1v:music-no-minibar)
+  assert.ok(!/player\.on\('(click )?hover:enter( click)?', '\[data-action\]'/.test(plugin), 'вернулась делегированная подписка — OK по кнопкам снова молчит');
+  assert.match(plugin, /row\.on\('hover:enter'/, 'строки листа не слушают hover:enter');
 
   // контроллер обязан строить коллекцию, а не быть заглушкой
   const ctrlIdx = plugin.indexOf("Lampa.Controller.add('lampac_music_full_player'");
@@ -432,7 +441,8 @@ test('DE10: 🔴 стрелки пульта ходят через глобал�
   assert.ok(jump.includes("lm-ios-full-player--phone"), 'переходы не различают телефонную раскладку');
 
   // длинная очередь: фокус подтягивает строку в видимую часть, текущий трек — в центр
-  assert.match(plugin, /row\.on\('hover:focus'[\s\S]{0,120}scrollIntoView/, 'строки очереди не прокручиваются под фокус');
+  // (с 2.104 — через scrollWithinPlayer, не scrollIntoView: тот прокручивал корень оверлея, DF2)
+  assert.match(plugin, /row\.on\('hover:focus'[\s\S]{0,160}scrollWithinPlayer\(this, 'nearest'\)/, 'строки очереди не прокручиваются под фокус');
   assert.ok(plugin.includes('data-au-current'), 'текущий трек не подтягивается в центр очереди');
 });
 
@@ -517,6 +527,103 @@ test('DE9: строки очереди несут обложку трека', ()
   // стили: картинка на всю плитку, при ошибке прячется
   assert.match(plugin, /\.lm-au__row-tile img \{[^}]*object-fit: cover/, 'обложка не растянута на плитку');
   assert.match(plugin, /\.lm-au__row-tile--fallback img \{ display: none; \}/, 'битая обложка не прячется');
+});
+
+// ── qdl 2.104: Playwright-аудит телефона и ТВ (медиасервер claude/06 §DF) ────────────
+
+test('DF1: 🔴 одно нажатие — одно действие: прямые подписки без click', () => {
+  // Владелец: «кнопка паузы не работает на айфоне». Lampa вешает click на КАЖДЫЙ .selector
+  // (Controller.observe, app.min.js:44192) и через 20 мс шлёт hover:enter — подписка на оба
+  // давала два действия: лог тапа «click → pause() → hover:enter → play()». Ломалось и мышью.
+  assert.ok(plugin.includes('d1v:music-enter-once'), 'потерян маркер d1v:music-enter-once');
+  // ни одной ПРЯМОЙ подписки на пару событий (делегированные — с селектором вторым аргументом —
+  // не в счёт: hover:enter не всплывает, там срабатывает только click, один раз)
+  const direct = plugin.match(/\.on\('(click hover:enter|hover:enter click)'(?!, ')/g) || [];
+  assert.deepStrictEqual(direct, [], 'вернулась прямая подписка на click+hover:enter: ' + direct.join(' | '));
+  // пять мест обязаны слушать hover:enter напрямую
+  assert.match(plugin, /player\.find\('\[data-action\]'\)\.on\('hover:enter'/, 'кнопки транспорта');
+  assert.strictEqual((plugin.match(/row\.on\('hover:enter', function \(event\)/g) || []).length, 2, 'строки листа и очереди');
+  assert.match(plugin, /button\.on\('hover:enter', function \(event\)/, 'кнопка «Текст» в панели видеоплеера');
+  assert.match(plugin, /earlier\.add\(later\)\.on\('hover:enter', function \(event\)/, 'кнопки смещения текста');
+});
+
+test('DF2: 🔴 корень оверлея не прокручивается: нет scrollIntoView внутри плеера', () => {
+  // На телефоне шапка с крестиком уезжала на y=−36: scrollIntoView строки очереди прокручивал
+  // не список, а корень .lm-ios-full-player (56 px переполнения от __backdrop{inset:-2em}).
+  assert.ok(plugin.includes('d1v:music-no-root-scroll'), 'потерян маркер d1v:music-no-root-scroll');
+  assert.ok(plugin.includes('function scrollWithinPlayer('), 'пропал scrollWithinPlayer');
+  // от начала полноэкранного плеера до кода визуала ВИДЕОплеера (это другой оверлей, у него свой
+  // scrollIntoView) не должно остаться ни одного вызова scrollIntoView
+  const from = plugin.indexOf('// ===== IOS FULL PLAYER =====');
+  const to = plugin.indexOf('function updateMusicPlayerVisualLyricsHighlight(');
+  const helperAt = plugin.indexOf('function scrollWithinPlayer(');
+  assert.ok(from > 0 && to > from && helperAt > from && helperAt < to, 'не найдены границы кода плеера');
+  const calls = plugin.slice(from, to).match(/\.scrollIntoView\(/g) || [];
+  assert.deepStrictEqual(calls, [], 'внутри плеера снова зовут scrollIntoView — шапка уедет за экран');
+  // helper двигает только один контейнер и не трогает корень
+  const helper = plugin.slice(helperAt, helperAt + 2200);
+  assert.ok(helper.includes("closest('.lm-ios-full-player')") && helper.includes('scroller === root'), 'helper не останавливается на корне оверлея');
+  assert.ok(helper.includes('scroller.scrollTop = target'), 'helper не двигает scrollTop контейнера');
+  // CSS-страховка: clip запрещает и программную прокрутку
+  assert.match(plugin, /\.lm-ios-full-player \{\\\n[\s\S]{0,700}overflow: hidden;\\\n\s*overflow: clip;\\\n/, 'у корня плеера нет overflow: clip после hidden');
+});
+
+test('DF3: цели нажатия и типографика телефона с полами в пикселях', () => {
+  // Замер iPhone 14 Pro: пауза 37.6, пред/след 30.7, крестик 26.3, строка очереди 38.4 —
+  // при минимуме 44 по HIG. Полы под классом --phone, а не в @media: класс ставится по платформе.
+  assert.ok(plugin.includes('d1v:music-phone-targets'), 'потерян маркер d1v:music-phone-targets');
+  // ищем ПЕРВОЕ правило после начала БЛОКА полов (маркер с этим же именем стоит и выше, у кнопок
+  // поиска): те же селекторы повторяются ниже в ландшафтном блоке и выше в базовой раскладке
+  const base = plugin.indexOf('d1v:music-phone-targets — полы');
+  assert.ok(base > 0, 'не найден блок полов HIG');
+  for (const rule of [
+    ['.lm-ios-full-player--phone .lm-ios-full-player__btn {', 'max(2.9em, 44px)'],
+    ['.lm-ios-full-player--phone .lm-ios-full-player__btn--primary {', 'max(3.55em, 56px)'],
+    ['.lm-ios-full-player--phone .lm-ios-full-player__tool {', 'max(2.48em, 44px)'],
+    ['.lm-ios-full-player--phone .lm-au__row {', 'min-height: 44px'],
+    ['.lm-ios-full-player--phone .lm-au__row {', 'grid-template-columns: max(2.6em, 40px)'],   // колонка растёт с плиткой
+    ['.lm-ios-full-player--phone .lm-au__main {', 'flex: 0 0 auto'],                          // стопка не сжимается
+    ['.lm-ios-full-player--phone .lm-au__queue {', 'flex: 0 1 auto'],                         // ужимается очередь
+    ['.lm-ios-full-player--phone .lm-ios-full-player__title {', 'max(1.38em, 18px)'],
+    ['.lm-ios-full-player--phone .lm-au__row-title {', 'max(0.88em, 14px)'],
+  ]) {
+    const idx = plugin.indexOf(rule[0], base);
+    assert.ok(idx > 0, 'нет правила ' + rule[0]);
+    assert.ok(plugin.slice(idx, idx + 220).includes(rule[1]), rule[0] + ' без пола ' + rule[1]);
+  }
+  // кнопки главной раздела (поиск/фильтр/закладки) — 37.8 px на телефоне
+  assert.match(plugin, /\.lm-search-btn--icon \{\\\n[\s\S]{0,200}width: max\(3\.1em, 44px\)/, 'кнопки поиска без пола 44 px');
+});
+
+test('DF4: широкая раскладка без капа героя — название не клампится при пустом месте', () => {
+  // ТВ 1920: герой 776 px из 1241, по бокам 240+226 px пусто, название на три строки резалось «…».
+  assert.ok(plugin.includes('d1v:music-wide-hero'), 'потерян маркер d1v:music-wide-hero');
+  assert.match(plugin, /\.lm-ios-full-player--wide \.lm-ios-full-player__hero \{ width: 100%; max-width: none; margin: 0; align-self: stretch; \}/,
+    'у --wide __hero нет сброса max-width/margin — базовые 34em и auto снова центрируют героя');
+});
+
+test('DF5: подпись «Повтор» переживает обновление кнопки', () => {
+  assert.ok(plugin.includes('d1v:music-repeat-label'), 'потерян маркер d1v:music-repeat-label');
+  assert.match(plugin, /\.html\(\(repeatMode === 'one' \? IOS_PLAYER_REPEAT_ONE_ICON : IOS_PLAYER_REPEAT_ICON\) \+ '<span>Повтор<\/span>'\)/,
+    '.html() у повтора снова стирает подпись из шаблона');
+});
+
+test('DF6: телефон узнаётся по короткой стороне, а не по ориентации', () => {
+  // Телефон и ТВ на Android шлют один токен d1vision_android; «портрет = телефон» давал телефону
+  // в ландшафте ТВ-раскладку (очередь столбиком 286 px на экране 915×412).
+  assert.ok(plugin.includes('d1v:music-phone-by-short-side'), 'потерян маркер d1v:music-phone-by-short-side');
+  const idx = plugin.indexOf('function auroraIsPhone(');
+  const body = plugin.slice(idx, idx + 400);
+  assert.ok(body.includes("window.d1vision_platform === 'ios'"), 'айфон больше не телефон по платформе');
+  assert.ok(body.includes('Math.min(window.innerWidth, window.innerHeight) <= 520'), 'нет порога по короткой стороне');
+  assert.ok(!body.includes('innerHeight > window.innerWidth'), 'вернулась проверка по ориентации');
+  // телефон в ландшафте: вертикальная стопка в 412 px не помещается — обязана быть ландшафтная
+  // раскладка под --phone (по ориентации, не по ширине в px)
+  const land = plugin.indexOf('@media screen and (orientation: landscape)');
+  assert.ok(land > 0, 'нет ландшафтной раскладки телефона');
+  const landCss = plugin.slice(land, land + 2200);
+  assert.ok(landCss.includes('.lm-ios-full-player--phone .lm-au__body { flex-direction: row;'), 'в ландшафте тело не в ряд');
+  assert.ok(landCss.includes('.lm-ios-full-player--phone .lm-au__queue {') && landCss.includes('max-height: none'), 'в ландшафте очередь не колонкой');
 });
 
 // ── общее ───────────────────────────────────────────────────────────────────

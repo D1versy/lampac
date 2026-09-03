@@ -6472,7 +6472,9 @@
         if (options.trailing) row.append(trailing);
 
         if (options.onSelect) {
-            row.on('click hover:enter', function (event) {
+            // d1v:music-enter-once — только hover:enter: click по .selector Lampa сама превращает
+            // в hover:enter, вторая подписка = второе срабатывание (см. кнопки транспорта).
+            row.on('hover:enter', function (event) {
                 event.preventDefault();
                 event.stopPropagation();
                 if (row.hasClass('disabled')) return;
@@ -7113,12 +7115,9 @@
             return;
         }
 
-        if (element && typeof element.scrollIntoView === 'function') {
-            try {
-                element.scrollIntoView({ block: 'center', behavior: force ? 'auto' : 'smooth' });
-            } catch (e) {
-                element.scrollIntoView();
-            }
+        if (element) {
+            // d1v:music-no-root-scroll — строку текста двигаем внутри тела шита, не корень оверлея
+            scrollWithinPlayer(element, 'center', !force);
             bumpMusicHeatMetric('fullPlayerLyricsScroll');
         }
 
@@ -7348,14 +7347,25 @@
         );
 
         // d1v:music-four-buttons — пульт жмёт не 'click', а 'hover:enter' по элементу в фокусе.
-        // Без второй подписки кнопки видны и даже фокусируются, но на OK не реагируют — то есть
-        // выглядят рабочими и молчат.
+        // Без подписки на hover:enter кнопки видны и даже фокусируются, но на OK не реагируют —
+        // то есть выглядят рабочими и молчат.
         // 🔴 d1v:music-enter-direct — подписка ПРЯМО на каждой кнопке, а не делегированная с
         // корня: Lampa шлёт hover:enter через Utils.trigger → initEvent(name, bubbles=false),
         // событие НЕ всплывает, и делегированный обработчик на корне его не видит никогда. Ровно
         // поэтому «предыдущий, пауза, следующий, перемешать, повтор не работают» при рабочем
         // фокусе; карточки раздела работали, потому что у них подписка на самом элементе.
-        player.find('[data-action]').on('click hover:enter', function (event) {
+        // 🔴 d1v:music-enter-once — ТОЛЬКО hover:enter, без 'click'. Lampa сама вешает click на
+        // КАЖДЫЙ .selector (MutationObserver в Controller.observe, app.min.js:44192) и через
+        // setTimeout(20) шлёт по нему hover:enter — без проверки коллекции контроллера. Подписка
+        // на оба события давала два действия на одно нажатие: лог тапа на айфоне —
+        // «click → audio.pause() → hover:enter → audio.play()», пауза ставилась и тут же
+        // снималась, «Перемешать» никогда не включалось, «Повтор» перескакивал режим, «след.»
+        // мышью на десктопе прыгал через трек. Пульт не страдал — он шлёт только hover:enter.
+        // Владелец: «кнопка паузы не работает на айфоне» (Playwright-аудит 2026-09-03,
+        // медиасервер claude/06 §DF). Мышь и тач без click не глохнут: гейт DeviceInput.canClick
+        // истинен на таче, в браузере, на Platform.tv() — у клиентов Windows/Mac это tvbox():
+        // UA «Linux; Android 13» без тача — и при движении мыши перед кликом.
+        player.find('[data-action]').on('hover:enter', function (event) {
             event.preventDefault();
             event.stopPropagation();
             handleStandaloneIosPlayerAction($(this).attr('data-action'));
@@ -7579,24 +7589,72 @@
             player.removeAttr('data-scroll-current');
 
             if (scroller && current) {
-                try {
-                    current.scrollIntoView({ block: 'center' });
-                } catch (e) {
-                    scroller.scrollTop = Math.max(0, current.offsetTop - (scroller.clientHeight / 2) + (current.clientHeight / 2));
-                }
+                // d1v:music-no-root-scroll — только список шита, не корень оверлея
+                scrollWithinPlayer(current, 'center');
             }
         }
 
         bumpMusicHeatDuration('fullPlayerQueueUpdate', heatStartedAt);
     }
 
-    // d1v:music-aurora — телефон определяется ПЛАТФОРМОЙ и ориентацией, а не порогом ширины.
+    // d1v:music-no-root-scroll — прокрутка ТОЛЬКО ближайшего прокручиваемого списка внутри плеера.
+    // 🔴 Element.scrollIntoView прокручивает ВСЕ прокручиваемые предки, включая корень оверлея
+    // `.lm-ios-full-player` (position:fixed; overflow:hidden): из-за `__backdrop{inset:-2em}` у него
+    // есть ~56 px переполнения, а overflow:hidden программной прокрутке не мешает. На телефоне
+    // первый же scrollIntoView текущей строки очереди уводил корень на scrollTop 56: шапка с
+    // крестиком «×» оказывалась за верхним краем, снизу оставалась чёрная полоса — закрыть плеер
+    // можно было только свайпом, о котором никто не знает. Причинно доказано Playwright-прогоном
+    // (2026-09-03, медиасервер claude/06 §DF): с погашенным scrollIntoView шапка на месте.
+    // Здесь двигаем scrollTop у ОДНОГО контейнера — первого предка с overflow auto/scroll.
+    function scrollWithinPlayer(element, block, smooth) {
+        if (!element || !element.getBoundingClientRect) return;
+
+        var root = element.closest ? element.closest('.lm-ios-full-player') : null;
+        var scroller = element.parentNode;
+
+        while (scroller && scroller !== root && scroller !== document.body) {
+            var overflowY = '';
+            try { overflowY = getComputedStyle(scroller).overflowY; } catch (e) {}
+            if ((overflowY === 'auto' || overflowY === 'scroll') && scroller.scrollHeight > scroller.clientHeight + 1) break;
+            scroller = scroller.parentNode;
+        }
+        if (!scroller || scroller === root || scroller === document.body || scroller === document) return;
+
+        var box = element.getBoundingClientRect();
+        var view = scroller.getBoundingClientRect();
+        var delta = box.top - view.top;                 // где строка сейчас относительно окна списка
+        var height = box.height || element.offsetHeight || 0;
+        var target = scroller.scrollTop;
+
+        if (block === 'center') {
+            target = scroller.scrollTop + delta - (scroller.clientHeight - height) / 2;
+        } else {
+            // nearest: подтянуть ровно настолько, чтобы строка оказалась в окне
+            if (delta < 0) target = scroller.scrollTop + delta;
+            else if (delta + height > scroller.clientHeight) target = scroller.scrollTop + delta + height - scroller.clientHeight;
+        }
+
+        target = Math.max(0, Math.min(scroller.scrollHeight - scroller.clientHeight, Math.round(target)));
+        if (target === scroller.scrollTop) return;
+
+        if (smooth && typeof scroller.scrollTo === 'function') {
+            try { scroller.scrollTo({ top: target, behavior: 'smooth' }); return; } catch (e) { /* старый WebView */ }
+        }
+        scroller.scrollTop = target;
+    }
+
+    // d1v:music-aurora — телефон определяется ПЛАТФОРМОЙ, а не порогом ширины.
     // Грабля уже описана (медиасервер claude/06 §DB): вьюпорт приложения на айфоне ШИРЕ 600 px,
     // поэтому @media по ширине телефон не ловит и раскладка уезжает в десктопную.
+    // d1v:music-phone-by-short-side — для остальных платформ телефон узнаём по КОРОТКОЙ стороне,
+    // а не по ориентации: телефон и ТВ на Android шлют один токен d1vision_android, а «портрет =
+    // телефон» в ландшафте давал телефону ТВ-раскладку (две колонки, очередь столбиком 286 px на
+    // экране 915×412 — Playwright-аудит 2026-09-03). Телефоны — 360–430 css px по короткой стороне,
+    // ТВ-WebView — 540/720/1080, планшеты ≥ 744 (им широкая раскладка и нужна).
     function auroraIsPhone() {
         try {
             if (window.d1vision_platform === 'ios') return true;
-            return window.innerHeight > window.innerWidth;   // портрет = телефон; ТВ всегда альбом
+            return Math.min(window.innerWidth, window.innerHeight) <= 520;
         } catch (e) {
             return false;
         }
@@ -7666,8 +7724,9 @@
                 row.append($('<div class="lm-au__row-dur"></div>').text(
                     track && track.duration_ms ? Lampa.Utils.secondsToTime(Math.round(track.duration_ms / 1000)) : ''));
 
-                // click для мыши, hover:enter для пульта — как у остальных наших кнопок
-                row.on('click hover:enter', function (event) {
+                // d1v:music-enter-once — только hover:enter (мышь и тач Lampa приводит к нему
+                // сама; с 'click' строка запускала трек дважды — см. кнопки транспорта)
+                row.on('hover:enter', function (event) {
                     event.preventDefault();
                     event.stopPropagation();
                     standaloneIosPlayIndex(index);
@@ -7675,8 +7734,9 @@
 
                 // d1v:music-dpad-zones — фокус пульта подтягивает строку в видимую часть списка:
                 // очередь на 45 треков длиннее колонки, без этого фокус уезжает под край.
+                // d1v:music-no-root-scroll — двигаем ТОЛЬКО список, не корень оверлея.
                 row.on('hover:focus', function () {
-                    try { this.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+                    scrollWithinPlayer(this, 'nearest');
                 });
 
                 list.append(row);
@@ -7701,7 +7761,9 @@
             list.attr('data-au-current', currentKey);
             var activeRow = list.children().get(current);
             if (activeRow && !list.find('.selector.focus').length) {
-                try { activeRow.scrollIntoView({ block: 'center' }); } catch (e) {}
+                // 🔴 d1v:music-no-root-scroll — именно этот вызов уводил шапку плеера за экран
+                // на телефоне: scrollIntoView прокручивал не список, а корень оверлея.
+                scrollWithinPlayer(activeRow, 'center');
             }
         }
     }
@@ -7832,8 +7894,11 @@
             player.toggleClass('lm-ios-full-player--paused', !state.playing);
             player.find('[data-action="shuffle"]').toggleClass('active', isStandaloneIosShuffle());
             player.attr('data-repeat-mode', repeatMode);
+            // d1v:music-repeat-label — .html() перерисовывает всю кнопку, и подпись из шаблона
+            // (<span>Повтор</span>) исчезала на первом же обновлении: на ТВ рядом стояли
+            // «⤨ Перемешать» с текстом и голая иконка повтора (178×41 против 62×41).
             player.find('[data-action="repeat"]')
-                .html(repeatMode === 'one' ? IOS_PLAYER_REPEAT_ONE_ICON : IOS_PLAYER_REPEAT_ICON)
+                .html((repeatMode === 'one' ? IOS_PLAYER_REPEAT_ONE_ICON : IOS_PLAYER_REPEAT_ICON) + '<span>Повтор</span>')
                 .toggleClass('active', repeatMode !== 'off');
             player.find('[data-action="prev"]').toggleClass('disabled', !state.hasPrev);
             player.find('[data-action="next"]').toggleClass('disabled', !state.hasNext);
@@ -10886,7 +10951,8 @@
         var button = controls.find('.player-panel__music-lyrics').first();
         if (!button.length) {
             button = $('<div class="player-panel__music-lyrics button selector" data-controller="player_panel">Текст</div>');
-            button.on('hover:enter click', function (event) {
+            // d1v:music-enter-once — только hover:enter (click по .selector Lampa приводит к нему сама)
+            button.on('hover:enter', function (event) {
                 event.preventDefault();
                 event.stopPropagation();
                 toggleMusicPlayerVisualLyrics();
@@ -10904,7 +10970,8 @@
             var earlier = $('<div class="player-panel__music-lyrics-offset button selector hide" data-controller="player_panel" data-lyrics-offset-delta="-500" aria-label="Показывать текст раньше">−</div>');
             var later = $('<div class="player-panel__music-lyrics-offset button selector hide" data-controller="player_panel" data-lyrics-offset-delta="500" aria-label="Показывать текст позже">+</div>');
 
-            earlier.add(later).on('hover:enter click', function (event) {
+            // d1v:music-enter-once — только hover:enter: с двойной подпиской смещение шагало на два
+            earlier.add(later).on('hover:enter', function (event) {
                 event.preventDefault();
                 event.stopPropagation();
 
@@ -16759,9 +16826,10 @@
             }\
             .lm-search-btn svg { width: 1.2em; height: 1.2em; display: block; }\
             .lm-search-btn--icon {\
-                width: 3.1em;\
-                min-width: 3.1em;\
-                height: 3.1em;\
+                /* d1v:music-phone-targets — на телефоне 3.1em = 37.8 px при минимуме 44 по HIG */\
+                width: max(3.1em, 44px);\
+                min-width: max(3.1em, 44px);\
+                height: max(3.1em, 44px);\
                 padding: 0;\
                 border-radius: 0.72em;\
             }\
@@ -17403,7 +17471,11 @@
                 display: none;\
                 color: #f5f5f7;\
                 background: #101012;\
+                /* d1v:music-no-root-scroll — clip запрещает и ПРОГРАММНУЮ прокрутку корня (hidden её\
+                   пропускает: scrollIntoView строки очереди уводил шапку за экран). Где clip не\
+                   знают, остаётся hidden + scrollWithinPlayer в JS. */\
                 overflow: hidden;\
+                overflow: clip;\
             }\
             .lm-ios-full-player--visible { display: block; }\
             body.lm-ios-full-player-open .lm-ios-player { display: none !important; }\
@@ -18124,7 +18196,10 @@
             /* flex-basis именно 0, а не auto: с auto колонка считается от СОДЕРЖИМОГО и остаётся\
                узкой (замер: 228px при свободных ~535). Герою нужен stretch — иначе он сжимается\
                по содержимому и не отдаёт мета-колонке ширину. */\
-            .lm-ios-full-player--wide .lm-ios-full-player__hero { width: 100%; align-self: stretch; }\
+            /* d1v:music-wide-hero — базовый __hero держит max-width:34em и margin:0 auto (телефонная\
+               центровка); без сброса на ТВ 1920 герой занимал 776 px из 1241, по бокам пустовало\
+               240+226 px, а название на три строки клампилось до двух с многоточием. */\
+            .lm-ios-full-player--wide .lm-ios-full-player__hero { width: 100%; max-width: none; margin: 0; align-self: stretch; }\
             .lm-ios-full-player--wide .lm-au__meta { flex: 1 1 0%; min-width: 0; }\
             .lm-ios-full-player--phone .lm-au__meta,\
             .lm-ios-full-player--phone .lm-ios-full-player__title { width: 100%; align-self: stretch; }\
@@ -18161,6 +18236,54 @@
             .lm-ios-full-player--phone .lm-ios-full-player__artist { font-size: 0.94em; color: var(--lm-au-muted); }\
             .lm-ios-full-player--phone .lm-au__meta { align-items: center; text-align: center; }\
             .lm-ios-full-player--phone .lm-au__eq { justify-content: center; }\
+            /* d1v:music-phone-targets — полы в ПИКСЕЛЯХ под классом --phone, а не в @media.\
+               Рут-em Lampa пропорционален ширине окна, и на телефоне кнопки сжимались до 26–38 px\
+               (пауза 37.6, пред/след 30.7, крестик 26.3) при минимуме 44 по HIG; медиазапрос по\
+               ширине на реальном айфоне может молчать вовсе (вьюпорт приложения шире 600 px),\
+               а класс --phone ставится по платформе. max(em, px): на крупном экране em, на\
+               телефоне — пол. Ряд из пяти кнопок: 4×44 + 56 + зазоры ≈ 264 px < 374 доступных. */\
+            .lm-ios-full-player--phone .lm-ios-full-player__btn { width: max(2.9em, 44px); height: max(2.9em, 44px); }\
+            .lm-ios-full-player--phone .lm-ios-full-player__btn--primary { width: max(3.55em, 56px); height: max(3.55em, 56px); }\
+            .lm-ios-full-player--phone .lm-ios-full-player__tool { width: max(2.48em, 44px); height: max(2.48em, 44px); }\
+            .lm-ios-full-player--phone .lm-ios-full-player__btn svg { width: max(1.7em, 22px); height: max(1.7em, 22px); }\
+            .lm-ios-full-player--phone .lm-ios-full-player__btn--primary svg { width: max(1.9em, 26px); height: max(1.9em, 26px); }\
+            .lm-ios-full-player--phone .lm-ios-full-player__btn--mini svg { width: max(1.25em, 20px); height: max(1.25em, 20px); }\
+            .lm-ios-full-player--phone .lm-ios-full-player__tool svg { width: max(1.1em, 18px); height: max(1.1em, 18px); }\
+            /* колонка грида под плитку обязана расти вместе с плиткой, иначе обложка наедет на название */\
+            .lm-ios-full-player--phone .lm-au__row { min-height: 44px; grid-template-columns: max(2.6em, 40px) 1fr auto; }\
+            .lm-ios-full-player--phone .lm-au__row-tile { width: max(3.25em, 40px); height: max(3.25em, 40px); }\
+            /* стопка арт→название→прогресс→кнопки не сжимается; при нехватке высоты ужимается очередь\
+               (до ~2 строк), а не наезжают друг на друга арт и прогресс */\
+            .lm-ios-full-player--phone .lm-au__main { flex: 0 0 auto; }\
+            .lm-ios-full-player--phone .lm-au__queue { flex: 0 1 auto; min-height: 7.5em; }\
+            .lm-ios-full-player--phone .lm-ios-full-player__title { font-size: max(1.38em, 18px); }\
+            .lm-ios-full-player--phone .lm-ios-full-player__artist { font-size: max(0.94em, 14px); }\
+            .lm-ios-full-player--phone .lm-au__sub { font-size: max(0.8em, 12px); }\
+            .lm-ios-full-player--phone .lm-au__row-title { font-size: max(0.88em, 14px); }\
+            .lm-ios-full-player--phone .lm-au__row-artist,\
+            .lm-ios-full-player--phone .lm-au__row-dur { font-size: max(0.74em, 12px); }\
+            .lm-ios-full-player--phone .lm-ios-full-player__times { font-size: max(0.82em, 12px); }\
+            .lm-ios-full-player--phone .lm-ios-full-player__head-title { font-size: max(0.92em, 13px); }\
+            /* d1v:music-phone-by-short-side — телефон в ЛАНДШАФТЕ: раньше сюда попадала ТВ-раскладка\
+               (две колонки, очередь столбиком 286 px на 915×412), теперь класс --phone, но вертикальная\
+               стопка телефона в 412 px высоты не помещается (~500 px). Поэтому в ландшафте — своя\
+               раскладка: арт слева от названия, очередь колонкой справа. Условие только по\
+               ориентации (не по ширине в px — та самая грабля §DB). Пульт на телефоне не живёт,\
+               поэтому auroraDpadJump тут по-прежнему считает очередь «снизу» — это допустимо. */\
+            @media screen and (orientation: landscape) {\
+                .lm-ios-full-player--phone .lm-au__body { flex-direction: row; gap: 1em; }\
+                .lm-ios-full-player--phone .lm-au__main { flex: 1 1 auto; min-width: 0; justify-content: space-between; }\
+                .lm-ios-full-player--phone .lm-au__queue {\
+                    flex: 0 0 38%; max-width: 38%; max-height: none; min-height: 0; margin-top: 0;\
+                    border-top: none; border-left: 1px solid rgba(255,255,255,0.08);\
+                    border-radius: 0.7em; padding: 0.6em 0.6em 0;\
+                }\
+                .lm-ios-full-player--phone .lm-ios-full-player__hero { flex-direction: row; align-items: center; gap: 1em; text-align: left; }\
+                .lm-ios-full-player--phone .lm-ios-full-player__art { width: min(30vh, 12em); height: auto; aspect-ratio: 1; flex: none; margin: 0; }\
+                .lm-ios-full-player--phone .lm-au__meta { flex: 1 1 0%; min-width: 0; align-items: flex-start; text-align: left; }\
+                .lm-ios-full-player--phone .lm-ios-full-player__title { text-align: left; }\
+                .lm-ios-full-player--phone .lm-au__eq { justify-content: flex-start; }\
+            }\
             </style>\
         ');
 
