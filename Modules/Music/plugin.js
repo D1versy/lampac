@@ -5893,6 +5893,7 @@
             MUSIC_IOS_FULL_PLAYER_RETURN_CONTROLLER = currentStandaloneIosControllerName();
 
         MUSIC_IOS_FULL_PLAYER_OPEN = true;
+        applyAuroraLayout(player);   // d1v:music-aurora — до первого кадра, иначе видно перескок
         player.addClass('lm-ios-full-player--visible');
         player.attr('data-scroll-current', 'true');
         $('body').addClass('lm-ios-full-player-open');
@@ -7194,10 +7195,24 @@
             // видимый выход, и без него экран был ловушкой («оверлей не закрывается»).
             + '<div class="lm-ios-full-player__tool selector" data-action="collapse">' + IOS_PLAYER_CLOSE_ICON + '</div>'
             + '</div>'
+            // d1v:music-aurora — раскладка по макету «Aurora Player». Две колонки на ТВ и
+            // десктопе, вертикаль на телефоне; переключает КЛАСС на корне, а не отдельная
+            // разметка — иначе две копии DOM разъезжались бы при каждой правке.
+            //
+            // 🔴 Имена классов, за которые цепляется updateStandaloneIosFullPlayer (__art,
+            // __title, __artist, __seek, __time--current, __time--total, __backdrop), сохранены
+            // дословно: это весь контракт обновления, и перестановка не должна его задеть.
+            + '<div class="lm-au__body">'
+            + '<div class="lm-au__main">'
             + '<div class="lm-ios-full-player__hero">'
             + '<div class="lm-ios-full-player__art"><img src="' + IMG_BG + '" alt=""></div>'
+            + '<div class="lm-au__meta">'
+            + '<div class="lm-au__eq"><i></i><i></i><i></i><i></i></div>'
             + '<div class="lm-ios-full-player__title">Музыка</div>'
             + '<div class="lm-ios-full-player__artist"></div>'
+            + '<div class="lm-au__sub"></div>'
+            + '</div>'
+            + '</div>'
             + '<div class="lm-ios-full-player__progress">'
             + '<input class="lm-ios-full-player__seek" type="range" min="0" max="1000" step="1" value="0">'
             + '<div class="lm-ios-full-player__times">'
@@ -7215,13 +7230,31 @@
             // фокус-коллекцию Lampa, и пультом до кнопки не дойти. Именно поэтому оверлей
             // «не закрывался» — крестик в шапке тоже был без него, и на телевизоре экран
             // превращался в ловушку.
+            // Порядок в DOM — мобильный по макету: перемешать, пред, пауза, след, повтор.
+            // На широком экране макет уводит перемешивание и повтор во ВТОРОЙ ряд; делает это
+            // распорка lm-au__break (flex-basis:100%) вместе с order, а не вторая разметка.
+            // 🔴 selector обязателен на каждой кнопке: без него до неё не дойти пультом.
             + '<div class="lm-ios-full-player__actions">'
+            + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--mini selector" data-action="shuffle">' + IOS_PLAYER_SHUFFLE_ICON + '<span>Перемешать</span></div>'
             + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--ghost selector" data-action="prev">' + IOS_PLAYER_PREV_ICON + '</div>'
             + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--primary selector" data-action="playpause">' + IOS_PLAYER_PAUSE_ICON + '</div>'
             + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--ghost selector" data-action="next">' + IOS_PLAYER_NEXT_ICON + '</div>'
-            + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--mini selector" data-action="queue">' + IOS_PLAYER_QUEUE_ICON + '</div>'
+            + '<div class="lm-ios-full-player__btn lm-ios-full-player__btn--mini selector" data-action="repeat">' + IOS_PLAYER_REPEAT_ICON + '<span>Повтор</span></div>'
+            + '<i class="lm-au__break"></i>'
             + '</div>'
             + '<div class="lm-ios-full-player__timer-status"></div>'
+            + '</div>'
+            // Очередь: справа отдельной колонкой на ТВ и десктопе, нижней панелью на телефоне —
+            // ровно как на обоих артбордах макета. Одна разметка, раскладку решает CSS.
+            + '<div class="lm-au__queue">'
+            + '<div class="lm-au__queue-head">'
+            + '<div class="lm-au__queue-title">Очередь</div>'
+            + '<div class="lm-au__queue-count"></div>'
+            + '</div>'
+            + '<div class="lm-au__queue-list"></div>'
+            + '<div class="lm-au__queue-foot"></div>'
+            + '</div>'
+            + '</div>'
             + '</div>'
             + '<div class="lm-ios-full-player__sheet">'
             + '<div class="lm-ios-full-player__sheet-panel">'
@@ -7468,6 +7501,89 @@
         bumpMusicHeatDuration('fullPlayerQueueUpdate', heatStartedAt);
     }
 
+    // d1v:music-aurora — телефон определяется ПЛАТФОРМОЙ и ориентацией, а не порогом ширины.
+    // Грабля уже описана (медиасервер claude/06 §DB): вьюпорт приложения на айфоне ШИРЕ 600 px,
+    // поэтому @media по ширине телефон не ловит и раскладка уезжает в десктопную.
+    function auroraIsPhone() {
+        try {
+            if (window.d1vision_platform === 'ios') return true;
+            return window.innerHeight > window.innerWidth;   // портрет = телефон; ТВ всегда альбом
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // d1v:music-aurora — подпись под названием: «артист · альбом · год», как на макете.
+    // Пустые части выкидываем, иначе получаются висячие разделители вида «Артист ·  · ».
+    function auroraTrackMeta(track, artist) {
+        var year = ((track && track.date) || '').slice(0, 4);
+
+        return [artist || '', (track && track.album_title) || '', /^\d{4}$/.test(year) ? year : '']
+            .filter(function (part) { return !!part; })
+            .join(' · ');
+    }
+
+    function applyAuroraLayout(player) {
+        if (!player || !player.length) return;
+
+        var phone = auroraIsPhone();
+
+        player.addClass('lm-ios-full-player--aurora');
+        player.toggleClass('lm-ios-full-player--wide', !phone);
+        player.toggleClass('lm-ios-full-player--phone', phone);
+    }
+
+    // d1v:music-aurora — очередь отдельной колонкой (широкая раскладка) или нижней панелью
+    // (телефон). Ключ нужен, чтобы список НЕ пересобирался на каждом тике обновления: пересборка
+    // рвала бы фокус пульта посреди навигации, а обновление зовётся раз в секунду.
+    function renderAuroraQueue(player) {
+        var list = player.find('.lm-au__queue-list');
+        if (!list.length) return;
+
+        var tracks = queueTracks();
+        var current = queueCurrentIndex();
+        var key = tracks.length + '|' + (tracks[0] && tracks[0].id ? tracks[0].id : '')
+            + '|' + (tracks[tracks.length - 1] && tracks[tracks.length - 1].id ? tracks[tracks.length - 1].id : '');
+
+        setTextIfChanged(player.find('.lm-au__queue-count'), tracks.length ? (tracks.length + ' в очереди') : '');
+        setTextIfChanged(player.find('.lm-au__queue-foot'),
+            isRadioAutoplayEnabled() ? 'Автовоспроизведение включено' : 'Автовоспроизведение выключено');
+
+        if (list.attr('data-au-key') !== key) {
+            list.attr('data-au-key', key);
+            list.empty();
+
+            tracks.forEach(function (track, index) {
+                var artist = (track && track.artist_name) || '';
+                var row = $('<div class="lm-au__row selector"></div>');
+
+                row.append($('<div class="lm-au__row-tile"></div>').text(artist.slice(0, 2).toUpperCase() || '♪'));
+
+                var main = $('<div class="lm-au__row-main"></div>');
+                main.append($('<div class="lm-au__row-title"></div>').text((track && track.title) || 'Трек'));
+                main.append($('<div class="lm-au__row-artist"></div>').text(artist));
+                row.append(main);
+
+                row.append($('<div class="lm-au__row-dur"></div>').text(
+                    track && track.duration_ms ? Lampa.Utils.secondsToTime(Math.round(track.duration_ms / 1000)) : ''));
+
+                // click для мыши, hover:enter для пульта — как у остальных наших кнопок
+                row.on('click hover:enter', function (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    standaloneIosPlayIndex(index);
+                });
+
+                list.append(row);
+            });
+        }
+
+        // подсветку текущего двигаем ОТДЕЛЬНО от пересборки — она меняется каждый трек
+        list.children().each(function (index) {
+            $(this).toggleClass('lm-au__row--active', index === current);
+        });
+    }
+
     function updateStandaloneIosFullPlayer() {
         var heatStartedAt = musicHeatNow();
         if (!MUSIC_IOS_FULL_PLAYER || !MUSIC_IOS_FULL_PLAYER.length) return;
@@ -7499,6 +7615,7 @@
             player.find('.lm-ios-full-player__art img').attr('src', image);
             setTextIfChanged(player.find('.lm-ios-full-player__title'), title);
             setTextIfChanged(player.find('.lm-ios-full-player__artist'), artist);
+            setTextIfChanged(player.find('.lm-au__sub'), auroraTrackMeta(state.track, artist));   // d1v:music-aurora
             MUSIC_IOS_AUDIO.fullUiKey = trackKey;
             bumpMusicHeatMetric('fullPlayerTrackUi');
 
@@ -7548,6 +7665,11 @@
         }
 
         updateStandaloneIosFullActions(player, state);
+        // d1v:music-aurora — раскладка и очередь в колонке. Раскладку пересчитываем на каждом
+        // обновлении, а не только при открытии: поворот телефона меняет ориентацию, а с ней и
+        // ответ auroraIsPhone.
+        applyAuroraLayout(player);
+        renderAuroraQueue(player);
         bumpMusicHeatMetric('fullPlayerActionsUpdate');
 
         if (!isSeeking) {
@@ -17624,6 +17746,182 @@
                 .lm-ios-full-player__timer-status { margin-top: 0.28em; font-size: 0.68em; }\
                 .lm-ios-full-player__stop { min-height: 2.05em; margin-top: 0.34em; font-size: 0.68em; }\
             }\
+            /* ── d1v:music-aurora — макет «Aurora Player» ─────────────────────────────────\
+               Две раскладки одной разметкой: широкая (ТВ, десктоп) и телефонная.\
+               🔴 Всё в em, а не в пикселях макета. Макет нарисован под 1440x810, а приложение\
+               живёт и на 1280x720, и на 1920x1080; жёсткие пиксели там разъезжаются. Базовый\
+               размер задаёт Lampa, поэтому em масштабируется вместе со всем интерфейсом.\
+               🔴 Шрифт макета (Space Grotesk) НЕ подключаем: клиент ходит только в наш сервер,\
+               а Google Fonts это чужой хост. Берём системный стек с теми же начертаниями. */\
+            .lm-ios-full-player--aurora {\
+                --lm-au-accent: #ff6a3d;\
+                --lm-au-dim: #6c7488;\
+                --lm-au-muted: #a7b0c2;\
+                background: #05060a;\
+                color: #f2f4f8;\
+            }\
+            .lm-ios-full-player--aurora .lm-ios-full-player__backdrop { opacity: 0.30; }\
+            .lm-ios-full-player--aurora .lm-ios-full-player__shell {\
+                background:\
+                    linear-gradient(115deg, rgba(255,106,61,0.16) 0%, rgba(255,106,61,0) 42%),\
+                    radial-gradient(60% 55% at 12% 88%, rgba(90,140,255,0.14), transparent 70%);\
+            }\
+            .lm-ios-full-player--aurora .lm-au__body {\
+                display: flex;\
+                flex-direction: column;\
+                flex: 1 1 auto;\
+                min-height: 0;\
+                gap: 0.8em;\
+            }\
+            .lm-ios-full-player--aurora .lm-au__main {\
+                display: flex;\
+                flex-direction: column;\
+                min-height: 0;\
+                min-width: 0;\
+                flex: 1 1 auto;\
+            }\
+            .lm-ios-full-player--aurora .lm-au__meta { min-width: 0; display: flex; flex-direction: column; gap: 0.3em; }\
+            .lm-ios-full-player--aurora .lm-au__sub { font-size: 0.72em; color: var(--lm-au-dim); letter-spacing: 0.04em; }\
+            .lm-ios-full-player--aurora .lm-au__eq { display: flex; align-items: flex-end; gap: 0.16em; height: 1.05em; }\
+            .lm-ios-full-player--aurora .lm-au__eq i {\
+                width: 0.18em; height: 100%; border-radius: 0.1em; background: var(--lm-au-accent);\
+                transform-origin: bottom; animation: lm-au-eq 1.1s ease-in-out infinite;\
+            }\
+            .lm-ios-full-player--aurora .lm-au__eq i:nth-child(2) { animation-delay: .18s; }\
+            .lm-ios-full-player--aurora .lm-au__eq i:nth-child(3) { animation-delay: .36s; }\
+            .lm-ios-full-player--aurora .lm-au__eq i:nth-child(4) { animation-delay: .54s; }\
+            .lm-ios-full-player--aurora.lm-ios-full-player--paused .lm-au__eq i { animation-play-state: paused; }\
+            @keyframes lm-au-eq { 0%,100% { transform: scaleY(.35) } 50% { transform: scaleY(1) } }\
+            .lm-ios-full-player--aurora .lm-au__break { display: none; }\
+            /* очередь: справа колонкой на широком, нижней панелью на телефоне */\
+            .lm-ios-full-player--aurora .lm-au__queue {\
+                display: flex; flex-direction: column; min-height: 0; box-sizing: border-box;\
+            }\
+            .lm-ios-full-player--aurora .lm-au__queue-head {\
+                display: flex; align-items: baseline; justify-content: space-between;\
+                padding: 0 0.4em 0.5em; flex: none;\
+            }\
+            .lm-ios-full-player--aurora .lm-au__queue-title {\
+                font-size: 0.86em; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase;\
+            }\
+            .lm-ios-full-player--aurora .lm-au__queue-count { font-size: 0.74em; color: var(--lm-au-dim); }\
+            .lm-ios-full-player--aurora .lm-au__queue-list {\
+                flex: 1 1 auto; min-height: 0; overflow-y: auto;\
+                display: flex; flex-direction: column; gap: 0.16em;\
+            }\
+            .lm-ios-full-player--aurora .lm-au__queue-foot {\
+                flex: none; margin-top: auto; padding: 0.7em 0.4em 0.2em;\
+                border-top: 1px solid rgba(255,255,255,0.07);\
+                font-size: 0.72em; color: var(--lm-au-dim);\
+            }\
+            .lm-ios-full-player--aurora .lm-au__row {\
+                display: grid; grid-template-columns: 2.6em 1fr auto; gap: 0.7em; align-items: center;\
+                padding: 0.42em 0.6em; border-radius: 0.6em; border: 1px solid transparent;\
+                cursor: pointer; text-align: left;\
+            }\
+            .lm-ios-full-player--aurora .lm-au__row-tile {\
+                width: 2.6em; height: 2.6em; border-radius: 0.44em; display: grid; place-items: center;\
+                font-weight: 700; font-size: 0.8em; color: #0c0d12; background: rgba(255,255,255,0.5);\
+            }\
+            .lm-ios-full-player--aurora .lm-au__row-main { min-width: 0; display: flex; flex-direction: column; gap: 0.16em; }\
+            .lm-ios-full-player--aurora .lm-au__row-title {\
+                font-size: 0.88em; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
+            }\
+            .lm-ios-full-player--aurora .lm-au__row-artist {\
+                font-size: 0.74em; color: #7d8698; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
+            }\
+            .lm-ios-full-player--aurora .lm-au__row-dur { font-size: 0.74em; color: #7d8698; }\
+            .lm-ios-full-player--aurora .lm-au__row--active {\
+                background: rgba(255,106,61,0.14); border-color: rgba(255,106,61,0.45);\
+            }\
+            .lm-ios-full-player--aurora .lm-au__row--active .lm-au__row-title { color: var(--lm-au-accent); }\
+            /* транспорт по макету */\
+            .lm-ios-full-player--aurora .lm-ios-full-player__actions {\
+                display: flex; align-items: center; justify-content: center; flex-wrap: wrap;\
+            }\
+            .lm-ios-full-player--aurora .lm-ios-full-player__btn--primary {\
+                background: linear-gradient(160deg,#ff8f6b,#ff4f18); color: #120704; border: none;\
+                box-shadow: 0 0.5em 1.4em rgba(255,90,38,0.4);\
+            }\
+            .lm-ios-full-player--aurora .lm-ios-full-player__btn--ghost {\
+                background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.14); color: #f2f4f8;\
+            }\
+            .lm-ios-full-player--aurora .lm-ios-full-player__btn--mini {\
+                background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.14); color: #e4e8f0;\
+            }\
+            .lm-ios-full-player--aurora .lm-ios-full-player__btn--mini.active {\
+                background: rgba(255,106,61,0.16); border-color: var(--lm-au-accent); color: var(--lm-au-accent);\
+            }\
+            .lm-ios-full-player--aurora .lm-ios-full-player__btn--mini span { display: none; }\
+            /* 🔴 Кольцо фокуса — по макету. Пульт двигает фокус классом .focus, мышь :hover.\
+               Без видимого кольца по экрану невозможно ориентироваться с пульта. */\
+            .lm-ios-full-player--aurora .selector.focus,\
+            .lm-ios-full-player--aurora .selector:hover {\
+                outline: none;\
+                box-shadow: 0 0 0 0.16em var(--lm-au-accent), 0 0 1.6em rgba(255,106,61,0.45);\
+            }\
+            .lm-ios-full-player--aurora .lm-ios-full-player__btn--primary.focus,\
+            .lm-ios-full-player--aurora .lm-ios-full-player__btn--primary:hover {\
+                box-shadow: 0 0 0 0.2em #fff, 0 0.6em 1.8em rgba(255,90,38,0.6);\
+            }\
+            /* ── широкая раскладка: ТВ и десктоп ── */\
+            .lm-ios-full-player--wide .lm-au__body { flex-direction: row; gap: 1.4em; }\
+            .lm-ios-full-player--wide .lm-au__main { justify-content: space-between; padding-left: 0.6em; }\
+            .lm-ios-full-player--wide .lm-au__queue {\
+                flex: 0 0 32%; max-width: 32%;\
+                background: rgba(255,255,255,0.035);\
+                border-left: 1px solid rgba(255,255,255,0.07);\
+                border-radius: 0.7em; padding: 0.9em 0.8em 0;\
+            }\
+            .lm-ios-full-player--wide .lm-ios-full-player__hero {\
+                display: flex; flex-direction: row; align-items: flex-end; gap: 1.8em; text-align: left;\
+            }\
+            .lm-ios-full-player--wide .lm-ios-full-player__art {\
+                width: 17em; height: 17em; flex: none; margin: 0; border-radius: 0.9em;\
+            }\
+            /* 🔴 Без flex:1 мета-колонка берёт ширину по содержимому: замер показал 288px при\
+               доступных 817, и длинное название ломалось в узкий столбик. min-width:0 обязателен\
+               рядом — иначе flex-элемент не даёт тексту сжиматься и распирает строку. */\
+            /* flex-basis именно 0, а не auto: с auto колонка считается от СОДЕРЖИМОГО и остаётся\
+               узкой (замер: 228px при свободных ~535). Герою нужен stretch — иначе он сжимается\
+               по содержимому и не отдаёт мета-колонке ширину. */\
+            .lm-ios-full-player--wide .lm-ios-full-player__hero { width: 100%; align-self: stretch; }\
+            .lm-ios-full-player--wide .lm-au__meta { flex: 1 1 0%; min-width: 0; }\
+            .lm-ios-full-player--phone .lm-au__meta,\
+            .lm-ios-full-player--phone .lm-ios-full-player__title { width: 100%; align-self: stretch; }\
+            .lm-ios-full-player--wide .lm-ios-full-player__title {\
+                font-size: 2.3em; line-height: 1.03; font-weight: 700; letter-spacing: -0.02em; text-align: left;\
+                -webkit-line-clamp: 2;\
+            }\
+            .lm-ios-full-player--wide .lm-ios-full-player__artist { font-size: 1.1em; color: var(--lm-au-muted); text-align: left; }\
+            .lm-ios-full-player--wide .lm-au__eq { height: 1.2em; }\
+            .lm-ios-full-player--wide .lm-ios-full-player__btn { width: 3.2em; height: 3.2em; }\
+            .lm-ios-full-player--wide .lm-ios-full-player__btn--primary { width: 4.5em; height: 4.5em; }\
+            .lm-ios-full-player--wide .lm-ios-full-player__actions { gap: 0.9em; }\
+            /* перемешать и повтор — вторым рядом, как на макете: распорка ломает строку */\
+            .lm-ios-full-player--wide .lm-au__break { display: block; flex-basis: 100%; height: 0; order: 2; }\
+            .lm-ios-full-player--wide .lm-ios-full-player__btn--ghost,\
+            .lm-ios-full-player--wide .lm-ios-full-player__btn--primary { order: 1; }\
+            .lm-ios-full-player--wide .lm-ios-full-player__btn--mini {\
+                order: 3; width: auto; height: 2.2em; padding: 0 0.8em; border-radius: 0.5em;\
+                display: flex; align-items: center; gap: 0.4em; font-size: 0.82em; margin-top: 0.9em;\
+            }\
+            .lm-ios-full-player--wide .lm-ios-full-player__btn--mini span { display: inline; }\
+            /* ── телефонная раскладка ── */\
+            .lm-ios-full-player--phone .lm-au__queue {\
+                margin-top: auto; flex: none; max-height: 34%;\
+                background: rgba(255,255,255,0.05);\
+                border-top: 1px solid rgba(255,255,255,0.08);\
+                border-radius: 1em 1em 0 0; padding: 0.7em 0.7em 0;\
+            }\
+            .lm-ios-full-player--phone .lm-ios-full-player__hero { flex-direction: column; }\
+            /* типографика телефона по макету: название 22/16, артист 15/16 от базового размера */\
+            .lm-ios-full-player--phone .lm-ios-full-player__title {\
+                font-size: 1.38em; font-weight: 700; letter-spacing: -0.01em; line-height: 1.2;\
+            }\
+            .lm-ios-full-player--phone .lm-ios-full-player__artist { font-size: 0.94em; color: var(--lm-au-muted); }\
+            .lm-ios-full-player--phone .lm-au__meta { align-items: center; text-align: center; }\
+            .lm-ios-full-player--phone .lm-au__eq { justify-content: center; }\
             </style>\
         ');
 

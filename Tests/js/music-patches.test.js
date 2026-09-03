@@ -277,6 +277,42 @@ test('DE4: дефолт музыки остаётся встроенным пл�
     'дефолт музыки сменён — это решение принимает владелец, а не ребейз');
 });
 
+test('DE7: 🔴 раскладка «Aurora»: две формы, телефон по платформе, без чужих шрифтов', () => {
+  assert.ok(plugin.includes('d1v:music-aurora'), 'потерян маркер d1v:music-aurora');
+
+  // две раскладки одной разметкой
+  for (const cls of ['lm-ios-full-player--aurora', 'lm-ios-full-player--wide', 'lm-ios-full-player--phone'])
+    assert.ok(plugin.includes(cls), 'пропал класс раскладки ' + cls);
+  for (const el of ['lm-au__body', 'lm-au__main', 'lm-au__queue-list', 'lm-au__row', 'lm-au__sub', 'lm-au__eq'])
+    assert.ok(plugin.includes(el), 'пропал узел раскладки ' + el);
+
+  // 🔴 телефон определяется платформой и ориентацией, а НЕ порогом ширины: вьюпорт приложения
+  // на айфоне шире 600 px, и медиазапрос по ширине телефон не ловит (медиасервер claude/06 §DB)
+  const idx = plugin.indexOf('function auroraIsPhone');
+  assert.ok(idx > 0, 'пропала auroraIsPhone');
+  const body = plugin.slice(idx, idx + 600);
+  assert.ok(body.includes("window.d1vision_platform === 'ios'"), 'телефон больше не определяется платформой');
+  assert.ok(body.includes('window.innerHeight > window.innerWidth'), 'пропала проверка ориентации');
+  assert.ok(!/max-width:\s*\d+px[^}]*lm-au__/.test(plugin), 'раскладка Aurora завязана на порог ширины — та самая грабля §DB');
+
+  // 🔴 макет нарисован под 1440x810; жёсткие пиксели оттуда разъедутся на 1280x720 и 1920x1080
+  const cssIdx = plugin.indexOf('d1v:music-aurora — макет');
+  assert.ok(cssIdx > 0, 'не найден блок стилей Aurora');
+  const css = plugin.slice(cssIdx, plugin.indexOf('</style>', cssIdx));
+  const hardPx = (css.match(/:\s*\d{2,}px/g) || []).filter((m) => !/1px/.test(m));
+  assert.deepStrictEqual(hardPx, [], 'в раскладке появились жёсткие пиксели макета: ' + hardPx.join(', '));
+
+  // 🔴 клиент ходит ТОЛЬКО в наш сервер: шрифт макета с Google Fonts подключать нельзя
+  assert.ok(!/fonts\.(googleapis|gstatic)\.com/.test(plugin), 'подключён внешний шрифт — клиент пойдёт на чужой хост');
+
+  // очередь строится фокусируемыми строками, иначе пультом по ней не походить
+  assert.ok(plugin.includes('lm-au__row selector'), 'строки очереди не фокусируются');
+  assert.match(plugin, /row\.on\('click hover:enter'/, 'строки очереди не слушают hover:enter');
+
+  // список не должен пересобираться на каждом тике — это рвало бы фокус посреди навигации
+  assert.ok(plugin.includes('data-au-key'), 'пропал ключ пересборки очереди');
+});
+
 test('DE6: 🔴 плеер музыки назначает сервер, а не устройство', () => {
   // Выбор жил в localStorage каждого клиента, поэтому починка плеера означала «зайди в настройки
   // на каждом устройстве». Владелец: «сделай так, чтобы это всё настраивалось на сервере».
@@ -311,12 +347,17 @@ test('DE5: 🔴 полноэкранный плеер музыки достиж�
   const actionsIdx = plugin.indexOf("'<div class=\"lm-ios-full-player__actions\">'");
   assert.ok(actionsIdx > 0, 'не найден ряд кнопок плеера');
   const actions = plugin.slice(actionsIdx, actionsIdx + 1400);
+  // Состав и ПОРЯДОК по макету «Aurora Player»: на телефоне это один ряд слева направо, а на
+  // широком экране перемешивание и повтор уводит во второй ряд распорка lm-au__break — то есть
+  // порядок в DOM обязан оставаться мобильным.
   const buttons = actions.match(/data-action="(prev|playpause|next|queue|shuffle|repeat)"/g) || [];
   assert.deepStrictEqual(buttons, [
-    'data-action="prev"', 'data-action="playpause"', 'data-action="next"', 'data-action="queue"',
-  ], 'состав ряда кнопок изменён — владелец просил ровно четыре: пред, пауза, след, плейлист');
-  assert.strictEqual((actions.match(/lm-ios-full-player__btn[^"]*selector/g) || []).length, 4,
+    'data-action="shuffle"', 'data-action="prev"', 'data-action="playpause"',
+    'data-action="next"', 'data-action="repeat"',
+  ], 'состав или порядок кнопок разошёлся с макетом');
+  assert.strictEqual((actions.match(/lm-ios-full-player__btn[^"]*selector/g) || []).length, 5,
     'кнопка без selector = кнопка, до которой не дойти пультом');
+  assert.ok(actions.includes('lm-au__break'), 'пропала распорка — на ТВ шаффл и повтор не уйдут во второй ряд');
 
   // выход с экрана и вход в лист очереди — тоже пультом
   assert.match(plugin, /lm-ios-full-player__tool selector" data-action="collapse"/,
