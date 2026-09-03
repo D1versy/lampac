@@ -298,7 +298,9 @@ test('DE7: 🔴 раскладка «Aurora»: две формы, телефон
   // 🔴 макет нарисован под 1440x810; жёсткие пиксели оттуда разъедутся на 1280x720 и 1920x1080
   const cssIdx = plugin.indexOf('d1v:music-aurora — макет');
   assert.ok(cssIdx > 0, 'не найден блок стилей Aurora');
-  const css = plugin.slice(cssIdx, plugin.indexOf('</style>', cssIdx));
+  // 🔴 Комментарии вырезаем ДО поиска: иначе кейс ловит собственную прозу вида «замер: 228px».
+  // Ровно на этом уже спотыкался DE4 — сторож обязан смотреть на правила, а не на пояснения.
+  const css = plugin.slice(cssIdx, plugin.indexOf('</style>', cssIdx)).replace(/\/\*[\s\S]*?\*\//g, '');
   const hardPx = (css.match(/:\s*\d{2,}px/g) || []).filter((m) => !/1px/.test(m));
   assert.deepStrictEqual(hardPx, [], 'в раскладке появились жёсткие пиксели макета: ' + hardPx.join(', '));
 
