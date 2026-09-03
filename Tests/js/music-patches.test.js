@@ -381,8 +381,13 @@ test('DE5: 🔴 полноэкранный плеер музыки достиж�
   assert.match(plugin, /lm-ios-full-player__sheet-row selector/,
     'строки очереди не фокусируются — кнопка «плейлист» ведёт в тупик');
 
-  // 🔴 пульт жмёт hover:enter, а не click: без второй подписки кнопки молчат на OK
-  assert.match(plugin, /on\('click hover:enter', '\[data-action\]'/, 'кнопки плеера не слушают hover:enter');
+  // 🔴 пульт жмёт hover:enter, а не click: без второй подписки кнопки молчат на OK.
+  // 🔴 И подписка обязана стоять ПРЯМО на кнопках: Lampa шлёт hover:enter через Utils.trigger с
+  // bubbles=false, делегированный обработчик на корне его не видит (владелец: «предыдущий,
+  // пауза, следующий, перемешать, повтор не работают»).
+  assert.ok(plugin.includes('d1v:music-enter-direct'), 'потерян маркер d1v:music-enter-direct');
+  assert.match(plugin, /player\.find\('\[data-action\]'\)\.on\('click hover:enter'/, 'кнопки плеера не слушают hover:enter на себе');
+  assert.ok(!/\.on\('click hover:enter', '\[data-action\]'/.test(plugin), 'вернулась делегированная подписка — OK по кнопкам снова молчит');
   assert.match(plugin, /row\.on\('click hover:enter'/, 'строки листа не слушают hover:enter');
 
   // контроллер обязан строить коллекцию, а не быть заглушкой
@@ -459,6 +464,17 @@ test('DE11: 🔴 пока плеер открыт, контроллер фоку
 
   // при возврате фокус встаёт на последний элемент плеера, а не всегда на паузу
   assert.ok(plugin.includes("player.on('hover:focus', '.selector'"), 'последний фокус в плеере не запоминается');
+});
+
+test('DE12: страница плейлиста и альбома открывается с фокусом на «Слушать»', () => {
+  // Владелец: «начальный фокус на "Слушать" и на просто канвасе, нужно переводить — сделай, чтобы
+  // просто нажал "Слушать" и всё запустилось». Фокус вставал на шапку, у которой нет действия на OK.
+  assert.ok(plugin.includes('d1v:music-play-first-focus'), 'потерян маркер d1v:music-play-first-focus');
+  assert.ok(plugin.includes('last = rawTracks.length ? playBtn[0] : header[0];'), 'плейлист снова открывается с фокусом на шапке');
+  assert.ok(plugin.includes('last = tracks.length ? playAlbumBtn[0] : header[0];'), 'альбом снова открывается с фокусом на шапке');
+  // OK по шапке тоже запускает — мёртвой остановки на пути к первому треку нет
+  assert.strictEqual((plugin.match(/header\.on\('hover:enter', function \(\) \{\s*if \((rawTracks|tracks)\.length\)\s*playTrack\(/g) || []).length, 2,
+    'OK по шапке плейлиста/альбома снова ничего не делает');
 });
 
 test('DE8: выход из плеера — только остановка; кнопки «свернуть» нет', () => {

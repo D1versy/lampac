@@ -7350,7 +7350,12 @@
         // d1v:music-four-buttons — пульт жмёт не 'click', а 'hover:enter' по элементу в фокусе.
         // Без второй подписки кнопки видны и даже фокусируются, но на OK не реагируют — то есть
         // выглядят рабочими и молчат.
-        player.on('click hover:enter', '[data-action]', function (event) {
+        // 🔴 d1v:music-enter-direct — подписка ПРЯМО на каждой кнопке, а не делегированная с
+        // корня: Lampa шлёт hover:enter через Utils.trigger → initEvent(name, bubbles=false),
+        // событие НЕ всплывает, и делегированный обработчик на корне его не видит никогда. Ровно
+        // поэтому «предыдущий, пауза, следующий, перемешать, повтор не работают» при рабочем
+        // фокусе; карточки раздела работали, потому что у них подписка на самом элементе.
+        player.find('[data-action]').on('click hover:enter', function (event) {
             event.preventDefault();
             event.stopPropagation();
             handleStandaloneIosPlayerAction($(this).attr('data-action'));
@@ -15618,12 +15623,20 @@
                         } catch (e) {}
                     });
 
-                    last = header[0];
+                    // d1v:music-play-first-focus — начальный фокус на «Слушать», а не на шапке:
+                    // у шапки на OK нет действия, и владелец видел «фокус на канвасе, нужно
+                    // переводить». OK по шапке тоже запускает плейлист — второй мёртвой остановки
+                    // на пути к первому треку быть не должно.
+                    last = rawTracks.length ? playBtn[0] : header[0];
 
                     header.on('hover:focus', function () {
                         last = this;
                         scroll.update($(this), true);
                         setBackground(heroImg);
+                    });
+
+                    header.on('hover:enter', function () {
+                        if (rawTracks.length) playTrack(rawTracks[0], rawTracks, 0);
                     });
 
                     playBtn.on('hover:focus', function () {
@@ -16574,12 +16587,17 @@
                     } catch (e) {}
                 });
 
-                last = header[0];
+                // d1v:music-play-first-focus — начальный фокус на «Слушать», см. плейлист выше
+                last = tracks.length ? playAlbumBtn[0] : header[0];
 
                 header.on('hover:focus', function () {
                     last = this;
                     scroll.update($(this), true);
                     setBackground(img);
+                });
+
+                header.on('hover:enter', function () {
+                    if (tracks.length) playTrack(tracks[0], tracks, 0);
                 });
 
                 playAlbumBtn.on('hover:focus', function () {
