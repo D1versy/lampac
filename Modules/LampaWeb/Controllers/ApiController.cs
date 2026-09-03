@@ -724,9 +724,23 @@ public class ApiController : BaseController
     // версии считает PluginVersion, а он уже подмешивает mtime init.conf — то есть прежнее
     // возражение «тело зависит от читаемого на лету init.conf» закрыто.
     // ⚠️ Тело зависит ещё и от host, но клиентский кеш адресуется URL'ом, в котором host и есть.
+    // 🔴 d1v:laminit-version-plugins — версия обязана включать ВСЕ файлы, чьи версии вшиты в тело.
+    //
+    // Было: только lampainit.js + lampainit-invc.js. Но ниже тело подставляет адресные ?v для
+    // qdl.js, music.js и desktop.js — то есть их версии ЛЕЖАТ ВНУТРИ этого ответа. Правишь
+    // music/plugin.js → его собственная версия меняется, а версия lampainit остаётся прежней →
+    // закешированное тело продолжает раздавать клиентам СТАРУЮ ссылку на плагин, и правка не
+    // доезжает никогда. Ни пересборка, ни рестарт не помогают: кеш дисковый.
+    //
+    // Это стоило нескольких кругов «выкатил — у владельца ничего не изменилось»: файл в образе
+    // новый, прямой запрос отдаёт новое, а клиент грузит старое, потому что ссылку ему выдал
+    // устаревший bootstrap.
     static string LamInitVersion()
         => PluginVersion($"{ModInit.modpath}/plugins/lampainit.js") + "-" +
-           PluginVersion($"{ModInit.modpath}/plugins/lampainit-invc.js");
+           PluginVersion($"{ModInit.modpath}/plugins/lampainit-invc.js") + "-" +
+           PluginVersion(ModuleFile("QbitDownload", "plugins/qdl.js")) + "-" +
+           PluginVersion(ModuleFile("Music", "plugin.js")) + "-" +
+           PluginVersion(ModuleFile("QbitDownload", "plugins/desktop.js"));
 
     /// <summary>Путь к файлу внутри каталога модуля; null, если модуль не загружен.</summary>
     static string ModuleFile(string moduleName, string relative)

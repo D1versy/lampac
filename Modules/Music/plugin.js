@@ -5223,10 +5223,23 @@
         });
 
         audio.addEventListener('error', function () {
+            // d1v:music-false-error — ошибку показываем ТОЛЬКО если она про действующий источник.
+            //
+            // Смена трека назначает новый src, и браузер обрывает предыдущую загрузку — <audio>
+            // отдаёт error по СТАРОМУ источнику уже после того, как новый пошёл играть. Владелец
+            // видел ровно это: «при старте трека пишет „не удалось воспроизвести“, хотя он
+            // воспроизводится». Признак чужой ошибки — мы в этот момент переключаемся
+            // (switching) либо src вообще пуст.
+            var switching = MUSIC_IOS_AUDIO.switching;
+            var src = audio.currentSrc || audio.getAttribute('src') || '';
+
             MUSIC_IOS_AUDIO.switching = false;
             MUSIC_IOS_AUDIO.playing = false;
             traceStandaloneIosAudio('audio-error', audio.error ? String(audio.error.code || '') : '', true);
-            Lampa.Noty.show('Не удалось воспроизвести трек.');
+
+            if (!switching && src)
+                Lampa.Noty.show('Не удалось воспроизвести трек.');
+
             updateStandaloneIosPlaybackState();
             updateStandaloneIosPlayerBar();
         });
@@ -7576,6 +7589,12 @@
 
                 list.append(row);
             });
+
+            // 🔴 d1v:music-aurora — коллекция фокуса собирается ПРИ ОТКРЫТИИ плеера, а строки
+            // очереди дорисовываются позже, уже в первом обновлении. Без пересборки они в
+            // коллекцию не попадают, и пультом до очереди не дойти вовсе — ровно то, что
+            // владелец назвал «в полноэкранном плеере нет навигации».
+            refocusStandaloneIosFullPlayer();
         }
 
         // подсветку текущего двигаем ОТДЕЛЬНО от пересборки — она меняется каждый трек
@@ -7747,7 +7766,14 @@
             seekStandaloneIosByRangeValue($(this).val());
         });
 
-        $('body').append(bar);
+        // d1v:music-no-minibar — мини-панель в страницу НЕ вставляется: её роль забрал
+        // полноэкранный плеер, который открывается сразу при запуске трека.
+        //
+        // Почему объект всё-таки создаётся, а не вырезан целиком: updateStandaloneIosPlayerBar —
+        // это ещё и насос обновления ПОЛНОЭКРАННОГО плеера, и на bar завязаны десятки вызовов
+        // внутри него. Оставленный откреплённым узел делает их безвредными no-op, тогда как
+        // вырезание потребовало бы переписать весь этот путь и рисковать воспроизведением.
+        // Для страницы панели не существует: в DOM её нет.
         MUSIC_IOS_BAR = bar;
         return MUSIC_IOS_BAR;
     }
@@ -8361,15 +8387,22 @@
         var settleElapsed = Date.now() - (MUSIC_IOS_AUDIO.gestureWarmupAt || 0);
         var settleDelay = Math.max(0, 700 - settleElapsed);
 
-        if (!settleDelay)
-            return standaloneIosPlayIndex(startIndex) ? MUSIC_IOS_AUDIO.prepareToken : 0;
+        // d1v:music-no-minibar — запуск трека открывает ПОЛНОЭКРАННЫЙ плеер сразу.
+        // Мини-панель внизу владельцу не нужна: «убери эту мини панель и сделай чтобы
+        // полноэкранный плеер открывался». Раньше весь новый экран прятался за лишним
+        // нажатием по панели, и человек видел ровно то же, что и до правок.
+        if (!settleDelay) {
+            if (!standaloneIosPlayIndex(startIndex)) return 0;
+            openStandaloneIosFullPlayer();
+            return MUSIC_IOS_AUDIO.prepareToken;
+        }
 
         var settleToken = MUSIC_IOS_AUDIO.prepareToken;
         traceStandaloneIosAudio('session-settle-delay', 'ms=' + settleDelay, true);
 
         setTimeout(function () {
             if (MUSIC_IOS_AUDIO.prepareToken !== settleToken || !MUSIC_IOS_AUDIO.active) return;
-            standaloneIosPlayIndex(startIndex);
+            if (standaloneIosPlayIndex(startIndex)) openStandaloneIosFullPlayer();
         }, settleDelay);
 
         return settleToken;
@@ -17753,19 +17786,25 @@
                размер задаёт Lampa, поэтому em масштабируется вместе со всем интерфейсом.\
                🔴 Шрифт макета (Space Grotesk) НЕ подключаем: клиент ходит только в наш сервер,\
                а Google Fonts это чужой хост. Берём системный стек с теми же начертаниями. */\
+            /* Палитра ЮТУБА, компоновка макета. Владелец: «расположение элементов как на\
+               макете, а сам дизайн и элементы — как в ютубе». Поэтому никаких оранжевых\
+               градиентов и свечения: нейтральный чёрный фон, белый текст, серый вторичный,\
+               белое кольцо фокуса. Красный — только как точечный акцент. */\
             .lm-ios-full-player--aurora {\
-                --lm-au-accent: #ff6a3d;\
-                --lm-au-dim: #6c7488;\
-                --lm-au-muted: #a7b0c2;\
-                background: #05060a;\
-                color: #f2f4f8;\
+                --lm-au-accent: #ffffff;\
+                --lm-au-red: #ff0033;\
+                --lm-au-dim: #717171;\
+                --lm-au-muted: #aaaaaa;\
+                background: #0f0f0f;\
+                color: #ffffff;\
             }\
-            .lm-ios-full-player--aurora .lm-ios-full-player__backdrop { opacity: 0.30; }\
-            .lm-ios-full-player--aurora .lm-ios-full-player__shell {\
-                background:\
-                    linear-gradient(115deg, rgba(255,106,61,0.16) 0%, rgba(255,106,61,0) 42%),\
-                    radial-gradient(60% 55% at 12% 88%, rgba(90,140,255,0.14), transparent 70%);\
-            }\
+            /* d1v:music-no-minibar — мини-панели больше нет: её роль забрал полноэкранный плеер,\
+               который теперь открывается сразу при запуске трека. display:none, а не\
+               visibility/opacity — иначе элемент остался бы в фокус-коллекции Lampa и пульт\
+               проваливался бы в невидимые кнопки (грабля описана в claude/06 §AK.3). */\
+            .lm-ios-player { display: none !important; }\
+            .lm-ios-full-player--aurora .lm-ios-full-player__backdrop { opacity: 0.18; }\
+            .lm-ios-full-player--aurora .lm-ios-full-player__shell { background: transparent; }\
             .lm-ios-full-player--aurora .lm-au__body {\
                 display: flex;\
                 flex-direction: column;\
@@ -17831,38 +17870,41 @@
                 font-size: 0.74em; color: #7d8698; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
             }\
             .lm-ios-full-player--aurora .lm-au__row-dur { font-size: 0.74em; color: #7d8698; }\
-            .lm-ios-full-player--aurora .lm-au__row--active {\
-                background: rgba(255,106,61,0.14); border-color: rgba(255,106,61,0.45);\
-            }\
-            .lm-ios-full-player--aurora .lm-au__row--active .lm-au__row-title { color: var(--lm-au-accent); }\
+            .lm-ios-full-player--aurora .lm-au__row--active { background: rgba(255,255,255,0.09); }\
+            .lm-ios-full-player--aurora .lm-au__row--active .lm-au__row-title { color: #ffffff; }\
+            .lm-ios-full-player--aurora .lm-au__row--active .lm-au__row-tile { box-shadow: inset 0 0 0 0.12em var(--lm-au-red); }\
             /* транспорт по макету */\
             .lm-ios-full-player--aurora .lm-ios-full-player__actions {\
                 display: flex; align-items: center; justify-content: center; flex-wrap: wrap;\
             }\
             .lm-ios-full-player--aurora .lm-ios-full-player__btn--primary {\
-                background: linear-gradient(160deg,#ff8f6b,#ff4f18); color: #120704; border: none;\
-                box-shadow: 0 0.5em 1.4em rgba(255,90,38,0.4);\
+                background: #ffffff; color: #0f0f0f; border: none; box-shadow: none;\
             }\
             .lm-ios-full-player--aurora .lm-ios-full-player__btn--ghost {\
-                background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.14); color: #f2f4f8;\
+                background: transparent; border: none; color: #ffffff;\
             }\
             .lm-ios-full-player--aurora .lm-ios-full-player__btn--mini {\
-                background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.14); color: #e4e8f0;\
+                background: transparent; border: none; color: var(--lm-au-muted);\
             }\
-            .lm-ios-full-player--aurora .lm-ios-full-player__btn--mini.active {\
-                background: rgba(255,106,61,0.16); border-color: var(--lm-au-accent); color: var(--lm-au-accent);\
+            .lm-ios-full-player--aurora .lm-ios-full-player__btn--mini.active { color: #ffffff; }\
+            .lm-ios-full-player--aurora .lm-ios-full-player__btn--mini.active::after {\
+                content: ""; position: absolute; bottom: -0.35em; left: 50%; width: 0.22em; height: 0.22em;\
+                border-radius: 50%; background: #ffffff; transform: translateX(-50%);\
             }\
+            .lm-ios-full-player--aurora .lm-ios-full-player__btn--mini { position: relative; }\
             .lm-ios-full-player--aurora .lm-ios-full-player__btn--mini span { display: none; }\
             /* 🔴 Кольцо фокуса — по макету. Пульт двигает фокус классом .focus, мышь :hover.\
                Без видимого кольца по экрану невозможно ориентироваться с пульта. */\
             .lm-ios-full-player--aurora .selector.focus,\
             .lm-ios-full-player--aurora .selector:hover {\
                 outline: none;\
-                box-shadow: 0 0 0 0.16em var(--lm-au-accent), 0 0 1.6em rgba(255,106,61,0.45);\
+                background: rgba(255,255,255,0.14);\
+                box-shadow: 0 0 0 0.12em rgba(255,255,255,0.9);\
             }\
             .lm-ios-full-player--aurora .lm-ios-full-player__btn--primary.focus,\
             .lm-ios-full-player--aurora .lm-ios-full-player__btn--primary:hover {\
-                box-shadow: 0 0 0 0.2em #fff, 0 0.6em 1.8em rgba(255,90,38,0.6);\
+                background: #ffffff;\
+                box-shadow: 0 0 0 0.18em rgba(255,255,255,0.55);\
             }\
             /* ── широкая раскладка: ТВ и десктоп ── */\
             .lm-ios-full-player--wide .lm-au__body { flex-direction: row; gap: 1.4em; }\
