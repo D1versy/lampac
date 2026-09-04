@@ -153,6 +153,9 @@ public class D1VPerimeterTests
     [InlineData("/adminpanel")]
     [InlineData("/admin")]
     [InlineData("/admin/d1v")]
+    // История просмотров — самые чувствительные данные во всей админке: кто что и когда смотрел.
+    [InlineData("/admin/d1v/history")]
+    [InlineData("/admin/d1v/api/history")]
     [InlineData("/stats")]
     [InlineData("/weblog")]
     public async Task Admin_paths_are_404_from_outside_even_WITH_a_valid_key(string path)

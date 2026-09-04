@@ -45,6 +45,10 @@
     tr:last-child td{border-bottom:0}
     tr.fresh td{background:rgba(74,125,255,.09)}
     .uid{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:14px;color:#9ec1ff}
+    /* Единственные ссылки в файле — айди устройства ведут в его историю. Без этого правила
+       браузер нарисовал бы их своим синим с подчёркиванием. */
+    .uid a{color:inherit;text-decoration:none;border-bottom:1px dotted rgba(158,193,255,.45)}
+    .uid a:hover{border-bottom-color:#9ec1ff}
     .plat{display:inline-block;padding:2px 8px;border-radius:6px;background:#222733;font-size:12px}
     .dim{color:#8b93a7;font-size:13px;white-space:nowrap}
     .nm{width:100%;min-width:150px;padding:7px 9px;border-radius:7px;border:1px solid #2a3040;background:#0c0e12;
@@ -312,7 +316,11 @@
         '<td><input class="nm" value="' + esc(d.name) + '" placeholder="без имени"></td>' +
         '<td><span class="plat">' + hi(d.platform || '—', q) + '</span>' +
           (d.client ? ' <span class="dim">' + hi(d.client, q) + '</span>' : '') + '</td>' +
-        '<td class="uid">' + hi(d.uid, q) + '</td>' +
+        // Обычная ссылка, а не обработчик: строку целиком перерисовывает автообновление раз
+        // в 30 секунд, и любое состояние, повешенное на DOM, оно бы стёрло.
+        // ⚠️ hi() возвращает УЖЕ экранированный HTML — второй раз экранировать нельзя.
+        '<td class="uid"><a href="/admin/d1v/history?uid=' + encodeURIComponent(d.uid) +
+          '" title="История просмотров">' + hi(d.uid, q) + '</a></td>' +
         '<td class="dim">' + esc(d.ip || '—') + '</td>' +
         '<td class="dim">' + esc(ago(d.last)) + '</td>' +
         '<td>' + (d.group ? '<span class="gtag">' + esc(d.groupName || d.group) + '</span>' : '<span class="dim">—</span>') + '</td>' +
@@ -506,7 +514,8 @@
       var members = (g.members || []).map(function (u) {
         var d = devOf(u);
         return '<div class="gmem" data-uid="' + esc(u) + '">' +
-          '<span class="who">' + esc(devLabel(u)) + ' <span class="uid">' + esc(u) + '</span></span>' +
+          '<span class="who">' + esc(devLabel(u)) + ' <span class="uid"><a href="/admin/d1v/history?uid=' +
+            encodeURIComponent(u) + '" title="История просмотров">' + esc(u) + '</a></span></span>' +
           '<span class="dim">' + esc(d ? ago(d.last) : '—') + '</span>' +
           '<button class="kill gleave">Отвязать</button></div>';
       }).join('');

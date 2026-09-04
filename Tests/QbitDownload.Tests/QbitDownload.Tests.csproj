@@ -98,6 +98,7 @@
     <Compile Include="..\..\Modules\QbitDownload\Groups.cs" Link="Module\Groups.cs" />
     <Compile Include="..\..\Modules\QbitDownload\GroupsHistory.cs" Link="Module\GroupsHistory.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Admin.cs" Link="Module\Admin.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\AdminHistory.cs" Link="Module\AdminHistory.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Controller.cs" Link="Module\Controller.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Live.cs" Link="Module\Live.cs" />
     <Compile Include="..\..\Modules\QbitDownload\LiveDetect.cs" Link="Module\LiveDetect.cs" />

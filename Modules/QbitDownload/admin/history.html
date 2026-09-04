@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>D1Vision — история просмотров</title>
+  <style>
+    /* Токены те же, что в d1v.html: общего CSS в проекте нет, страницы админки копируют набор
+       (так же поступает auth.html). Менять цвет — значит менять его в обоих файлах. */
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0c0e12;color:#e6e9f0;font:400 15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:28px 20px 60px}
+    .wrap{max-width:1180px;margin:0 auto}
+    header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:16px}
+    h1{font-size:22px;font-weight:600}
+    h2{font-size:15px;font-weight:600;margin:26px 0 10px}
+    .sub{font-size:13px;color:#8b93a7;margin-bottom:20px;max-width:880px}
+    .note{font-size:12px;color:#8b93a7;margin-top:10px;max-width:880px}
+    .warn{margin-bottom:14px;padding:12px 14px;border-radius:10px;background:#3a2a12;border:1px solid #6b4a17;
+          color:#f0c987;font-size:13px}
+
+    .bar{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+    .bar .muted{font-size:13px;color:#8b93a7;flex:1;min-width:240px}
+    button.mini{padding:7px 13px;border:1px solid #2a3040;border-radius:8px;background:#1a1e28;color:#e6e9f0;
+                font-size:13px;cursor:pointer}
+    button.mini:hover{background:#222733}
+
+    .scroll{overflow-x:auto;border:1px solid #2a3040;border-radius:12px;background:#13161d}
+    table{width:100%;border-collapse:collapse;min-width:760px}
+    th{text-align:left;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#8b93a7;
+       padding:12px 14px;border-bottom:1px solid #2a3040;white-space:nowrap;font-weight:600}
+    td{padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:middle}
+    tr:last-child td{border-bottom:0}
+    .uid{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:14px;color:#9ec1ff}
+    .plat{display:inline-block;padding:2px 8px;border-radius:6px;background:#222733;font-size:12px}
+    .dim{color:#8b93a7;font-size:13px;white-space:nowrap}
+    .gtag{display:inline-block;padding:2px 8px;border-radius:6px;background:rgba(74,125,255,.18);color:#9ec1ff;font-size:12px}
+    .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;font-weight:600}
+    .pill.ok{background:rgba(60,170,110,.18);color:#6ddaa0}
+    .pill.off{background:#222733;color:#8b93a7}
+    .empty{padding:40px 20px;text-align:center;color:#8b93a7;font-size:14px}
+    .back{margin-left:auto;font-size:13px;color:#8b93a7;text-decoration:none}
+    .back:hover{color:#e6e9f0}
+
+    /* плитка истории */
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:16px}
+    .tile .ph{position:relative;display:block;width:100%;aspect-ratio:2/3;border-radius:10px;background:#1a1e28;
+              overflow:hidden}
+    .tile .ph img{width:100%;height:100%;object-fit:cover;display:block}
+    .tile .ph .no{display:flex;align-items:center;justify-content:center;height:100%;padding:8px;text-align:center;
+                  font-size:12px;color:#8b93a7}
+    .tile .by{position:absolute;left:6px;bottom:6px;max-width:calc(100% - 12px);overflow:hidden;text-overflow:ellipsis;
+              white-space:nowrap;background:rgba(12,14,18,.82);border-radius:6px;padding:2px 7px;font-size:11px;color:#9ec1ff}
+    .tile .t{font-size:13px;line-height:1.3;margin-top:7px}
+    .tile .m{font-size:12px;color:#8b93a7}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>История просмотров</h1>
+    <span class="dim" id="who"></span>
+    <a class="back" href="/admin/d1v">← к списку устройств</a>
+  </header>
+
+  <div class="sub" id="scope">Загружаю…</div>
+  <div id="warns"></div>
+
+  <div class="bar">
+    <span class="muted" id="counts"></span>
+    <button class="mini" id="reload">Обновить</button>
+  </div>
+
+  <div id="body"></div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var uid = new URLSearchParams(location.search).get('uid') || '';
+
+  var elWho = document.getElementById('who');
+  var elScope = document.getElementById('scope');
+  var elWarns = document.getElementById('warns');
+  var elCounts = document.getElementById('counts');
+  var elBody = document.getElementById('body');
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  // ⚠️ Два формата времени в одном ответе, и они РАЗНЫЕ:
+  //   таймкоды  '2026-09-03 21:17:37.0697472'   — DateTime.UtcNow из EF, БЕЗ метки зоны;
+  //   access.json '2026-09-03T21:17:37.0445992Z' — уже с 'Z'.
+  // Приклеить 'Z' ко всему подряд нельзя (получалось '…ZZ' и «—» вместо даты), не приклеивать
+  // тоже нельзя (браузер счёл бы UTC местным временем и показал бы на три часа раньше).
+  // Плюс .NET пишет семь знаков после точки — столько браузер не разбирает.
+  function when(s) {
+    if (!s) return '—';
+
+    var t = String(s).trim().replace(' ', 'T').replace(/\.(\d{3})\d+/, '.$1');
+    if (!/[zZ]$/.test(t) && !/[+-]\d{2}:?\d{2}$/.test(t)) t += 'Z';
+
+    var d = new Date(t);
+    if (isNaN(d.getTime())) return '—';
+    return d.toLocaleDateString('ru-RU') + ' ' +
+           d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function plural(n, one, few, many) {
+    var a = Math.abs(n) % 100, b = a % 10;
+    if (a > 10 && a < 20) return many;
+    if (b > 1 && b < 5) return few;
+    if (b === 1) return one;
+    return many;
+  }
+
+  function warn(html) {
+    var d = document.createElement('div');
+    d.className = 'warn';
+    d.innerHTML = html;
+    elWarns.appendChild(d);
+  }
+
+  function label(m) {
+    return (m.name ? esc(m.name) : 'без имени') + ' <span class="uid">' + esc(m.uid) + '</span>';
+  }
+
+  function render(j) {
+    elWarns.innerHTML = '';
+
+    var d = j.device || {};
+    elWho.innerHTML = (d.name ? esc(d.name) + ' · ' : '') +
+                      (d.platform ? '<span class="plat">' + esc(d.platform) + '</span> · ' : '') +
+                      '<span class="uid">' + esc(d.uid) + '</span>' +
+                      (d.last ? ' · последний раз ' + esc(when(d.last)) : '');
+
+    // ── чья это история ──────────────────────────────────────────────────────
+    var s = j.scope || {};
+    var scope = '';
+
+    if (s.kind === 'group') {
+      var who = (s.members || []).map(function (m) { return label(m); }).join(' · ');
+      scope = 'Устройство в группе <b>' + esc(s.groupName || s.gid) + '</b>, и история у группы <b>общая</b>: ' +
+              who + '. Разделить её по устройствам сервер не может — он и хранит её одной записью на группу. ' +
+              'Значок на карточке показывает, кто её добавил, там где это известно.';
+    } else {
+      scope = 'История личная: устройство ни в какой группе не состоит.';
+    }
+
+    elScope.innerHTML = scope + ' Страница только показывает — удалить или очистить отсюда нельзя.';
+
+    if (!s.groupsEnabled && s.gid) {
+      warn('Группы устройств <b>выключены</b> (<code>groupsEnabled:false</code>), поэтому сервер снова пишет в личный ' +
+           'ключ этого устройства — его и показываю. Общая история группы <span class="uid">' + esc(s.gid) +
+           '</span> никуда не делась, она просто сейчас не наполняется.');
+    }
+
+    var p = s.personal;
+    if (p && ((p.history | 0) + (p.timecodes | 0)) > 0) {
+      warn('До объединения у этого устройства была своя история, и она осталась лежать отдельно: ' +
+           esc(p.history) + ' ' + plural(p.history, 'тайтл', 'тайтла', 'тайтлов') + ', ' +
+           esc(p.timecodes) + ' ' + plural(p.timecodes, 'позиция', 'позиции', 'позиций') +
+           '. Объединение копирует историю, а не переносит.');
+    }
+
+    if ((s.profiles || []).length) {
+      warn('У этого ключа есть отдельные профили Lampa: <span class="uid">' + s.profiles.map(esc).join('</span>, <span class="uid">') +
+           '</span>. Это разные истории, сливать их нельзя — здесь показана только основная.');
+    }
+
+    if (j.db && (!j.db.sync || !j.db.timecode)) {
+      warn('Часть баз ещё не создана (' + (!j.db.sync ? 'закладки' : '') + (!j.db.sync && !j.db.timecode ? ', ' : '') +
+           (!j.db.timecode ? 'таймкоды' : '') + ') — модуль синхронизации на этом сервере ещё не поднимался.');
+    }
+
+    if (j.replica) {
+      warn('Это сервер-реплика: история приезжает сюда снимком из дома, а не пишется здесь.');
+    }
+
+    // ── счётчики ─────────────────────────────────────────────────────────────
+    var c = j.counts || {};
+    var bits = [
+      c.history + ' ' + plural(c.history, 'тайтл', 'тайтла', 'тайтлов') + ' в истории',
+      c.timecodes + ' ' + plural(c.timecodes, 'запись', 'записи', 'записей') + ' о воспроизведении',
+      'ключ ' + s.key
+    ];
+    elCounts.innerHTML = esc(bits.join(' · '));
+
+    // ── карточки ─────────────────────────────────────────────────────────────
+    var html = '<h2>Что смотрели</h2>';
+
+    if (!(j.cards || []).length) {
+      html += '<div class="scroll"><div class="empty">Истории пока нет.</div></div>';
+    } else {
+      html += '<div class="grid">';
+      j.cards.forEach(function (x) {
+        var title = x.title || ('карточки нет · id ' + x.id);
+        var meta = [x.year, x.type === 'tv' ? 'сериал' : (x.type === 'movie' ? 'фильм' : ''), x.source]
+                   .filter(Boolean).join(' · ');
+
+        html += '<div class="tile"><div class="ph">' +
+                (x.img ? '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(x.img) + '" alt="">'
+                       : '<div class="no">' + esc(title) + '</div>') +
+                (x.byUid ? '<span class="by" title="это устройство добавило карточку в историю">' +
+                           esc(x.byName || x.byUid) + '</span>' : '') +
+                '</div>' +
+                '<div class="t">' + esc(title) + '</div>' +
+                '<div class="m">' + esc(meta) + '</div></div>';
+      });
+      html += '</div>';
+
+      if (c.cardsShown < c.history)
+        html += '<div class="note">Показаны первые ' + c.cardsShown + ' из ' + c.history + '.</div>';
+
+      html += '<div class="note">Значок устройства стоит там, где его удалось определить: он приезжает вместе ' +
+              'с адресом постера. У карточек с jut.su и у старых записей его нет — это не значит, что их никто не добавлял.</div>';
+    }
+
+    // ── журнал ───────────────────────────────────────────────────────────────
+    html += '<h2>Журнал воспроизведения</h2>';
+
+    if (!(j.plays || []).length) {
+      html += '<div class="scroll"><div class="empty">Ни одной записи о воспроизведении.</div></div>';
+    } else {
+      html += '<div class="scroll"><table><thead><tr>' +
+              '<th>Тайтл</th><th>Записей</th><th>Досмотрено</th><th>Максимум</th>' +
+              '<th>Первый раз</th><th>Последний раз</th><th>Откуда</th>' +
+              '</tr></thead><tbody>';
+
+      j.plays.forEach(function (r) {
+        html += '<tr>' +
+          '<td>' + esc(r.title || r.key) + (r.year ? ' <span class="dim">' + esc(r.year) + '</span>' : '') + '</td>' +
+          '<td class="dim">' + r.rows + '</td>' +
+          '<td>' + (r.done > 0 ? '<span class="pill ok">' + r.done + '</span>' : '<span class="dim">—</span>') + '</td>' +
+          '<td class="dim">' + r.percentMax + '%</td>' +
+          '<td class="dim">' + esc(when(r.first)) + '</td>' +
+          '<td class="dim">' + esc(when(r.last)) + '</td>' +
+          '<td>' + (r.resolved ? '<span class="plat">' + esc(r.source || '—') + '</span>'
+                               : '<span class="pill off">не определилось</span>') + '</td>' +
+          '</tr>';
+      });
+
+      html += '</tbody></table></div>';
+
+      html += '<div class="note">Строка — это тайтл целиком, а не серия: конкретные эпизоды сервер не разворачивает. ' +
+              '«Досмотрено» — сколько записей дошло до 90 % и больше, тем же порогом считает сам плеер.</div>';
+    }
+
+    if (c.unresolved > 0) {
+      html += '<div class="note">Ещё ' + c.unresolved + ' ' + plural(c.unresolved, 'запись', 'записи', 'записей') +
+              ' не удалось привязать к тайтлу (служебные и вырожденные ключи). Они не потеряны — просто ' +
+              'по ним нечего показать.</div>';
+    }
+
+    elBody.innerHTML = html;
+
+    // Постер не открылся (наш прокси отдал 302 на TMDB, а тот из локалки недоступен) — вместо
+    // битой картинки показываем название. Обработчик вешаем скриптом, а не атрибутом.
+    Array.prototype.forEach.call(elBody.querySelectorAll('.tile img'), function (img) {
+      img.addEventListener('error', function () {
+        var box = img.parentNode;
+        var name = box.parentNode.querySelector('.t');
+        img.remove();
+        var no = document.createElement('div');
+        no.className = 'no';
+        no.textContent = name ? name.textContent : '';
+        box.insertBefore(no, box.firstChild);
+      });
+    });
+  }
+
+  function load() {
+    if (!uid) {
+      elScope.textContent = '';
+      elBody.innerHTML = '<div class="scroll"><div class="empty">Не указан айди устройства. ' +
+                         'Откройте страницу кликом по айди в списке устройств.</div></div>';
+      return;
+    }
+
+    elScope.textContent = 'Загружаю…';
+
+    fetch('/admin/d1v/api/history?uid=' + encodeURIComponent(uid), { credentials: 'same-origin' })
+      .then(function (r) {
+        if (r.status === 404) throw new Error('Устройства с таким айди нет в реестре.');
+        if (!r.ok) throw new Error('Сервер ответил ' + r.status + '.');
+        return r.json();
+      })
+      .then(render)
+      .catch(function (e) {
+        elScope.textContent = '';
+        elCounts.textContent = '';
+        elWarns.innerHTML = '';
+        elBody.innerHTML = '<div class="scroll"><div class="empty">' + esc(e.message || 'Не загрузилось.') + '</div></div>';
+      });
+  }
+
+  document.getElementById('reload').addEventListener('click', load);
+
+  // Автообновления нет намеренно: история меняется часами, а перерисовка раз в полминуты
+  // сбрасывала бы прокрутку под руками. В списке устройств оно нужно, здесь — мешает.
+  load();
+})();
+</script>
+</body>
+</html>

@@ -52,6 +52,14 @@ public class D1VAdminController : BaseController
         return Html("d1v.html");
     }
 
+    /// <summary>История просмотров одного пользователя. Открывается кликом по айди в списке устройств.</summary>
+    [HttpGet]
+    [Route("/admin/d1v/history")]
+    public ActionResult HistoryPage()
+    {
+        return Html("history.html");
+    }
+
     ActionResult Html(string file)
     {
         // ⚠️ HTML лежит в папке модуля и приезжает в контейнер только с образом (COPY . .) или
@@ -351,6 +359,32 @@ public class D1VAdminController : BaseController
 
     public class GroupNameBody { public string gid { get; set; } public string name { get; set; } }
     public class GroupLinkBody { public string gid { get; set; } public string uid { get; set; } public bool keepCopy { get; set; } = true; }
+
+    #endregion
+
+    #region история просмотров (qdl 2.105)
+
+    // Только чтение: ни очистки, ни удаления пунктов. Поэтому нет ни SameOrigin() (он стережёт
+    // мутации — так же устроены read-only соседи Devices и GroupsList), ни GroupsReplicaDeny()
+    // (на реплике те же строки лежат снимком с дома, и смотреть их законно; XSMART-резолв там
+    // сам отключится по пустому xsmartApi). Сбор данных — QbitController.AdminHistory.
+
+    [HttpGet]
+    [Route("/admin/d1v/api/history")]
+    async public Task<ActionResult> DeviceHistory(string uid)
+    {
+        SetHeadersNoCache();
+
+        // Пустой uid — это не «покажи хоть чью-нибудь историю». Умолчания здесь быть не должно.
+        if (Perms.NormUid(uid) == null)
+            return StatusCode(400, new { error = "нужен айди устройства" });
+
+        var report = await QbitController.AdminHistory(uid);
+        if (report == null)
+            return StatusCode(404, new { error = "устройство не найдено" });
+
+        return Content(report.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
 
     #endregion
 
