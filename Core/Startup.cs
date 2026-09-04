@@ -1,4 +1,4 @@
-using Core.Endpoints;
+﻿using Core.Endpoints;
 using Core.Middlewares;
 using Core.Services;
 using Microsoft.AspNetCore.Builder;
@@ -77,7 +77,13 @@ public class Startup
         serviceCollection = services;
 
         #region IHttpClientFactory - proxy
-        services.AddHttpClient("proxy").ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        // AddHttpMessageHandler — ретрай по статусу источника (ProxyRetryHandler.cs, qdl 2.106):
+        // Cloudflare у pornhub отшивает первый запрос по каждому новому h2-соединению, а idle
+        // timeout ниже закрывает соединение за 2 минуты простоя. Что именно повторять, решает
+        // подписчик EventListener.ProxyApiRetry — здесь только точка врезки.
+        services.AddHttpClient("proxy")
+            .AddHttpMessageHandler(() => new Middlewares.ProxyRetryHandler())
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
         {
             AllowAutoRedirect = false,
             AutomaticDecompression = DecompressionMethods.Brotli | DecompressionMethods.GZip | DecompressionMethods.Deflate,

@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Shared.Models.Templates;
 using System.Text;
 
@@ -21,6 +21,8 @@ public class EventListener
     public static Func<EventProxyApiCacheStream, (string uriKey, string contentType)> ProxyApiCacheStream;
 
     public static Func<EventProxyApiOverride, Task<bool>> ProxyApiOverride;
+
+    public static Func<EventProxyApiRetry, int?> ProxyApiRetry;
 
     public static Func<EventProxyImgMd5key, string> ProxyImgMd5key;
 

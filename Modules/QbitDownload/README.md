@@ -1,4 +1,4 @@
-# QbitDownload
+﻿# QbitDownload
 
 Модуль для Lampac: кнопка **«Скачать»** в Lampa → загрузка торрента через **qBittorrent** на диск → раздел **«Загрузки»** с просмотром **оффлайн** (файл отдаётся напрямую с диска, без интернета/сидов).
 
@@ -105,6 +105,24 @@ rolling-HLS `/hls/{id}/index.m3u8` (RTSP-камеры — `seg_N.ts`, тарге
 }
 ```
 `downloadsPath` — путь, который видят **и** qBittorrent, **и** контейнер Lampac (общий том). В docker-compose: оба монтируют `D:\data\downloads` в `/downloads`.
+
+## HTTP/2 для проксируемых потоков (`ProxyHttp2.cs`, qdl 2.106)
+
+Cloudflare у pornhub отвечает **410 Gone** на HTTP/1.1, а `ProxyAPI` версию протокола не задаёт
+вовсе (по умолчанию 1.1) — «Клубничка» переставала играть целиком. Модуль поднимает версию до
+h2 для перечисленных хостов через штатный хук `EventListener.ProxyApiCreateHttpRequest` и там же
+держит политику ретрая (`EventListener.ProxyApiRetry` → `Core/Middlewares/ProxyRetryHandler.cs`):
+Cloudflare отшивает первый запрос по каждому НОВОМУ соединению, а пул закрывает его после
+2 минут простоя.
+
+```json
+"QbitDownload": {
+  "proxyHttp2Hosts": ["phncdn.com"]
+}
+```
+Сравнение суффиксное (`phncdn.com` накрывает `hv-h.` и `ev-h.`), пусто/нет ключа = дефолт из кода.
+Правится на лету. Ключ `httpversion` в конфигах модулей SISI на это НЕ влияет: он honored только
+для загрузки страницы. Разбор — `E:\Media-server\claude\06-fixes-and-gotchas.md` §DG.
 
 ## Регистрация плагина
 В `Modules/LampaWeb/plugins/lampainit-invc.js` (designated-хук) добавлена строка:

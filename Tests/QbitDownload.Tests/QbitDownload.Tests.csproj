@@ -71,6 +71,7 @@
     <Compile Include="..\..\Modules\QbitDownload\MusicWarm.cs" Link="Module\MusicWarm.cs" />
     <Compile Include="..\..\Modules\QbitDownload\SearchCache.cs" Link="Module\SearchCache.cs" />
     <Compile Include="..\..\Modules\QbitDownload\CubExtensions.cs" Link="Module\CubExtensions.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\ProxyHttp2.cs" Link="Module\ProxyHttp2.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Bitmagnet.cs" Link="Module\Bitmagnet.cs" />
     <Compile Include="..\..\Modules\QbitDownload\SearchMonitor.cs" Link="Module\SearchMonitor.cs" />
     <Compile Include="..\..\Modules\QbitDownload\HealthState.cs" Link="Module\HealthState.cs" />

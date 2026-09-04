@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Http;
+﻿using Microsoft.AspNetCore.Http;
 using Newtonsoft.Json.Linq;
 using Shared.Models.Proxy;
 using Shared.Models.SISI.Base;
@@ -72,6 +72,11 @@ public record EventPlaywrightHttpResponse(string url, string method, int status,
 public record EventProxyApiCreateHttpRequest(ProxyLinkModel decryptLink, string plugin, HttpRequest request, IReadOnlyList<HeadersModel> headers, Uri uri, HttpRequestMessage requestMessage);
 
 public record EventProxyApiCacheStream(HttpContext httpContext, ProxyLinkModel decryptLink);
+
+// Повторить проксируемый запрос, когда источник отшил нас по статусу (ProxyRetryHandler.cs).
+// attempt — номер УЖЕ сделанной попытки, начиная с 0. Подписчик возвращает паузу в мс перед
+// повтором либо null — «отдать ответ клиенту как есть».
+public record EventProxyApiRetry(Uri uri, int statusCode, int attempt);
 
 public record EventProxyApiOverride(HttpContext httpContext, RequestModel requestInfo, ProxyLinkModel decryptLink, HttpClientHandler proxyHandler);
 

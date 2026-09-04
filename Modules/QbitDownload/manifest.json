@@ -29,6 +29,7 @@
     "MusicWarm.cs",
     "SearchCache.cs",
     "CubExtensions.cs",
+    "ProxyHttp2.cs",
     "AppReplace.cs",
     "SearchMonitor.cs",
     "HealthState.cs",

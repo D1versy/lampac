@@ -53,6 +53,7 @@ public class ModInit : IModuleLoaded
         MusicWarm.Attach();                // прогрев полок раздела «Музыка» (MusicWarm.cs)
         Perms.Attach();                    // реестр устройств для прав на D1versy Live/Rec (Perms.cs)
         Groups.Attach();                   // общая история у связанных устройств (Groups.cs, qdl 2.81)
+        ProxyHttp2.Attach();               // h2 для /proxy/ на phncdn — иначе Cloudflare даёт 410 (ProxyHttp2.cs)
 
         // SQLite-хранилище уведомлений: создаём схему (без миграций) + WAL для параллельных read/write
         try
@@ -447,6 +448,7 @@ public class ModInit : IModuleLoaded
         CatalogWarmup.Detach();
         MusicWarm.Detach();
         Perms.Detach();
+        ProxyHttp2.Detach();
         _watchTimer?.Dispose();
         _watchTimer = null;
         _notifyTimer?.Dispose();

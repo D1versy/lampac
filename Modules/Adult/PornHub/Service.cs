@@ -541,7 +541,19 @@ public static class PornHubTo
         {
             string video = Rx.Match(html, $"\"videoUrl\":\"([^\"]+)\",\"quality\":\"{q}\"");
 
-            if (!string.IsNullOrEmpty(video) || !video.Contains("validfrom"))
+            // 🔴 Было `!IsNullOrEmpty(video) || !video.Contains("validfrom")` — с ИЛИ вместо И.
+            // Rx.Match на промахе возвращает null (Shared/Services/RxEnumerate/Rx.cs), поэтому
+            // на первом же отсутствующем качестве левая часть давала false, управление уходило
+            // в video.Contains(null) → NullReferenceException → StreamLinks падал ЦЕЛИКОМ.
+            // А качества перебираются с 1080: любое видео без 1080p (их в выдаче хватает —
+            // 240/480/720) отдавало клиенту 503 и «Клубничка» показывала ошибку, хотя три
+            // рабочие дорожки лежали на странице рядом.
+            //
+            // Отсечку по "validfrom" не восстанавливаем намеренно: при непустом video она и
+            // раньше ни на что не влияла (ИЛИ отрабатывало по левой части), а pornhub раздаёт
+            // с двух площадок — hv-h с ключами h/e и ev-h как раз с validfrom/validto, и
+            // ev-h-ссылки играют. С «И» они бы отвалились все разом. Проверено 04.09.2026.
+            if (!string.IsNullOrEmpty(video))
                 qualitys.TryAdd($"{q}p", video.Replace("\\", "").Replace("///", "//"));
         }
 

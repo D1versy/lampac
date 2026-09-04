@@ -33,6 +33,12 @@ public class ModuleConf : ModuleBaseConf
     // устройство решает само.
     public string musicPlayer { get; set; } = "";
 
+    // Хосты, к которым проксируемый поток уходит по HTTP/2 (ProxyHttp2.cs, qdl 2.106).
+    // Пусто/нет ключа = дефолт из кода (phncdn.com), а НЕ «выключено»: пустой список не должен
+    // молча возвращать «Клубничку» в 410. Сравнение суффиксное — "phncdn.com" накрывает
+    // hv-h.phncdn.com и ev-h.phncdn.com. Правится в init.conf на лету, без пересборки.
+    public List<string> proxyHttp2Hosts { get; set; }
+
     // Витрина расширений CUB локально (qdl 2.17, CubExtensions.cs): смонтированный том с копией
     // тем (CSS), скринсейверов (MP4), превью и JS плагинов + локальный list.json с premium=0.
     // Наполняется scripts/vendor-cub-extensions.ps1.
