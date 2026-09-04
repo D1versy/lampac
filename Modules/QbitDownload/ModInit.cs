@@ -13,6 +13,7 @@ public class ModInit : IModuleLoaded
     static System.Threading.Timer _watchTimer;
     static System.Threading.Timer _notifyTimer;
     static System.Threading.Timer _huntTimer;
+    static System.Threading.Timer _huntLocalTimer;  // локальный тик охоты: только bitmagnet + наш индекс, без трекеров (qdl 2.107)
     static System.Threading.Timer _diagTimer;
     static System.Threading.Timer _crawlTimer;
     static System.Threading.Timer _pruneTimer;
@@ -132,6 +133,17 @@ public class ModInit : IModuleLoaded
             try { await QbitController.HuntAll(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] hunt timer: " + ex); }
         }, null, huntFirst, _huntPeriod);
+
+        // Локальный тик охоты (qdl 2.107): таймер с ПОСТОЯННЫМ периодом в минуту, а сам интервал
+        // (huntLocalIntervalMinutes) читается внутри тика — так ключ правится на лету, без рестарта
+        // (в отличие от episodeHuntIntervalHours). Первый заход через 6 мин: после notify@2, до
+        // watch@10/hunt@15, чтобы старты не толкались за общий _watchGate. На реплике не нужен.
+        _huntLocalTimer?.Dispose();
+        _huntLocalTimer = QbitController.ReplicaMode ? null : new System.Threading.Timer(async _ =>
+        {
+            try { await QbitController.HuntLocalTick(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] hunt-local timer: " + ex); }
+        }, null, System.TimeSpan.FromMinutes(6), System.TimeSpan.FromMinutes(1));
 
         // Мониторинг поиска (SearchMonitor.cs). Первый тик через 20 мин — после notify@2 / watch@10 /
         // hunt@15, чтобы старты не толкались. Таймер создаётся ВСЕГДА: при интервале 0 тик выходит
@@ -455,6 +467,8 @@ public class ModInit : IModuleLoaded
         _notifyTimer = null;
         _huntTimer?.Dispose();
         _huntTimer = null;
+        _huntLocalTimer?.Dispose();
+        _huntLocalTimer = null;
         _diagTimer?.Dispose();
         _diagTimer = null;
         _crawlTimer?.Dispose();

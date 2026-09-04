@@ -69,14 +69,23 @@ public class FormattingTests
     [InlineData("", 0)]
     // null coerced to "" via (t ?? "")
     [InlineData(null, 0)]
-    // 4K written as literal is not matched (only listed tokens)
-    [InlineData("Movie.4K.mkv", 0)]
+    // qdl 2.107: 4K/UHD распознаются как 2160 (раньше 0 — единственный перевёрнутый пин)
+    [InlineData("Movie.4K.mkv", 2160)]
+    [InlineData("Movie.UHD.BluRay.mkv", 2160)]
     // first match wins (leftmost)
     [InlineData("1080 and 720", 1080)]
     [InlineData("720 and 1080", 720)]
     // digit substrings still match even embedded in larger numbers (regex is unanchored)
     [InlineData("x2160y", 2160)]
     [InlineData("11080p", 1080)]  // "1080p" matches inside "11080p"
+    // qdl 2.107: любая высота с p/i и WxH → ВЫСОТА («720x400» раньше читался как 720p и проходил гейт донора)
+    [InlineData("Silo.S03E09.400p.ColdFilm.avi", 400)]
+    [InlineData("Show.720x400.XviD.avi", 400)]
+    [InlineData("Show.1920x1080.mkv", 1080)]
+    [InlineData("Show.1440p.mkv", 1440)]
+    [InlineData("Show.576p.mkv", 576)]
+    [InlineData("Show.1080i.HDTV.mkv", 1080)]
+    [InlineData("Укрытие (Бункер) (3 сезон: 1-10 серии из 10) / Silo / 2026 / ПМ (RuDub) / WEBRip", 0)]   // без токена = не распознано
     public void QualityFromTitle_Cases(string title, int expected)
         => Assert.Equal(expected, Access.QualityFromTitle(title));
 

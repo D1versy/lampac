@@ -330,6 +330,25 @@ test('поиск: url содержит season, /qdl/add увозит TMDB-кон
   assert.ok(addUrl.indexOf('&season=2') !== -1);
 });
 
+// TMDB id карточки — ключ к локальному DHT-индексу bitmagnet (Bitmagnet.cs): без него этот источник
+// пуст, и именно так 04.09.2026 охота за сериями осталась слепой. Клиент шлёт id в /qdl/search
+// (plugins/qdl.js, ~строка 3875) — сторожим, чтобы параметр не потерялся при следующей правке URL.
+test('поиск: url несёт tmdb_id карточки (источник bitmagnet); без id параметра нет', () => {
+  const r = searchRig([
+    { title: 'A', quality: 1080, size: '5 GB', tracker: 'tr', sid: 10, magnet: 'magnet:?xt=urn:btih:a' },
+  ]);
+  r.qdl.chooseAndDownload({ id: 125988, title: 'Сериал', original_name: 'The Serial', first_air_date: '2024-01-01', media_type: 'tv', number_of_seasons: 2 });
+  const withId = r.calls.reqs.filter((u) => u.indexOf('/qdl/search') !== -1)[0];
+  assert.ok(withId.indexOf('&tmdb_id=125988') !== -1, 'tmdb_id уходит в поиск — иначе bitmagnet молчит');
+
+  const r2 = searchRig([
+    { title: 'A', quality: 1080, size: '5 GB', tracker: 'tr', sid: 10, magnet: 'magnet:?xt=urn:btih:a' },
+  ]);
+  r2.qdl.chooseAndDownload({ title: 'Кино', media_type: 'movie' });
+  const noId = r2.calls.reqs.filter((u) => u.indexOf('/qdl/search') !== -1)[0];
+  assert.strictEqual(noId.indexOf('tmdb_id='), -1, 'без id в карточке параметр не подставляется');
+});
+
 test('поиск: старый ответ сервера БЕЗ новых полей рендерится как раньше (регрессия)', () => {
   const r = searchRig([
     { title: 'A x264', codec: 'h264', quality: 1080, size: '6 GB', tracker: 'tr', sid: 8, magnet: 'magnet:?xt=urn:btih:c' },

@@ -29,6 +29,11 @@ public class EpisodeHunterTests
     [InlineData("Сериал 2 сезон WEB-DL", 2, 9, DonorCover.Maybe)]
     [InlineData("Сериал 1 сезон WEB-DL", 2, 9, DonorCover.No)]
     [InlineData("Сериал [2 сезон, 1-8 из 12]", 2, 9, DonorCover.No)]
+    // qdl 2.107: мультисезонный пак — счётчик серий сквозной, серию внутри сезона не доказывает → Maybe
+    // (раньше 27 ≥ 10 давало ложный Yes, пак сгорал в no-episode; 20 записей blacklist у «Укрытия»)
+    [InlineData("Укрытие (Бункер) (1-3 сезон: 1-27 серии из 30) / Silo / 2022-2026 / ДБ, 6 x ПМ, АП, ЛМ, СТ / WEB-DL (1080p)", 3, 10, DonorCover.Maybe)]
+    [InlineData("Дом дракона (1-3 сезоны: 1-20 серии из 26) / House of the Dragon / WEB-DL (1080p)", 3, 8, DonorCover.Maybe)]
+    [InlineData("Укрытие (Бункер) (3 сезон: 1-10 серии из 10) / Silo / 2026 / ПМ (RuDub) / WEBRip", 3, 10, DonorCover.Yes)]
     public void TitleCoversEp_Verdicts(string title, int season, int ep, DonorCover expected)
         => Assert.Equal(expected, HunterAccess.TitleCoversEp(title, season, ep));
 
@@ -127,8 +132,14 @@ public class EpisodeHunterTests
         );
         var h = HunterAccess.MakeHuntCtx(MainHash, 2, new[] { MainHash }, null, 3, 1080, 150, 8);
         var res = HunterAccess.FilterDonorCandidates(scored, h);
-        Assert.Equal(2, res.Count);   // «ок» + «качество неизвестно»
+        Assert.Equal(2, res.Count);   // «ок» + «качество неизвестно» (старая политика: rejectUnknownQuality выключен в MakeHuntCtx)
         Assert.All(res, t => Assert.Equal(10, t.Value<int>("sid")));
+
+        // 🔴 Политика 2026-09-04 (донором «Укрытия» стал 720×400 XviD с quality:0): неизвестное = ниже порога
+        var strict = HunterAccess.MakeHuntCtx(MainHash, 2, new[] { MainHash }, null, 3, 1080, 150, 8, rejectUnknownQuality: true);
+        var res2 = HunterAccess.FilterDonorCandidates(scored, strict);
+        Assert.Single(res2);
+        Assert.Equal("качество не распознано", HunterAccess.DropReason(scored[3] as JObject, strict));
     }
 
     // ── сезон донора (инцидент 2026-08-09, «Укрытие») ────────────────────
@@ -247,6 +258,65 @@ public class EpisodeHunterTests
         Assert.Empty(HunterAccess.ComputeUpgrades(donors, new JArray(same), new List<JObject> { same }, new HashSet<int>(), 1, 15));
     }
 
+    // qdl 2.107: ранг качества относительно цели — единый компаратор (охота/апгрейд/уборка/показ)
+    [Fact]
+    public void ComputeUpgrades_ByQualityRank_NotScore()
+    {
+        // донор с quality:0 (XviD «WEBRip» без цифры) раньше был неуязвим (guard bquality>0) — теперь ранг 1000, худший
+        var xvid = new JArray(Donor(DonorHash, 122, 0, 10));
+        var cold = Cand("Silo.S03E10.1080p.ColdFilm.mkv", 2, parselink: null, magnet: "magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc", score: 107);
+        Assert.Equal(new[] { 10 }, HunterAccess.ComputeUpgrades(xvid, new JArray(cold), new List<JObject> { cold }, new HashSet<int>(), 3, 15, 1080));
+
+        // цель 1080: донор 1080 не апгрейдится ни на 2160 (выше цели), ни на 720 (ниже) — даже при +40 скора
+        var d1080 = new JArray(Donor(DonorHash, 60, 1080, 5));
+        var c2160 = Cand("Сериал [1 сезон, 1-6 из 12] 2160p", 40, parselink: "http://t/a?id=1", quality: 2160, score: 100);
+        var c720 = Cand("Сериал [1 сезон, 1-6 из 12] 720p", 40, parselink: "http://t/b?id=2", quality: 720, score: 100);
+        Assert.Empty(HunterAccess.ComputeUpgrades(d1080, new JArray(c2160, c720), new List<JObject> { c2160, c720 }, new HashSet<int>(), 1, 15, 1080));
+
+        // равный ранг — только по +15 скора
+        var c1080 = Cand("Сериал [1 сезон, 1-6 из 12] 1080p", 40, parselink: "http://t/c?id=3", quality: 1080, score: 76);
+        Assert.Equal(new[] { 5 }, HunterAccess.ComputeUpgrades(d1080, new JArray(c1080), new List<JObject> { c1080 }, new HashSet<int>(), 1, 15, 1080));
+        var c1080low = Cand("Сериал [1 сезон, 1-6 из 12] 1080p", 40, parselink: "http://t/d?id=4", quality: 1080, score: 70);
+        Assert.Empty(HunterAccess.ComputeUpgrades(d1080, new JArray(c1080low), new List<JObject> { c1080low }, new HashSet<int>(), 1, 15, 1080));
+
+        // цель 1080, донор 2160 → кандидат 1080 апгрейдит (ровно цель лучше «выше цели»)
+        var d2160 = new JArray(Donor(DonorHash, 90, 2160, 5));
+        Assert.Equal(new[] { 5 }, HunterAccess.ComputeUpgrades(d2160, new JArray(c1080low), new List<JObject> { c1080low }, new HashSet<int>(), 1, 15, 1080));
+
+        // Maybe-пак — только при строго лучшем ранге; тот же файл, что у донора (подпись), — не апгрейд
+        var pack = Cand("Сериал 1 сезон WEB-DL 1080p", 40, parselink: "http://t/p?id=5", quality: 1080, score: 100);
+        Assert.Empty(HunterAccess.ComputeUpgrades(d1080, new JArray(pack), new List<JObject> { pack }, new HashSet<int>(), 1, 15, 1080));
+        var d720 = new JArray(Donor(DonorHash, 60, 720, 5));
+        Assert.Equal(new[] { 5 }, HunterAccess.ComputeUpgrades(d720, new JArray(pack), new List<JObject> { pack }, new HashSet<int>(), 1, 15, 1080));
+        var sameFile = Cand("Silo.S01E05.1080p.ColdFilm.mkv", 5, parselink: null, magnet: "magnet:?xt=urn:btih:dddddddddddddddddddddddddddddddddddddddd", score: 100);
+        sameFile["bm_files"] = new JArray(new JObject { ["name"] = "Silo.S01E05.1080p.ColdFilm.mkv", ["size"] = 2_352_351_365L });
+        var donorSig = new HashSet<string> { HunterAccess.SigKey("Silo.S01E05.1080p.ColdFilm.mkv", 2_352_351_365L) };
+        Assert.Empty(HunterAccess.ComputeUpgrades(d720, new JArray(sameFile), new List<JObject> { sameFile }, new HashSet<int>(), 1, 15, 1080, donorSig));
+    }
+
+    [Theory]
+    [InlineData(1080, 1080, 0)]
+    [InlineData(1440, 1080, 4)]
+    [InlineData(2160, 1080, 11)]
+    [InlineData(720, 1080, 460)]
+    [InlineData(480, 1080, 700)]
+    [InlineData(0, 1080, 1000)]
+    [InlineData(2160, 2160, 0)]
+    [InlineData(1080, 2160, 999)]   // ниже цели: 100 + (target − q), кап 999 — всё равно лучше «не распознано» (1000)
+    public void QualityRank_Order(int q, int target, int expected) => Assert.Equal(expected, HunterAccess.QualityRank(q, target));
+
+    [Fact]
+    public void DonorTargetQuality_MainOrFloor1080()
+    {
+        var conf = new ModuleConf();
+        Assert.Equal(1080, HunterAccess.DonorTargetQuality(new JArray(File(0, "Silo (Season 3) WEB-DL 1080p/Silo.S03E01.1080p.WEB-DL.RGzsRutracker.mkv")), conf));
+        Assert.Equal(2160, HunterAccess.DonorTargetQuality(new JArray(File(0, "Show.S01E01.2160p.mkv"), File(1, "Show.S01E02.2160p.mkv")), conf));
+        Assert.Equal(1080, HunterAccess.DonorTargetQuality(new JArray(File(0, "Silo.s03e01.WEBRip.XviD.Rus.RuDub.tv.avi")), conf));   // основная 720×400/XviD → цель 1080, не потолок
+        Assert.Equal(1080, HunterAccess.DonorTargetQuality(new JArray(File(0, "Show.S01E01.720p.mkv")), conf));                     // основная 720p → цель 1080
+        conf.donorQualityTarget = 2160;
+        Assert.Equal(2160, HunterAccess.DonorTargetQuality(new JArray(File(0, "Show.S01E01.720p.mkv")), conf));                     // явное перекрывает
+    }
+
     [Fact]
     public void PlanReplacements_UpgradedDonor_DroppedOnlyWhenWinnerComplete()
     {
@@ -326,10 +396,16 @@ public class EpisodeHunterTests
     public void FindEpFiles_SingleFileTakesEpFromTitle()
     {
         var files = new JArray(File(0, "Show.mkv"));
-        var found = HunterAccess.FindEpFiles(files, 2, new List<int> { 9 }, "Сериал (Серия 9) 1080p");
+        // qdl 2.107: одиночка без сезона ни в имени, ни в папке, ни у донора — при season > 1 НЕ берём
+        // (раньше «s <= 0 → s = season» подставлял сезон охоты вслепую и делал проверку тождеством)
+        Assert.Empty(HunterAccess.FindEpFiles(files, 2, new List<int> { 9 }, "Сериал (Серия 9) 1080p"));
+        // сезон подтверждён донором (имя/папка/episodes классификатора) — берём и проставляем его
+        var found = HunterAccess.FindEpFiles(files, 2, new List<int> { 9 }, "Сериал (Серия 9) 1080p", 2);
         Assert.Single(found);
         Assert.Equal(9, found[0].ep);
         Assert.Equal(2, found[0].season);
+        // первый сезон / аниме без маркеров — как раньше
+        Assert.Single(HunterAccess.FindEpFiles(files, 1, new List<int> { 9 }, "Сериал (Серия 9) 1080p"));
     }
 
     // ── объединённый плейлист ────────────────────────────────────────────

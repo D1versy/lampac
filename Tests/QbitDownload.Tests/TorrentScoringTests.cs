@@ -159,13 +159,54 @@ public class TorrentScoringTests
     [InlineData("Minions.2015.WEB-DL.KP.1080p-SOFCJ.mkv", null)]            // KP = Кинопоиск
     [InlineData("Minions.2015.720p.WEB-DL.Rus.HDCLUB.mkv", null)]
     [InlineData("Minions.2015.2160p.BluRay.REMUX.HEVC", true)]              // подсказка из БД
+    // qdl 2.107: русские студии/маркеры из DHT (у bitmagnet все они помечены ["en"])
+    [InlineData("Silo.S03E10.1080p.ColdFilm.mkv", null)]
+    [InlineData("Silo.S03.720p.Ru.Ultradox", null)]
+    [InlineData("[AniDub]_Gnosia.s01", null)]
+    [InlineData("Dune.Prophecy.2024.S01.WEB-DL.1080p.AMZN.RHS", null)]
+    [InlineData("Show.S01E01.RUS.ENG.WEB-DL.1080p", null)]
+    [InlineData("Silo.S03E09.rus.LostFilm.TV.avi", null)]
+    [InlineData("Silo.s03.WEBRip.XviD.Rus.RuDub.tv", null)]
+    // 🔴 «укр» внутри слова — не украинское вето: «Укрытие», «Укрощение», «укрепления» (поймано при раскатке)
+    [InlineData("Укрытие (Бункер) (3 сезон: 1-9 серии из 10) / Silo / 2026 / ПМ (HDrezka Studio), СТ / WEB-DL (1080p)", null)]
+    [InlineData("Укрощение строптивого / Il bisbetico domato (1980) BDRip 1080p", null)]
+    [InlineData("Укрытие / Silo / Сезон: 3 / Серии: 1-9 из 10 [2026, WEB-DL 1080p] MVO", null)]
     public void IsRussian_True(string title, bool? hint) => Assert.True(TorrentScoring.IsRussian(title, hint));
 
     [Theory]
     [InlineData("Minions.2015.UHD.BluRay.2160p.TrueHD.Atmos.7.1.HEVC.REMUX-FraMeSToR")]
     [InlineData("[ OxTorrent.com ] Minions.2015.TRUEFRENCH.BDRiP.XViD-AViTECH.avi")]
     [InlineData("Minions (2015) 2160p H265 10 bit ita eng AC3 5.1 sub ita eng Licdom")]
+    // qdl 2.107: голый «dub» больше не русский — «[English Dub]» (44 строки Гносии в DHT), «Hindi (HQ-Dub)»
+    [InlineData("[Yameii] GNOSIA - S01E01 [English Dub] [CR WEB-DL 1080p]")]
+    [InlineData("House of the Dragon (2022) S01-E05 1080p [Proper Hindi (HQ-Dub) + English]")]
+    [InlineData("Silo.S03E10.FINAL.MULTI.1080p.WEB.H264-HiggsBoson")]
+    [InlineData("Silo.S03E10.1080p.10bit.WEBRip.6CH.x265.HEVC-PSA.mkv")]
+    // украинское вето: студия ≠ язык
+    [InlineData("Silo.S01E10.WEBRip.1080p.ukr.5.1.HDREZKA.STUDIO.mkv")]
+    [InlineData("Silo.s02.720p.ATVP.WEB-DL.DDP5.1.Atmos.H.264.Ukr.Eng.BaibaKo.tv")]
+    [InlineData("Silo.(Season 1).(2023).WEBDLRip.[Ukr_Eng]")]
+    [InlineData("Бункер (Сезон 3, Серії 1-9) / Silo (Season 3, Episodes 1-9) (2026) WEB-DL 1080p H.265 Ukr/Eng")]
+    // голый «ru» — не маркер (славянское слово, японский тайтл, русские СУБТИТРЫ)
+    [InlineData("Ruža pre nevestu - 04x21.mp4")]
+    [InlineData("To Love-Ru S01E03 1080p")]
+    [InlineData("Lou Grant.S03E11.ru.subs.mp4")]
     public void IsRussian_False(string title) => Assert.False(TorrentScoring.IsRussian(title));
+
+    // qdl 2.107: сиды bitmagnet — подсказка (sid_hint): ни «мёртвая» −20, ни бонус; ⭐ такой строке не даём
+    [Fact]
+    public void SidHint_IsNeutral_AndNeverStar()
+    {
+        var hint0 = new JObject { ["title"] = "Silo.S03E10.1080p.ColdFilm.mkv", ["sid"] = 0, ["pir"] = 0, ["id_match"] = true, ["sid_hint"] = true };
+        var dead = new JObject { ["title"] = "Silo.S03E10.1080p.ColdFilm.mkv", ["sid"] = 0, ["pir"] = 0, ["id_match"] = true };
+        var ctx = Ctx("Укрытие", "Silo", 2023, true);
+        Assert.True(TorrentScoring.Score(hint0, ctx).score > TorrentScoring.Score(dead, ctx).score + 20);
+
+        var hint84 = new JObject { ["title"] = "Silo.S03E10.720p.10bit.WEBRip.2CH.x265.HEVC-PSA.mkv", ["sid"] = 84, ["id_match"] = true, ["sid_hint"] = true };
+        var res = TorrentScoring.SortAndMark(new JArray(hint84), ctx, 5);
+        Assert.Single(res);
+        Assert.Null(res[0]["rec"]);   // 84 «сида» из краулера звезду не дают
+    }
 
     // Русская раздача обязана быть выше иностранной, даже если у той кратно больше сидов
     [Fact]

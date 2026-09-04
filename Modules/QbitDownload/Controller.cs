@@ -334,11 +334,23 @@ public partial class QbitController : BaseController
                 StaleRefresh(ckey, query, title, title_original, year, is_serial, season, apikey, tmdb_id);
             }
 
-            return ContentTo(scored.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+            return ContentTo(SearchHideForeign(scored, title ?? query).ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
         }
 
         var sorted = await SearchScored(query, title, title_original, year, is_serial, season, apikey, tmdb_id);
-        return ContentTo(sorted.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+        return ContentTo(SearchHideForeign(sorted, title ?? query).ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
+
+    // Пост-фильтр ручки (qdl 2.107, решение владельца): иностранные поштучные серии из bitmagnet — только
+    // когда русских раздач нет. Ровно на выходе к человеку, в обеих ветках (кеш и живая): кеш, индекс,
+    // охота и обходчик видят полную выдачу. Ответ остаётся массивом. Киллсвитч searchHideForeignSingles.
+    static JArray SearchHideForeign(JArray sorted, string forLog)
+    {
+        if (!ModInit.conf.searchHideForeignSingles) return sorted;
+        var (list, hidden) = HideForeignSingles(sorted);
+        if (hidden > 0)
+            Console.WriteLine($"[QbitDownload] поиск «{forLog}»: скрыто {hidden} иностранных поштучных серий bitmagnet (русские есть), осталось {list.Count}");
+        return list;
     }
 
     /// <summary>
@@ -367,9 +379,13 @@ public partial class QbitController : BaseController
     // Весь пайплайн поиска (проходы индексатора + bitmagnet + дедуп + скоринг) — статический:
     // переиспользуется фоновыми контурами (EpisodeHunter, предложение переключения в CheckWatches).
     // tmdb_id опционален: без него просто не работает источник bitmagnet, остальное как раньше.
+    // bmScopeSeason > 0 (только охота, qdl 2.107): bitmagnet отдаёт ВСЕ раздачи сезона по episodes
+    // jsonb вместо top-100 по сидам. Такой снимок непредставителен для человека, поэтому при скоупе
+    // ни SearchCache, ни torrent_index НЕ пишутся — иначе пользователь получил бы сезонную выборку
+    // на 6 часов, а индекс каждый тик заливало бы сотнями DHT-строк.
     static async Task<JArray> SearchScored(string query, string title, string title_original,
                                            int year, int is_serial, int season, string apikey,
-                                           string tmdb_id = null)
+                                           string tmdb_id = null, int bmScopeSeason = 0)
     {
         string search = !string.IsNullOrWhiteSpace(query) ? query
                       : !string.IsNullOrWhiteSpace(title) ? title : title_original;
@@ -401,7 +417,7 @@ public partial class QbitController : BaseController
         // Проход 3 — локальный индекс bitmagnet по TMDB id (точное совпадение, мусор невозможен).
         // Идёт параллельно с трекерами и его сбой не влияет на них: FetchBitmagnet сам глушит
         // исключения и отдаёт пустой список.
-        var bitmagnetPass = FetchBitmagnet(tmdb_id, is_serial);
+        var bitmagnetPass = FetchBitmagnet(tmdb_id, is_serial, bmScopeSeason);
         passes.Add(bitmagnetPass);
 
         // Проход 4 — НАШ индекс: всё, что когда-либо отдавали все источники вместе.
@@ -452,9 +468,12 @@ public partial class QbitController : BaseController
         // (score/watchable/ep), поэтому порядок здесь принципиален; сам Write ещё раз клонирует.
         // Пишут ВСЕ вызывающие, включая фоновые контуры: обходчик индекса и так платит за трекеры,
         // пусть заодно греет пользовательский кеш — нового трафика наружу это не создаёт.
-        SearchCache.Write(SearchCache.Key(tmdb_id, queryNorm, year, is_serial), result, search);
+        // Исключение — сезонный скоуп охоты (см. комментарий к параметру): ни кеш, ни индекс.
+        bool userPath = bmScopeSeason <= 0;
+        if (userPath)
+            SearchCache.Write(SearchCache.Key(tmdb_id, queryNorm, year, is_serial), result, search);
 
-        return ScoreResult(result, query, title, title_original, year, is_serial, season, tmdb_id, store: true);
+        return ScoreResult(result, query, title, title_original, year, is_serial, season, tmdb_id, store: userPath);
     }
 
     /// <summary>
@@ -578,9 +597,25 @@ public partial class QbitController : BaseController
         while (s >= 1024 && i < u.Length - 1) { s /= 1024; i++; }
         return (i >= 3 ? s.ToString("0.0") : s.ToString("0")) + " " + u[i];
     }
+    // Качество из названия. Порядок проб (qdl 2.107):
+    //   1) явное «NNNp/NNNi» — любая высота (400p/540p/576p/1440p, не только четыре токена);
+    //   2) «WxH» → ВЫСОТА: «720x400» раньше читался как 720p и проходил гейт донора как честный 720p;
+    //   3) 4K/UHD → 2160;
+    //   4) старый leftmost «2160|1080|720|480» без p (в т.ч. внутри чисел — «11080p» → 1080, закреплено).
+    // 0 = не распознано; для донора это теперь «ниже порога» (donorRejectUnknownQuality), не пропуск.
+    static readonly Regex _qHeightPRx = new(@"(?<!\d)(\d{3,4})[pi](?![a-z0-9])", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    static readonly Regex _qWxHRx = new(@"(?<!\d)(\d{3,4})x(\d{3,4})(?!\d)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    static readonly Regex _q4kRx = new(@"(?<![a-z0-9])(4k|uhd)(?![a-z0-9])", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    static readonly Regex _qLegacyRx = new(@"(2160|1080|720|480)p?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     static int QualityFromTitle(string t)
     {
-        var m = Regex.Match(t ?? "", "(2160|1080|720|480)p?", RegexOptions.IgnoreCase);
+        t = t ?? "";
+        var m = _qHeightPRx.Match(t);
+        if (m.Success && int.TryParse(m.Groups[1].Value, out int hp) && hp >= 240 && hp <= 4320) return hp;
+        m = _qWxHRx.Match(t);
+        if (m.Success && int.TryParse(m.Groups[2].Value, out int hh) && hh >= 240 && hh <= 4320) return hh;
+        if (_q4kRx.IsMatch(t)) return 2160;
+        m = _qLegacyRx.Match(t);
         return m.Success ? int.Parse(m.Groups[1].Value) : 0;
     }
 

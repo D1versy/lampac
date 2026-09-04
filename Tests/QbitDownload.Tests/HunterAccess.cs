@@ -46,9 +46,15 @@ public static class HunterAccess
     public static HashSet<int> InventoryEps(JArray mainFiles, JArray donors, int season)
         => (HashSet<int>)Access.Call("InventoryEps", mainFiles, donors, season);
 
+    // qdl 2.107: новые гейты выключены по умолчанию (requireRussian=false, rejectUnknownQuality=false),
+    // чтобы старые фикстуры (кириллические названия, quality задан явно) вели себя как раньше;
+    // кейсы новых гейтов включают их явно.
     public static object MakeHuntCtx(string mainHash, int season, IEnumerable<string> known, IEnumerable<string> blacklist,
                                      int minSeeds, int minQuality, int minMb, int maxGb,
-                                     string titleNorm = null, string originalNorm = null, string selfLink = null)
+                                     string titleNorm = null, string originalNorm = null, string selfLink = null,
+                                     bool requireRussian = false, bool rejectUnknownQuality = false, int targetQuality = 1080,
+                                     IEnumerable<(string name, long size)> mainSig = null, string mainName = null,
+                                     bool rejectLegacy = true, bool rejectScreener = true)
     {
         var h = Activator.CreateInstance(HuntCtxT);
         HuntCtxT.GetField("selfTopicKey").SetValue(h, selfLink == null ? null : TopicKey(selfLink));
@@ -62,11 +68,48 @@ public static class HunterAccess
         HuntCtxT.GetField("maxGb").SetValue(h, maxGb);
         HuntCtxT.GetField("titleNorm").SetValue(h, titleNorm);
         HuntCtxT.GetField("originalNorm").SetValue(h, originalNorm);
+        HuntCtxT.GetField("requireRussian").SetValue(h, requireRussian);
+        HuntCtxT.GetField("rejectUnknownQuality").SetValue(h, rejectUnknownQuality);
+        HuntCtxT.GetField("rejectLegacy").SetValue(h, rejectLegacy);
+        HuntCtxT.GetField("rejectScreener").SetValue(h, rejectScreener);
+        HuntCtxT.GetField("targetQuality").SetValue(h, targetQuality);
+        if (mainSig != null)
+        {
+            var sig = new HashSet<string>(StringComparer.Ordinal);
+            int n = 0;
+            foreach (var (name, size) in mainSig) { n++; var k = SigKey(name, size); if (k != null) sig.Add(k); }
+            HuntCtxT.GetField("mainSig").SetValue(h, sig);
+            HuntCtxT.GetField("mainVideoCount").SetValue(h, n);
+        }
+        if (mainName != null)
+            HuntCtxT.GetField("mainNameNorm").SetValue(h, Shared.Services.Utilities.SearchNameTo.Convert(mainName));
         return h;
     }
 
     public static bool NameMatchesSeries(string title, string titleNorm, string originalNorm)
         => (bool)Access.Call("NameMatchesSeries", title, titleNorm, originalNorm);
+
+    // ── qdl 2.107: bitmagnet в охоте ──────────────────────────────────────
+    public static bool NameMatchesSeriesOrId(JObject cand, object huntCtx) => (bool)Access.Call("NameMatchesSeriesOrId", cand, huntCtx);
+    public static string TitleHeadBeforeMarker(string title) => (string)Access.Call("TitleHeadBeforeMarker", title);
+    public static DonorCover TitleCoversEpItem(JObject cand, int season, int ep) => (DonorCover)Access.Call("TitleCoversEpItem", cand, season, ep);
+    public static bool SeasonOkItem(JObject cand, object huntCtx) => (bool)Access.Call("SeasonOkItem", cand, huntCtx);
+    public static int QualityRank(int q, int target) => (int)Access.Call("QualityRank", q, target);
+    public static int DominantQuality(IEnumerable<string> paths) => (int)Access.Call("DominantQuality", paths);
+    public static int DonorTargetQuality(JArray mainFiles, ModuleConf conf) => (int)Access.Call("DonorTargetQuality", mainFiles, conf);
+    public static int SizeBucket(long bytesPerEp) => (int)Access.Call("SizeBucket", bytesPerEp);
+    public static string SigKey(string name, long size) => (string)Access.Call("SigKey", name, size);
+    public static bool LooksLikeOwnRelease(JObject cand, object huntCtx) => (bool)Access.Call("LooksLikeOwnRelease", cand, huntCtx);
+    public static string MainRootFolder(JArray mainFiles) => (string)Access.Call("MainRootFolder", mainFiles);
+    public static bool LocalTickWaiting(JObject m, JArray mainFiles, JArray donors, int season) => (bool)Access.Call("LocalTickWaiting", m, mainFiles, donors, season);
+    public static object BuildHuntPlan(JObject m, JArray mainFiles, string mainName, JArray donors, HashSet<string> donorSig,
+                                       JArray scored, IEnumerable<string> lampaHashes, string ctitle, string titleOriginal,
+                                       int season, int aired, DateTime now, ModuleConf conf, bool localOnly)
+        => Access.Call("BuildHuntPlan", m, mainFiles, mainName, donors, donorSig, scored, lampaHashes, ctitle, titleOriginal, season, aired, now, conf, localOnly);
+    public static T PlanField<T>(object plan, string field) => (T)plan.GetType().GetField(field).GetValue(plan);
+    public static Task<JArray> HuntDry(string onlyHash, bool localOnly) => (Task<JArray>)Access.Call("HuntDry", onlyHash, localOnly);
+    public static Task<int> HuntAll(string onlyHash, bool localOnly) => (Task<int>)Access.Call("HuntAll", onlyHash, localOnly);
+    public static void SetLocalWanted(JObject m, List<int> wanted) => Access.Call("SetLocalWanted", m, wanted);
 
     public static string TopicKey(string link) => (string)Access.Call("TopicKey", link);
     public static bool PathsOverlap(string a, string b) => (bool)Access.Call("PathsOverlap", a, b);
@@ -76,8 +119,8 @@ public static class HunterAccess
     public static List<JObject> FilterDonorCandidates(JArray scored, object huntCtx)
         => (List<JObject>)Access.Call("FilterDonorCandidates", scored, huntCtx);
 
-    public static List<JObject> OrderByCover(List<JObject> eligible, int season, List<int> wanted)
-        => (List<JObject>)Access.Call("OrderByCover", eligible, season, wanted);
+    public static List<JObject> OrderByCover(List<JObject> eligible, int season, List<int> wanted, int targetQuality = 1080)
+        => (List<JObject>)Access.Call("OrderByCover", eligible, season, wanted, targetQuality);
 
     public static List<(int index, int ep, int season, string epkey, long size)> FindEpFiles(JArray files, int season, List<int> wanted, string candidateTitle, int donorSeason = 0)
     {
@@ -124,8 +167,9 @@ public static class HunterAccess
     public static List<JObject> ClaimCandidates(JArray scored, object huntCtx) => (List<JObject>)Access.Call("ClaimCandidates", scored, huntCtx);
     public static int SelfTopicClaim(JArray scored, object huntCtx) => (int)Access.Call("SelfTopicClaim", scored, huntCtx);
 
-    public static List<int> ComputeUpgrades(JArray donors, JArray scored, List<JObject> eligible, HashSet<int> mainEps, int season, int minScoreGain)
-        => (List<int>)Access.Call("ComputeUpgrades", donors, scored, eligible, mainEps, season, minScoreGain, null);
+    public static List<int> ComputeUpgrades(JArray donors, JArray scored, List<JObject> eligible, HashSet<int> mainEps, int season, int minScoreGain,
+                                            int targetQuality = 1080, HashSet<string> donorSig = null)
+        => (List<int>)Access.Call("ComputeUpgrades", donors, scored, eligible, mainEps, season, minScoreGain, null, targetQuality, donorSig);
 
     // ── qBit-хелперы (инъецируемый HttpClient) ────────────────────────────
     public static Task<bool> QbitAddMagnetEx(HttpClient c, string magnet, string category, string tags = null, bool stopAfterMeta = false)
@@ -154,8 +198,8 @@ public static class HunterAccess
     public static void SaveWatch(JArray a) => Access.Call("SaveWatch", a);
 
     // ── надёжность и покрытие охоты (топ-N проб, пустая выдача, догон после рестарта) ──
-    public static List<JObject> ProbeCandidates(List<JObject> eligible, int season, List<int> wanted, int probesPerRun)
-        => (List<JObject>)Access.Call("ProbeCandidates", eligible, season, wanted, probesPerRun);
+    public static List<JObject> ProbeCandidates(List<JObject> eligible, int season, List<int> wanted, int probesPerRun, int targetQuality = 1080)
+        => (List<JObject>)Access.Call("ProbeCandidates", eligible, season, wanted, probesPerRun, targetQuality);
 
     public static string DropReason(JObject cand, object huntCtx) => (string)Access.Call("DropReason", cand, huntCtx);
 

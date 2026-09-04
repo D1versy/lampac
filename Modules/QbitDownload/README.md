@@ -23,6 +23,7 @@
 | `GET /qdl/season/watch/remove?hash=\|id=` | снять маркер (с диска не удаляется ничего — контур умеет только добавлять) |
 | `GET /qdl/season/watch/list` | дамп `/qdl-data/season-watch.json` |
 | `GET /qdl/season/watch/check[?dry=1][&id=]` | ручной прогон тика; `dry=1` — отчёт «что бы сделал» без единой записи |
+| `GET /qdl/hunt/run[?hash=&dry=1&local=1]` | **охота за сериями** (`EpisodeHunter.cs`, qdl 2.107): ручной прогон по одной раздаче (`hash`) или по всем записям `watch.json`. `dry=1` — план без побочек (без add/blacklist/штампов; работает и на реплике): кандидаты, отсев по причинам (`DropReason`), порядок проб, цель качества. `local=1` — режим локального тика: только bitmagnet + наш индекс, только сериалы с недостающими сериями |
 | `GET /qdl/live/cameras?date=` | **D1VERSY LIVE**: камеры, у которых ЕСТЬ записи за локальный день (+ сколько камер всего) |
 | `GET /qdl/live/recordings?camera=&date=` | записи одной камеры за день (время локальное, длительность, размер) |
 | `GET /qdl/live/days[?back=]` | дни, за которые записи вообще есть (для выбора даты) |
@@ -105,6 +106,47 @@ rolling-HLS `/hls/{id}/index.m3u8` (RTSP-камеры — `seg_N.ts`, тарге
 }
 ```
 `downloadsPath` — путь, который видят **и** qBittorrent, **и** контейнер Lampac (общий том). В docker-compose: оба монтируют `D:\data\downloads` в `/downloads`.
+
+## Охота за сериями × bitmagnet (`EpisodeHunter.cs` + `Bitmagnet.cs`, qdl 2.107)
+
+Донор недостающей серии ищется и в локальном DHT-индексе bitmagnet (сезонная выборка по
+`episodes` jsonb, а не top-100 по сидам), а гейты донора собраны в один `DropReason`:
+имя → язык → сиды → качество → кодек/экранка → уже есть/blacklist → своя раздача → сезон → вес серии.
+Все ключи правятся на лету:
+
+```json
+"QbitDownload": {
+  "huntBitmagnet": true,
+  "bitmagnetHuntLimit": 1000,
+  "bitmagnetFreshLimit": 100,
+  "donorMinQuality": 720,
+  "donorQualityTarget": 0,
+  "donorRejectUnknownQuality": true,
+  "donorRejectLegacy": true,
+  "donorRejectScreener": true,
+  "donorRequireRussian": true,
+  "searchHideForeignSingles": true,
+  "huntLocalIntervalMinutes": 10,
+  "huntLocalSummaryMinutes": 60
+}
+```
+- `huntBitmagnet` — брать кандидатов из bitmagnet (охота); `bitmagnetHuntLimit` — потолок сезонной
+  выборки для охоты; `bitmagnetFreshLimit` — сколько самых СВЕЖИХ по `created_at` строк добавляется к
+  top-N по сидам в интерактивной выдаче `/qdl/search` (иначе свежая серия проигрывает годовалым пакам).
+- `donorMinQuality` — нижний порог высоты донора (было 1080); `donorQualityTarget` — цель: `0` = качество
+  основной раздачи, но не ниже 1080. `donorRejectUnknownQuality` — «WEBRip» без цифры это отказ, а не
+  пропуск (🔴 смена политики 2.107: неопознанный донор не уступал место лучшему); `donorRejectLegacy` /
+  `donorRejectScreener` — отсев XviD-эпохи и экранок по классификатору bitmagnet; `donorRequireRussian` —
+  без русской дорожки донором не быть (украинское вето, `[English Dub]` — не русский).
+- `searchHideForeignSingles` — пост-фильтр `/qdl/search`: когда в выдаче есть русские раздачи, иностранные поштучные серии bitmagnet
+  скрываются (обе ветки выдачи).
+- `huntLocalIntervalMinutes` — локальный тик охоты (только bitmagnet + наш индекс, только сериалы с
+  недостающими сериями, без апгрейдов и re-grab; таймер в `ModInit.cs`, интервал на лету);
+  `huntLocalSummaryMinutes` — как часто писать сводку тика.
+- `bitmagnetStaleSeedsDays` — остался в конфиге, но с 2.107 не читается (сиды теперь `greatest(tc, dht)`).
+
+Dry-run — `GET /qdl/hunt/run?dry=1[&local=1]` (см. таблицу ручек). Разбор инцидента с «Укрытием» —
+`CHANGELOG-qdl.md` → 2.107.
 
 ## HTTP/2 для проксируемых потоков (`ProxyHttp2.cs`, qdl 2.106)
 

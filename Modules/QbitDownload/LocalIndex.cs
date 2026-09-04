@@ -228,14 +228,22 @@ on conflict do nothing;", db);
             await db.OpenAsync();
 
             // Привязка по tmdb_id — точная; по названию+году — запасная, для карточек без id.
+            // ⚠️ limit — снаружи подзапроса и после сортировки по сидам/свежести (qdl 2.107). Раньше
+            // он стоял прямо за distinct on, а тот требует order by dedupe_key — то есть срез был
+            // по ЛЕКСИКОГРАФИИ btih: у «Укрытия» из 807 ключей уходили 200 младших по hex — случайная
+            // четверть DHT-строк и ни одной трекерной (их ключ — http://…).
             await using var cmd = new NpgsqlCommand(@"
-select distinct on (i.dedupe_key)
-       i.title, i.tracker, i.magnet, i.parselink, i.size_bytes, i.sid, i.pir, i.quality, i.codec, i.published_at
-from torrent_index i
-join torrent_title tt on tt.torrent_id = i.id
-where (@tmdb > 0 and tt.tmdb_id = @tmdb)
-   or (@tmdb = 0 and @qn <> '' and tt.query_norm = @qn and (@yr = 0 or tt.year = @yr))
-order by i.dedupe_key, i.last_seen desc
+select x.title, x.tracker, x.magnet, x.parselink, x.size_bytes, x.sid, x.pir, x.quality, x.codec, x.published_at
+from (
+  select distinct on (i.dedupe_key)
+         i.title, i.tracker, i.magnet, i.parselink, i.size_bytes, i.sid, i.pir, i.quality, i.codec, i.published_at, i.last_seen
+  from torrent_index i
+  join torrent_title tt on tt.torrent_id = i.id
+  where (@tmdb > 0 and tt.tmdb_id = @tmdb)
+     or (@tmdb = 0 and @qn <> '' and tt.query_norm = @qn and (@yr = 0 or tt.year = @yr))
+  order by i.dedupe_key, i.last_seen desc
+) x
+order by x.sid desc nulls last, x.last_seen desc
 limit @lim;", db);
             cmd.CommandTimeout = Math.Max(2, ModInit.conf.localIndexTimeoutSec);
             cmd.Parameters.AddWithValue("tmdb", tmdb);

@@ -207,14 +207,37 @@ public static class TorrentScoring
 
     // Латиничные имена (в основном из bitmagnet) — по маркерам озвучки и русским
     // релиз-группам: краулер помечает такие раздачи как ["en"], хотя дубляж русский.
+    // ⚠️ Голого «dub» здесь НЕТ (qdl 2.107): он делал русскими «[English Dub]» (44 строки Гносии в
+    // DHT), «Hindi (HQ-Dub)». Русский дубляж без студии пишут как rus.dub/dub.rus/rudub — они есть.
+    // ⚠️ Голого «ru» тоже нет: с ASCII-границами он ловит «Ruža pre nevestu», «To Love-Ru», пиньинь
+    // и «ru.subs» (русские СУБТИТРЫ при английском звуке) — 189 строк по базе. Допускается только в
+    // паре с другим языком (Ru.Eng / Eng.Ru): так обозначают многодорожечные русские релизы.
     static readonly Regex _ruMarkRx = new Regex(
-        @"(?i)(?<![a-z0-9])(rus|rux|dub|mvo|dvo|avo|kp|hdclub|hdt|new-?team|sofcj|kinoreys|lostfilm|newstudio|hdrezka|kubik|jaskier|tvshows|baibako|coldfilm|amedia|selezen|elektri4ka|dexter|kerob|scarabey|hellywood|domino|exkinoray)(?![a-z0-9])",
+        @"(?i)(?<![a-z0-9])(rus|rux|rus\.?dub|dub\.?rus|rudub|mvo|dvo|avo|kp|hdclub|hdt|new-?team|sofcj|kinoreys|lostfilm|newstudio|hdrezka|kubik|jaskier|tvshows|baibako|coldfilm|amedia|selezen|elektri4ka|dexter|kerob|scarabey|hellywood|domino|exkinoray|ultradox|newcomers|rhs|red[\s._-]?head[\s._-]?sound|anilibria|anidub|animedia|shiza|dreamcast|studio[\s._-]?band|ru[._-](eng|en|jp|ja)|(eng|en)[._-]ru)(?![a-z0-9])",
         RegexOptions.Compiled);
 
-    /// <summary>Русская ли раздача: подсказка источника (может отсутствовать) + кириллица + маркеры озвучки.</summary>
+    // Украинское вето (qdl 2.107). Имя студии — не доказательство языка: HDRezka Studio и BaibaKo
+    // выпускают и украинские дорожки («Silo.S01E10.WEBRip.1080p.ukr.5.1.HDREZKA.STUDIO.mkv»,
+    // «Silo.s02…Ukr.Eng.BaibaKo.tv»), а кириллица сама по себе не значит «по-русски» (toloka:
+    // «Бункер (Сезон 3, Серії 1-9)»). Явный украинский токен при ОТСУТСТВИИ явного русского
+    // языкового токена → не русская, какая бы студия ни стояла рядом. Граница слева включает
+    // «_»: «[Ukr_Eng]» иначе не матчился бы. 🔴 Границы ОБЯЗАНЫ включать кириллицу: без «а-яё» в
+    // лукахеде «укр» матчился внутри «Укрытие», и все русские паки самого «Укрытия» без явного
+    // «rus/дубляж» становились «нерусскими» (поймано на живой выдаче при раскатке 2.107).
+    static readonly Regex _ukrMarkRx = new Regex(@"(?i)(?<![a-z0-9_а-яё])(ukr|укр)(?![a-z0-9а-яё])|(?<![а-яё])серії|українськ|(?<![a-z0-9])toloka(?![a-z0-9])", RegexOptions.Compiled);
+    static readonly Regex _ruLangTokenRx = new Regex(@"(?i)(?<![a-z0-9])(rus|rux|rus\.?dub|dub\.?rus|rudub)(?![a-z0-9])|рус\w*|дубляж|многоголос|двухголос|одноголос|закадров", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Русская ли раздача: подсказка источника (может отсутствовать) + кириллица + маркеры озвучки,
+    /// минус украинское вето (явный ukr/укр/серії без явного русского языкового токена).
+    /// </summary>
     public static bool IsRussian(string title, bool? langRuHint = null)
-        => langRuHint == true
-        || (!string.IsNullOrEmpty(title) && (_cyrillicRx.IsMatch(title) || _ruMarkRx.IsMatch(title)));
+    {
+        if (langRuHint == true) return true;
+        if (string.IsNullOrEmpty(title)) return false;
+        if (_ukrMarkRx.IsMatch(title) && !_ruLangTokenRx.IsMatch(title)) return false;
+        return _cyrillicRx.IsMatch(title) || _ruMarkRx.IsMatch(title);
+    }
 
     static readonly Regex _yearRx = new Regex(@"(?<!\d)(19|20)\d{2}(?!\d)", RegexOptions.Compiled);
     public static List<int> ParseYears(string title)
@@ -396,7 +419,12 @@ public static class TorrentScoring
         }
 
         // ── сиды (−20..15, лог-шкала с капом ~300: 500 vs 700 неразличимы) ──
-        if (sid <= 0 && pir <= 0) score -= 20;        // мёртвая
+        // sid_hint (bitmagnet, qdl 2.107): число из краулера — замер через минуту после появления
+        // раздачи в DHT либо копия, обнуляемая при переклассификации; на выборке 2725 раздач оно почти
+        // не несёт информации о живости (ColdFilm 1080p: в базе 2, реально 35). Ни штрафа «мёртвая»,
+        // ни бонуса — нейтрально.
+        if (t.Value<bool?>("sid_hint") == true) score += 3;
+        else if (sid <= 0 && pir <= 0) score -= 20;        // мёртвая
         else if (sid <= 0) score -= 6;
         else
         {
@@ -485,6 +513,9 @@ public static class TorrentScoring
         foreach (var (t, r) in ordered)
         {
             if (r.nameMiss || r.nameGateOff || r.typeMiss || (t.Value<int?>("sid") ?? 0) < recommendMinSeeds) continue;
+            // ⭐ не bitmagnet-строкам: parselink нет (re-grab не работает), сиды — подсказка, а с честным
+            // greatest(tc, dht) английская одиночка PSA с 84 сидами иначе забирала бы звезду у русского пака.
+            if (t.Value<bool?>("sid_hint") == true) continue;
             t["rec"] = true;
             t["why"] = string.Join(" · ", r.why);
             break;   // ⭐ только у одной; никто не прошёл — списка без ⭐ достаточно
