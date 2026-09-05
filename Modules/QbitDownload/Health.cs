@@ -195,6 +195,16 @@ public partial class QbitController
         AddPassiveRow(arr, HealthState.Ids.TmdbImg, "TMDB картинки", GrpMeta, now, flap);
         AddPassiveRow(arr, HealthState.Ids.Cub, "CUB каталог (" + cubHost + ")", GrpMeta, now, flap);
 
+        // ── Номер страницы в рядах каталога (qdl 2.112, §DI/§DO) ─────────────────────────────
+        // Строка отдельная от «CUB каталог» намеренно: та отвечает «апстрим жив», а при
+        // отравленной записи апстрим как раз здоров — врёт ЗАПИСЬ КЕША, и её видно только по
+        // тому, что в теле номер страницы не тот, который просили. Данные собирает прогрев
+        // каталога: он ходит по реальным клиентским ключам и потому видит и HIT-ы, которых
+        // сторож в контроллере CubProxy не видит принципиально.
+        var cp = CatalogWarmup.PageHealthSnapshot();
+        var (cpStatus, cpDetail) = CubPageVerdict(cp, now);
+        arr.Add(Svc(HealthState.Ids.CubPage, "CUB: номер страницы", GrpMeta, cpStatus, 0, cpDetail));
+
         // ── Поиск раздач ── живые поиски пользователя + канарейки идут через FetchIndexer
         AddPassiveRow(arr, HealthState.Ids.Indexer, "Индексатор (живые поиски)", GrpSearch, now, flap);
 
@@ -478,6 +488,43 @@ public partial class QbitController
     /// Порядок проверок = порядок важности, первое совпадение и есть вердикт.
     /// 🔴 «Выключено» и «греть некуда» — это off, а не fail: отсутствие работы не авария.
     /// </summary>
+    /// <summary>
+    /// Вердикт по аудиту номера страницы (qdl 2.112). Порядок правил = важность, поля читаются
+    /// защищённо теми же MwInt/MwDate: снимок собирается прогревом и не обязан быть полным.
+    ///
+    /// Пороги: 1–2 расхождения — это одна-две залежавшиеся записи, они дохнут сами за TTL;
+    /// 3 и больше за один обход — уже не случайность, апстрим сыплет и стоит вмешаться.
+    /// Специально не делаем fail на единичном случае: привычка игнорировать красное дороже.
+    /// </summary>
+    internal static (string status, string detail) CubPageVerdict(JObject b, DateTime now)
+    {
+        if (b == null) return ("off", "состояния нет");
+
+        var at = MwDate(b, "at");
+        if (at == null) return ("off", "обхода каталога ещё не было");
+
+        int periodMin = Math.Max(5, MwInt(b, "periodMin", 15));
+        if ((now - at.Value).TotalMinutes > periodMin * 3)
+            return ("off", "прогрев каталога не ходил " + HealthState.Ago(now - at.Value));
+
+        int checkedRows = MwInt(b, "checked", 0);
+        if (checkedRows == 0) return ("off", "рядов в обходе не было");
+
+        int bad = MwInt(b, "bad", 0);
+        string tail = " · рядов " + checkedRows + " · обход " + HealthState.Ago(now - at.Value);
+
+        if (bad == 0)
+            return ("ok", "страница совпала на всех" + tail);
+
+        // Светим сами адреса: §DI показал, что запись кеша называет свой файл заголовками
+        // X-StatiCache-Bucket/Id, и тогда снос точечный, а не покос всех рядов.
+        var samples = (b["samples"] as JArray)?.Select(x => (string)x).Where(x => !string.IsNullOrEmpty(x)).ToArray();
+        string list = samples != null && samples.Length > 0 ? " · " + string.Join(" · ", samples) : "";
+
+        return (bad >= 3 ? "fail" : "warn",
+            "чужая страница в " + bad + " " + HealthState.Plural(bad, "записи", "записях", "записях") + tail + list);
+    }
+
     internal static (string status, string detail) MusicWarmVerdict(JObject b, DateTime now)
     {
         if (b == null) return ("off", "состояния нет");

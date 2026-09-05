@@ -4,7 +4,9 @@ using Shared.Models.Events;
 using Shared.Models.Module;
 using Shared.Models.Module.Interfaces;
 using Shared.Services;
+using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace CubProxy;
 
@@ -12,6 +14,8 @@ public class ModInit : IModuleLoaded
 {
     public static string modpath;
     public static ModuleConf conf;
+
+    static Timer _pruneTimer;
 
     public void Loaded(InitspaceModel baseconf)
     {
@@ -22,11 +26,22 @@ public class ModInit : IModuleLoaded
 
         foreach (var m in conf.limit_map)
             CoreInit.conf.WAF.limit_map.Insert(0, m);
+
+        // qdl 2.112: уборка протухших копий страниц (PageStore). Раз в сутки, первый заход через
+        // час после старта — на старте у контейнера есть дела поважнее, а копий там от силы
+        // полсотни файлов по 7–22 КБ.
+        _pruneTimer = new Timer(_ =>
+        {
+            try { PageStore.Prune(conf?.pageGuardKeepMinutes ?? 1440); } catch { }
+        }, null, TimeSpan.FromHours(1), TimeSpan.FromHours(24));
     }
 
     public void Dispose()
     {
         EventListener.UpdateInitFile -= updateConf;
+
+        _pruneTimer?.Dispose();
+        _pruneTimer = null;
     }
 
     void updateConf()

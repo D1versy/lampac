@@ -139,6 +139,14 @@
          в нём нечего, а статика между тестами протекала бы. -->
     <Compile Include="..\..\Modules\Proxy\CubProxy\RowFilter.cs" Link="CubProxy\RowFilter.cs" />
 
+    <!-- PageGuard.cs — сторож номера страницы (qdl 2.112): у CUB свой кеш nginx, и он иногда
+         отдаёт тело чужой страницы, а мы примораживаем это на 3 часа. То же правило, что у
+         RowFilter.cs: ни ModInit, ни BaseController; состояние предохранителя держит контроллер,
+         сюда оно приезжает значением.
+         ⚠️ PageStore.cs сюда НЕ линкуется — по той же причине, что FilterStore.cs: он ходит на
+         диск и держит статику, которая протекала бы между тестами. -->
+    <Compile Include="..\..\Modules\Proxy\CubProxy\PageGuard.cs" Link="CubProxy\PageGuard.cs" />
+
     <!-- Online: линкуем ТОЛЬКО OnlineEventsCache.cs — он не трогает ни Online.ModInit, ни
          BaseController, поэтому коллизии с QbitDownload.ModInit не возникает. Под тестами его
          два инварианта: «пишем только полный набор» и «не закрепляем массовый сбой». -->

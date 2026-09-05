@@ -301,4 +301,91 @@ public class CatalogWarmupTests
         Assert.Empty(CatalogWarmup.ExtractImdbIds(null, 10));
         Assert.Empty(CatalogWarmup.ExtractImdbIds(Encoding.UTF8.GetBytes(json), 0));
     }
+
+    #region аудит номера страницы (qdl 2.112)
+    // Второй сторож дефекта §DI/§DO. Он видит то, что реально отдаётся клиенту, включая HIT-ы,
+    // которых сторож в контроллере CubProxy не видит принципиально: на HIT контроллер не
+    // исполняется, а отравленная запись раздаётся именно с HIT-ов все три часа.
+
+    static byte[] Row(int page, int total = 427, int cards = 2)
+    {
+        var sb = new StringBuilder();
+        sb.Append("{\"page\":").Append(page).Append(",\"total_pages\":").Append(total).Append(",\"results\":[");
+        for (int i = 0; i < cards; i++)
+            sb.Append(i > 0 ? "," : "").Append("{\"id\":").Append(i + 1).Append("}");
+        return Encoding.UTF8.GetBytes(sb.Append("]}").ToString());
+    }
+
+    [Theory]
+    [InlineData("/cub/tmdb./?sort=now_playing&page=1&email=", 1)]
+    [InlineData("/cub/tmdb./?sort=now_playing&email=", 1)]          // ряд ГЛАВНОЙ ходит без page (§DI)
+    [InlineData("/cub/tmdb./?sort=now_playing&page=31&email=", 31)]
+    [InlineData("/cub/tmdb./top/hundred/movie", 1)]
+    public void Запрошенная_страница_читается_из_адреса(string pathQuery, int expected)
+        => Assert.Equal(expected, CatalogWarmup.RequestedPage(pathQuery));
+
+    // Боевые случаи дословно: 04.09 ключ ряда держал page 11 на запрос первой страницы;
+    // 05.09 перебор дал page=21 -> 2 и page=31 -> 3.
+    [Theory]
+    [InlineData("/cub/tmdb./?sort=now_playing&page=1&email=", 11)]
+    [InlineData("/cub/tmdb./?sort=now_playing&email=", 11)]
+    [InlineData("/cub/tmdb./?sort=now_playing&page=21&email=", 2)]
+    [InlineData("/cub/tmdb./?sort=now_playing&page=31&email=", 3)]
+    public void Чужая_страница_ловится_прогревом(string pathQuery, int got)
+        => Assert.Equal(CatalogWarmup.PageVerdict.Mismatch, CatalogWarmup.CheckPage(pathQuery, Row(got)));
+
+    [Fact]
+    public void Совпадение_страницы_это_норма()
+        => Assert.Equal(CatalogWarmup.PageVerdict.Match,
+            CatalogWarmup.CheckPage("/cub/tmdb./?sort=now_playing&page=4&email=", Row(4)));
+
+    [Fact]
+    public void Кламп_за_последней_страницей_не_расхождение()
+        => Assert.Equal(CatalogWarmup.PageVerdict.Skip, CatalogWarmup.CheckPage("/cub/tmdb./?page=99999", Row(1)));
+
+    [Theory]
+    [InlineData("[{\"id\":0}]")]                       // /blocked отдаёт массив
+    [InlineData("{\"page\":1}")]                       // нет results
+    [InlineData("{\"results\":[]}")]                   // нет page
+    [InlineData("не json")]
+    [InlineData("")]
+    public void Чужая_форма_тела_прогревом_не_судится(string body)
+        => Assert.Equal(CatalogWarmup.PageVerdict.Skip,
+            CatalogWarmup.CheckPage("/cub/tmdb./?page=1", Encoding.UTF8.GetBytes(body)));
+
+    [Fact]
+    public void Пустое_тело_не_роняет_проверку()
+        => Assert.Equal(CatalogWarmup.PageVerdict.Skip, CatalogWarmup.CheckPage("/cub/tmdb./?page=1", null));
+
+    // Под сверку идут только РЯДЫ: постеры, детали карточки и лента отсекаются селектором
+    // HealthIdFor, тем же, что у пассивного хелса.
+    [Theory]
+    [InlineData("/tmdb/img/t/p/w300/a.jpg")]
+    [InlineData("/tmdb/api/3/movie/125988")]
+    [InlineData("/cub/tmdb./3/movie/125988")]
+    [InlineData("/cub/cub.best/api/feed/all")]
+    public void Постеры_и_карточки_под_сверку_страницы_не_попадают(string pathQuery)
+        => Assert.NotEqual(HealthState.Ids.Cub, CatalogWarmup.HealthIdFor(pathQuery));
+
+    // 🔥 Единственная реальная цена решения «два независимых сторожа» — что копии разъедутся.
+    // Ловим машинно: обе линкуются в ЭТУ сборку, гоняем общий корпус через обе.
+    [Theory]
+    [InlineData("?sort=now_playing&page=1&email=", 1, 427, "Match")]
+    [InlineData("?sort=now_playing&page=1&email=", 11, 427, "Mismatch")]
+    [InlineData("?sort=now_playing&email=", 11, 427, "Mismatch")]
+    [InlineData("?sort=now_playing&page=21&email=", 2, 427, "Mismatch")]
+    [InlineData("?sort=now_playing&page=31&email=", 3, 427, "Mismatch")]
+    [InlineData("?page=99999", 1, 427, "Skip")]
+    [InlineData("?page=427", 3, 427, "Mismatch")]
+    [InlineData("?page=abc", 1, 427, "Skip")]
+    [InlineData("top/hundred/movie", 1, 5, "Match")]
+    public void Сторож_страницы_в_двух_модулях_судит_одинаково(string uri, int bodyPage, int total, string expected)
+    {
+        byte[] body = Row(bodyPage, total);
+        string text = Encoding.UTF8.GetString(body);
+
+        Assert.Equal(expected, CubProxy.PageGuard.Check(uri, text).ToString());
+        Assert.Equal(expected, CatalogWarmup.CheckPage("/cub/tmdb./" + uri, body).ToString());
+    }
+    #endregion
 }

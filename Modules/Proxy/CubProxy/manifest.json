@@ -6,6 +6,8 @@
     "ModInit.cs",
     "ModuleConf.cs",
     "RowFilter.cs",
-    "FilterStore.cs"
+    "FilterStore.cs",
+    "PageGuard.cs",
+    "PageStore.cs"
   ]
 }

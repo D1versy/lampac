@@ -39,6 +39,42 @@ public class ModuleConf : CubConf, Iproxy
     /// </summary>
     public string catalogFilterFile { get; set; } = "/qdl-data/catalog-filter.json";
 
+    /// <summary>
+    /// qdl 2.112: киллсвитч сторожа номера страницы (PageGuard). Выключает всё разом — и
+    /// проверку, и повтор, и подстановку копии; поведение становится ровно таким, как до 2.112.
+    /// ⚠️ Секции "cub" в боевом init.conf нет вовсе, так что дефолт из кода работает сразу.
+    /// </summary>
+    public bool pageGuard { get; set; } = true;
+
+    /// <summary>
+    /// qdl 2.112: отдельный рубильник на ПОВТОР — единственную часть сторожа, которая ходит
+    /// наружу. Выключен — расхождение по-прежнему ловим, тело не кешируем и подставляем копию,
+    /// но лишнего запроса к CUB не делаем.
+    /// </summary>
+    public bool pageGuardRetry { get; set; } = true;
+
+    /// <summary>
+    /// qdl 2.112: сколько минут годится сохранённая копия страницы для подстановки. 0 —
+    /// подстановка выключена (копии всё равно ведём, чтобы после включения не начинать с нуля).
+    /// </summary>
+    public int pageGuardKeepMinutes { get; set; } = 1440;
+
+    /// <summary>
+    /// qdl 2.112: TTL для ВЫЛЕЧЕННОГО повтором тела. Оно верное, но кеш CUB по этому ключу
+    /// сейчас нестабилен — держать его общие 3 часа неразумно.
+    /// </summary>
+    public int pageGuardSuspectMinutes { get; set; } = 15;
+
+    /// <summary>qdl 2.112: потолок повторов за окно PageGuard.SlotMinutes (10 мин).</summary>
+    public int pageGuardRetryCap { get; set; } = 60;
+
+    /// <summary>
+    /// qdl 2.112: сколько подтверждённых расхождений за окно открывают предохранитель. После
+    /// этого сторож только наблюдает: если «врут» ВСЕ ответы, вероятнее ошиблись мы, а сделать
+    /// весь каталог некешируемым хуже, чем показать то, что отдал CUB.
+    /// </summary>
+    public int pageGuardOpenAfter { get; set; } = 20;
+
 
     [JsonProperty("limit_map", ObjectCreationHandling = ObjectCreationHandling.Replace, NullValueHandling = NullValueHandling.Ignore)]
     public List<WafLimitRootMap> limit_map { get; set; }
