@@ -1,4 +1,8 @@
-﻿using System.Text;
+﻿using Newtonsoft.Json.Linq;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Text;
 using Xunit;
 
 namespace QbitDownload.Tests;
@@ -316,13 +320,30 @@ public class CatalogWarmupTests
         return Encoding.UTF8.GetBytes(sb.Append("]}").ToString());
     }
 
+    static HttpResponseMessage Rs(string bucket = null, string id = null, string guard = null)
+    {
+        var rs = new HttpResponseMessage(HttpStatusCode.OK);
+        if (bucket != null) rs.Headers.TryAddWithoutValidation("X-StatiCache-Bucket", bucket);
+        if (id != null) rs.Headers.TryAddWithoutValidation("X-StatiCache-Id", id);
+        if (guard != null) rs.Headers.TryAddWithoutValidation("X-QDL-Page", guard);
+        return rs;
+    }
+
     [Theory]
     [InlineData("/cub/tmdb./?sort=now_playing&page=1&email=", 1)]
     [InlineData("/cub/tmdb./?sort=now_playing&email=", 1)]          // ряд ГЛАВНОЙ ходит без page (§DI)
     [InlineData("/cub/tmdb./?sort=now_playing&page=31&email=", 31)]
     [InlineData("/cub/tmdb./top/hundred/movie", 1)]
+    [InlineData("/cub/tmdb./?PAGE=5", 5)]
     public void Запрошенная_страница_читается_из_адреса(string pathQuery, int expected)
         => Assert.Equal(expected, CatalogWarmup.RequestedPage(pathQuery));
+
+    [Theory]
+    [InlineData("/cub/tmdb./?page=abc")]
+    [InlineData("/cub/tmdb./?page=2&page=9")]     // дубль с разными значениями — судить нечего
+    [InlineData("/cub/tmdb./?page=1.0")]
+    public void Нечитаемая_страница_в_адресе_даёт_skip(string pathQuery)
+        => Assert.Equal(CatalogWarmup.PageVerdict.Skip, CatalogWarmup.CheckPage(pathQuery, Row(1)));
 
     // Боевые случаи дословно: 04.09 ключ ряда держал page 11 на запрос первой страницы;
     // 05.09 перебор дал page=21 -> 2 и page=31 -> 3.
@@ -341,12 +362,18 @@ public class CatalogWarmupTests
 
     [Fact]
     public void Кламп_за_последней_страницей_не_расхождение()
-        => Assert.Equal(CatalogWarmup.PageVerdict.Skip, CatalogWarmup.CheckPage("/cub/tmdb./?page=99999", Row(1)));
+    {
+        Assert.Equal(CatalogWarmup.PageVerdict.Skip, CatalogWarmup.CheckPage("/cub/tmdb./?page=99999", Row(1)));
+        Assert.Equal(CatalogWarmup.PageVerdict.Skip, CatalogWarmup.CheckPage("/cub/tmdb./?page=99999", Row(427)));
+        // а вот чужая страница 2 с total_pages=15 на запрос 18 на кламп не похожа
+        Assert.Equal(CatalogWarmup.PageVerdict.Mismatch, CatalogWarmup.CheckPage("/cub/tmdb./?page=18", Row(2, total: 15)));
+    }
 
     [Theory]
     [InlineData("[{\"id\":0}]")]                       // /blocked отдаёт массив
     [InlineData("{\"page\":1}")]                       // нет results
     [InlineData("{\"results\":[]}")]                   // нет page
+    [InlineData("{\"page\":1.0,\"results\":[]}")]       // дробное — не читаем (единое правило с PageGuard)
     [InlineData("не json")]
     [InlineData("")]
     public void Чужая_форма_тела_прогревом_не_судится(string body)
@@ -356,6 +383,15 @@ public class CatalogWarmupTests
     [Fact]
     public void Пустое_тело_не_роняет_проверку()
         => Assert.Equal(CatalogWarmup.PageVerdict.Skip, CatalogWarmup.CheckPage("/cub/tmdb./?page=1", null));
+
+    [Theory]
+    [InlineData("/cub/tmdb./?sort=now_playing&email=", 1, true)]        // ряд главной
+    [InlineData("/cub/tmdb./?sort=latest&page=1&email=", 1, true)]
+    [InlineData("/cub/tmdb./?sort=now_playing&page=2&email=", 2, false)] // глубже — не главная
+    [InlineData("/cub/tmdb./?sort=top&genre=18&page=1&email=", 1, false)] // жанровый ряд — не свежесть
+    [InlineData("/cub/tmdb./top/hundred/movie?page=1", 1, false)]
+    public void Ряд_главной_это_первая_страница_свежести(string pathQuery, int wanted, bool expected)
+        => Assert.Equal(expected, CatalogWarmup.IsMainRow(pathQuery, wanted));
 
     // Под сверку идут только РЯДЫ: постеры, детали карточки и лента отсекаются селектором
     // HealthIdFor, тем же, что у пассивного хелса.
@@ -376,8 +412,12 @@ public class CatalogWarmupTests
     [InlineData("?sort=now_playing&page=21&email=", 2, 427, "Mismatch")]
     [InlineData("?sort=now_playing&page=31&email=", 3, 427, "Mismatch")]
     [InlineData("?page=99999", 1, 427, "Skip")]
+    [InlineData("?page=99999", 427, 427, "Skip")]
+    [InlineData("?page=18", 2, 15, "Mismatch")]
     [InlineData("?page=427", 3, 427, "Mismatch")]
+    [InlineData("?page=1", 11, -1, "Mismatch")]
     [InlineData("?page=abc", 1, 427, "Skip")]
+    [InlineData("?page=2&page=9", 2, 427, "Skip")]
     [InlineData("top/hundred/movie", 1, 5, "Match")]
     public void Сторож_страницы_в_двух_модулях_судит_одинаково(string uri, int bodyPage, int total, string expected)
     {
@@ -386,6 +426,149 @@ public class CatalogWarmupTests
 
         Assert.Equal(expected, CubProxy.PageGuard.Check(uri, text).ToString());
         Assert.Equal(expected, CatalogWarmup.CheckPage("/cub/tmdb./" + uri, body).ToString());
+    }
+
+    // Те же две копии на СЫРЫХ телах — ровно там, где они расходились до выравнивания парсеров
+    // (дробные числа, строки, null, нестрогий JSON).
+    [Theory]
+    [InlineData("?page=1", "{\"page\":\"1\",\"total_pages\":427,\"results\":[]}", "Match")]
+    [InlineData("?page=1", "{\"page\":1.0,\"total_pages\":427,\"results\":[]}", "Skip")]
+    [InlineData("?page=1", "{\"page\":11.0,\"total_pages\":427,\"results\":[]}", "Skip")]
+    [InlineData("?page=1", "{\"page\":1e0,\"results\":[]}", "Skip")]
+    [InlineData("?page=99999", "{\"page\":1,\"total_pages\":427.0,\"results\":[]}", "Mismatch")]   // дробный total — как отсутствующий
+    [InlineData("?page=1", "{\"page\":1,\"total_pages\":\"427\",\"results\":[]}", "Match")]
+    [InlineData("?page=1", "{\"page\":1,\"total_pages\":null,\"results\":[]}", "Match")]
+    [InlineData("?page=1", "{\"page\":1,\"total_pages\":0,\"results\":[]}", "Skip")]              // пустая лента
+    [InlineData("?page=1", "{\"page\":11,\"total_pages\":0,\"results\":[{\"id\":1}]}", "Mismatch")]
+    [InlineData("?page=1", "{\"page\":null,\"results\":[]}", "Skip")]
+    [InlineData("?page=1", "[{\"page\":11}]", "Skip")]
+    [InlineData("?page=1", "{\"page\":11,\"results\":{}}", "Skip")]
+    [InlineData("?page=1", "{\"page\":99999999999,\"results\":[]}", "Skip")]
+    [InlineData("?page=1", "{\"page\":\" 11 \",\"results\":[]}", "Mismatch")]                    // int.TryParse терпит пробелы — в обеих
+    [InlineData("?page=1", "{'page':11,'results':[]}", "Mismatch")]                             // Newtonsoft терпит одинарные кавычки — в обеих
+    [InlineData("?page=1", "{\"page\":11,\"results\":[],}", "Mismatch")]                        // и висячую запятую — в обеих
+    [InlineData("?page=1", "{\"page\":11,\"results\":[]} x", "Skip")]                           // мусор после json — в обеих
+    public void Сторож_страницы_в_двух_модулях_одинаков_на_сырых_телах(string uri, string body, string expected)
+    {
+        Assert.Equal(expected, CubProxy.PageGuard.Check(uri, body).ToString());
+        Assert.Equal(expected, CatalogWarmup.CheckPage("/cub/tmdb./" + uri, Encoding.UTF8.GetBytes(body)).ToString());
+    }
+
+    // ── бухгалтерия аудита: то, что владелец реально увидит ────────────────────────────────
+
+    [Fact]
+    public void Аудит_считает_расхождения_и_публикует_снимок()
+    {
+        TestEnv.FreshCache();
+        CatalogWarmup.ResetPageAuditForTests();
+        const string H = "192.168.87.24:9118";
+
+        CatalogWarmup.NotePage(H, "/cub/tmdb./?sort=now_playing&email=", Row(11), "application/json", miss: false, Rs("30", "abc"));
+        CatalogWarmup.NotePage(H, "/cub/tmdb./?sort=latest&page=1&email=", Row(1), "application/json", miss: true, Rs());
+        CatalogWarmup.NotePage(H, "/cub/tmdb./?sort=top&genre=18&page=3&email=", Row(7), "application/json", miss: false, Rs("2", "zzz"));
+
+        // до публикации снимок описывает ПРОШЛЫЙ обход — то есть пуст
+        Assert.Equal(0, (int)CatalogWarmup.PageHealthSnapshot()["checked"]);
+
+        CatalogWarmup.PublishPageAuditForTests(rows: 86);
+        var s = CatalogWarmup.PageHealthSnapshot();
+
+        Assert.Equal(3, (int)s["checked"]);
+        Assert.Equal(2, (int)s["bad"]);
+        Assert.Equal(1, (int)s["badMain"]);      // ряд главной — отдельным счётчиком
+        Assert.Equal(86, (int)s["rows"]);
+        Assert.NotNull(s["at"]);
+
+        var samples = ((JArray)s["samples"]).Select(x => (string)x).ToArray();
+        Assert.Equal(2, samples.Length);
+        Assert.Contains(samples, x => x.Contains("now_playing p1→11 HIT ГЛАВНАЯ"));
+        Assert.Contains(samples, x => x.Contains("top p3→7 HIT"));
+
+        var (items, total) = QdlEvents.Read(10);
+        Assert.Equal(2, total);
+        Assert.All(items, i => Assert.Equal(QdlEvents.CatDiag, i.Value<string>("cat")));
+        Assert.Contains(items, i => i.Value<string>("text").Contains("static/30/abc*") && i.Value<string>("act").Contains("rm -f /c/static/30/abc*"));
+    }
+
+    [Fact]
+    public void Аудит_не_судит_не_json_и_детали_карточки()
+    {
+        TestEnv.FreshCache();
+        CatalogWarmup.ResetPageAuditForTests();
+
+        CatalogWarmup.NotePage("h", "/cub/tmdb./?page=1", Row(11), "text/html", false, Rs());
+        CatalogWarmup.NotePage("h", "/cub/tmdb./3/movie/1?page=1", Row(11), "application/json", false, Rs());
+        CatalogWarmup.PublishPageAuditForTests(rows: 2);
+
+        Assert.Equal(0, (int)CatalogWarmup.PageHealthSnapshot()["checked"]);
+        Assert.Equal(0, QdlEvents.Read(10).total);
+    }
+
+    [Fact]
+    public void Примеров_не_больше_восьми_а_счётчик_честный_и_журнал_не_спамит()
+    {
+        TestEnv.FreshCache();
+        CatalogWarmup.ResetPageAuditForTests();
+
+        for (int i = 0; i < 12; i++)
+            CatalogWarmup.NotePage("h", "/cub/tmdb./?sort=top&genre=" + i + "&page=1", Row(11), "application/json", false, Rs("1", "id" + i));
+
+        CatalogWarmup.PublishPageAuditForTests(rows: 12);
+        var s = CatalogWarmup.PageHealthSnapshot();
+
+        Assert.Equal(12, (int)s["bad"]);
+        Assert.Equal(8, ((JArray)s["samples"]).Count);
+
+        // первые 8 — отдельными строками с командой сноса, дальше одна сводная
+        var (items, total) = QdlEvents.Read(50);
+        Assert.Equal(9, total);
+        Assert.Single(items, i => i.Value<string>("key") == "cubpage:summary");
+    }
+
+    [Fact]
+    public void Аудит_считает_вмешательства_сторожа_на_своих_промахах()
+    {
+        TestEnv.FreshCache();
+        CatalogWarmup.ResetPageAuditForTests();
+
+        CatalogWarmup.NotePage("h", "/cub/tmdb./?sort=now_playing&page=2", Row(2), "application/json", true, Rs(guard: "healed"));
+        CatalogWarmup.NotePage("h", "/cub/tmdb./?sort=now_playing&page=3", Row(3), "application/json", true, Rs(guard: "restored"));
+        CatalogWarmup.NotePage("h", "/cub/tmdb./?sort=now_playing&page=4", Row(4), "application/json", true, Rs(guard: "match"));
+        CatalogWarmup.PublishPageAuditForTests(rows: 3);
+
+        var g = (JObject)CatalogWarmup.PageHealthSnapshot()["guard"];
+        Assert.Equal(1, (int)g["healed"]);
+        Assert.Equal(1, (int)g["restored"]);
+        Assert.Equal(0, (int)g["mismatch"]);
+    }
+
+    [Fact]
+    public void Повтор_того_же_адреса_и_хоста_в_журнал_не_дублируется_а_другой_хост_попадает()
+    {
+        TestEnv.FreshCache();
+        CatalogWarmup.ResetPageAuditForTests();
+
+        CatalogWarmup.NotePage("lan", "/cub/tmdb./?sort=now_playing&email=", Row(11), "application/json", false, Rs("1", "a"));
+        CatalogWarmup.NotePage("lan", "/cub/tmdb./?sort=now_playing&email=", Row(11), "application/json", false, Rs("1", "a"));
+        CatalogWarmup.NotePage("ext", "/cub/tmdb./?sort=now_playing&email=", Row(11), "application/json", false, Rs("2", "b"));
+
+        // отравление ПО-ХОСТОВОЕ: у внешнего входа своя запись и своя команда сноса
+        Assert.Equal(2, QdlEvents.Read(10).total);
+    }
+
+    [Fact]
+    public void Сброс_снимка_не_привязан_к_ResetForTests()
+    {
+        // ResetForTests зовётся из Reload() при promote — снимок обхода этого процесса он трогать не должен
+        CatalogWarmup.ResetPageAuditForTests();
+        CatalogWarmup.NotePage("h", "/cub/tmdb./?sort=latest&page=1", Row(1), "application/json", false, Rs());
+        CatalogWarmup.PublishPageAuditForTests(rows: 1);
+
+        CatalogWarmup.ResetForTests();
+        Assert.Equal(1, (int)CatalogWarmup.PageHealthSnapshot()["checked"]);
+
+        CatalogWarmup.ResetPageAuditForTests();
+        Assert.Equal(0, (int)CatalogWarmup.PageHealthSnapshot()["checked"]);
     }
     #endregion
 }

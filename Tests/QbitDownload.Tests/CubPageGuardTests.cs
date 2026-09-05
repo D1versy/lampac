@@ -5,20 +5,19 @@ using Xunit;
 namespace QbitDownload.Tests;
 
 // Сторож номера страницы в рядах каталога CUB (qdl 2.112) — Modules/Proxy/CubProxy/PageGuard.cs.
-//
-// Дефект (§DI, §DO): у CUB перед API свой кеш nginx, и он периодически отдаёт тело ЧУЖОЙ
-// страницы. Мы примораживаем это на cache_api (3 ч) отдельно под каждый вход, и владелец видит
-// в топе главной одиннадцатую страницу живого потока.
-//
-// Что здесь под защитой:
-//  • 🔴 адрес БЕЗ параметра page означает первую страницу — именно так ходит ряд ГЛАВНОЙ, и
-//    именно он был пострадавшим. Проверять только явный page= значит не закрыть главный симптом;
-//  • запрос за пределы total_pages — законный кламп апстрима, а НЕ отравление: без этого правила
-//    сторож молотил бы повторы на каждом заходе за край ленты;
+// Дефект и замеры — шапка PageGuard.cs и §DI/§DO. Что здесь под защитой:
+//  • 🔴 адрес БЕЗ параметра page означает первую страницу — так ходит ряд ГЛАВНОЙ, и именно он
+//    был пострадавшим. Проверять только явный page= значит не закрыть главный симптом;
+//  • кламп за краем ленты признаётся, только если тело на него ПОХОЖЕ (пришла первая или
+//    последняя страница): total_pages берётся из подозрительного тела и у одного ряда нестабилен;
+//  • числа читаются строго (integer/string, не 1.0) — единое правило с копией в CatalogWarmup;
 //  • чужая форма тела (у /blocked это МАССИВ) — строго no-op, как и у RowFilter;
-//  • кандидатность гейтит буферизацию, поэтому картинки и детали карточки в неё попадать не должны;
-//  • 🔴 повтор не смеет менять page: добор соседних страниц отменён в 2.94 (§DA);
-//  • предохранитель открывается на потоке расхождений и не залипает между окнами.
+//  • 🔴 повтор не смеет менять page: добор соседних страниц отменён в 2.94 (§DA) — равенство дословно;
+//  • ключ копии одинаков для ряда главной и «Ещё» стр. 1 — это одна апстримная страница;
+//  • предохранитель: открывается ТОЛЬКО от подтверждённых расхождений, повторы ограничены
+//    потолком, окно сбрасывается вперёд и не откатывается назад, ноль везде значит «выключено»;
+//  • решение по ответу (Decide) — чистое: ветка «предохранитель открыт → только наблюдать»
+//    иначе жила бы только в контроллере, недостижимом для тестов.
 public class CubPageGuardTests
 {
     static string Row(int page, int totalPages = 427, int cards = 3)
@@ -34,7 +33,7 @@ public class CubPageGuardTests
         return sb.Append("]}").ToString();
     }
 
-    // ── кандидаты ───────────────────────────────────────────────────────────────────────────
+    // ── кандидаты (общее правило с фильтром по году — RowFilter.IsCatalogApi) ───────────────
 
     [Theory]
     [InlineData("tmdb", "?sort=now_playing&email=", true)]                    // ряд главной
@@ -49,7 +48,10 @@ public class CubPageGuardTests
     [InlineData("geo", "", false)]
     [InlineData("", "api/reactions/get/movie_1", false)]
     public void Кандидаты_только_json_api_каталога(string subdomain, string uri, bool expected)
-        => Assert.Equal(expected, PageGuard.IsCandidate(subdomain, uri));
+    {
+        Assert.Equal(expected, PageGuard.IsCandidate(subdomain, uri));
+        Assert.Equal(expected, RowFilter.IsCatalogApi(subdomain, uri));   // одно правило — один источник
+    }
 
     [Fact]
     public void Кандидат_не_падает_на_пустом_адресе()
@@ -64,6 +66,8 @@ public class CubPageGuardTests
     [InlineData("?sort=now_playing&page=1&email=", 1)]
     [InlineData("?sort=now_playing&page=31&email=", 31)]
     [InlineData("?page=7", 7)]
+    [InlineData("?PAGE=5", 5)]                  // регистр не важен
+    [InlineData("?page=2&page=2", 2)]           // дубль с тем же значением — не спор
     public void Страница_читается_из_запроса(string uri, int expected)
         => Assert.Equal(expected, PageGuard.RequestedPage(uri));
 
@@ -73,6 +77,7 @@ public class CubPageGuardTests
     [InlineData("?sort=now_playing&email=")]
     [InlineData("top/hundred/movie")]
     [InlineData("")]
+    [InlineData("?page")]                       // нет «=» — считаем, что параметра нет
     public void Без_параметра_page_ждём_первую(string uri)
         => Assert.Equal(1, PageGuard.RequestedPage(uri));
 
@@ -81,6 +86,8 @@ public class CubPageGuardTests
     [InlineData("?page=")]
     [InlineData("?page=0")]
     [InlineData("?page=-3")]
+    [InlineData("?page=1.0")]
+    [InlineData("?page=2&page=9")]              // дубль с РАЗНЫМИ значениями — у фреймворков выигрывает то первый, то последний
     public void Нечитаемая_страница_проверке_не_подлежит(string uri)
     {
         Assert.Null(PageGuard.RequestedPage(uri));
@@ -107,24 +114,50 @@ public class CubPageGuardTests
     public void Тело_чужой_страницы_ловится(string uri, int got)
         => Assert.Equal(PageGuard.Verdict.Mismatch, PageGuard.Check(uri, Row(got)));
 
+    [Fact]
+    public void Judge_отдаёт_цифры_для_контроллера_и_журнала()
+    {
+        var j = PageGuard.Judge("?sort=now_playing&page=1&email=", Row(11, cards: 5));
+        Assert.Equal(PageGuard.Verdict.Mismatch, j.verdict);
+        Assert.Equal(1, j.wanted);
+        Assert.Equal(11, j.got);
+        Assert.Equal(5, j.results);
+    }
+
+    // ── кламп за краем ленты ────────────────────────────────────────────────────────────────
+
     // ⚠️ За последней страницей апстрим вправе клампить — это НЕ отравление. Без этого правила
     // сторож делал бы повтор на каждом заходе за край ленты.
+    [Theory]
+    [InlineData(1)]      // откатил на первую
+    [InlineData(427)]    // или на последнюю
+    public void Кламп_за_последней_страницей_не_расхождение(int got)
+        => Assert.Equal(PageGuard.Verdict.Skip, PageGuard.Check("?page=99999", Row(got, totalPages: 427)));
+
+    // 🔴 total_pages приходит из ПОДОЗРИТЕЛЬНОГО тела и у одного ряда нестабилен (15 на page=1,
+    // 21 на page=2 — §CW). Чужая страница 2 с total_pages=15 на запрос page=18 — это отравление,
+    // а не кламп: на кламп тело не похоже.
     [Fact]
-    public void Запрос_за_пределами_total_pages_не_расхождение()
-        => Assert.Equal(PageGuard.Verdict.Skip, PageGuard.Check("?page=99999", Row(1, totalPages: 427)));
+    public void Ложный_кламп_из_чужого_тела_ловится()
+        => Assert.Equal(PageGuard.Verdict.Mismatch, PageGuard.Check("?page=18", Row(2, totalPages: 15)));
 
     [Fact]
     public void Ровно_на_последней_странице_проверяем()
         => Assert.Equal(PageGuard.Verdict.Mismatch, PageGuard.Check("?page=427", Row(3, totalPages: 427)));
 
     [Fact]
-    public void Без_total_pages_проверяем_как_обычно()
-    {
-        string body = "{\"page\":11,\"results\":[{\"id\":1}]}";
-        Assert.Equal(PageGuard.Verdict.Mismatch, PageGuard.Check("?page=1", body));
-    }
+    public void Отрицательный_total_pages_игнорируется_а_страница_судится()
+        => Assert.Equal(PageGuard.Verdict.Mismatch, PageGuard.Check("?page=1", Row(11, totalPages: -1)));
 
-    // ── чужая форма тела ────────────────────────────────────────────────────────────────────
+    [Fact]
+    public void Пустая_лента_проверке_не_подлежит()
+        => Assert.Equal(PageGuard.Verdict.Skip, PageGuard.Check("?page=1", Row(1, totalPages: 0, cards: 0)));
+
+    [Fact]
+    public void Без_total_pages_проверяем_как_обычно()
+        => Assert.Equal(PageGuard.Verdict.Mismatch, PageGuard.Check("?page=1", "{\"page\":11,\"results\":[{\"id\":1}]}"));
+
+    // ── форма тела ──────────────────────────────────────────────────────────────────────────
 
     // /blocked отдаёт МАССИВ, а не объект — сторож обязан быть на нём строго no-op.
     [Theory]
@@ -134,6 +167,7 @@ public class CubPageGuardTests
     [InlineData("{\"results\":[]}")]                              // нет page
     [InlineData("{\"page\":null,\"results\":[]}")]
     [InlineData("{\"page\":\"хрень\",\"results\":[]}")]
+    [InlineData("{\"page\":1,\"results\":{}}")]                    // results не массив
     [InlineData("не json вовсе")]
     [InlineData("")]
     [InlineData(null)]
@@ -144,29 +178,41 @@ public class CubPageGuardTests
     public void Строковый_номер_страницы_понимается()
         => Assert.Equal(PageGuard.Verdict.Match, PageGuard.Check("?page=2", "{\"page\":\"2\",\"results\":[]}"));
 
-    // ── кеш-бастер ──────────────────────────────────────────────────────────────────────────
-
-    // 🔴 Повтор — ровно тот же адрес плюс уникальный параметр. Ни page±1, ни склейки соседних
-    // страниц: именно добор давал дубли в «Ещё» и отменён в 2.94 (§DA).
+    // Числа — строго целые: 1.0 и 1e0 не читаются. Это ЕДИНОЕ правило с копией в CatalogWarmup:
+    // Newtonsoft печатал 1.0 как "1", а System.Text.Json на 1.0 падал — копии расходились.
     [Theory]
-    [InlineData("https://tmdb.cub.best/?sort=now_playing&page=1&email=")]
-    [InlineData("https://tmdb.cub.best/top/hundred/movie")]
-    public void Кеш_бастер_не_меняет_запрошенную_страницу(string requri)
+    [InlineData("{\"page\":1.0,\"results\":[]}")]
+    [InlineData("{\"page\":11.0,\"results\":[]}")]
+    [InlineData("{\"page\":1e0,\"results\":[]}")]
+    [InlineData("{\"page\":99999999999,\"results\":[]}")]        // не влезает в int
+    public void Дробные_и_огромные_числа_не_читаются(string body)
     {
-        string bust = PageGuard.BustUrl(requri, "abc123");
-
-        Assert.Contains(PageGuard.BustKey + "=abc123", bust);
-        Assert.StartsWith(requri, bust);
-
-        // номер страницы в адресе обязан остаться прежним
-        int? before = PageGuard.RequestedPage(requri.Substring(requri.IndexOf('/', 8) + 1));
-        int? after = PageGuard.RequestedPage(bust.Substring(bust.IndexOf('/', 8) + 1));
-        Assert.Equal(before, after);
+        Assert.Null(PageGuard.Shape(body).page);
+        Assert.Equal(PageGuard.Verdict.Skip, PageGuard.Check("?page=1", body));
     }
 
     [Fact]
-    public void Бастер_не_ломает_адрес_без_вопроса()
-        => Assert.Equal("https://x/y?d1v=n", PageGuard.BustUrl("https://x/y", "n"));
+    public void Shape_считает_карточки()
+    {
+        Assert.Equal(3, PageGuard.Shape(Row(1)).results);
+        Assert.Equal(0, PageGuard.Shape(Row(1, cards: 0)).results);
+        Assert.Equal(-1, PageGuard.Shape("[1,2]").results);
+    }
+
+    // ── кеш-бастер ──────────────────────────────────────────────────────────────────────────
+
+    // 🔴 Повтор — ровно тот же адрес плюс уникальный параметр. Ни page±1, ни склейки соседних
+    // страниц: именно добор давал дубли в «Ещё» и отменён в 2.94 (§DA). Равенство ДОСЛОВНО —
+    // иначе бастер, дописывающий «&page=2&d1v=…», прошёл бы проверку по StartsWith.
+    [Theory]
+    [InlineData("https://tmdb.cub.best/?sort=now_playing&page=1&email=", "&")]
+    [InlineData("http://tmdb.cub.red/top/hundred/movie", "?")]
+    public void Кеш_бастер_только_дописывает_параметр(string requri, string sep)
+        => Assert.Equal(requri + sep + PageGuard.BustKey + "=abc123", PageGuard.BustUrl(requri, "abc123"));
+
+    [Fact]
+    public void Бастер_поверх_бастера_просто_дописывается()
+        => Assert.Equal("https://x/y?d1v=old&d1v=new", PageGuard.BustUrl("https://x/y?d1v=old", "new"));
 
     // ── ключ хранилища копий ────────────────────────────────────────────────────────────────
 
@@ -182,13 +228,29 @@ public class CubPageGuardTests
         Assert.Contains("sort=now_playing", a);
     }
 
+    // Ряд главной (без page) и «Ещё» стр. 1 — одна апстримная страница: копия с любого из них
+    // годится обоим, а главный пострадавший как раз ряд главной.
+    [Fact]
+    public void Ряд_главной_и_первая_страница_Ещё_это_одна_копия()
+        => Assert.Equal(PageGuard.StoreKey("?sort=now_playing&email="), PageGuard.StoreKey("?sort=now_playing&page=1&email="));
+
+    [Fact]
+    public void Адрес_без_параметров_и_с_одними_летучими_это_один_ключ()
+    {
+        Assert.Equal(PageGuard.StoreKey("top/hundred/movie"), PageGuard.StoreKey("top/hundred/movie?email="));
+        Assert.DoesNotContain("?email", PageGuard.StoreKey("top/hundred/movie?email="));
+    }
+
     [Fact]
     public void Порядок_параметров_на_ключ_не_влияет()
         => Assert.Equal(PageGuard.StoreKey("?sort=latest&page=2"), PageGuard.StoreKey("?page=2&sort=latest"));
 
-    [Fact]
-    public void Разные_страницы_это_разные_ключи()
-        => Assert.NotEqual(PageGuard.StoreKey("?sort=latest&page=1"), PageGuard.StoreKey("?sort=latest&page=2"));
+    [Theory]
+    [InlineData("?sort=latest&page=1", "?sort=latest&page=2")]
+    [InlineData("?sort=latest&page=1", "?sort=latest&page=10")]   // «page=1» не префикс «page=10»
+    [InlineData("?sort=latest&page=1", "?sort=now_playing&page=1")]
+    public void Разные_страницы_и_ряды_это_разные_ключи(string a, string b)
+        => Assert.NotEqual(PageGuard.StoreKey(a), PageGuard.StoreKey(b));
 
     // ── годность копии для подстановки ──────────────────────────────────────────────────────
 
@@ -204,59 +266,113 @@ public class CubPageGuardTests
         Assert.False(PageGuard.Usable(1, now, wanted: 1, now, keepMinutes: 0));                       // выключено
     }
 
+    [Fact]
+    public void Годность_копии_границы()
+    {
+        var now = new DateTimeOffset(2026, 9, 5, 22, 0, 0, TimeSpan.Zero);
+
+        Assert.True(PageGuard.Usable(1, now.AddMinutes(-1440), 1, now, 1440));                  // ровно на границе — годна
+        Assert.False(PageGuard.Usable(1, now.AddMinutes(-1440).AddSeconds(-1), 1, now, 1440));
+        Assert.False(PageGuard.Usable(1, default, 1, now, 1440));                               // нет mtime
+        Assert.True(PageGuard.Usable(1, now.AddDays(3), 1, now, 1440));                         // часы уехали вперёд — не выбрасываем
+    }
+
+    // ── решение по ответу ───────────────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("Skip", false, false, false, "PassThrough")]
+    [InlineData("Match", false, false, true, "PassThrough")]
+    [InlineData("Mismatch", false, true, true, "Healed")]
+    [InlineData("Mismatch", true, true, true, "Healed")]          // вылечили — предохранитель ни при чём
+    [InlineData("Mismatch", true, false, true, "Fuse")]           // открыт: только наблюдаем, копию НЕ подставляем
+    [InlineData("Mismatch", false, false, true, "Restored")]
+    [InlineData("Mismatch", false, false, false, "MismatchNoCache")]
+    public void Решение_по_ответу(string verdict, bool fuseOpen, bool healed, bool hasCopy, string expected)
+        => Assert.Equal(expected, PageGuard.Decide(Enum.Parse<PageGuard.Verdict>(verdict), fuseOpen, healed, hasCopy).ToString());
+
     // ── предохранитель ──────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public void Предохранитель_открывается_на_потоке_расхождений()
+    public void Предохранитель_открывается_на_потоке_подтверждённых_расхождений()
     {
         var f = default(PageGuard.Fuse);
-        long slot = PageGuard.SlotOf(DateTime.UtcNow);
+        const long slot = 100;
 
         for (int i = 0; i < 3; i++)
-            f = PageGuard.Note(f, slot, retried: true, confirmed: true, retryCap: 60, openAfter: 3);
+            f = PageGuard.Note(f, slot, retried: true, confirmed: true);
 
-        Assert.True(f.open);
-        Assert.False(PageGuard.MayRetry(f, slot, retryCap: 60));
+        Assert.True(PageGuard.Open(f, slot, openAfter: 3));
+        Assert.False(PageGuard.MayRetry(f, slot, retryCap: 60, openAfter: 3));
 
-        // ⚠️ негативный контроль: без порога тот же поток предохранитель НЕ открывает
-        var g = default(PageGuard.Fuse);
-        for (int i = 0; i < 3; i++)
-            g = PageGuard.Note(g, slot, retried: true, confirmed: true, retryCap: 60, openAfter: 0);
+        // ⚠️ негативный контроль: с порогом «никогда» тот же поток предохранитель НЕ открывает
+        Assert.False(PageGuard.Open(f, slot, openAfter: 0));
+        Assert.True(PageGuard.MayRetry(f, slot, retryCap: 60, openAfter: 0));
+    }
 
-        Assert.False(g.open);
+    [Fact]
+    public void Предохранитель_не_открывается_раньше_порога()
+    {
+        var f = default(PageGuard.Fuse);
+        for (int i = 0; i < 2; i++) f = PageGuard.Note(f, 100, retried: true, confirmed: true);
+        Assert.False(PageGuard.Open(f, 100, openAfter: 3));
     }
 
     [Fact]
     public void Предохранитель_не_залипает_между_окнами()
     {
         var f = default(PageGuard.Fuse);
-        long slot = PageGuard.SlotOf(DateTime.UtcNow);
+        for (int i = 0; i < 5; i++) f = PageGuard.Note(f, 100, retried: true, confirmed: true);
 
-        for (int i = 0; i < 5; i++)
-            f = PageGuard.Note(f, slot, retried: true, confirmed: true, retryCap: 60, openAfter: 3);
+        Assert.True(PageGuard.Open(f, 100, openAfter: 3));
+        Assert.False(PageGuard.Open(f, 101, openAfter: 3));                       // новое окно — закрыт
+        Assert.True(PageGuard.MayRetry(f, 101, retryCap: 60, openAfter: 3));      // и повторы снова можно
 
-        Assert.True(f.open);
-        Assert.True(PageGuard.MayRetry(f, slot + 1, retryCap: 60));       // новое окно — можно
+        f = PageGuard.Note(f, 101, retried: true, confirmed: false);
+        Assert.Equal((101L, 1, 0), (f.slot, f.retries, f.confirmed));
+    }
 
-        f = PageGuard.Note(f, slot + 1, retried: true, confirmed: false, retryCap: 60, openAfter: 3);
-        Assert.False(f.open);
-        Assert.Equal(1, f.retries);
-        Assert.Equal(0, f.confirmed);
+    [Fact]
+    public void Окно_не_откатывается_назад()
+    {
+        // Запрос A начал повтор в старом окне, B уже перевёл счётчики в новое; Note от A не должен
+        // обнулить новое окно и вернуть старое.
+        var f = PageGuard.Note(default, 101, retried: true, confirmed: false);
+        f = PageGuard.Note(f, 100, retried: false, confirmed: true);
+        Assert.Equal((101L, 1, 1), (f.slot, f.retries, f.confirmed));
     }
 
     [Fact]
     public void Повторы_ограничены_потолком_за_окно()
     {
         var f = default(PageGuard.Fuse);
-        long slot = PageGuard.SlotOf(DateTime.UtcNow);
 
         for (int i = 0; i < 4; i++)
         {
-            Assert.True(PageGuard.MayRetry(f, slot, retryCap: 4));
-            f = PageGuard.Note(f, slot, retried: true, confirmed: false, retryCap: 4, openAfter: 0);
+            Assert.True(PageGuard.MayRetry(f, 100, retryCap: 4, openAfter: 20));
+            f = PageGuard.Note(f, 100, retried: true, confirmed: false);
         }
 
-        Assert.False(PageGuard.MayRetry(f, slot, retryCap: 4));
+        Assert.False(PageGuard.MayRetry(f, 100, retryCap: 4, openAfter: 20));
+        Assert.False(PageGuard.Open(f, 100, openAfter: 20));   // потолок повторов — не предохранитель
+    }
+
+    [Fact]
+    public void Ноль_повторов_значит_повторов_нет()
+    {
+        // 0 везде в секции значит «выключено» (keepMinutes, suspectMinutes) — и здесь тоже,
+        // иначе владелец, выключая походы наружу через 0, получил бы безлимит.
+        Assert.False(PageGuard.MayRetry(default, 100, retryCap: 0, openAfter: 20));
+        Assert.False(PageGuard.MayRetry(default, 100, retryCap: -1, openAfter: 20));
+    }
+
+    [Fact]
+    public void Без_повторов_предохранитель_не_взводится()
+    {
+        // pageGuardRetry=false: подтвердить, что врёт сам ответ, нечем — confirmed не растёт
+        var f = default(PageGuard.Fuse);
+        for (int i = 0; i < 30; i++) f = PageGuard.Note(f, 100, retried: false, confirmed: false);
+        Assert.Equal(0, f.confirmed);
+        Assert.False(PageGuard.Open(f, 100, openAfter: 20));
     }
 
     [Fact]

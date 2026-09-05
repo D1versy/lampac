@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -159,7 +160,7 @@ public static class CatalogWarmup
     /// <summary>Периодический прогрев. Зовётся из ModInit.Activate — только у ведущего (Deploy): дежурный не пишет состояние.</summary>
     public static void StartTimer()
     {
-        int period = Math.Max(5, ModInit.conf != null && ModInit.conf.catalogWarmupPeriodMin > 0 ? ModInit.conf.catalogWarmupPeriodMin : 15);
+        int period = EffectivePeriodMin();
         _timer?.Dispose();
         _timer = new Timer(async _ =>
         {
@@ -834,7 +835,6 @@ public static class CatalogWarmup
                 return;
 
             _tickHealth.Clear();   // агрегат «упало ВСЁ» живёт ровно один тик
-            ResetPageAudit();      // аудит страниц тоже описывает ПОСЛЕДНИЙ обход, а не всю жизнь процесса
 
             int pruneDays = Math.Max(1, conf.catalogWarmupPruneDays);
             foreach (var kv in _rows)
@@ -922,6 +922,9 @@ public static class CatalogWarmup
                 await Task.Delay(100);
             }
 
+            // обход рядов завершён — публикуем снимок аудита страниц (бюджеты постеров/карточек ниже — минуты)
+            PublishPageAudit(rows.Length, Deploy.Draining);
+
             int posterMiss = await WarmList(port, posters, posterBudget, _posterCur, v => _posterCur = v);
             int backdropMiss = await WarmList(port, backdrops, backdropBudget, _backdropCur, v => _backdropCur = v);
             var (cardsDone, cardUrls, cardMiss) = await WarmCards(port, cards, cardBudget);
@@ -936,11 +939,10 @@ public static class CatalogWarmup
             bool deadChanged = deadNow != _deadLogged;
             _deadLogged = deadNow;
 
-            if (miss > 0 || fail > 0 || posterMiss > 0 || backdropMiss > 0 || cardMiss > 0 || feedMiss > 0 || deadChanged)
-                Console.WriteLine($"[QbitDownload] catalog warmup: rows {rows.Length} (miss {miss}, fail {fail}, dead {deadNow}, skip {deadSkipped}{(ignoreQuarantine ? ", карантин отключён — мёртвых больше половины" : "")}), posters {Math.Min(posters.Count, posterBudget)}/{posters.Count} (miss {posterMiss}), backdrops {Math.Min(backdrops.Count, backdropBudget)}/{backdrops.Count} (miss {backdropMiss}), cards {cardsDone}/{cards.Count} ({cardUrls} url, miss {cardMiss}), tmpl {_tmpl.Count}{(feedOk ? $", feed {feedUrls} url (miss {feedMiss})" : "")}");
+            if (miss > 0 || fail > 0 || _pubBad > 0 || posterMiss > 0 || backdropMiss > 0 || cardMiss > 0 || feedMiss > 0 || deadChanged)
+                Console.WriteLine($"[QbitDownload] catalog warmup: rows {rows.Length} (miss {miss}, fail {fail}, dead {deadNow}, skip {deadSkipped}{(ignoreQuarantine ? ", карантин отключён — мёртвых больше половины" : "")}), posters {Math.Min(posters.Count, posterBudget)}/{posters.Count} (miss {posterMiss}), backdrops {Math.Min(backdrops.Count, backdropBudget)}/{backdrops.Count} (miss {backdropMiss}), cards {cardsDone}/{cards.Count} ({cardUrls} url, miss {cardMiss}), tmpl {_tmpl.Count}, pages {_pubChecked} (bad {_pubBad}){(feedOk ? $", feed {feedUrls} url (miss {feedMiss})" : "")}");
 
             FlushTickHealth(Math.Max(1, conf.healthAllFailMinSamples));
-            _pageAt = DateTime.UtcNow;
 
             if (_dirty) { _dirty = false; Save(); }
         }
@@ -1241,33 +1243,41 @@ public static class CatalogWarmup
          : null;
 
     #region аудит номера страницы (qdl 2.112)
-    // ── Второй, независимый сторож дефекта из §DI/§DO ────────────────────────────────────────
-    // У CUB перед API свой кеш nginx, и он периодически отдаёт тело ЧУЖОЙ страницы; мы
-    // примораживаем это на cache_api (3 ч) отдельно под каждый вход, и владелец видит в топе
-    // главной одиннадцатую страницу живого потока.
+    // ── Второй, независимый сторож дефекта §DI/§DO ────────────────────────────────────────────
+    // Дефект, замеры и правила — шапка Modules/Proxy/CubProxy/PageGuard.cs. Здесь — почему копия:
+    // предотвращение в CubProxy видит ТОЛЬКО промахи (на HIT контроллер не исполняется), а
+    // отравленная запись раздаётся клиентам именно с HIT-ов все три часа. Прогрев ходит по
+    // РЕАЛЬНЫМ клиентским ключам (86 адресов в боевом реестре) и видит то, что получает зритель.
     //
-    // Предотвращение живёт в CubProxy.PageGuard — но оно видит ТОЛЬКО промахи: на HIT контроллер
-    // не исполняется вовсе, а отравленная запись раздаётся клиентам именно с HIT-ов, все три
-    // часа. Поэтому наблюдение обязано стоять здесь: прогрев и так ходит по РЕАЛЬНЫМ клиентским
-    // ключам (86 адресов в боевом реестре) и видит ровно то, что получает зритель.
-    //
-    // 🔴 Логика намеренно продублирована с CubProxy.PageGuard — модули компилируются в разные
-    // сборки и типами связаться не могут. Расхождение двух копий ловится машинно: тест
-    // «Сторож_страницы_в_двух_модулях_судит_одинаково» прогоняет общий корпус через обе.
+    // 🔴 Логика намеренно продублирована с CubProxy.PageGuard — модули в разных сборках. Обе
+    // копии на ОДНОМ парсере (Newtonsoft, целые числа только как integer/string): на дробных
+    // числах и нестрогом JSON они иначе расходились. Расхождение ловит тест
+    // «Сторож_страницы_в_двух_модулях_судит_одинаково» на корпусе сырых тел. Правишь там —
+    // правь и здесь.
     public enum PageVerdict { Skip, Match, Mismatch }
 
-    static int _pageChecked, _pageBad;
-    static DateTime _pageAt;
-    static readonly object _pageLock = new();
-    static readonly List<string> _pageSample = new();
-
-    /// <summary>Сколько примеров расхождения показываем владельцу.</summary>
+    /// <summary>Сколько примеров расхождения показываем владельцу за обход.</summary>
     const int PageSampleCap = 8;
 
-    /// <summary>
-    /// Какую страницу просили. Параметра нет — первую: ряд ГЛАВНОЙ ходит без page
-    /// (`?sort=now_playing&amp;email=`), и он же был пострадавшим (§DI).
-    /// </summary>
+    /// <summary>Тот же заголовок, что PageGuard.HeaderName в CubProxy — типами не связаться, поэтому строка.</summary>
+    const string CubPageHeader = "X-QDL-Page";
+
+    // Текущий обход КОПИТСЯ, последний завершённый ПУБЛИКУЕТСЯ атомарно сразу после цикла рядов
+    // (образец — _tickHealth → FlushTickHealth). Иначе всё время обхода строка хелса читала бы
+    // полупустые счётчики и показывала «off — рядов не было» каждые 15 минут.
+    static readonly object _pageLock = new();
+    static int _curChecked, _curBad, _curBadMain, _curHealed, _curRestored, _curMismatch, _curFuse;
+    static readonly List<string> _curSample = new();
+    static int _pubChecked, _pubBad, _pubBadMain, _pubRows, _pubHealed, _pubRestored, _pubMismatch, _pubFuse;
+    static bool _pubPartial;
+    static List<string> _pubSample = new();
+    static DateTime _pageAt;
+
+    /// <summary>Эффективный период тика — одна формула на таймер и на снимок хелса.</summary>
+    internal static int EffectivePeriodMin()
+        => Math.Max(5, ModInit.conf != null && ModInit.conf.catalogWarmupPeriodMin > 0 ? ModInit.conf.catalogWarmupPeriodMin : 15);
+
+    /// <summary>Какую страницу просили — копия PageGuard.RequestedPage (нет параметра → 1; дубль с разными значениями → null).</summary>
     internal static int? RequestedPage(string pathQuery)
     {
         if (pathQuery == null) return null;
@@ -1275,120 +1285,234 @@ public static class CatalogWarmup
         int q = pathQuery.IndexOf('?');
         if (q < 0) return 1;
 
+        int? found = null;
+
         foreach (var pair in pathQuery.Substring(q + 1).Split('&'))
         {
             int eq = pair.IndexOf('=');
             if (eq <= 0 || !pair.Substring(0, eq).Equals("page", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            return int.TryParse(pair.Substring(eq + 1), out int p) && p >= 1 ? p : (int?)null;
+            int? p = int.TryParse(pair.Substring(eq + 1), out int v) && v >= 1 ? v : (int?)null;
+            if (found.HasValue && found != p) return null;
+            if (!p.HasValue) return null;
+            found = p;
         }
 
-        return 1;
+        return found ?? 1;
     }
 
-    /// <summary>Форма тела. hasResults обязателен: у /blocked это МАССИВ, там судить не о чем.</summary>
-    internal static (int? page, int? total, bool hasResults) BodyShape(byte[] body)
+    /// <summary>Форма тела — копия PageGuard.Shape. results = -1, если это не наша форма (у /blocked — массив).</summary>
+    internal static (int? page, int? totalPages, int results) Shape(byte[] body)
     {
-        if (body == null || body.Length == 0) return (null, null, false);
+        if (body == null || body.Length == 0) return (null, null, -1);
 
         try
         {
-            using var doc = JsonDocument.Parse(body);
-            if (doc.RootElement.ValueKind != JsonValueKind.Object) return (null, null, false);
+            if (Newtonsoft.Json.JsonConvert.DeserializeObject<JToken>(Encoding.UTF8.GetString(body)) is not JObject o)
+                return (null, null, -1);
 
-            return (ElemInt(doc.RootElement, "page"), ElemInt(doc.RootElement, "total_pages"),
-                doc.RootElement.TryGetProperty("results", out var r) && r.ValueKind == JsonValueKind.Array);
+            int results = o["results"] is JArray arr ? arr.Count : -1;
+            return (PageInt(o["page"]), PageInt(o["total_pages"]), results);
         }
-        catch { return (null, null, false); }
+        catch { return (null, null, -1); }
     }
 
-    static int? ElemInt(JsonElement o, string name)
-    {
-        if (!o.TryGetProperty(name, out var e)) return null;
-        if (e.ValueKind == JsonValueKind.Number && e.TryGetInt32(out int n)) return n;
-        if (e.ValueKind == JsonValueKind.String && int.TryParse(e.GetString(), out int s)) return s;
-        return null;
-    }
+    static int? PageInt(JToken t)
+        => t is JValue v && (v.Type is JTokenType.Integer or JTokenType.String)
+           && int.TryParse(v.ToString(), out int n) ? n : (int?)null;
 
-    /// <summary>
-    /// Вердикт. Расхождение засчитываем только при requested ≤ total_pages: за последней
-    /// страницей апстрим вправе клампить, и это НЕ отравление.
-    /// </summary>
-    internal static PageVerdict CheckPage(string pathQuery, byte[] body)
+    /// <summary>Вердикт с цифрами — копия PageGuard.Judge (кламп признаём, только если тело на него похоже).</summary>
+    internal static (PageVerdict verdict, int? wanted, int? got, int results) Judge(string pathQuery, byte[] body)
     {
         int? wanted = RequestedPage(pathQuery);
-        if (!wanted.HasValue) return PageVerdict.Skip;
+        var (page, totalPages, results) = Shape(body);
 
-        var (page, total, hasResults) = BodyShape(body);
-        if (!hasResults || !page.HasValue) return PageVerdict.Skip;
-        if (total.HasValue && wanted.Value > total.Value) return PageVerdict.Skip;
+        if (!wanted.HasValue || results < 0 || !page.HasValue)
+            return (PageVerdict.Skip, wanted, page, results);
 
-        return page.Value == wanted.Value ? PageVerdict.Match : PageVerdict.Mismatch;
+        // Кламп признаём, только если тело на него похоже (пришла первая или последняя страница).
+        // total_pages ≤ 0 — мусор, судим по page; ноль при пустых results — пустая лента, судить нечего.
+        if (totalPages is >= 1 && wanted.Value > totalPages.Value && (page.Value == 1 || page.Value == totalPages.Value))
+            return (PageVerdict.Skip, wanted, page, results);
+
+        if (totalPages == 0 && results == 0)
+            return (PageVerdict.Skip, wanted, page, results);
+
+        return (page.Value == wanted.Value ? PageVerdict.Match : PageVerdict.Mismatch, wanted, page, results);
     }
 
-    static void NotePage(string host, string pathQuery, byte[] body, string contentType, bool miss, HttpResponseMessage rs)
+    internal static PageVerdict CheckPage(string pathQuery, byte[] body) => Judge(pathQuery, body).verdict;
+
+    /// <summary>
+    /// Ряд, который зритель видит на главной: первая страница рядов свежести (те же sort, что у
+    /// фильтра по году). Чужая страница там — ровно жалоба владельца, и это fail, а не warn.
+    /// </summary>
+    internal static bool IsMainRow(string pathQuery, int wanted)
+    {
+        if (wanted != 1 || pathQuery == null) return false;
+        var m = System.Text.RegularExpressions.Regex.Match(pathQuery, @"[?&]sort=([^&]+)");
+        if (!m.Success) return false;
+        string sort = m.Groups[1].Value;
+        return sort is "now_playing" or "latest" or "now" or "airing";
+    }
+
+    /// <summary>Короткое имя ряда для строки хелса: sort или хвост пути.</summary>
+    static string ShortRow(string pathQuery)
+    {
+        pathQuery ??= "";
+        var m = System.Text.RegularExpressions.Regex.Match(pathQuery, @"[?&]sort=([^&]+)");
+        if (m.Success) return m.Groups[1].Value;
+        int q = pathQuery.IndexOf('?');
+        string path = q < 0 ? pathQuery : pathQuery.Substring(0, q);
+        int slash = path.LastIndexOf('/');
+        return slash >= 0 && slash < path.Length - 1 ? path.Substring(slash + 1) : path;
+    }
+
+    /// <summary>Учесть один ответ ряда. internal — под тестами (HttpResponseMessage собирается руками).</summary>
+    internal static void NotePage(string host, string pathQuery, byte[] body, string contentType, bool miss, HttpResponseMessage rs)
     {
         try
         {
-            // только ряды каталога: постеры, детали карточки и лента отсекаются сами
+            // только ряды каталога: постеры, детали карточки и лента отсекаются селектором хелса
             if (HealthIdFor(pathQuery) != HealthState.Ids.Cub) return;
             if (contentType == null || !contentType.Contains("json", StringComparison.OrdinalIgnoreCase)) return;
 
-            var v = CheckPage(pathQuery, body);
-            if (v == PageVerdict.Skip) return;
+            // На своих ПРОМАХАХ обход видит и след сторожа контроллера (X-QDL-Page) — единственный
+            // способ показать владельцу «сторож вмешивался N раз» без канала между сборками.
+            string guard = rs != null && rs.Headers.TryGetValues(CubPageHeader, out var g) ? g.FirstOrDefault() : null;
 
-            Interlocked.Increment(ref _pageChecked);
-            if (v == PageVerdict.Match) return;
+            var (v, wanted, got, _) = Judge(pathQuery, body);
+            if (v == PageVerdict.Skip && guard == null) return;
 
-            Interlocked.Increment(ref _pageBad);
-
-            int want = RequestedPage(pathQuery) ?? 0;
-            int got = BodyShape(body).page ?? 0;
-
-            // §DI: ответ сам называет свой файл в кеше — это избавляет от покоса всех рядов
-            string bucket = rs.Headers.TryGetValues("X-StatiCache-Bucket", out var b) ? b.FirstOrDefault() : null;
-            string id = rs.Headers.TryGetValues("X-StatiCache-Id", out var i) ? i.FirstOrDefault() : null;
-
-            string line = $"{host}{pathQuery} · просили {want}, в теле {got} · {(miss ? "MISS" : "HIT")}"
-                + (bucket != null && id != null ? $" · static/{bucket}/{id}*" : "");
+            bool main = IsMainRow(pathQuery, wanted ?? 0);
+            int badNow;
 
             lock (_pageLock)
-                if (_pageSample.Count < PageSampleCap)
-                    _pageSample.Add(line);
+            {
+                switch (guard)
+                {
+                    case "healed": _curHealed++; break;
+                    case "restored": _curRestored++; break;
+                    case "mismatch": _curMismatch++; break;
+                    case "fuse": _curFuse++; break;
+                }
+
+                if (v == PageVerdict.Skip) return;
+
+                _curChecked++;
+                if (v == PageVerdict.Match) return;
+
+                _curBad++;
+                if (main) _curBadMain++;
+
+                if (_curSample.Count < PageSampleCap)
+                    _curSample.Add(host + " " + ShortRow(pathQuery) + " p" + wanted + "→" + got + " " + (miss ? "MISS" : "HIT") + (main ? " ГЛАВНАЯ" : ""));
+
+                badNow = _curBad;
+            }
+
+            // §DI: ответ сам называет свой файл в кеше — это избавляет от покоса всех рядов
+            string bucket = rs != null && rs.Headers.TryGetValues("X-StatiCache-Bucket", out var b) ? b.FirstOrDefault() : null;
+            string id = rs != null && rs.Headers.TryGetValues("X-StatiCache-Id", out var i) ? i.FirstOrDefault() : null;
 
             // Журнал ВЛАДЕЛЬЦА: чисто диагностическое событие, строку в noti не создаём —
-            // зритель кухню не видит (образец SearchMonitor).
-            string key = "cubpage:" + pathQuery;
-            if (!QdlEvents.Recent(QdlEvents.CatDiag, key, TimeSpan.FromHours(6)))
+            // зритель кухню не видит (образец SearchMonitor). Ключ — с хостом: отравление
+            // ПО-ХОСТОВОЕ (три ключа Staticache на один ряд), и команда сноса у каждого своя.
+            // Окно дедупа = cache_api: после протухания записи новое отравление — новое событие.
+            if (badNow > PageSampleCap)
+            {
+                // устойчивая поломка: не 86 одинаковых строк, а одна сводная на тик
+                if (!QdlEvents.Recent(QdlEvents.CatDiag, "cubpage:summary", TimeSpan.FromHours(1)))
+                    QdlEvents.Log(QdlEvents.CatDiag, "Каталог CUB",
+                        "Чужая страница ещё в " + badNow + " записях обхода — см. строку «CUB: номер страницы» в хелс-чеках",
+                        key: "cubpage:summary");
+                return;
+            }
+
+            string key = "cubpage:" + host + pathQuery;
+            if (QdlEvents.Recent(QdlEvents.CatDiag, key, TimeSpan.FromHours(3)))
+                return;
+
+            string where = host + pathQuery + " · просили " + wanted + ", в теле " + got;
+
+            if (miss)
+            {
+                // На MISS в кеш ничего не попало (сторож поставил saveCache:false) — снос не нужен,
+                // нужно понять, почему не подменил: копии нет, предохранитель или pageGuard выключен.
                 QdlEvents.Log(QdlEvents.CatDiag, "Каталог CUB",
-                    "Запись кеша отдаёт чужую страницу: " + line, key: key);
+                    "CUB отдал чужую страницу живьём, сторож не подменил (" + (guard ?? "заголовка нет — pageGuard выключен?") + "): " + where + " · в кеш не попало",
+                    key: key);
+            }
+            else
+            {
+                bool known = bucket != null && id != null;
+                string act = known
+                    ? "docker run --rm -v media-server_lampac-cache:/c alpine sh -c 'rm -f /c/static/" + bucket + "/" + id + "*' — затем scripts\\deploy-lampac.ps1 (реестр Staticache строится при старте; под живым цветом rm даёт 500), либо переждать TTL до 3 ч"
+                    : null;
+
+                QdlEvents.Log(QdlEvents.CatDiag, "Каталог CUB",
+                    "Запись кеша отдаёт чужую страницу: " + where + (known ? " · static/" + bucket + "/" + id + "*" : ""),
+                    act: act, key: key);
+            }
         }
         catch { }   // аудит не имеет права уронить прогрев
     }
 
-    /// <summary>Снимок для строки хелса — образец MusicWarm.HealthSnapshot.</summary>
+    /// <summary>Опубликовать завершённый обход рядов и обнулить накопитель. Зовётся сразу после цикла рядов в Tick.</summary>
+    static void PublishPageAudit(int rows, bool partial)
+    {
+        lock (_pageLock)
+        {
+            _pubChecked = _curChecked; _pubBad = _curBad; _pubBadMain = _curBadMain;
+            _pubHealed = _curHealed; _pubRestored = _curRestored; _pubMismatch = _curMismatch; _pubFuse = _curFuse;
+            _pubRows = rows; _pubPartial = partial;
+            _pubSample = new List<string>(_curSample);
+            _pageAt = DateTime.UtcNow;
+
+            _curChecked = _curBad = _curBadMain = _curHealed = _curRestored = _curMismatch = _curFuse = 0;
+            _curSample.Clear();
+        }
+    }
+
+    /// <summary>Снимок для строки хелса — образец MusicWarm.HealthSnapshot. Описывает ПОСЛЕДНИЙ завершённый обход.</summary>
     internal static JObject PageHealthSnapshot()
     {
         lock (_pageLock)
             return new JObject
             {
-                ["checked"] = _pageChecked,
-                ["bad"] = _pageBad,
+                ["enabled"] = ModInit.conf?.catalogWarmupEnabled == true,
+                ["timer"] = _timer != null,
+                ["checked"] = _pubChecked,
+                ["bad"] = _pubBad,
+                ["badMain"] = _pubBadMain,
+                ["rows"] = _pubRows,
+                ["partial"] = _pubPartial,
                 ["at"] = _pageAt == default ? null : _pageAt.ToString("o"),
-                ["periodMin"] = ModInit.conf?.catalogWarmupPeriodMin ?? 0,
-                ["samples"] = new JArray(_pageSample)
+                ["periodMin"] = EffectivePeriodMin(),
+                ["samples"] = new JArray(_pubSample),
+                ["guard"] = new JObject
+                {
+                    ["healed"] = _pubHealed, ["restored"] = _pubRestored,
+                    ["mismatch"] = _pubMismatch, ["fuse"] = _pubFuse
+                }
             };
     }
 
-    /// <summary>Сброс перед новым обходом: снимок описывает ПОСЛЕДНИЙ тик, а не всю жизнь процесса.</summary>
-    static void ResetPageAudit()
+    /// <summary>Тестовый хук: опубликовать накопленное как завершённый обход.</summary>
+    internal static void PublishPageAuditForTests(int rows, bool partial = false) => PublishPageAudit(rows, partial);
+
+    /// <summary>Сброс аудита — только для тестов. Promote/Reload снимок НЕ трогают: он описывает обход этого процесса.</summary>
+    internal static void ResetPageAuditForTests()
     {
         lock (_pageLock)
         {
-            _pageChecked = 0;
-            _pageBad = 0;
-            _pageSample.Clear();
+            _curChecked = _curBad = _curBadMain = _curHealed = _curRestored = _curMismatch = _curFuse = 0;
+            _pubChecked = _pubBad = _pubBadMain = _pubRows = _pubHealed = _pubRestored = _pubMismatch = _pubFuse = 0;
+            _pubPartial = false;
+            _curSample.Clear();
+            _pubSample = new List<string>();
+            _pageAt = default;
         }
     }
     #endregion
@@ -1434,9 +1558,8 @@ public static class CatalogWarmup
         _posterCur = _backdropCur = _cardCur = null;
         _dirty = false;
         _deadLogged = -1;
-
-        ResetPageAudit();
-        _pageAt = default;
+        // ⚠️ аудит страниц здесь НЕ сбрасываем: ResetForTests зовётся из Reload() при promote, а снимок
+        // описывает обход ЭТОГО процесса и роли не касается. Тестам — ResetPageAuditForTests().
     }
 
     internal static bool DirtyForTests { get => _dirty; set => _dirty = value; }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -72,8 +72,8 @@ public class ModuleRegistryTests
         var disk = OnDisk();
         var tree = InManifest();
 
-        var missing = disk.Except(tree, StringComparer.OrdinalIgnoreCase).ToArray();
-        var stale = tree.Except(disk, StringComparer.OrdinalIgnoreCase).ToArray();
+        var missing = disk.Except(tree, StringComparer.Ordinal).ToArray();
+        var stale = tree.Except(disk, StringComparer.Ordinal).ToArray();
 
         Assert.True(missing.Length == 0,
             "файлы есть на диске, но НЕ вписаны в manifest.json → tree (Roslyn их не увидит, контейнер уйдёт в крашлуп): "
@@ -112,7 +112,7 @@ public class ModuleRegistryTests
     public void Every_Compile_Include_points_at_a_file_that_exists()
     {
         var disk = OnDisk();
-        var ghosts = InCsproj().Except(disk, StringComparer.OrdinalIgnoreCase).ToArray();
+        var ghosts = InCsproj().Except(disk, StringComparer.Ordinal).ToArray();
 
         Assert.True(ghosts.Length == 0,
             "csproj линкует несуществующие файлы модуля: " + string.Join(", ", ghosts));
@@ -121,7 +121,7 @@ public class ModuleRegistryTests
     [Fact]
     public void Csproj_is_a_subset_of_the_manifest()
     {
-        var extra = InCsproj().Except(InManifest(), StringComparer.OrdinalIgnoreCase).ToArray();
+        var extra = InCsproj().Except(InManifest(), StringComparer.Ordinal).ToArray();
 
         Assert.True(extra.Length == 0,
             "тесты линкуют файлы, которых нет в manifest.json → tree: " + string.Join(", ", extra));
@@ -132,7 +132,7 @@ public class ModuleRegistryTests
     {
         // Файл, выпавший из csproj без правки KnownUnlinked, перестаёт покрываться тестами
         // молча. Список ведётся здесь и требует причины в комментарии.
-        var unlinked = InManifest().Except(InCsproj(), StringComparer.OrdinalIgnoreCase).ToArray();
+        var unlinked = InManifest().Except(InCsproj(), StringComparer.Ordinal).ToArray();
 
         Assert.True(KnownUnlinked.SetEquals(unlinked),
             "набор незалинкованных файлов изменился. Сейчас вне тестов: ["
@@ -154,6 +154,10 @@ public class ModuleRegistryTests
     // ровно та же мина: забытая строка в его manifest.json → tree даёт неполный набор
     // исходников для Roslyn и крашлуп контейнера, который ничем не ловится. Нашлось это при
     // добавлении PageGuard.cs в CubProxy.
+    //
+    // 🔴 Все сравнения имён — Ordinal. Контейнер — Linux, ext4 регистрозависим: «pageguard.cs» в
+    // tree прошёл бы NTFS-тест (File.Exists там регистронезависим) и дал крашлуп в проде.
+    // Поэтому существование на диске проверяется посегментно, точным именем (ExistsExact).
 
     static string RepoRoot => new DirectoryInfo(Resolve("Modules")).Parent.FullName;
 
@@ -182,26 +186,89 @@ public class ModuleRegistryTests
         return null;
     }
 
+    static JArray TreeOf(string moduleDir)
+        => JObject.Parse(File.ReadAllText(Path.Combine(moduleDir, "manifest.json")))["tree"] as JArray;
+
     /// <summary>
     /// Покрыт ли файл записью tree. Запись-КАТАЛОГ покрывает всё под собой — так устроены
-    /// JacRed ("Engine", "Controllers") и Online ("SQL").
+    /// JacRed ("Engine", "Controllers") и Online ("SQL"). Пустой или отсутствующий tree — как у
+    /// загрузчика (CSharpEval.Compilation): компилируется всё *.cs рекурсивно, забыть нечего.
     /// </summary>
-    static bool CoveredByTree(string[] tree, string relative)
+    internal static bool CoveredByTree(JArray tree, string relative)
     {
+        if (tree == null || tree.Count == 0)
+            return true;
+
         relative = relative.Replace('\\', '/');
 
-        foreach (string entry in tree)
+        foreach (var t in tree)
         {
-            string e = entry.Replace('\\', '/').TrimEnd('/');
+            string e = ((string)t ?? "").Replace('\\', '/').TrimEnd('/');
+            if (e.Length == 0)
+                continue;
 
-            if (relative.Equals(e, StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            if (relative.StartsWith(e + "/", StringComparison.OrdinalIgnoreCase))
+            if (relative.Equals(e, StringComparison.Ordinal) || relative.StartsWith(e + "/", StringComparison.Ordinal))
                 return true;
         }
 
         return false;
+    }
+
+    /// <summary>Существование пути ТОЧНЫМ именем, посегментно — то, что увидит Linux.</summary>
+    static bool ExistsExact(string dir, string relative)
+    {
+        string cur = dir;
+
+        foreach (string seg in relative.Replace('\\', '/').TrimEnd('/').Split('/'))
+        {
+            if (seg.Length == 0)
+                continue;
+
+            string hit = Directory.EnumerateFileSystemEntries(cur)
+                                  .Select(Path.GetFileName)
+                                  .FirstOrDefault(n => n.Equals(seg, StringComparison.Ordinal));
+            if (hit == null)
+                return false;
+
+            cur = Path.Combine(cur, hit);
+        }
+
+        return true;
+    }
+
+    /// <summary>Каталоги, где живут модули с манифестами. Весь репозиторий не обходим: там 200+ манифестов в node_modules и примеры апстрима, которые Roslyn не компилирует.</summary>
+    static IEnumerable<string> ModuleManifests()
+    {
+        foreach (string top in new[] { "Modules", "Online" })
+        {
+            string dir = Path.Combine(RepoRoot, top);
+            if (!Directory.Exists(dir))
+                continue;
+
+            foreach (string m in Directory.EnumerateFiles(dir, "manifest.json", SearchOption.AllDirectories))
+            {
+                string rel = Path.GetRelativePath(RepoRoot, m).Replace('\\', '/');
+                if (rel.Contains("/node_modules/") || rel.Contains("/bin/") || rel.Contains("/obj/"))
+                    continue;
+
+                yield return m;
+            }
+        }
+    }
+
+    [Fact]
+    public void Tree_coverage_is_case_sensitive_like_linux()
+    {
+        // негативный контроль самого сторожа: NTFS простил бы, Linux — нет
+        Assert.False(CoveredByTree(new JArray("pageguard.cs"), "PageGuard.cs"));
+        Assert.True(CoveredByTree(new JArray("PageGuard.cs"), "PageGuard.cs"));
+        Assert.True(CoveredByTree(new JArray("Engine"), "Engine/Sub/X.cs"));
+        Assert.False(CoveredByTree(new JArray("Engine"), "EngineX/A.cs"));
+        Assert.False(CoveredByTree(new JArray("Other.cs"), "Any.cs"));
+        Assert.True(CoveredByTree(null, "Any.cs"));                 // без tree компилируется всё
+        Assert.True(CoveredByTree(new JArray(), "Any.cs"));
+        Assert.False(ExistsExact(CubProxyDir, "pageguard.cs"));
+        Assert.True(ExistsExact(CubProxyDir, "PageGuard.cs"));
     }
 
     [Fact]
@@ -211,16 +278,16 @@ public class ModuleRegistryTests
 
         foreach (string include in AllIncludes())
         {
+            if (include.Contains('*'))
+                continue;   // глоб — csproj раскроет сам, файл за файлом тут не проверить
+
             string moduleDir = ModuleOf(include);
             if (moduleDir == null)
                 continue;   // Core и прочее без manifest — Roslyn их не компилирует
 
-            var tree = (JObject.Parse(File.ReadAllText(Path.Combine(moduleDir, "manifest.json")))["tree"] as JArray)
-                ?.Select(t => (string)t).ToArray() ?? Array.Empty<string>();
-
             string rel = Path.GetRelativePath(moduleDir, Path.Combine(RepoRoot, include));
 
-            if (!CoveredByTree(tree, rel))
+            if (!CoveredByTree(TreeOf(moduleDir), rel))
                 bad.Add(include);
         }
 
@@ -234,12 +301,8 @@ public class ModuleRegistryTests
     {
         var bad = new List<string>();
 
-        foreach (string manifest in Directory.GetFiles(RepoRoot, "manifest.json", SearchOption.AllDirectories))
+        foreach (string manifest in ModuleManifests())
         {
-            if (manifest.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}") ||
-                manifest.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}"))
-                continue;
-
             string dir = Path.GetDirectoryName(manifest);
 
             JObject root;
@@ -255,13 +318,12 @@ public class ModuleRegistryTests
                 if (string.IsNullOrEmpty(entry))
                     continue;
 
-                string p = Path.Combine(dir, entry.Replace('/', Path.DirectorySeparatorChar));
-                if (!File.Exists(p) && !Directory.Exists(p))
+                if (!ExistsExact(dir, entry))
                     bad.Add(Path.GetRelativePath(RepoRoot, manifest) + " → " + entry);
             }
         }
 
-        Assert.True(bad.Count == 0, "в manifest.json перечислено несуществующее: " + string.Join(", ", bad));
+        Assert.True(bad.Count == 0, "в manifest.json перечислено несуществующее (или не тем регистром): " + string.Join(", ", bad));
     }
 
     // ── CubProxy: тот же двойной реестр, что у QbitDownload ───────────────
@@ -272,7 +334,7 @@ public class ModuleRegistryTests
     /// Файлы CubProxy, намеренно не залинкованные в тесты. У каждого — причина, и она же
     /// записана в комментарии над строкой линковки в csproj.
     /// </summary>
-    static readonly HashSet<string> CubProxyUnlinked = new(StringComparer.OrdinalIgnoreCase)
+    static readonly HashSet<string> CubProxyUnlinked = new(StringComparer.Ordinal)
     {
         "Controller.cs",   // BaseController — в тестовую сборку не тянется
         "ModInit.cs",      // конфликт с QbitDownload.ModInit
@@ -281,22 +343,28 @@ public class ModuleRegistryTests
         "PageStore.cs"     // то же самое: диск + статика
     };
 
+    static string[] CubProxyOnDisk() =>
+        Directory.GetFiles(CubProxyDir, "*.cs", SearchOption.AllDirectories)
+                 .Select(f => Path.GetRelativePath(CubProxyDir, f).Replace('\\', '/'))
+                 .Where(f => !f.StartsWith("bin/") && !f.StartsWith("obj/"))   // артефакты локальной сборки csproj, Roslyn их не видит
+                 .OrderBy(x => x, StringComparer.Ordinal).ToArray();
+
     [Fact]
-    public void CubProxy_manifest_tree_matches_the_files_on_disk_exactly()
+    public void CubProxy_manifest_tree_covers_every_file_on_disk()
     {
-        var disk = Directory.GetFiles(CubProxyDir, "*.cs", SearchOption.TopDirectoryOnly)
-                            .Select(Path.GetFileName).OrderBy(x => x, StringComparer.Ordinal).ToArray();
+        // tree перечисляет только файлы, поэтому .cs в подпапке был бы невидим и для Roslyn —
+        // берём диск рекурсивно и сверяем через CoveredByTree (он понимает и записи-каталоги)
+        var tree = TreeOf(CubProxyDir);
+        Assert.NotNull(tree);
+        Assert.NotEmpty(tree);
 
-        var tree = (JObject.Parse(File.ReadAllText(Path.Combine(CubProxyDir, "manifest.json")))["tree"] as JArray)
-            .Select(t => (string)t).ToArray();
-
-        var missing = disk.Except(tree, StringComparer.OrdinalIgnoreCase).ToArray();
-        var stale = tree.Except(disk, StringComparer.OrdinalIgnoreCase).ToArray();
-
+        var missing = CubProxyOnDisk().Where(f => !CoveredByTree(tree, f)).ToArray();
         Assert.True(missing.Length == 0,
             "файлы CubProxy есть на диске, но НЕ вписаны в manifest.json → tree (крашлуп): " + string.Join(", ", missing));
+
+        var stale = tree.Select(t => (string)t).Where(e => !ExistsExact(CubProxyDir, e)).ToArray();
         Assert.True(stale.Length == 0,
-            "в manifest.json CubProxy перечислены несуществующие файлы: " + string.Join(", ", stale));
+            "в manifest.json CubProxy перечислены несуществующие файлы (или не тем регистром): " + string.Join(", ", stale));
 
         // ⚠️ Тест порядка (ModuleConf/ModInit первыми) на CubProxy НЕ переносится: у него в tree
         // первым идёт Controller.cs. Это соглашение QbitDownload, а не требование Roslyn — он
@@ -308,10 +376,9 @@ public class ModuleRegistryTests
     {
         string xml = File.ReadAllText(CsprojPath);
         var rx = new Regex(@"<Compile\s+Include=""\.\.\\\.\.\\Modules\\Proxy\\CubProxy\\([^""]+)""", RegexOptions.Compiled);
-        var linked = rx.Matches(xml).Select(m => m.Groups[1].Value).ToArray();
+        var linked = rx.Matches(xml).Select(m => m.Groups[1].Value.Replace('\\', '/')).ToArray();
 
-        var disk = Directory.GetFiles(CubProxyDir, "*.cs", SearchOption.TopDirectoryOnly).Select(Path.GetFileName);
-        var unlinked = disk.Except(linked, StringComparer.OrdinalIgnoreCase).ToArray();
+        var unlinked = CubProxyOnDisk().Except(linked, StringComparer.Ordinal).ToArray();
 
         Assert.True(CubProxyUnlinked.SetEquals(unlinked),
             "набор незалинкованных файлов CubProxy изменился. Сейчас вне тестов: ["

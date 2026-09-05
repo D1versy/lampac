@@ -1,4 +1,4 @@
-using Newtonsoft.Json;
+﻿using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
@@ -27,6 +27,12 @@ namespace CubProxy;
 // обязано означать «ждём первую страницу», иначе главный пострадавший остаётся без защиты.
 // Проверено на боевом: CUB на адрес без page отвечает {"page":1,…}.
 //
+// 🔴 Логика намеренно ПРОДУБЛИРОВАНА в Modules/QbitDownload/CatalogWarmup.cs (аудит по реальным
+// клиентским ключам — он видит HIT-ы, которых контроллер не видит). Модули компилируются в
+// разные сборки и типами связаться не могут. Обе копии обязаны судить одинаково — это стережёт
+// тест Сторож_страницы_в_двух_модулях_судит_одинаково на общем корпусе сырых тел; правишь здесь —
+// правь и там.
+//
 // 🔴 Почему функция ЧИСТАЯ и лежит отдельным файлом — ровно та же причина, что у RowFilter.cs:
 // её линкуют в Tests/QbitDownload.Tests (Compile Include=… Link=…). Обращений к CubProxy.ModInit
 // быть не должно (в тестовой сборке он конфликтует с QbitDownload.ModInit), к BaseController —
@@ -43,6 +49,28 @@ public static class PageGuard
         Mismatch
     }
 
+    /// <summary>Что делать с ответом — решение вынесено в чистую функцию Decide, чтобы его можно было тестировать.</summary>
+    public enum Action
+    {
+        /// <summary>Расхождения нет — отдаём и кешируем как обычно.</summary>
+        PassThrough,
+        /// <summary>Расхождение, но предохранитель открыт: отдаём то, что дал CUB, с КОРОТКИМ TTL, копию не подставляем.</summary>
+        Fuse,
+        /// <summary>Повтор мимо кеша CUB вернул верную страницу — отдаём её, кешируем коротко.</summary>
+        Healed,
+        /// <summary>Повтор не помог, есть свежая копия — отдаём её, в кеш не кладём.</summary>
+        Restored,
+        /// <summary>Повтор не помог, копии нет — отдаём чужую страницу как есть, в кеш не кладём.</summary>
+        MismatchNoCache
+    }
+
+    /// <summary>
+    /// Потолок тела, с которым сторож вообще работает. Ряд каталога — 7–22 КБ по замеру боевого;
+    /// всё, что крупнее, у tmdb.cub.* не наше. Один и тот же потолок — и для буферизации в
+    /// контроллере (дальше тело уходит потоком), и для копий PageStore.
+    /// </summary>
+    public const int MaxBodyBytes = 2 * 1024 * 1024;
+
     /// <summary>
     /// Параметры, не влияющие на содержимое ряда — выброшены из ключа хранилища копий.
     /// Список повторяет CoreInit.SkipQueryKeys (их же выбрасывает Staticache по skipUids) плюс
@@ -58,38 +86,22 @@ public static class PageGuard
     /// <summary>Имя параметра-бастера, которым обходим кеш CUB на повторе.</summary>
     public const string BustKey = "d1v";
 
-    /// <summary>Заголовок ответа с исходом проверки: "healed" / "restored" / "mismatch".</summary>
+    /// <summary>Заголовок ответа с исходом проверки: match / healed / restored / mismatch / fuse.</summary>
     public const string HeaderName = "X-QDL-Page";
 
     /// <summary>
     /// Применима ли проверка к ЗАПРОСУ. Решается ДО похода в апстрим — от неё зависит, будем ли
-    /// буферизовать тело, поэтому гейт обязан быть узким и дешёвым.
-    ///
-    /// 🔴 Гейт по ПОДДОМЕНУ, а не по content-type: content-type до похода неизвестен, а
-    /// tmdb.cub.* — это чистое API. Картинки живут на imagetmdb/cdn, реакции и лента — на самом
-    /// домене (см. GetDomain в контроллере). То есть «картинки и статику не буферизуем»
-    /// получается по построению, а не по угадыванию.
+    /// буферизовать тело, поэтому гейт обязан быть узким и дешёвым. Это то же самое «ряд ли это
+    /// каталога», что и у фильтра по году — одно правило, один источник (RowFilter.IsCatalogApi):
+    /// картинки живут на imagetmdb/cdn, детали карточки — под /3/, поиск — одноразовый.
     /// </summary>
-    public static bool IsCandidate(string subdomain, string uri)
-    {
-        if (uri == null || !"tmdb".Equals(subdomain, StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        // /3/ — passthrough TMDB-API (детали карточки, recommendations, similar, images).
-        // Там своя пагинация, к рядам каталога отношения не имеющая, и бывают тяжёлые тела.
-        if (uri.StartsWith("3/", StringComparison.Ordinal) || uri.Contains("/3/", StringComparison.Ordinal))
-            return false;
-
-        // поиск — одноразовые адреса: ни кешировать, ни подставлять там нечего
-        if (uri.Contains("query=", StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        return true;
-    }
+    public static bool IsCandidate(string subdomain, string uri) => RowFilter.IsCatalogApi(subdomain, uri);
 
     /// <summary>
     /// Какую страницу просили. Параметра нет — первую (§DI: так ходит ряд главной).
-    /// Параметр есть, но не число или меньше единицы — null, проверка неприменима.
+    /// Параметр есть, но не число, меньше единицы или встречается дважды с РАЗНЫМИ значениями —
+    /// null: у фреймворков «выигрывает первый» и «выигрывает последний» встречаются оба, и судить
+    /// на таком адресе значит выдумывать ожидание.
     /// </summary>
     public static int? RequestedPage(string uri)
     {
@@ -100,68 +112,85 @@ public static class PageGuard
         if (q < 0)
             return 1;
 
+        int? found = null;
+
         foreach (var pair in uri.Substring(q + 1).Split('&'))
         {
             int eq = pair.IndexOf('=');
             if (eq <= 0 || !pair.Substring(0, eq).Equals("page", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            return int.TryParse(pair.Substring(eq + 1), out int p) && p >= 1 ? p : (int?)null;
+            int? p = int.TryParse(pair.Substring(eq + 1), out int v) && v >= 1 ? v : (int?)null;
+
+            if (found.HasValue && found != p)
+                return null;
+
+            if (!p.HasValue)
+                return null;
+
+            found = p;
         }
 
-        return 1;
+        return found ?? 1;
     }
 
     /// <summary>
-    /// Разбор тела. hasResults обязателен: судить можно только о нашей форме, а у /blocked это
-    /// вообще МАССИВ — там сторож должен быть строго no-op (тот же инвариант, что у RowFilter).
+    /// Разбор тела. results = -1, если это не наша форма (у /blocked это вообще МАССИВ — там сторож
+    /// обязан быть строго no-op, тот же инвариант, что у RowFilter); иначе число карточек.
+    ///
+    /// ⚠️ Числа принимаем ТОЛЬКО целые (JSON integer) и строки с целым — не 1.0, не 1e0. Правило
+    /// общее с копией в CatalogWarmup: на дробных числах копии иначе расходились (Newtonsoft
+    /// печатает 1.0 как "1", System.Text.Json TryGetInt32 на 1.0 падает).
     /// </summary>
-    public static (int? page, int? totalPages, bool hasResults) Shape(string json)
+    public static (int? page, int? totalPages, int results) Shape(string json)
     {
         if (string.IsNullOrEmpty(json))
-            return (null, null, false);
+            return (null, null, -1);
 
         try
         {
             if (JsonConvert.DeserializeObject<JToken>(json) is not JObject o)
-                return (null, null, false);
+                return (null, null, -1);
 
-            return (IntOf(o["page"]), IntOf(o["total_pages"]), o["results"] is JArray);
+            int results = o["results"] is JArray arr ? arr.Count : -1;
+            return (IntOf(o["page"]), IntOf(o["total_pages"]), results);
         }
-        catch { return (null, null, false); }
+        catch { return (null, null, -1); }
     }
 
     static int? IntOf(JToken t)
-    {
-        if (t == null || t.Type == JTokenType.Null)
-            return null;
-
-        return int.TryParse(t.ToString(), out int v) ? v : (int?)null;
-    }
+        => t is JValue v && (v.Type is JTokenType.Integer or JTokenType.String)
+           && int.TryParse(v.ToString(), out int n) ? n : (int?)null;
 
     /// <summary>
-    /// Главный вердикт.
+    /// Главный вердикт. Расхождение засчитываем только при requested ≤ total_pages — за последней
+    /// страницей апстрим вправе клампить, и это НЕ отравление.
     ///
-    /// ⚠️ Расхождение засчитываем только при requested ≤ total_pages: за последней страницей
-    /// апстрим вправе клампить, и это НЕ отравление. Без этого правила сторож молотил бы повторы
-    /// на каждом заходе за край ленты. У живого ряда total_pages ~427, так что боевые случаи
-    /// (page=21 → 2, page=31 → 3) под правило попадают честно.
+    /// 🔴 Но total_pages берётся из ПОДОЗРИТЕЛЬНОГО тела, а у одного ряда он нестабилен (15 на
+    /// page=1 и 21 на page=2 — §CW). Чужая страница 2 с total_pages=15 на запрос page=18 прошла
+    /// бы как «кламп» и примёрзла на 3 часа. Поэтому кламп признаём только когда тело на него
+    /// ПОХОЖЕ: пришла первая или последняя страница. total_pages=0 — пустая лента, судить нечего.
     /// </summary>
-    public static Verdict Check(string uri, string json)
+    public static Verdict Check(string uri, string json) => Judge(uri, json).verdict;
+
+    /// <summary>То же, что Check, но с цифрами — чтобы контроллер и аудит не разбирали тело дважды.</summary>
+    public static (Verdict verdict, int? wanted, int? got, int results) Judge(string uri, string json)
     {
         int? wanted = RequestedPage(uri);
-        if (!wanted.HasValue)
-            return Verdict.Skip;
+        var (page, totalPages, results) = Shape(json);
 
-        var (page, totalPages, hasResults) = Shape(json);
+        if (!wanted.HasValue || results < 0 || !page.HasValue)
+            return (Verdict.Skip, wanted, page, results);
 
-        if (!hasResults || !page.HasValue)
-            return Verdict.Skip;
+        // Кламп признаём, только если тело на него похоже (пришла первая или последняя страница).
+        // total_pages ≤ 0 — мусор, судим по page; ноль при пустых results — пустая лента, судить нечего.
+        if (totalPages is >= 1 && wanted.Value > totalPages.Value && (page.Value == 1 || page.Value == totalPages.Value))
+            return (Verdict.Skip, wanted, page, results);
 
-        if (totalPages.HasValue && wanted.Value > totalPages.Value)
-            return Verdict.Skip;
+        if (totalPages == 0 && results == 0)
+            return (Verdict.Skip, wanted, page, results);
 
-        return page.Value == wanted.Value ? Verdict.Match : Verdict.Mismatch;
+        return (page.Value == wanted.Value ? Verdict.Match : Verdict.Mismatch, wanted, page, results);
     }
 
     /// <summary>
@@ -169,7 +198,8 @@ public static class PageGuard
     /// параметром (§DI, «ловушка диагностики»).
     ///
     /// 🔴 page НЕ трогаем — это ровно тот же самый запрос. Никакого добора соседних страниц:
-    /// именно он давал дубли в «Ещё» и отменён в 2.94 (§DA).
+    /// именно он давал дубли в «Ещё» и отменён в 2.94 (§DA). Тест держит равенство
+    /// `requri + sep + "d1v=" + nonce` дословно.
     /// </summary>
     public static string BustUrl(string requri, string nonce)
     {
@@ -181,9 +211,13 @@ public static class PageGuard
     }
 
     /// <summary>
-    /// Ключ хранилища «последней верной страницы» — АПСТРИМНЫЙ адрес без летучих параметров.
-    /// Не наш ключ Staticache: тот включает Host, и три входа держали бы три копии одного ряда.
-    /// Порядок параметров нормализуем сортировкой — бандл строит адрес динамически.
+    /// Ключ хранилища «последней верной страницы» — АПСТРИМНЫЙ адрес без летучих параметров,
+    /// с нормализованным номером страницы. Не наш ключ Staticache: тот включает Host, и три входа
+    /// держали бы три копии одного ряда.
+    ///
+    /// Ряд главной (без page) и «Ещё» стр. 1 (page=1) — одна и та же апстримная страница, поэтому
+    /// page дописывается всегда: копия, снятая с любого из них, годится обоим — а главный
+    /// пострадавший как раз ряд главной. Порядок параметров нормализуем сортировкой.
     /// </summary>
     public static string StoreKey(string uri)
     {
@@ -191,31 +225,38 @@ public static class PageGuard
             return string.Empty;
 
         int q = uri.IndexOf('?');
-        if (q < 0)
-            return uri;
-
-        string head = uri.Substring(0, q);
+        string head = q < 0 ? uri : uri.Substring(0, q);
         var kept = new List<string>();
 
-        foreach (var pair in uri.Substring(q + 1).Split('&'))
+        if (q >= 0)
         {
-            if (pair.Length == 0)
-                continue;
+            foreach (var pair in uri.Substring(q + 1).Split('&'))
+            {
+                if (pair.Length == 0)
+                    continue;
 
-            int eq = pair.IndexOf('=');
-            string name = eq > 0 ? pair.Substring(0, eq) : pair;
+                int eq = pair.IndexOf('=');
+                string name = eq > 0 ? pair.Substring(0, eq) : pair;
 
-            if (!_volatileKeys.Contains(name))
+                if (name.Equals("page", StringComparison.OrdinalIgnoreCase) || _volatileKeys.Contains(name))
+                    continue;
+
                 kept.Add(pair);
+            }
         }
 
+        int? page = RequestedPage(uri);
+        if (page.HasValue)
+            kept.Add("page=" + page.Value);
+
         kept.Sort(StringComparer.Ordinal);
-        return head + "?" + string.Join("&", kept);
+        return kept.Count == 0 ? head : head + "?" + string.Join("&", kept);
     }
 
     /// <summary>
     /// Годится ли сохранённая копия для подстановки: она есть, лежит под ту же страницу и не
-    /// старше keepMinutes. keepMinutes ≤ 0 — подстановка выключена.
+    /// старше keepMinutes. keepMinutes ≤ 0 — подстановка выключена. Возраст «в будущем» (часы
+    /// уехали после падения по питанию) не выбрасываем.
     /// </summary>
     public static bool Usable(int? storedPage, DateTimeOffset storedAt, int wanted, DateTimeOffset now, int keepMinutes)
     {
@@ -225,42 +266,80 @@ public static class PageGuard
         return storedAt > DateTimeOffset.MinValue && now - storedAt <= TimeSpan.FromMinutes(keepMinutes);
     }
 
+    /// <summary>
+    /// Что делать с ответом. Единственное место, где сходятся вердикт, предохранитель, исход
+    /// повтора и наличие копии — и оно чистое, чтобы ветка «предохранитель открыт» была под тестом,
+    /// а не жила только в контроллере.
+    ///
+    /// Открытый предохранитель означает «врут ВСЕ ответы — вероятнее ошиблись мы»: сторож только
+    /// наблюдает. Ни копии, ни выключенного кеша — иначе весь каталог стал бы некешируемым, а
+    /// каждый клиентский запрос — походом в CUB. Только короткий TTL, чтобы окно ущерба было конечным.
+    /// </summary>
+    public static Action Decide(Verdict verdict, bool fuseOpen, bool healed, bool hasCopy)
+    {
+        if (verdict != Verdict.Mismatch)
+            return Action.PassThrough;
+
+        if (healed)
+            return Action.Healed;
+
+        if (fuseOpen)
+            return Action.Fuse;
+
+        return hasCopy ? Action.Restored : Action.MismatchNoCache;
+    }
+
     #region предохранитель
     // Состояние держит контроллер (статика в модуле), сюда приезжает значением — иначе файл
     // нельзя было бы линковать в тесты. Образец чистого перехода — CatalogWarmup.RowQuarantine.
+    //
+    // Два независимых ограничителя:
+    //   • потолок ПОВТОРОВ за окно (retryCap) — защита CUB и себя от шторма лишних походов;
+    //   • предохранитель (openAfter) — по числу ПОДТВЕРЖДЁННЫХ расхождений: повтор мимо кеша
+    //     вернул тело, и номер страницы всё равно чужой. Значит врёт не кеш, а сам ответ — и
+    //     вероятнее, что ошиблись мы (CUB сменил семантику page). Тогда сторож только наблюдает.
+    // ⚠️ Без повторов (pageGuardRetry=false) подтверждать нечем, и предохранитель не взводится —
+    // это осознанно: выключенный повтор = «ловить и подставлять, наружу не ходить».
 
     /// <summary>Окно предохранителя, минут. Совпадает по духу с бакетами HealthState.</summary>
     public const int SlotMinutes = 10;
 
     /// <summary>Состояние окна: номер слота, сколько повторов сделано, сколько расхождений подтверждено.</summary>
-    public readonly record struct Fuse(long slot, int retries, int confirmed, bool open);
+    public readonly record struct Fuse(long slot, int retries, int confirmed);
 
     public static long SlotOf(DateTime utc) => utc.Ticks / TimeSpan.TicksPerMinute / SlotMinutes;
 
+    /// <summary>Открыт ли предохранитель в этом окне. Выводится из счётчиков — липкого флага нет: счётчики в окне монотонны.</summary>
+    public static bool Open(Fuse f, long nowSlot, int openAfter)
+        => f.slot == nowSlot && openAfter > 0 && f.confirmed >= openAfter;
+
     /// <summary>
-    /// Можно ли сходить повторно. Предохранитель открыт или выбран потолок повторов — нельзя:
-    /// если «врут» ВСЕ ответы, вероятнее ошиблись мы, и превращать весь каталог в
-    /// некешируемый хуже, чем показать то, что отдал CUB.
+    /// Можно ли сходить повторно. retryCap ≤ 0 — повторов НЕТ (ноль везде в этой секции значит
+    /// «выключено»: keepMinutes 0 — без подстановки, suspectMinutes 0 — не кешировать).
     /// </summary>
-    public static bool MayRetry(Fuse f, long nowSlot, int retryCap)
+    public static bool MayRetry(Fuse f, long nowSlot, int retryCap, int openAfter)
     {
+        if (retryCap <= 0)
+            return false;
+
         if (f.slot != nowSlot)
             return true;   // новое окно — счётчики обнулятся в Note
 
-        return !f.open && (retryCap <= 0 || f.retries < retryCap);
+        return !Open(f, nowSlot, openAfter) && f.retries < retryCap;
     }
 
-    /// <summary>Учесть исход. Со сменой окна счётчики сбрасываются — предохранитель не залипает.</summary>
-    public static Fuse Note(Fuse f, long nowSlot, bool retried, bool confirmed, int retryCap, int openAfter)
+    /// <summary>
+    /// Учесть событие. Повтор резервируется ДО похода (retried:true), исход учитывается ПОСЛЕ
+    /// (confirmed) — иначе N параллельных расхождений перебирали бы потолок на величину параллелизма.
+    /// Со сменой окна счётчики сбрасываются; назад окно не откатывается (запрос, начатый в прошлом
+    /// слоте, не должен обнулять уже начатый новый).
+    /// </summary>
+    public static Fuse Note(Fuse f, long nowSlot, bool retried, bool confirmed)
     {
-        if (f.slot != nowSlot)
-            f = new Fuse(nowSlot, 0, 0, false);
+        if (nowSlot > f.slot)
+            f = new Fuse(nowSlot, 0, 0);
 
-        int retries = f.retries + (retried ? 1 : 0);
-        int conf = f.confirmed + (confirmed ? 1 : 0);
-        bool open = f.open || (openAfter > 0 && conf >= openAfter) || (retryCap > 0 && retries >= retryCap);
-
-        return new Fuse(nowSlot, retries, conf, open);
+        return new Fuse(f.slot, f.retries + (retried ? 1 : 0), f.confirmed + (confirmed ? 1 : 0));
     }
     #endregion
 }

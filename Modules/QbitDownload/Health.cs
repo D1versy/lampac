@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
 using Npgsql;
@@ -488,43 +488,6 @@ public partial class QbitController
     /// Порядок проверок = порядок важности, первое совпадение и есть вердикт.
     /// 🔴 «Выключено» и «греть некуда» — это off, а не fail: отсутствие работы не авария.
     /// </summary>
-    /// <summary>
-    /// Вердикт по аудиту номера страницы (qdl 2.112). Порядок правил = важность, поля читаются
-    /// защищённо теми же MwInt/MwDate: снимок собирается прогревом и не обязан быть полным.
-    ///
-    /// Пороги: 1–2 расхождения — это одна-две залежавшиеся записи, они дохнут сами за TTL;
-    /// 3 и больше за один обход — уже не случайность, апстрим сыплет и стоит вмешаться.
-    /// Специально не делаем fail на единичном случае: привычка игнорировать красное дороже.
-    /// </summary>
-    internal static (string status, string detail) CubPageVerdict(JObject b, DateTime now)
-    {
-        if (b == null) return ("off", "состояния нет");
-
-        var at = MwDate(b, "at");
-        if (at == null) return ("off", "обхода каталога ещё не было");
-
-        int periodMin = Math.Max(5, MwInt(b, "periodMin", 15));
-        if ((now - at.Value).TotalMinutes > periodMin * 3)
-            return ("off", "прогрев каталога не ходил " + HealthState.Ago(now - at.Value));
-
-        int checkedRows = MwInt(b, "checked", 0);
-        if (checkedRows == 0) return ("off", "рядов в обходе не было");
-
-        int bad = MwInt(b, "bad", 0);
-        string tail = " · рядов " + checkedRows + " · обход " + HealthState.Ago(now - at.Value);
-
-        if (bad == 0)
-            return ("ok", "страница совпала на всех" + tail);
-
-        // Светим сами адреса: §DI показал, что запись кеша называет свой файл заголовками
-        // X-StatiCache-Bucket/Id, и тогда снос точечный, а не покос всех рядов.
-        var samples = (b["samples"] as JArray)?.Select(x => (string)x).Where(x => !string.IsNullOrEmpty(x)).ToArray();
-        string list = samples != null && samples.Length > 0 ? " · " + string.Join(" · ", samples) : "";
-
-        return (bad >= 3 ? "fail" : "warn",
-            "чужая страница в " + bad + " " + HealthState.Plural(bad, "записи", "записях", "записях") + tail + list);
-    }
-
     internal static (string status, string detail) MusicWarmVerdict(JObject b, DateTime now)
     {
         if (b == null) return ("off", "состояния нет");
@@ -566,6 +529,82 @@ public partial class QbitController
             return ("warn", "пусто: " + string.Join(", ", empty) + tail);
 
         return ("ok", "полок " + shelves + " · home " + MwInt(b, "ms", 0) + " мс · прогрев " + HealthState.Ago(now - lastOk.Value));
+    }
+
+    /// <summary>
+    /// Вердикт по аудиту номера страницы в рядах каталога CUB (qdl 2.112, §DI/§DO). Снимок —
+    /// CatalogWarmup.PageHealthSnapshot (последний ЗАВЕРШЁННЫЙ обход рядов); поля читаются
+    /// защищённо теми же MwInt/MwBool/MwDate — снимок полным быть не обязан.
+    ///
+    /// Порядок правил = важность. «Выключено» и «не ведущий» — off с честной причиной, а не
+    /// «скоро будет»; чужая страница в РЯДУ ГЛАВНОЙ (первая страница рядов свежести) — fail
+    /// сразу: это единственное, что владелец видит в топе, открыв приложение; глубже — 1–2
+    /// записи warn (дохнут сами за TTL), 3+ fail. Специально не делаем fail на единичном
+    /// глубоком случае: привычка игнорировать красное дороже.
+    /// </summary>
+    internal static (string status, string detail) CubPageVerdict(JObject b, DateTime now)
+    {
+        if (b == null) return ("off", "состояния нет");
+        if (!MwBool(b, "enabled")) return ("off", "прогрев каталога выключен (catalogWarmupEnabled) — аудит полки не ведётся, сторож на промахах работает");
+        if (!MwBool(b, "timer")) return ("off", "экземпляр не ведущий — обход каталога не запускается");
+
+        var at = MwDate(b, "at");
+        if (at == null) return ("off", "обхода каталога ещё не было");
+
+        int periodMin = Math.Max(5, MwInt(b, "periodMin", 15));
+        if ((now - at.Value).TotalMinutes > periodMin * 3)
+            return ("off", "прогрев каталога не ходил " + HealthState.Ago(now - at.Value));
+
+        int checkedRows = MwInt(b, "checked", 0);
+        if (checkedRows == 0) return ("off", "рядов в обходе не было");
+
+        int bad = MwInt(b, "bad", 0);
+        int badMain = MwInt(b, "badMain", 0);
+        int rows = MwInt(b, "rows", 0);
+        bool partial = MwBool(b, "partial");
+
+        string tail = " · рядов " + checkedRows + (rows > checkedRows ? " из " + rows : "") + " · обход " + HealthState.Ago(now - at.Value) + GuardTail(b["guard"] as JObject);
+
+        if (bad == 0)
+        {
+            // Половина рядов не проверена (обрыв по Draining, карантин) — это не «всё хорошо»
+            if (partial || (rows > 0 && checkedRows * 2 < rows))
+                return ("warn", "обход неполный" + tail);
+
+            return ("ok", "страница совпала на всех" + tail);
+        }
+
+        // В хелсе — короткие примеры (хост, ряд, p1→11); полные адреса с путём файла и командой
+        // сноса — в журнале владельца, с экрана ТВ они всё равно не копируются.
+        var samples = (b["samples"] as JArray)?
+            .Where(x => x is JValue v && v.Type == JTokenType.String)
+            .Select(x => (string)x).Where(x => !string.IsNullOrEmpty(x)).ToArray() ?? Array.Empty<string>();
+
+        string list = samples.Length > 0 ? " · " + string.Join(" · ", samples.Take(2)) : "";
+        if (samples.Length > 2 || bad > samples.Length)
+            list += " · … полный список и команда сноса — в журнале";
+
+        if (badMain > 0)
+            return ("fail", "чужая страница в ряду главной" + (bad > badMain ? " и ещё в " + (bad - badMain) : "") + tail + list);
+
+        return (bad >= 3 ? "fail" : "warn",
+            "чужая страница в " + bad + " " + HealthState.Plural(bad, "записи", "записях", "записях") + tail + list);
+    }
+
+    /// <summary>«сторож на промахах: вылечил N, подставил M…» — только если было что показать.</summary>
+    static string GuardTail(JObject g)
+    {
+        if (g == null) return "";
+
+        int healed = MwInt(g, "healed", 0), restored = MwInt(g, "restored", 0), mismatch = MwInt(g, "mismatch", 0), fuse = MwInt(g, "fuse", 0);
+        if (healed + restored + mismatch + fuse == 0) return "";
+
+        var parts = new List<string>();
+        if (healed > 0) parts.Add("вылечил " + healed);
+        if (restored > 0) parts.Add("подставил копию " + restored);
+        if (mismatch > 0) parts.Add("не смог " + mismatch);
+        if (fuse > 0) parts.Add("предохранитель " + fuse);
+        return " · сторож на промахах: " + string.Join(", ", parts);
     }
 
     static int MwInt(JObject b, string key, int def)

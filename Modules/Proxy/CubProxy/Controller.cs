@@ -352,7 +352,7 @@ public class CubProxyController : BaseController
                                     // сливаем накопленное и дочитываем потоком, сторож и фильтр на
                                     // этом ответе просто не применяются. Заодно закрывает и прежнюю
                                     // НЕОГРАНИЧЕННУЮ буферизацию фильтра рядов.
-                                    if (fbuf.Length + bytesRead > GuardBufferCap)
+                                    if (fbuf.Length + bytesRead > PageGuard.MaxBodyBytes)
                                     {
                                         BodyWriter.Write(fbuf.ToArray());
                                         fbuf.Dispose();
@@ -445,32 +445,38 @@ public class CubProxyController : BaseController
                         (HttpContext.Response.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) ?? false);
 
                     // одна декодировка на обоих потребителей — сторожа и фильтр
-                    string text = null;
-                    if (json200)
-                    {
-                        try { text = Encoding.UTF8.GetString(raw); }
-                        catch { text = null; }
-                    }
+                    string text = json200 ? Encoding.UTF8.GetString(raw) : null;
 
                     #region сторож номера страницы (qdl 2.112)
-                    var verdict = guarding && text != null
-                        ? PageGuard.Check(uri, text)
-                        : PageGuard.Verdict.Skip;
+                    // Дефект, замеры и правила — шапка PageGuard.cs и §DO. Здесь только сама врезка.
+                    var judged = guarding && text != null
+                        ? PageGuard.Judge(uri, text)
+                        : (PageGuard.Verdict.Skip, null, null, -1);
 
-                    if (verdict == PageGuard.Verdict.Match)
+                    if (judged.verdict == PageGuard.Verdict.Match)
                     {
-                        // Копию заводим ТОЛЬКО на заведомо верном ответе — сбой не закрепляем.
-                        PageStore.Save(PageGuard.StoreKey(uri), text);
+                        // Заголовок нужен живой проверке (cubpage.mjs): без него «сторож отработал
+                        // и всё сошлось» неотличимо от «сторож выключен». На HIT не воспроизводится —
+                        // Staticache хранит только тело — и это ожидаемо.
+                        HttpContext.Response.Headers[PageGuard.HeaderName] = "match";
+
+                        // Копию заводим ТОЛЬКО на заведомо верном и НЕПУСТОМ ответе: пустая лента,
+                        // подставленная потом вместо чужой страницы, выбросила бы ряд с главной
+                        // (мина 2 из §CW).
+                        if (judged.results > 0)
+                            PageStore.Save(PageGuard.StoreKey(uri), text);
                     }
-                    else if (verdict == PageGuard.Verdict.Mismatch)
+                    else if (judged.verdict == PageGuard.Verdict.Mismatch)
                     {
-                        int wanted = PageGuard.RequestedPage(uri) ?? 0;
+                        int wanted = judged.wanted ?? 0;
                         string skey = PageGuard.StoreKey(uri);
 
-                        string healed = await PageHeal(init, requri, uri, headers, proxy).ConfigureAwait(false);
-                        string restored = healed == null
+                        var (healed, fuseOpen) = await PageHeal(init, requri, uri, headers, proxy).ConfigureAwait(false);
+                        string restored = healed == null && !fuseOpen
                             ? PageStore.Load(skey, wanted, init.pageGuardKeepMinutes)
                             : null;
+
+                        var action = PageGuard.Decide(judged.verdict, fuseOpen, healed != null, restored != null);
 
                         // 🔴 ContentLength = null обязателен в ЛЮБОЙ ветке ниже, и по двум разным
                         // причинам. (1) Тело подменено — при рассинхроне длины StaticacheWriter
@@ -481,37 +487,49 @@ public class CubProxyController : BaseController
                         // уже не дотянется.
                         HttpContext.Response.ContentLength = null;
 
-                        if (healed != null)
-                        {
-                            text = healed;
-                            raw = Encoding.UTF8.GetBytes(healed);
-                            HttpContext.Response.Headers[PageGuard.HeaderName] = "healed";
-                            PageStore.Save(skey, healed);
+                        // TTL «подозрительного, но верного» тела: кеш CUB по ключу сейчас нестабилен,
+                        // общие 3 часа ему давать неразумно. 0 — не кешировать вовсе.
+                        var shortTtl = init.pageGuardSuspectMinutes > 0
+                            ? new StatiCacheEntry(DateTimeOffset.Now.AddMinutes(init.pageGuardSuspectMinutes))
+                            : new StatiCacheEntry(default, false);
 
-                            // Тело верное, но кеш CUB по этому ключу прямо сейчас нестабилен —
-                            // общие 3 часа ему давать неразумно.
-                            HttpContext.Features.Set(init.pageGuardSuspectMinutes > 0
-                                ? new StatiCacheEntry(DateTimeOffset.Now.AddMinutes(init.pageGuardSuspectMinutes))
-                                : new StatiCacheEntry(default, false));
-                        }
-                        else
+                        // ⚠️ Features.Set ниже — ПОСЛЕДНИЙ, он и выигрывает: StaticacheWriter читает
+                        // фичу один раз, уже после выхода из контроллера, а положительный TTL
+                        // выставлен выше по коду.
+                        switch (action)
                         {
-                            if (restored != null)
-                            {
+                            case PageGuard.Action.Healed:
+                                text = healed;
+                                raw = Encoding.UTF8.GetBytes(healed);
+                                HttpContext.Response.Headers[PageGuard.HeaderName] = "healed";
+                                PageStore.Save(skey, healed);
+                                HttpContext.Features.Set(shortTtl);
+                                break;
+
+                            case PageGuard.Action.Fuse:
+                                // Предохранитель открыт: «врут ВСЕ ответы — вероятнее ошиблись мы».
+                                // Отдаём то, что дал CUB, копию не подставляем, кеш НЕ выключаем —
+                                // иначе весь каталог стал бы некешируемым. Только короткий TTL.
+                                HttpContext.Response.Headers[PageGuard.HeaderName] = "fuse";
+                                HttpContext.Features.Set(shortTtl);
+                                break;
+
+                            case PageGuard.Action.Restored:
                                 // Решение владельца: чужая страница не должна попасть в топ даже на
                                 // один показ. Отдаём последнюю копию, у которой номер сходился.
                                 text = restored;
                                 raw = Encoding.UTF8.GetBytes(restored);
                                 HttpContext.Response.Headers[PageGuard.HeaderName] = "restored";
-                            }
-                            else
-                                HttpContext.Response.Headers[PageGuard.HeaderName] = "mismatch";
+                                HttpContext.Features.Set(new StatiCacheEntry(default, false));
+                                break;
 
-                            // ⚠️ Это ПОСЛЕДНИЙ Set — он и выигрывает: StaticacheWriter читает фичу
-                            // один раз, уже после выхода из контроллера, а положительный TTL
-                            // выставлен выше по коду.
-                            HttpContext.Features.Set(new StatiCacheEntry(default, false));
+                            default:
+                                HttpContext.Response.Headers[PageGuard.HeaderName] = "mismatch";
+                                HttpContext.Features.Set(new StatiCacheEntry(default, false));
+                                break;
                         }
+
+                        LogGuard(action, uri, judged.wanted, judged.got, skey);
                     }
                     #endregion
 
@@ -551,36 +569,45 @@ public class CubProxyController : BaseController
 
 
     #region PageHeal (qdl 2.112)
-    /// <summary>
-    /// Потолок буфера тела. Ряд каталога — 7–22 КБ по замеру боевого; всё, что крупнее восьми
-    /// мегабайт, у tmdb.cub.* не наше, и копить его в памяти незачем.
-    /// </summary>
-    const int GuardBufferCap = 8 * 1024 * 1024;
-
     // Предохранитель общий на процесс: считаем повторы и подтверждённые расхождения в окне
     // PageGuard.SlotMinutes. Само состояние — чистая запись, переходы — чистые функции в
-    // PageGuard (иначе файл нельзя было бы линковать в тесты).
+    // PageGuard (иначе файл нельзя было бы линковать в тесты). Здесь только lock вокруг них.
     static readonly object _fuseLock = new();
     static PageGuard.Fuse _fuse;
-    static long _lastLogTicks;
+
+    // Лог не чаще раза в минуту НА АДРЕС (кап словаря 256), а исход «зритель получил чужую
+    // страницу» — всегда: он редкий и это красная линия владельца.
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _lastLog = new();
 
     /// <summary>
-    /// Один повтор мимо кеша CUB. Вернул тело с ПРАВИЛЬНЫМ номером страницы — отдаём его,
-    /// иначе null.
+    /// Один повтор мимо кеша CUB. Возвращает тело с ПРАВИЛЬНЫМ номером страницы (или null) и
+    /// состояние предохранителя после учёта этого расхождения.
     ///
     /// 🔴 Повтор — это ровно тот же самый адрес плюс уникальный параметр: у CUB кеш на URL, и
     /// обойти его можно только так (§DI, «ловушка диагностики»). Ни page±1, ни склейки соседних
     /// страниц — именно добор давал дубли в «Ещё» и отменён в 2.94 (§DA).
     ///
-    /// Заголовки передаём ТЕ ЖЕ (кука viewru + UA клиента), иначе это другой запрос.
+    /// Заголовки передаём ТЕ ЖЕ (кука viewru + UA клиента), иначе это другой запрос. Повтор
+    /// резервируется в потолке ДО похода, чтобы параллельные расхождения не перебирали потолок на
+    /// величину параллелизма; «подтверждено» — только если повтор ВЕРНУЛ тело и номер снова чужой
+    /// (упавший или выключенный повтор ничего не подтверждает).
     /// </summary>
-    async Task<string> PageHeal(ModuleConf init, string requri, string uri, List<HeadersModel> headers, WebProxy proxy)
+    async Task<(string healed, bool fuseOpen)> PageHeal(ModuleConf init, string requri, string uri, List<HeadersModel> headers, WebProxy proxy)
     {
-        long slot = PageGuard.SlotOf(DateTime.UtcNow);
         bool mayRetry;
 
         lock (_fuseLock)
-            mayRetry = init.pageGuardRetry && PageGuard.MayRetry(_fuse, slot, init.pageGuardRetryCap);
+        {
+            long slot = PageGuard.SlotOf(DateTime.UtcNow);
+
+            // Клиент уже отвалился — лишний поход к CUB ему не поможет, а слот потолка съест.
+            mayRetry = init.pageGuardRetry
+                && !HttpContext.RequestAborted.IsCancellationRequested
+                && PageGuard.MayRetry(_fuse, slot, init.pageGuardRetryCap, init.pageGuardOpenAfter);
+
+            if (mayRetry)
+                _fuse = PageGuard.Note(_fuse, slot, retried: true, confirmed: false);
+        }
 
         string content = null;
 
@@ -599,24 +626,43 @@ public class CubProxyController : BaseController
 
         // uri берём ИСХОДНЫЙ, без бастера: он и задаёт ожидаемый номер страницы
         bool healed = content != null && PageGuard.Check(uri, content) == PageGuard.Verdict.Match;
+        bool confirmed = mayRetry && content != null && !healed;
+        bool open;
 
         lock (_fuseLock)
-            _fuse = PageGuard.Note(_fuse, slot, mayRetry, !healed, init.pageGuardRetryCap, init.pageGuardOpenAfter);
-
-        #region лог, не чаще раза в минуту
-        long now = DateTime.UtcNow.Ticks;
-        long prev = Interlocked.Read(ref _lastLogTicks);
-
-        if (now - prev > TimeSpan.TicksPerMinute && Interlocked.CompareExchange(ref _lastLogTicks, now, prev) == prev)
         {
-            var f = _fuse;
-            Console.WriteLine($"[CubProxy] page guard: {uri} · просили {PageGuard.RequestedPage(uri)}, " +
-                $"повтор {(mayRetry ? (healed ? "вылечил" : "не помог") : "пропущен")} · " +
-                $"за окно повторов {f.retries}, расхождений {f.confirmed}{(f.open ? ", предохранитель открыт" : "")}");
+            // слот считаем заново: повтор мог занять до 8 с и перейти границу окна
+            long slot = PageGuard.SlotOf(DateTime.UtcNow);
+            _fuse = PageGuard.Note(_fuse, slot, retried: false, confirmed: confirmed);
+            open = PageGuard.Open(_fuse, slot, init.pageGuardOpenAfter);
         }
-        #endregion
 
-        return healed ? content : null;
+        return (healed ? content : null, open);
+    }
+
+    /// <summary>Итог сторожа в stdout — единственный след на промахах, которого не видит аудит прогрева.</summary>
+    void LogGuard(PageGuard.Action action, string uri, int? wanted, int? got, string key)
+    {
+        long now = DateTime.UtcNow.Ticks;
+
+        if (action != PageGuard.Action.MismatchNoCache)
+        {
+            if (_lastLog.TryGetValue(key, out long prev) && now - prev < TimeSpan.TicksPerMinute)
+                return;
+
+            _lastLog[key] = now;
+
+            if (_lastLog.Count > 256)
+                foreach (var kv in _lastLog)
+                    if (now - kv.Value > TimeSpan.TicksPerMinute * 10)
+                        _lastLog.TryRemove(kv.Key, out _);
+        }
+
+        PageGuard.Fuse f;
+        lock (_fuseLock) f = _fuse;
+
+        Console.WriteLine($"[CubProxy] page guard: {uri} · просили {wanted}, пришла {got} → {action} · " +
+            $"окно: повторов {f.retries}, подтверждено {f.confirmed}");
     }
     #endregion
 

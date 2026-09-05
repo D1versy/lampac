@@ -1107,14 +1107,21 @@ public class HealthTests
     // §DI/§DO: у CUB свой кеш nginx, он иногда отдаёт тело чужой страницы, а мы примораживаем
     // это на 3 часа. Строка отдельная от «CUB каталог»: при отравленной записи апстрим здоров.
 
-    static JObject Pages(int checkedRows = 20, int bad = 0, DateTime? at = null, int periodMin = 15, params string[] samples)
+    static JObject Pages(int checkedRows = 20, int bad = 0, int badMain = 0, DateTime? at = null, int periodMin = 15,
+                         bool enabled = true, bool timer = true, int rows = 0, bool partial = false, params string[] samples)
     {
         var o = new JObject
         {
+            ["enabled"] = enabled,
+            ["timer"] = timer,
             ["checked"] = checkedRows,
             ["bad"] = bad,
+            ["badMain"] = badMain,
+            ["rows"] = rows,
+            ["partial"] = partial,
             ["periodMin"] = periodMin,
-            ["samples"] = new JArray(samples)
+            ["samples"] = new JArray(samples),
+            ["guard"] = new JObject { ["healed"] = 0, ["restored"] = 0, ["mismatch"] = 0, ["fuse"] = 0 }
         };
         if (at != null) o["at"] = at.Value.ToString("o");
         return o;
@@ -1129,23 +1136,58 @@ public class HealthTests
         Assert.Contains("рядов 20", detail);
     }
 
-    [Fact]
-    public void CubPage_OneStaleEntry_IsWarnNotFail()
+    [Theory]
+    [InlineData(1, "warn", "в 1 записи")]
+    [InlineData(2, "warn", "в 2 записях")]
+    [InlineData(3, "fail", "в 3 записях")]
+    [InlineData(50, "fail", "в 50 записях")]
+    public void CubPage_Порог_ровно_три(int bad, string status, string phrase)
     {
-        // Одна залежавшаяся запись дохнет сама за TTL — привычка игнорировать красное дороже
-        var (status, detail) = QbitController.CubPageVerdict(
-            Pages(bad: 1, at: T0, samples: "192.168.87.24:9118/cub/tmdb./?sort=now_playing&email= · просили 1, в теле 11 · HIT"), T0);
-
-        Assert.Equal("warn", status);
-        Assert.Contains("в теле 11", detail);   // адрес и цифры видны сразу, без похода в логи
+        // Одна-две залежавшихся записи дохнут сами за TTL — привычка игнорировать красное дороже
+        var (st, d) = QbitController.CubPageVerdict(Pages(bad: bad, at: T0), T0);
+        Assert.Equal(status, st);
+        Assert.Contains(phrase, d);
     }
 
     [Fact]
-    public void CubPage_ManyMismatches_IsFail()
+    public void CubPage_MainRowPoisoned_IsFail()
     {
-        var (status, detail) = QbitController.CubPageVerdict(Pages(bad: 3, at: T0), T0);
+        // Чужая страница в ряду главной — ровно жалоба владельца: это единственное, что он видит в топе
+        var (status, detail) = QbitController.CubPageVerdict(
+            Pages(bad: 1, badMain: 1, at: T0, samples: "tv.d1versy.com:9443 now_playing p1→11 HIT ГЛАВНАЯ"), T0);
+
         Assert.Equal("fail", status);
-        Assert.Contains("3", detail);
+        Assert.Contains("ряду главной", detail);
+        Assert.Contains("p1→11", detail);   // адрес и цифры видны сразу, без похода в журнал
+    }
+
+    [Fact]
+    public void CubPage_Samples_ShortAndCapped()
+    {
+        var (_, detail) = QbitController.CubPageVerdict(
+            Pages(bad: 5, at: T0, samples: new[] { "a p1→2 HIT", "b p1→3 HIT", "c p1→4 HIT", "d p1→5 HIT", "e p1→6 HIT" }), T0);
+
+        Assert.Contains("a p1→2 HIT", detail);
+        Assert.Contains("b p1→3 HIT", detail);
+        Assert.DoesNotContain("c p1→4", detail);        // на экране ТВ — не больше двух
+        Assert.Contains("в журнале", detail);           // остальное — там, вместе с командой сноса
+    }
+
+    [Fact]
+    public void CubPage_Disabled_SaysDisabledNotPending()
+    {
+        // 🔴 «выключено» ≠ «скоро будет»: владелец, выключивший прогрев, не должен неделями читать «ещё не было»
+        var (status, detail) = QbitController.CubPageVerdict(Pages(at: T0, enabled: false), T0);
+        Assert.Equal("off", status);
+        Assert.Contains("выключен", detail);
+    }
+
+    [Fact]
+    public void CubPage_Standby_SaysNotLeader()
+    {
+        var (status, detail) = QbitController.CubPageVerdict(Pages(at: T0, timer: false), T0);
+        Assert.Equal("off", status);
+        Assert.Contains("не ведущий", detail);
     }
 
     [Fact]
@@ -1157,12 +1199,15 @@ public class HealthTests
     }
 
     [Fact]
-    public void CubPage_StaleSweep_IsOff()
+    public void CubPage_Окно_свежести_три_периода_с_клампом_снизу()
     {
-        // Прогрев не ходил три периода — судить не о чем, это не «всё хорошо»
-        var (status, detail) = QbitController.CubPageVerdict(Pages(at: T0, periodMin: 15), T0.AddMinutes(50));
+        Assert.Equal("ok", QbitController.CubPageVerdict(Pages(at: T0, periodMin: 15), T0.AddMinutes(45)).status);   // граница включительно
+        var (status, detail) = QbitController.CubPageVerdict(Pages(at: T0, periodMin: 15), T0.AddMinutes(46));
         Assert.Equal("off", status);
         Assert.Contains("не ходил", detail);
+        Assert.Equal("off", QbitController.CubPageVerdict(Pages(at: T0, periodMin: 0), T0.AddMinutes(16)).status);   // 0 → кламп 5 → 15 мин
+        var b = Pages(at: T0); b["periodMin"] = "x";
+        Assert.Equal("ok", QbitController.CubPageVerdict(b, T0.AddMinutes(40)).status);   // нечитаем → дефолт 15
     }
 
     [Fact]
@@ -1170,11 +1215,53 @@ public class HealthTests
         => Assert.Equal("off", QbitController.CubPageVerdict(Pages(checkedRows: 0, at: T0), T0).status);
 
     [Fact]
+    public void CubPage_PartialSweep_IsWarn()
+    {
+        // Обрыв по Draining или карантин: проверено 3 ряда из 86 — это не «всё хорошо»
+        var (status, detail) = QbitController.CubPageVerdict(Pages(checkedRows: 3, rows: 86, at: T0), T0);
+        Assert.Equal("warn", status);
+        Assert.Contains("неполный", detail);
+        Assert.Contains("3 из 86", detail);
+
+        Assert.Equal("warn", QbitController.CubPageVerdict(Pages(checkedRows: 80, rows: 86, partial: true, at: T0), T0).status);
+        Assert.Equal("ok", QbitController.CubPageVerdict(Pages(checkedRows: 80, rows: 86, at: T0), T0).status);
+    }
+
+    [Fact]
+    public void CubPage_GuardCounters_InDetail()
+    {
+        var b = Pages(at: T0);
+        b["guard"] = new JObject { ["healed"] = 2, ["restored"] = 1, ["mismatch"] = 0, ["fuse"] = 0 };
+        var (status, detail) = QbitController.CubPageVerdict(b, T0);
+        Assert.Equal("ok", status);
+        Assert.Contains("вылечил 2", detail);
+        Assert.Contains("подставил копию 1", detail);
+        Assert.DoesNotContain("не смог", detail);
+    }
+
+    [Fact]
+    public void CubPage_БитыеСчётчикиПриЖивомAt_НеРонят()
+    {
+        var broken = Pages(at: T0);
+        broken["checked"] = "хрень"; broken["bad"] = true; broken["periodMin"] = "x";
+        Assert.Equal("off", QbitController.CubPageVerdict(broken, T0).status);   // checked нечитаем → «рядов не было»
+    }
+
+    [Fact]
+    public void CubPage_БитыеSamples_НеРонят()
+    {
+        // Снимок собирается на живом сервере: не-строки в samples не имеют права уронить весь /qdl/health
+        var b = Pages(bad: 1, at: T0);
+        b["samples"] = new JArray("строка", null, 5, new JObject { ["a"] = 1 });
+        var (status, detail) = QbitController.CubPageVerdict(b, T0);
+        Assert.Equal("warn", status);
+        Assert.Contains("строка", detail);
+    }
+
+    [Fact]
     public void CubPage_BrokenSnapshot_DoesNotThrow()
     {
-        // Снимок собирается на живом сервере и полным быть не обязан: битое поле не имеет права
-        // уронить весь /qdl/health — экран погас бы целиком из-за одной строки
-        var broken = new JObject { ["checked"] = "хрень", ["bad"] = true, ["at"] = "не дата" };
+        var broken = new JObject { ["enabled"] = true, ["timer"] = true, ["checked"] = "хрень", ["bad"] = true, ["at"] = "не дата" };
         Assert.Equal("off", QbitController.CubPageVerdict(broken, T0).status);
     }
     #endregion

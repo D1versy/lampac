@@ -59,6 +59,14 @@ public static class RowFilter
     /// ровно в том виде, в каком его собирает CubProxyController ("?sort=now_playing&amp;page=1&amp;email=").
     /// </summary>
     public static bool IsCandidate(string subdomain, string uri)
+        => IsCatalogApi(subdomain, uri) && _sorts.Contains(SortOf(uri));
+
+    /// <summary>
+    /// «Это ряд каталога CUB, а не картинка/детали/поиск» — одно правило на фильтр по году и на
+    /// сторож номера страницы (PageGuard, qdl 2.112): область у них общая, и жить она должна в
+    /// одном месте, иначе следующий новый passthrough-префикс попадёт в одну копию из двух.
+    /// </summary>
+    public static bool IsCatalogApi(string subdomain, string uri)
     {
         if (uri == null || !"tmdb".Equals(subdomain, StringComparison.OrdinalIgnoreCase))
             return false;
@@ -72,7 +80,7 @@ public static class RowFilter
         if (uri.Contains("query=", StringComparison.OrdinalIgnoreCase))
             return false;
 
-        return _sorts.Contains(SortOf(uri));
+        return true;
     }
 
     /// <summary>Значение параметра sort= (пустая строка, если его нет).</summary>
