@@ -53,7 +53,17 @@ public static class JsonStore
     static readonly ConcurrentDictionary<string, byte> _dirty = new(StringComparer.OrdinalIgnoreCase);
 
     static int _writer;
-    static long _reads, _diskReads, _writes, _diskWrites;
+    static long _reads, _diskReads, _writes, _diskWrites, _dropped;
+
+    /// <summary>
+    /// Ворота записи на диск (Deploy.cs, qdl 2.110). У дежурного и замороженного экземпляра false:
+    /// РАМ живёт как раньше (процесс сам с собой согласован), а диск принадлежит ведущему —
+    /// иначе два процесса писали бы один документ целиком и последний затирал бы чужое.
+    /// Отброшенные записи считаются в Dropped; при promote РАМ забывается без флаша.
+    /// </summary>
+    public static volatile bool WritesEnabled = true;
+
+    public static long Dropped => Interlocked.Read(ref _dropped);
 
     /// <summary>Диагностика для /qdl/jut/diag и тестов: сколько чтений реально дошло до диска.</summary>
     public static (long reads, long diskReads, long writes, long diskWrites) Stats()
@@ -141,6 +151,19 @@ public static class JsonStore
 
     public static void ForgetAll() => _mem.Clear();
 
+    /// <summary>
+    /// Забыть ВСЁ без флаша — и РАМ, и листинги, и очередь грязного. Для promote в Deploy:
+    /// диск только что записал предыдущий экземпляр, наша РАМ-копия устарела по определению,
+    /// и довести её до диска значило бы затереть его.
+    /// </summary>
+    public static void ForgetAllNoFlush()
+    {
+        _mem.Clear();
+        _dirs.Clear();
+        _dirty.Clear();
+        while (_dirtyOrder.TryDequeue(out _)) { }
+    }
+
     static void MarkDirty(string path)
     {
         if (_dirty.TryAdd(path, 0)) _dirtyOrder.Enqueue(path);
@@ -179,6 +202,13 @@ public static class JsonStore
 
     static void WriteThrough(string path, Entry e)
     {
+        if (!WritesEnabled)
+        {
+            // не ведущий: ключ остаётся «не на диске», диск не трогаем (ни основной, ни зеркало)
+            Interlocked.Increment(ref _dropped);
+            return;
+        }
+
         try
         {
             Interlocked.Increment(ref _diskWrites);

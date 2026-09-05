@@ -658,7 +658,7 @@ public partial class QbitController
                 // а finally тут же перезапускал воркер — тот выхватывал следующий элемент и
                 // снова ломался о break. Получался busy-loop, молча сливавший всю очередь,
                 // после которого те же серии нельзя было поставить заново до рестарта.
-                while (JutOn && _jutQueue.TryDequeue(out var it))
+                while (JutOn && !Deploy.Draining && _jutQueue.TryDequeue(out var it))   // Draining: заморозка экземпляра (Deploy) — новое не берём
                 {
                     if (JutStale(it)) { JutDoneWith(it); continue; }
                     try { await JutGrabOne(it); }
@@ -679,7 +679,7 @@ public partial class QbitController
                 Interlocked.Exchange(ref _jutWorker, 0);
                 // Добор при гонке: пока сбрасывали флаг, могли поставить новый элемент.
                 // Гейт по JutOn обязателен — без него это тот самый busy-loop.
-                if (JutOn && !_jutQueue.IsEmpty) JutKickWorker();
+                if (JutOn && !Deploy.Draining && !_jutQueue.IsEmpty) JutKickWorker();
                 else JutPruneJobs();
             }
         });
@@ -787,7 +787,8 @@ public partial class QbitController
                 // ⚠️ Именно idle, а не общий таймаут: у медиа-клиента Timeout.InfiniteTimeSpan
                 // обязателен (§AL грабля 4 — иначе 489-МиБ файл рвётся на 100-й секунде).
                 int idleSec = Math.Max(0, ModInit.conf?.jutGrabIdleSec ?? 60);
-                using var idle = new CancellationTokenSource();
+                // Deploy: заморозка экземпляра рвёт скачивание тем же токеном — .part остаётся, докачает новый экземпляр
+                using var idle = CancellationTokenSource.CreateLinkedTokenSource(Deploy.DrainToken);
                 if (idleSec > 0) idle.CancelAfter(TimeSpan.FromSeconds(idleSec));
 
                 using var resp = await JutNet.Media(link.exitId)
@@ -870,7 +871,7 @@ public partial class QbitController
                 // ⚠️ Отмену и idle-таймаут различать ОБЯЗАТЕЛЬНО: оба прилетают сюда
                 // как OperationCanceledException. Отмена окончательна, ретраить нельзя; idle-таймаут —
                 // штатный обрыв, .part остаётся и докачивается обычным бэкоффом.
-                if (JutStale(it) || !JutOn) { JutSetState(job, "canceled"); return; }
+                if (JutStale(it) || !JutOn || Deploy.Draining) { JutSetState(job, "canceled"); return; }
                 bool idleTimeout = ex is OperationCanceledException;
                 job.error = idleTimeout ? "нет данных от CDN — обрыв по idle-таймауту" : ex.Message;
                 if (idleTimeout)

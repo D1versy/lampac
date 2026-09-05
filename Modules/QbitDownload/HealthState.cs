@@ -358,5 +358,13 @@ public static class HealthState
         _recs.Clear();
         _dirty = false;
     }
+
+    /// <summary>Перечитать с диска, забыв РАМ (promote в Deploy: файл писал предыдущий экземпляр).</summary>
+    public static void Reload()
+    {
+        _recs.Clear();
+        _dirty = false;
+        Load();
+    }
     #endregion
 }

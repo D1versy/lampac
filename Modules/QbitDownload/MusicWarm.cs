@@ -72,10 +72,16 @@ public static class MusicWarm
 
     internal static int PeriodMin => Math.Max(5, ModInit.conf != null && ModInit.conf.musicWarmIntervalMin > 0 ? ModInit.conf.musicWarmIntervalMin : 20);
 
+    /// <summary>Учёт хостов (хук пайплайна) + состояние с диска. Таймер — отдельно, StartTimer() у ведущего.</summary>
     public static void Attach()
     {
         Load();
         EventListener.Middleware += OnRequest;
+    }
+
+    /// <summary>Периодический прогрев. Зовётся из ModInit.Activate — только у ведущего (Deploy).</summary>
+    public static void StartTimer()
+    {
         _timer?.Dispose();
         _timer = new Timer(async _ =>
         {
@@ -84,11 +90,23 @@ public static class MusicWarm
         }, null, TimeSpan.FromMinutes(12), TimeSpan.FromMinutes(PeriodMin));
     }
 
+    public static void StopTimer()
+    {
+        _timer?.Dispose();
+        _timer = null;
+    }
+
     public static void Detach()
     {
         EventListener.Middleware -= OnRequest;
-        _timer?.Dispose();
-        _timer = null;
+        StopTimer();
+    }
+
+    /// <summary>Перечитать состояние с диска (promote в Deploy: файл дописал предыдущий экземпляр).</summary>
+    internal static void Reload()
+    {
+        ResetForTests();
+        Load();
     }
 
     // Наблюдатель пайплайна: только учёт, всегда true. Держать ДЁШЕВО — стоит на каждом запросе.
@@ -428,6 +446,7 @@ public static class MusicWarm
 
     internal static void Save()
     {
+        if (!Deploy.WarmSavesAllowed) return;   // дежурный/замороженный экземпляр: файл принадлежит ведущему
         try
         {
             string dir = Path.GetDirectoryName(StorePath);

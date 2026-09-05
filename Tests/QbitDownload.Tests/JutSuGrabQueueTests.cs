@@ -111,10 +111,11 @@ public class JutSuGrabQueueTests
         // нельзя было поставить заново до рестарта контейнера.
         string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
 
-        // флаг проверяется В УСЛОВИИ цикла, до извлечения элемента
-        Assert.Contains("while (JutOn && _jutQueue.TryDequeue", src);
+        // флаг проверяется В УСЛОВИИ цикла, до извлечения элемента (с qdl 2.110 рядом стоит
+        // Deploy.Draining — заморозка экземпляра при blue/green-редеплое тоже не вынимает элемент)
+        Assert.Contains("while (JutOn && !Deploy.Draining && _jutQueue.TryDequeue", src);
         // и перекик тоже под флагом — иначе это тот же busy-loop
-        Assert.Contains("if (JutOn && !_jutQueue.IsEmpty) JutKickWorker();", src);
+        Assert.Contains("if (JutOn && !Deploy.Draining && !_jutQueue.IsEmpty) JutKickWorker();", src);
         // старой формы больше нет
         Assert.DoesNotContain("if (ModInit.conf?.jutEnable != true) break;", src);
     }
@@ -648,7 +649,7 @@ public class JutSuGrabQueueTests
         // idle-таймаут — штатный обрыв, .part докачивается бэкоффом.
         string src = Strip(File.ReadAllText(ModuleFile("JutSuGrab.cs")));
         Assert.Contains("bool idleTimeout = ex is OperationCanceledException;", src);
-        int stale = src.IndexOf("if (JutStale(it) || !JutOn) { JutSetState(job, \"canceled\"); return; }",
+        int stale = src.IndexOf("if (JutStale(it) || !JutOn || Deploy.Draining) { JutSetState(job, \"canceled\"); return; }",
                                 StringComparison.Ordinal);
         int idle = src.IndexOf("bool idleTimeout", StringComparison.Ordinal);
         Assert.True(stale > 0 && idle > stale, "проверка отмены обязана идти ПЕРЕД разбором idle");

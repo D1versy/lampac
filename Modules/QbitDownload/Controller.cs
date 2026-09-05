@@ -1612,6 +1612,51 @@ public partial class QbitController : BaseController
     static readonly TimeSpan _hlsTouchTtl = TimeSpan.FromMinutes(30);
     static readonly System.Threading.Timer _hlsIdleTimer = new(_ => { KillIdleHls(); CleanupHlsThrottled(300); }, null, 60_000, 30_000);   // держим ссылку от GC
 
+    internal static int HlsRunningCount => _hlsRunning.Count;
+
+    /// <summary>Заняты ли воркеры закачек jut/xsmart (Deploy.Freeze ждёт их, прежде чем отдать аренду).</summary>
+    internal static bool GrabWorkersBusy => Volatile.Read(ref _jutWorker) != 0 || Volatile.Read(ref _xsWorker) != 0;
+
+    /// <summary>
+    /// Убить ВСЕ свои HLS-сессии (Deploy.Freeze, шаг 2): сегменты дальше просит новый экземпляр,
+    /// и второй ffmpeg в ту же папку недопустим. Зритель получит штатный рестарт с -ss (~3-5 с).
+    /// </summary>
+    internal static int KillAllHls()
+    {
+        int n = 0;
+        foreach (var kv in _hlsRunning)
+        {
+            var lk = _hlsLock.GetOrAdd(kv.Key, _ => new object());
+            lock (lk)
+            {
+                if (!_hlsRunning.TryRemove(kv.Key, out var sess)) continue;
+                sess.killed = true;
+                try { sess.job?.Kill(); } catch { }
+                n++;
+            }
+        }
+        if (n > 0) Console.WriteLine("[QbitDownload] hls: убито сессий при заморозке — " + n);
+        return n;
+    }
+
+    /// <summary>
+    /// В папку ключа кто-то ещё дописывает сегменты (свежий seg*.ts моложе двух длительностей
+    /// сегмента) — ffmpeg предыдущего экземпляра, до которого reap при тёплой передаче не дошёл.
+    /// Сторож усыновления: не запускать второй ffmpeg в ту же папку, а ждать сегмент с диска.
+    /// </summary>
+    static bool HlsForeignWriter(string dir)
+    {
+        try
+        {
+            if (!Directory.Exists(dir)) return false;
+            var cutoff = DateTime.UtcNow.AddSeconds(-2 * HlsSegSec);
+            foreach (var f in new DirectoryInfo(dir).EnumerateFiles("seg*.ts"))
+                if (f.LastWriteTimeUtc > cutoff) return true;
+        }
+        catch { }
+        return false;
+    }
+
     // Зритель закрыл приложение/поставил долгую паузу — запросы сегментов прекратились, а ffmpeg
     // молотил бы до конца файла (для _m-профиля это весь фильм на GPU впустую). Глушим VOD-сессии
     // без активности дольше hlsIdleKillSec: любой следующий запрос сегмента перезапустит транскод
@@ -1707,16 +1752,24 @@ public partial class QbitController : BaseController
 
                         _hlsRunning.TryGetValue(key, out var sess);
                         bool covered = sess != null && sess.startSeg >= 0 && sess.startSeg <= n && n <= SegLastCompleted(sess) + HlsAheadSegs;
+                        bool adopting = false;
                         if (!covered)   // дальний seek вперёд, назад на вычищенный сегмент или ffmpeg не запущен → рестарт с -ss
                         {
-                            var (src, extAudio, audioMap) = await ResolveHlsInputs(hash, index, audio);
-                            if (src == null) return NotFound();
-                            CleanupHlsThrottled(60);
-                            StartHls(key, dir, src, extAudio, audioMap, n, mobile);
+                            // Deploy: первые минуты после promote в папку мог ещё писать ffmpeg предыдущего
+                            // экземпляра — второй ffmpeg в ту же папку перемешал бы сегменты, ждём с диска
+                            if (Deploy.InHandoffWindow && HlsForeignWriter(dir))
+                                adopting = true;
+                            else
+                            {
+                                var (src, extAudio, audioMap) = await ResolveHlsInputs(hash, index, audio);
+                                if (src == null) return NotFound();
+                                CleanupHlsThrottled(60);
+                                StartHls(key, dir, src, extAudio, audioMap, n, mobile);
+                            }
                         }
                         for (int i = 0; i < 40 && !SegReady(dir, n); i++)   // short-poll до 10с вместо слепых ретраев hls.js
                         {
-                            if (!_hlsRunning.ContainsKey(key)) break;   // ffmpeg вышел — дальше ждать нечего
+                            if (!adopting && !_hlsRunning.ContainsKey(key)) break;   // ffmpeg вышел — дальше ждать нечего
                             await Task.Delay(250);
                             _hlsTouch[key] = DateTime.UtcNow;
                         }
@@ -2714,6 +2767,9 @@ public partial class QbitController : BaseController
     static int _tcWorker = 0;                                        // 1 = воркер-цикл жив
     static volatile TcQueueItem _tcCurrent;                          // выполняемый элемент (для дозаписи серий)
 
+    /// <summary>Идёт или стоит в очереди транскод (Deploy: скрипт деплоя ждёт, прежде чем переключать цвет).</summary>
+    internal static bool TranscodeActive => _tcCurrent != null || !_tcQueue.IsEmpty;
+
     // Совместимость: старая сигнатура одиночного файла (фильм) — используется прежним путём и тестами.
     static int EnqueueTranscode(string hash, string src, string part, string final, double duration)
         => EnqueueTranscode(hash, finalize: true, name: null, dir: null,
@@ -2810,6 +2866,7 @@ public partial class QbitController : BaseController
         var ro = ReplicaReadOnlyDeny(); if (ro != null) return ro;   // на реплике транскода нет вовсе
         var mg = ManageDenied(); if (mg != null) return mg;   // право «manage» или кука (2.67)
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
+        if (Deploy.Draining) return Json(new { success = false, error = "идёт деплой — повторите через минуту" });   // очередь транскодов живёт в РАМ этого экземпляра
         try
         {
             var loc0 = LoadLocal(hash);
@@ -3289,6 +3346,13 @@ public partial class QbitController : BaseController
     // (чтобы отличить интерактивный add от нашего же re-grab, сменившего hash записи).
     static void SaveWatchReconciled(JArray working, HashSet<string> originalHashes)
     {
+        if (Deploy.Draining)
+        {
+            // заморозка (Deploy): watch.json уже принадлежит новому экземпляру — слепая запись
+            // затёрла бы его WatchAdd. Проход идемпотентен, донора-сироту уберёт ReconcileDonors.
+            Console.WriteLine("[QbitDownload] watch: сохранение прохода пропущено — идёт заморозка экземпляра");
+            return;
+        }
         lock (_watchLock)
         {
             var fresh = LoadWatch();

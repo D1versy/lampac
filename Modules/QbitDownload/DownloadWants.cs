@@ -450,7 +450,10 @@ static class DownloadWants
     /// Для тестов: забыть БЕЗ флаша. Сброс с записью уронил бы состояние прошлого кейса
     /// в новый временный cachePath.
     /// </summary>
-    public static void ResetForTests()
+    public static void ResetForTests() => ResetNoFlush();
+
+    /// <summary>Promote в Deploy: забыть БЕЗ флаша — журнал на диске дописал предыдущий экземпляр.</summary>
+    public static void ResetNoFlush()
     {
         Xsmart.Reset(flush: false);
         Jut.Reset(flush: false);

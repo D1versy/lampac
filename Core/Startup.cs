@@ -635,6 +635,9 @@ public class Startup
         app.UseForwardedHeaders(forwarded);
         #endregion
 
+        // D1Vision: запросы в полёте и последний запрос — для бесшовного редеплоя (Core/Middlewares/D1VInflight.cs)
+        app.UseD1VInflight();
+
         app.UseBaseMod();
         app.UseModHeaders();
         app.UseRequestInfo();

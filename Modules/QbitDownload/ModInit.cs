@@ -39,7 +39,18 @@ public class ModInit : IModuleLoaded
     public void Loaded(InitspaceModel baseconf)
     {
         modpath = baseconf.path;
+        Common();
+        // Бесшовный редеплой (Deploy.cs, qdl 2.110): без D1V_COLOR — сразу Activate(), как раньше;
+        // с цветом роль решает файл active + аренда, и Activate() зовётся при promote.
+        Deploy.Start(Activate, Deactivate);
+    }
 
+    /// <summary>
+    /// Общий init для ЛЮБОЙ роли (ведущий, дежурный, legacy): конфиг, хуки пайплайна, схема SQLite.
+    /// Без таймеров, без ретенции и без уборки после падения — всё это в Activate().
+    /// </summary>
+    void Common()
+    {
         updateConf();
         EventListener.UpdateInitFile += updateConf;
         AppPatch.Attach();   // вырезание upstream-колокольчика/меню из app.min.js при отдаче (см. AppReplace.cs)
@@ -50,8 +61,8 @@ public class ModInit : IModuleLoaded
         catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] health state load: " + ex); }
 
         EventListener.MyLocalIp += MyIp;   // внешний IP без api.ipify.org (qdl 2.15, см. MyIp ниже)
-        CatalogWarmup.Attach();            // почасовой прогрев каталога главной (CatalogWarmup.cs)
-        MusicWarm.Attach();                // прогрев полок раздела «Музыка» (MusicWarm.cs)
+        CatalogWarmup.Attach();            // учёт клиентских рядов для прогрева каталога (таймер — в Activate)
+        MusicWarm.Attach();                // учёт хостов для прогрева полок «Музыки» (таймер — в Activate)
         Perms.Attach();                    // реестр устройств для прав на D1versy Live/Rec (Perms.cs)
         Groups.Attach();                   // общая история у связанных устройств (Groups.cs, qdl 2.81)
         ProxyHttp2.Attach();               // h2 для /proxy/ на phncdn — иначе Cloudflare даёт 410 (ProxyHttp2.cs)
@@ -62,19 +73,40 @@ public class ModInit : IModuleLoaded
             using var db = new SqlContext();
             db.Database.EnsureCreated();
             try { db.Database.ExecuteSqlRaw("PRAGMA journal_mode = WAL;"); } catch { }
-            // Ретенция ленты уведомлений: таблица noti росла вечно (единственным удалением был
-            // ручной /clear), а каждая скачанная серия добавляла строку.
-            try { QbitController.NotiPrune(conf?.notiKeepRows ?? 500); } catch { }
         }
         catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] db init: " + ex); }
+    }
 
-        // обрывки прерванных транскодов (*.part) — мусор после рестарта, чистим сразу
-        try { QbitController.CleanupTranscodeParts(); }
-        catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] part cleanup: " + ex); }
+    /// <summary>
+    /// Старт ВЕДУЩЕГО: ретенция, уборка после падения, все таймеры, восстановление очередей.
+    /// Зовётся из Deploy при promote (и сразу из Loaded() в legacy-режиме). Повторный вызов
+    /// после отката безопасен: таймеры пересоздаются через Dispose, блок восстановления идемпотентен.
+    /// </summary>
+    internal static void Activate()
+    {
+        // Ретенция ленты уведомлений: таблица noti росла вечно (единственным удалением был
+        // ручной /clear), а каждая скачанная серия добавляла строку.
+        try { QbitController.NotiPrune(conf?.notiKeepRows ?? 500); } catch { }
 
-        // GPU-воркер: добить джобы прошлого запуска контейнера (fire-and-forget, best-effort)
-        try { FfWorker.ReapOrphans(); }
-        catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] ffworker reap: " + ex); }
+        if (Deploy.ColdStart)
+        {
+            // обрывки прерванных транскодов (*.part) — мусор после рестарта, чистим сразу
+            try { QbitController.CleanupTranscodeParts(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] part cleanup: " + ex); }
+
+            // GPU-воркер: добить джобы прошлого запуска контейнера (fire-and-forget, best-effort)
+            try { FfWorker.ReapOrphans(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] ffworker reap: " + ex); }
+        }
+        else
+        {
+            // Тёплая передача (Deploy): предыдущий экземпляр сам убил свои HLS-сессии и дописал
+            // .part-файлы; reap убил бы его ещё живые джобы, а чистка — его недокачанное.
+            System.Console.WriteLine("[QbitDownload] тёплая передача: чистка .part и reap воркера пропущены");
+        }
+
+        CatalogWarmup.StartTimer();        // почасовой прогрев каталога главной (CatalogWarmup.cs)
+        MusicWarm.StartTimer();            // прогрев полок раздела «Музыка» (MusicWarm.cs)
 
         // осиротевшие доноры охоты (add в qBit прошёл, watch.json не сохранился до рестарта) — убрать
         _ = System.Threading.Tasks.Task.Run(async () => {
@@ -461,6 +493,17 @@ public class ModInit : IModuleLoaded
         MusicWarm.Detach();
         Perms.Detach();
         ProxyHttp2.Detach();
+        Deactivate();
+    }
+
+    /// <summary>
+    /// Остановить фон и довести состояние до диска — тело прежнего Dispose. Зовётся и при выгрузке
+    /// модуля, и при заморозке экземпляра (Deploy.Freeze, шаг 2). Хуки пайплайна не трогает.
+    /// </summary>
+    internal static void Deactivate()
+    {
+        CatalogWarmup.StopTimer();
+        MusicWarm.StopTimer();
         _watchTimer?.Dispose();
         _watchTimer = null;
         _notifyTimer?.Dispose();

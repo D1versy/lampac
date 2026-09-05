@@ -148,10 +148,16 @@ public static class CatalogWarmup
     internal static long CardFirstSeen(long id)
         => _cardFirstSeen.TryGetValue(id, out long t) ? t : 0;
 
+    /// <summary>Учёт клиентских рядов (хук пайплайна) + состояние с диска. Таймер — отдельно, StartTimer() у ведущего.</summary>
     public static void Attach()
     {
         Load();
         EventListener.Middleware += OnRequest;
+    }
+
+    /// <summary>Периодический прогрев. Зовётся из ModInit.Activate — только у ведущего (Deploy): дежурный не пишет состояние.</summary>
+    public static void StartTimer()
+    {
         int period = Math.Max(5, ModInit.conf != null && ModInit.conf.catalogWarmupPeriodMin > 0 ? ModInit.conf.catalogWarmupPeriodMin : 15);
         _timer?.Dispose();
         _timer = new Timer(async _ =>
@@ -161,11 +167,25 @@ public static class CatalogWarmup
         }, null, TimeSpan.FromMinutes(3), TimeSpan.FromMinutes(period));
     }
 
+    public static void StopTimer()
+    {
+        _timer?.Dispose();
+        _timer = null;
+    }
+
     public static void Detach()
     {
         EventListener.Middleware -= OnRequest;
-        _timer?.Dispose();
-        _timer = null;
+        StopTimer();
+    }
+
+    /// <summary>Перечитать состояние с диска (promote в Deploy: файл дописал предыдущий экземпляр).</summary>
+    internal static void Reload()
+    {
+        ResetForTests();
+        _feed = null;
+        _findForm = null;
+        Load();
     }
 
     // Наблюдатель пайплайна: только учёт, всегда true (запрос не трогаем). Держать ДЁШЕВО.
@@ -801,7 +821,7 @@ public static class CatalogWarmup
         public string Key => host + "|" + (tv ? "tv" : "movie") + "|" + id.ToString("D10");
     }
 
-    static async Task Tick()
+    internal static async Task Tick()
     {
         if (Interlocked.CompareExchange(ref _ticking, 1, 0) == 1)
             return;
@@ -851,6 +871,7 @@ public static class CatalogWarmup
 
             foreach (var en in rows)
             {
+                if (Deploy.Draining) break;   // заморозка экземпляра (Deploy): дальше греть некому
                 var now = DateTime.UtcNow;
                 if (!ignoreQuarantine && Quarantined(en, now, deadRetryHours)) { deadSkipped++; continue; }
 
@@ -1096,6 +1117,7 @@ public static class CatalogWarmup
         int missCount = 0, todo = Math.Min(budget, list.Count);
         for (int i = 0; i < todo; i++)
         {
+            if (Deploy.Draining) break;   // заморозка экземпляра (Deploy)
             var it = list[(start + i) % list.Count];
             var (ok, wasMiss, _, _, _) = await Fetch(port, it.scheme, it.host, it.path, readBody: true);
             if (ok && wasMiss) missCount++;
@@ -1357,6 +1379,7 @@ public static class CatalogWarmup
 
     internal static void Save()
     {
+        if (!Deploy.WarmSavesAllowed) return;   // дежурный/замороженный экземпляр: файл принадлежит ведущему
         try
         {
             string dir = Path.GetDirectoryName(StorePath);

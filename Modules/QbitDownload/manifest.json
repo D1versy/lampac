@@ -65,6 +65,7 @@
     "ReplicaNoti.cs",
     "HistoryBackfill.cs",
     "TestSandbox.cs",
+    "Deploy.cs",
 
     "Controller.cs"
   ]

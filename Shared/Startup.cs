@@ -8,6 +8,13 @@ public class Startup
 {
     public static bool IsShutdown { get; set; }
 
+    /// <summary>
+    /// D1Vision (qdl 2.110): запросы в полёте и тик последнего запроса. Пишет Core/Middlewares/D1VInflight.cs,
+    /// читает Modules/QbitDownload/Deploy.cs — дренаж и «тишина» при заморозке экземпляра (blue/green-редеплой).
+    /// </summary>
+    public static long Inflight;
+    public static long LastRequestTicks;
+
     public static INws Nws { get; set; }
 
     public static AppReload appReload { get; private set; }

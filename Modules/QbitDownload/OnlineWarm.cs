@@ -154,8 +154,15 @@ public static class OnlineWarm
         }
     }
 
+    /// <summary>Забыть состояние — следующий St() перечитает диск (promote в Deploy).</summary>
+    internal static void Reset()
+    {
+        lock (_lock) _st = null;
+    }
+
     static void Save()
     {
+        if (!Deploy.WarmSavesAllowed) return;   // дежурный/замороженный экземпляр: файл принадлежит ведущему
         try
         {
             var st = St();
@@ -265,6 +272,9 @@ public static class OnlineWarm
 
             foreach (var (lane, cand) in plan)
             {
+                // заморозка экземпляра (Deploy): прогон длится минуты, а дальше греть некому и не для кого
+                if (Deploy.Draining) break;
+
                 var c = cand;
                 if (string.IsNullOrEmpty(c.title))
                     c = await Enrich(port, host, c) ?? c;

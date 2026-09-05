@@ -110,6 +110,7 @@
     <Compile Include="..\..\Modules\QbitDownload\ReplicaNoti.cs" Link="Module\ReplicaNoti.cs" />
     <Compile Include="..\..\Modules\QbitDownload\HistoryBackfill.cs" Link="Module\HistoryBackfill.cs" />
     <Compile Include="..\..\Modules\QbitDownload\TestSandbox.cs" Link="Module\TestSandbox.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\Deploy.cs" Link="Module\Deploy.cs" />
 
 
     <!-- JacRed: линкуем ТОЛЬКО ProxyFallback.cs — он намеренно не обращается ни к ModInit, ни к

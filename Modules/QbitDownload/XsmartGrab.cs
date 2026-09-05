@@ -659,7 +659,7 @@ public partial class QbitController
                 // вынуть и выйти по break, не сняв ключ в _xsQueued: ключ протекал навсегда,
                 // а finally тут же перезапускал воркер — busy-loop, молча сливающий очередь
                 // (ровно этим болел jut, JutSuGrab.cs).
-                while (XsmartNet.On && _xsQueue.TryDequeue(out var it))
+                while (XsmartNet.On && !Deploy.Draining && _xsQueue.TryDequeue(out var it))   // Draining: заморозка экземпляра (Deploy) — новое не берём
                 {
                     if (XsmartStale(it)) { XsmartDoneWith(it); continue; }
                     try { await XsmartGrabOne(it); }
@@ -680,7 +680,7 @@ public partial class QbitController
                 Interlocked.Exchange(ref _xsWorker, 0);
                 // Добор при гонке: пока сбрасывали флаг, могли поставить новый элемент.
                 // Гейт по XsmartNet.On обязателен — без него это тот самый busy-loop.
-                if (XsmartNet.On && !_xsQueue.IsEmpty) XsmartKickWorker();
+                if (XsmartNet.On && !Deploy.Draining && !_xsQueue.IsEmpty) XsmartKickWorker();
                 else XsmartPruneJobs();
             }
         });
@@ -879,7 +879,7 @@ public partial class QbitController
                 // ⚠️ Отмену и idle-таймаут различать ОБЯЗАТЕЛЬНО: оба прилетают сюда как
                 // OperationCanceledException. Отмена окончательна, ретраить нельзя;
                 // idle-таймаут — штатный обрыв, .part остаётся и докачивается бэкоффом.
-                if (XsmartStale(it) || !XsmartNet.On) { XsmartSetState(job, "canceled"); return; }
+                if (XsmartStale(it) || !XsmartNet.On || Deploy.Draining) { XsmartSetState(job, "canceled"); return; }
                 bool idleTimeout = ex is OperationCanceledException;
                 job.error = idleTimeout ? "нет данных от CDN — обрыв по idle-таймауту" : ex.Message;
                 if (attempt >= retries - 1)
@@ -1156,7 +1156,7 @@ public partial class QbitController
         long bytes = 0;
         for (int i = 0; i < segUris.Count; i++)
         {
-            if (XsmartStale(it) || !XsmartNet.On) { XsmartSetState(job, "canceled"); return; }
+            if (XsmartStale(it) || !XsmartNet.On || Deploy.Draining) { XsmartSetState(job, "canceled"); return; }
 
             string path = Path.Combine(partsDir, names[i]);
             // ⚠️ Готовность сегмента определяем ФАЙЛОМ, а не счётчиком в state.json: счётчик
