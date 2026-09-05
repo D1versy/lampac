@@ -83,11 +83,23 @@ where tc.content_source = 'tmdb'
   and coalesce(t.private, false) = false";
 
     // Сезонный скоуп охоты: {"<season>":{}} содержится и в одиночках {"3":{"10":{}}}, и в паках {"3":{}}.
-    // Сортировка по алиасу seeders (greatest), не по сырому tc.seeders; limit — страховочный потолок.
+    // Окно — по СВЕЖЕСТИ (t.created_at), не по сидам: охоте нужны новые строки (серия только что вышла),
+    // порядок проб всё равно задаёт DonorOrder, а окно по сидам плавало бы вместе с сидами и дёргало
+    // отпечаток локального тика у сезона, перевалившего за bitmagnetHuntLimit (замечание агента краулера,
+    // 05.09.2026: в базе такой сезон один из 38 418, но после переразметки их станет больше). Второй ключ —
+    // info_hash, чтобы порядок был детерминирован при равных датах.
     internal const string BmSqlScoped = BmSqlSelect + @"
   and tc.episodes @> @seasonJson::jsonb
-order by seeders desc nulls last
+order by t.created_at desc, tc.info_hash
 limit @huntLim";
+
+    // Статус последней сезонной выборки (охота, dry-run): отказ источника ≠ «строк нет», срез по потолку.
+    internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (bool ok, bool truncated, DateTime at)> _bmScopedStatus = new(StringComparer.Ordinal);
+    internal static (bool ok, bool truncated) BmScopedStatus(string tmdbId, int season)
+        => tmdbId != null && _bmScopedStatus.TryGetValue(tmdbId + ":" + season, out var s) ? (s.ok, s.truncated) : (true, false);
+    internal static void SetBmScopedStatus(string tmdbId, int season, bool ok, bool truncated)
+        => _bmScopedStatus[tmdbId + ":" + season] = (ok, truncated, DateTime.UtcNow);
+    internal static bool ScopedTruncated(int read, int huntLimit) => read >= Math.Max(1, huntLimit);
 
     // Интерактив: top-N по сидам ∪ top-M по появлению в DHT (одна и та же колонка t.created_at и в
     // select-списке, и в order by). union без all — одинаковые строки схлопываются.
@@ -178,13 +190,16 @@ where info_hash = any(@hashes)";
                     cmd.Parameters.AddWithValue("fresh", Math.Max(1, ModInit.conf.bitmagnetFreshLimit));
             }
 
+            int read = 0;
             await using (var r = await cmd.ExecuteReaderAsync())
                 while (await r.ReadAsync())
                 {
+                    read++;
                     var row = BitmagnetReadRow(r);
                     if (string.IsNullOrWhiteSpace(row.name) || string.IsNullOrWhiteSpace(row.btih)) continue;
                     rows.Add(row);
                 }
+            if (scopeSeason > 0) SetBmScopedStatus(tmdbId, scopeSeason, true, ScopedTruncated(read, ModInit.conf.bitmagnetHuntLimit));
 
             // Файлы — только для охоты и только multi (в отдельном try: провал файлового запроса даёт
             // bm_files = null, «гейт файлов молчит», а не пустую выдачу источника).
@@ -194,6 +209,9 @@ where info_hash = any(@hashes)";
         catch (Exception ex)
         {
             // Источник дополнительный: его недоступность не должна ломать поиск по трекерам.
+            // Для локального тика отказ помечаем отдельно: пустая выдача из-за таймаута иначе читалась бы
+            // как «состав изменился» (скоринг, лог, запись) и на следующем удачном тике — снова.
+            if (scopeSeason > 0) SetBmScopedStatus(tmdbId, scopeSeason, false, false);
             Console.WriteLine($"[QbitDownload] bitmagnet недоступен ({ex.GetType().Name}): {ex.Message}");
             return new JArray();
         }

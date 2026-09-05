@@ -1167,6 +1167,7 @@ public partial class QbitController
     sealed class HuntOneResult
     {
         public int grabbed; public bool searched; public bool barren; public bool regrab;
+        public bool bmFail;        // локальный тик: сезонная выборка bitmagnet упала (таймаут/сеть) — пропуск, не изменение
         public bool changed;       // запись мутирована (штампы/blacklist/донор) — сохранять
         public bool localSkipped;  // локальный тик: fingerprint не изменился / ждать нечего — ни скоринга, ни лога
         public bool waiting;       // локальный тик: у сериала есть недостающие серии
@@ -1197,7 +1198,7 @@ public partial class QbitController
             }
             return 0;
         }
-        int grabbed = 0, series = 0, searched = 0, barren = 0, waiting = 0, newRows = 0, probes = 0;
+        int grabbed = 0, series = 0, searched = 0, barren = 0, waiting = 0, newRows = 0, probes = 0, bmFail = 0;
         bool regrabAsk = false;
         try
         {
@@ -1221,6 +1222,7 @@ public partial class QbitController
                     if (r.regrab) regrabAsk = true;
                     if (r.waiting) waiting++;
                     if (r.newRows) newRows++;
+                    if (r.bmFail) bmFail++;
                     probes += r.probes;
                 }
                 // Упавшая посреди проб запись всё равно сохраняется: правки записи append-only (донор уже
@@ -1232,6 +1234,7 @@ public partial class QbitController
             {
                 if (waiting > _ltWaiting) Interlocked.Exchange(ref _ltWaiting, waiting);   // число сериалов, а не сумма по тикам
                 Interlocked.Add(ref _ltNewRows, newRows);
+                Interlocked.Add(ref _ltBmFail, bmFail);
                 Interlocked.Add(ref _ltProbes, probes);
                 Interlocked.Add(ref _ltGrabbed, grabbed);
                 if (probes > 0 || grabbed > 0)
@@ -1643,6 +1646,7 @@ public partial class QbitController
         public JArray mainFiles, donors, scored;
         public int season, aired, donorsCount;
         public bool barren, localWaiting, localChanged;
+        public bool bmFail, bmTruncated;   // статус сезонной выборки bitmagnet (BmScopedStatus)
         public string localFp;
         public HuntPlan plan;
         public DateTime now;
@@ -1722,6 +1726,10 @@ public partial class QbitController
                 if (p.aired <= 0) { p.skip = "no-aired-cache"; return p; }
             }
             var (raw, fp) = await LocalFetch(ctitle, year, season, tmdbId);
+            var bmSt = BmScopedStatus(tmdbId, season);
+            p.bmTruncated = bmSt.truncated;
+            // Отказ источника ≠ «строк нет»: отпечаток не трогаем, скоринга и лога нет — следующий тик повторит.
+            if (!bmSt.ok) { p.bmFail = true; p.skip = "bitmagnet-fail"; return p; }
             p.localFp = fp;
             p.localChanged = !(_localFp.TryGetValue(mainHash, out var prevFp) && prevFp == fp);
             if (!p.localChanged && !dry) { p.skip = "unchanged"; return p; }
@@ -1735,6 +1743,7 @@ public partial class QbitController
             p.aired = conf.tmdbAiredCap ? await AiredEpisodes(tmdbNum, season) : 0;
             // Полный проход: трекеры + bitmagnet сезонным скоупом (без записи кеша/индекса) + наш индекс.
             p.scored = await SearchScored(ctitle, ctitle, titleOriginal, year, 2, season, null, tmdbId, tmdbId != null ? season : 0);
+            if (tmdbId != null) { var bmSt = BmScopedStatus(tmdbId, season); p.bmFail = !bmSt.ok; p.bmTruncated = bmSt.truncated; }
             // Пусто = либо трекеры отдали ошибку (JacRed InternalServerError и т.п.), либо индексатор лёг.
             // Это НЕ «новых серий нет»: штамп не ставим (иначе следующая диагностика соврёт), сигналим
             // наверх — HuntAll попросит таймер прийти раньше.
@@ -1791,6 +1800,7 @@ public partial class QbitController
             {
                 res.waiting = p.localWaiting;
                 res.localSkipped = true;
+                res.bmFail = p.bmFail;
             }
             return res;
         }
@@ -1826,7 +1836,8 @@ public partial class QbitController
         string claimNote = plan.maxClaim != plan.eligibleClaim ? $" (годные заявляют {plan.eligibleClaim})" : "";
         string upNote = plan.upgrades.Count > 0 ? $", апгрейд {plan.upgrades.Count}" : "";
         string capNote = atCap ? $" [доноров {p.donorsCount}/{conf.donorMaxPerSeries} — только апгрейд]" : "";
-        Console.WriteLine($"[QbitDownload] {tag} «{stitle}» S{season}: кандидатов {scored.Count} (bitmagnet {plan.bitmagnet}) → годных {plan.eligible.Count}{DropSummary(scored, plan.eligible.Count, h)}; цель {h.targetQuality}p; заявлено серий до {plan.maxClaim}{claimNote}, нужно {WantedText(wanted)}{upNote}{capNote}");
+        string bmNote = p.bmTruncated ? ", срез по bitmagnetHuntLimit" : p.bmFail ? ", bitmagnet недоступен" : "";
+        Console.WriteLine($"[QbitDownload] {tag} «{stitle}» S{season}: кандидатов {scored.Count} (bitmagnet {plan.bitmagnet}{bmNote}) → годных {plan.eligible.Count}{DropSummary(scored, plan.eligible.Count, h)}; цель {h.targetQuality}p; заявлено серий до {plan.maxClaim}{claimNote}, нужно {WantedText(wanted)}{upNote}{capNote}");
 
         // Свой топик перевыложен с бо́льшим числом серий. Донором его брать НЕЛЬЗЯ (§AK: он вот-вот
         // станет основной, и контур замещения снёс бы его С ФАЙЛАМИ) — владелец обновления только
@@ -2028,7 +2039,7 @@ public partial class QbitController
     // fingerprint скоупа на сериал: совпал с прошлым тиком → выход до скоринга и без лога.
     static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _localFp = new(StringComparer.OrdinalIgnoreCase);
     static DateTime _lastLocalRun = DateTime.MinValue, _lastLocalSummary = DateTime.MinValue;
-    static int _ltTicks, _ltBusy, _ltWaiting, _ltNewRows, _ltProbes, _ltGrabbed;
+    static int _ltTicks, _ltBusy, _ltWaiting, _ltNewRows, _ltProbes, _ltGrabbed, _ltBmFail;
 
     // Есть ли у сериала чего ждать — ЛЮБОЕ из двух: полный проход записал недостающие серии
     // (hunt.localWanted — серии, которые кто-то на трекерах уже заявил, а у нас их нет), ИЛИ по кешу
@@ -2098,8 +2109,8 @@ public partial class QbitController
         if ((now - _lastLocalSummary).TotalMinutes >= sm)
         {
             _lastLocalSummary = now;
-            Console.WriteLine($"[QbitDownload] hunt-local: сводка — тиков {_ltTicks}, занят гейт {_ltBusy}, сериалов с ожиданием {_ltWaiting}, новых строк у {_ltNewRows}, проб {_ltProbes}, добыто {_ltGrabbed} (интервал {iv} мин)");
-            _ltTicks = 0; _ltBusy = 0; _ltWaiting = 0; _ltNewRows = 0; _ltProbes = 0; _ltGrabbed = 0;
+            Console.WriteLine($"[QbitDownload] hunt-local: сводка — тиков {_ltTicks}, занят гейт {_ltBusy}, сериалов с ожиданием {_ltWaiting}, новых строк у {_ltNewRows}, проб {_ltProbes}, добыто {_ltGrabbed}{(_ltBmFail > 0 ? $", сбоев bitmagnet {_ltBmFail}" : "")} (интервал {iv} мин)");
+            _ltTicks = 0; _ltBusy = 0; _ltWaiting = 0; _ltNewRows = 0; _ltProbes = 0; _ltGrabbed = 0; _ltBmFail = 0;
         }
     }
 
@@ -2141,7 +2152,7 @@ public partial class QbitController
         if (!p.ok) return o;
         var plan = p.plan; var h = plan.h;
         o["target"] = h.targetQuality;
-        o["candidates"] = p.scored.Count; o["bitmagnet"] = plan.bitmagnet; o["eligible"] = plan.eligible.Count;
+        o["candidates"] = p.scored.Count; o["bitmagnet"] = plan.bitmagnet; o["bitmagnetTruncated"] = p.bmTruncated; o["eligible"] = plan.eligible.Count;
         o["drops"] = JObject.FromObject(plan.drops);
         o["maxClaim"] = plan.maxClaim; o["aired"] = p.aired; o["atCap"] = plan.atCap;
         o["inventory"] = new JArray(plan.inv.OrderBy(x => x));

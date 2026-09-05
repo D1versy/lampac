@@ -287,14 +287,33 @@ public class BitmagnetTests
         Assert.Contains("coalesce(t.private, false) = false", sql);  // приватные трекеры по DHT не качаются
     }
 
+    // 05.09: окно скоупа — по свежести и info_hash (детерминировано), НЕ по сидам: окно по сидам плавало бы
+    // вместе с сидами и дёргало отпечаток локального тика у сезона за потолком bitmagnetHuntLimit.
     [Fact]
-    public void SQL_Scoped_сезон_по_jsonb_сортировка_по_сидам()
+    public void SQL_Scoped_сезон_по_jsonb_окно_по_свежести()
     {
         string sql = QbitController.BmSqlScoped;
         Assert.Contains("episodes @> @seasonJson", sql);
-        Assert.Contains("order by seeders desc", sql);
+        Assert.Contains("order by t.created_at desc, tc.info_hash", sql);
+        Assert.DoesNotContain("order by seeders", sql);
         Assert.Contains("limit @huntLim", sql);
         Assert.StartsWith(QbitController.BmSqlSelect, sql);
+    }
+
+    // Статус сезонной выборки: отказ ≠ пусто; срез при read >= потолка; неизвестный ключ = ok
+    [Fact]
+    public void BmScopedStatus_Отказ_Срез_Дефолт()
+    {
+        Assert.Equal((true, false), QbitController.BmScopedStatus("999777", 3));
+        Assert.Equal((true, false), QbitController.BmScopedStatus(null, 3));
+        QbitController.SetBmScopedStatus("999777", 3, false, false);
+        Assert.Equal((false, false), QbitController.BmScopedStatus("999777", 3));
+        QbitController.SetBmScopedStatus("999777", 3, true, true);
+        Assert.Equal((true, true), QbitController.BmScopedStatus("999777", 3));
+        Assert.True(QbitController.ScopedTruncated(3000, 3000));
+        Assert.False(QbitController.ScopedTruncated(2999, 3000));
+        Assert.True(QbitController.ScopedTruncated(1, 0));   // кламп потолка к 1
+        QbitController._bmScopedStatus.TryRemove("999777:3", out _);
     }
 
     [Fact]

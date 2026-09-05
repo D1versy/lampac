@@ -763,6 +763,22 @@ public class HuntBitmagnetTests
         Assert.False(HunterAccess.NameMatchesSeriesOrId(new JObject { ["title"] = "Gnosia.Killer - 05 [1080p].mkv", ["tracker"] = "bitmagnet", ["id_match"] = true, ["id_title"] = "GNOSIA" }, h));
     }
 
+    // Отказ bitmagnet в локальном режиме — пропуск ДО отпечатка (сторож порядка строк) и счётчик в сводке
+    [Fact]
+    public void Source_LocalTick_BitmagnetFail_SkipsBeforeFingerprint()
+    {
+        var src = Strip(File.ReadAllText(ModuleFile("EpisodeHunter.cs")));
+        string prep = Between(src, "static async Task<HuntPrep> HuntPrepare(", "static async Task<HuntOneResult> HuntOne(");
+        int fail = prep.IndexOf("if (!bmSt.ok) { p.bmFail = true; p.skip = \"bitmagnet-fail\"; return p; }", StringComparison.Ordinal);
+        int fp = prep.IndexOf("p.localFp = fp;", StringComparison.Ordinal);
+        int changed = prep.IndexOf("p.localChanged =", StringComparison.Ordinal);
+        Assert.True(fail > 0 && fp > fail && changed > fp, "отказ источника должен обрабатываться до записи отпечатка");
+        string all = Between(src, "public static async Task<int> HuntAll(", "static async Task<HuntPrep> HuntPrepare(");
+        Assert.Contains("if (r.bmFail) bmFail++;", all);
+        Assert.Contains("Interlocked.Add(ref _ltBmFail, bmFail);", all);
+        Assert.Contains("сбоев bitmagnet", src);
+    }
+
     // ── H. текстовые сторожа исходника ──────────────────────────────────
     static string ModuleFile(string name)
     {
@@ -849,6 +865,48 @@ public class HuntBitmagnetTests
     }
 
     // ── I. сухой прогон: только чтение, ни одной записи ──────────────────
+    // Отказ сезонной выборки bitmagnet (таймаут/сеть) в локальном режиме — пропуск «bitmagnet-fail», а не
+    // «состав изменился»: без плана, без строки лога, отпечаток нетронут (порядок строк — сторож выше).
+    [Fact]
+    public async Task HuntDry_LocalOnly_BitmagnetFail_IsSkipNotChange()
+    {
+        TestEnv.FreshCache();
+        TestEnv.SetListen(1, "127.0.0.1");
+        var conf = ModInit.conf;
+        string prevBm = conf.bitmagnetConnection, prevLi = conf.localIndexConnection;
+        bool prevAired = conf.tmdbAiredCap;
+        conf.bitmagnetConnection = ""; conf.localIndexConnection = ""; conf.tmdbAiredCap = false;
+        var rec = MainRecord();
+        rec["hunt"] = new JObject { ["localWanted"] = new JArray(10) };
+        HunterAccess.SaveWatch(new JArray(rec));
+        var fake = new FakeQbit()
+            .Json("/torrents/files?hash=" + MainHash, MainFiles().ToString(Formatting.None))
+            .Json("/torrents/info", new JArray(new JObject { ["hash"] = MainHash, ["name"] = MainName, ["category"] = "lampa" }).ToString(Formatting.None));
+        Access.SeedQbitFake(fake.BuildHandler());
+        string tmdb = rec.Value<int>("id").ToString();
+        try
+        {
+            QbitController.SetBmScopedStatus(tmdb, 3, ok: false, truncated: false);   // «последняя выборка упала»
+            var items = await HunterAccess.HuntDry(MainHash, true);
+            var rep = items.OfType<JObject>().First(x => MainHash.Equals(x.Value<string>("hash"), StringComparison.OrdinalIgnoreCase));
+            Assert.Equal("bitmagnet-fail", rep.Value<string>("skip"));
+            Assert.True(rep.Value<bool>("waiting"));
+            Assert.Null(rep["wanted"]);   // плана нет — шапка отчёта без wanted/order
+
+            QbitController.SetBmScopedStatus(tmdb, 3, ok: true, truncated: true);    // выборка удалась, но упёрлась в потолок
+            items = await HunterAccess.HuntDry(MainHash, true);
+            rep = items.OfType<JObject>().First(x => MainHash.Equals(x.Value<string>("hash"), StringComparison.OrdinalIgnoreCase));
+            Assert.Null(rep.Value<string>("skip"));
+            Assert.True(rep.Value<bool>("bitmagnetTruncated"));
+        }
+        finally
+        {
+            QbitController._bmScopedStatus.TryRemove(tmdb + ":3", out _);
+            Access.ResetQbitFake();
+            conf.bitmagnetConnection = prevBm; conf.localIndexConnection = prevLi; conf.tmdbAiredCap = prevAired;
+        }
+    }
+
     [Fact]
     public async Task HuntDry_LocalOnly_ReadsOnly_NoWrites()
     {
