@@ -543,6 +543,20 @@ public class HuntBitmagnetTests
         var closed = new JObject { ["hash"] = MainHash, ["id"] = 999001, ["hunt"] = new JObject { ["localWanted"] = new JArray() } };
         Assert.False(HunterAccess.LocalTickWaiting(closed, mainFiles, null, 3));
 
+        // 🐞 05.09.2026: localWanted пуст (трекеры серию не заявили), но по TMDB вышло больше, чем в
+        // инвентаре (1-9) → ждать НАДО — ровно ради этого тик ходит в DHT. Первая версия возвращала
+        // lw.Count > 0, как только localWanted был записан, и «Чёрный Факел» с E10 в эфире не опрашивала.
+        try
+        {
+            HunterAccess.SeedAiredCache(999001, 3, 10);
+            Assert.True(HunterAccess.LocalTickWaiting(closed, mainFiles, null, 3));
+            HunterAccess.SeedAiredCache(999001, 3, 9);       // эфир догнал инвентарь → ждать нечего
+            Assert.False(HunterAccess.LocalTickWaiting(closed, mainFiles, null, 3));
+            HunterAccess.SeedAiredCache(999001, 3, 10);
+            Assert.True(HunterAccess.LocalTickWaiting(fresh, mainFiles, null, 3)); // без hunt — тот же путь
+        }
+        finally { HunterAccess.SeedAiredCache(999001, 3, 0); }
+
         // SetLocalWanted пишет ровно этот список
         var m = new JObject { ["hash"] = MainHash };
         HunterAccess.SetLocalWanted(m, new List<int> { 10 });

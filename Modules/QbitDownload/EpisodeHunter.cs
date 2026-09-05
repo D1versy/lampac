@@ -1870,12 +1870,16 @@ public partial class QbitController
     static DateTime _lastLocalRun = DateTime.MinValue, _lastLocalSummary = DateTime.MinValue;
     static int _ltTicks, _ltBusy, _ltWaiting, _ltNewRows, _ltProbes, _ltGrabbed;
 
-    // Есть ли у сериала чего ждать: полный проход записал недостающие серии (hunt.localWanted); до
-    // первого полного прохода после 2.107 — по кешу эфира TMDB против инвентаря. Иначе — нечего,
-    // ни одного SELECT.
+    // Есть ли у сериала чего ждать — ЛЮБОЕ из двух: полный проход записал недостающие серии
+    // (hunt.localWanted — серии, которые кто-то на трекерах уже заявил, а у нас их нет), ИЛИ по кешу
+    // эфира TMDB вышло больше, чем лежит в инвентаре (серия вышла, но её ещё нет ни на одном
+    // трекере — ровно тот случай, ради которого тик и ходит в DHT каждые 10 минут). Иначе — нечего,
+    // ни одного SELECT. 🐞 05.09.2026: первая версия возвращала lw.Count > 0, как только localWanted
+    // был записан, и до ветки эфира не доходила — «Чёрный Факел» с вышедшей по TMDB E10 без единой
+    // трекерной заявки тик не опрашивал.
     static bool LocalTickWaiting(JObject m, JArray mainFiles, JArray donors, int season)
     {
-        if ((m["hunt"] as JObject)?["localWanted"] is JArray lw) return lw.Count > 0;
+        if ((m["hunt"] as JObject)?["localWanted"] is JArray lw && lw.Count > 0) return true;
         var inv = InventoryEps(mainFiles, donors, season);
         string key = (m.Value<int?>("id") ?? 0) + ":" + season;
         if (_airedCache.TryGetValue(key, out var e)) return e.aired > (inv.Count > 0 ? inv.Max() : 0);

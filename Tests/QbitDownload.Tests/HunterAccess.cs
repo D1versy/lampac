@@ -110,6 +110,15 @@ public static class HunterAccess
     public static Task<JArray> HuntDry(string onlyHash, bool localOnly) => (Task<JArray>)Access.Call("HuntDry", onlyHash, localOnly);
     public static Task<int> HuntAll(string onlyHash, bool localOnly) => (Task<int>)Access.Call("HuntAll", onlyHash, localOnly);
     public static void SetLocalWanted(JObject m, List<int> wanted) => Access.Call("SetLocalWanted", m, wanted);
+    /// <summary>Посеять/снять запись кеша эфира TMDB (_airedCache[id:season]); aired &lt;= 0 — удалить.</summary>
+    public static void SeedAiredCache(int id, int season, int aired)
+    {
+        var dict = C.GetField("_airedCache", SF)!.GetValue(null)!;
+        string key = id + ":" + season;
+        var t = dict.GetType();
+        if (aired <= 0) { t.GetMethod("TryRemove", new[] { typeof(string), t.GetGenericArguments()[1].MakeByRefType() })!.Invoke(dict, new object[] { key, null }); return; }
+        t.GetProperty("Item")!.SetValue(dict, ValueTuple.Create(aired, DateTime.UtcNow), new object[] { key });
+    }
 
     public static string TopicKey(string link) => (string)Access.Call("TopicKey", link);
     public static bool PathsOverlap(string a, string b) => (bool)Access.Call("PathsOverlap", a, b);
