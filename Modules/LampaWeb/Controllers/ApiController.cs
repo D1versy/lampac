@@ -651,12 +651,32 @@ public class ApiController : BaseController
 
     // cache_version для index.html (?v= у app.min.js / css/app.css): апстримовый index генерит
     // Math.floor(Date/9e5) — новый ?v каждые 15 минут, т.е. браузер перекачивал 2-МБ app.min.js
-    // при каждом запуске позже 15 мин. Версия — ТОЛЬКО из mtime+length файла (qdl 2.16: раньше
+    // при каждом запуске позже 15 мин. Версия — из mtime+length файла (qdl 2.16: раньше
     // сюда входил cacheVersion=ticks процесса, и каждый рестарт контейнера заставлял всех клиентов
     // перекачивать бандл+css ~630 КБ br без единого изменённого байта). Меняется при реальном
-    // обновлении вендора/LampaCron.
+    // обновлении вендора/LampaCron — и при правке патчера (см. ниже).
+    //
+    // 🔴 d1v:appver-patch (qdl 2.108). Тело app.min.js — это НЕ файл с диска: поверх него при
+    // отдаче ложится AppPatch (QbitDownload/AppReplace.cs) и замены в LampaApp. Пока версия
+    // считалась ТОЛЬКО из mtime вендоренного файла, новый патч не доезжал ни до одного клиента,
+    // который уже открывал Lampa: URL `app.min.js?v=<та же версия>` отдаётся с
+    // `Cache-Control: immutable, max-age=1 год`, то есть браузер/WebView больше НИКОГДА не
+    // спрашивает сервер. Боевой случай: 2.108 вырезал штатное меню карточки, на телевизоре всё
+    // применилось (кеш WebView был пуст), а на маке, айфоне, Windows и в браузере месяцами
+    // жило бы старое меню. Серверная чистка Staticache тут не помогает вовсе — она чинит только
+    // ответ сервера, а спрашивать его клиент уже не собирается.
+    // Поэтому в версию подмешан штамп САМОГО патчера: правка AppReplace.cs → новый ?v → index.html
+    // (он отдаётся no-cache) приводит клиента на новый URL. Рестарт без правок ?v не меняет —
+    // «рестартный налог» из 2.16 не вернулся.
+    // ⚠️ Появится второй серверный патчер бандла — подмешать и его: здесь перечислены не «все .cs»,
+    // а именно те файлы, которые меняют ОТДАВАЕМОЕ тело.
+    // ⚠️ init.conf в штамп НЕ входит намеренно: его правки идут часто (куки, лимиты, флаги), а
+    // тела бандла касаются только `appReplace`/`initPlugins.cubProxy` — обратное решение дарило бы
+    // всем клиентам перекачку 2 МБ на каждую настройку. Правил эти два ключа — рестарт с чисткой
+    // кеша статики (claude/04) или трогай AppReplace.cs.
     static string _appVer;
     static long _appVerMtime = -1;
+    static long _appVerPatch = -1;
     static string AppCacheVersion()
     {
         try
@@ -664,16 +684,41 @@ public class ApiController : BaseController
             string type = ModInit.conf.path ?? (ModInit.conf.index ?? "lampa-main/index.html").Split('/')[0];
             var fi = new IO.FileInfo($"wwwroot/{type}/app.min.js");
             long mt = fi.Exists ? fi.LastWriteTimeUtc.Ticks : 0;
+            long pt = PatchStamp();
             // Свежий mtime (<60 с) = LampaCron может ещё писать файл (распаковка не атомарна):
             // не выпускаем новый ?v, пока файл не «отлежался» — иначе клиент рискует навечно
             // (immutable) закешировать обрезанный бандл. До тех пор старый ?v → старая
             // серверная кеш-запись → консистентная старая пара версия+тело.
             if (_appVer != null && mt != _appVerMtime && DateTime.UtcNow.Ticks - mt < TimeSpan.TicksPerMinute)
                 return _appVer;
-            if (_appVer == null || mt != _appVerMtime) { _appVerMtime = mt; _appVer = $"{mt:x}-{(fi.Exists ? fi.Length : 0):x}"; }
+            if (_appVer == null || mt != _appVerMtime || pt != _appVerPatch)
+            {
+                _appVerMtime = mt;
+                _appVerPatch = pt;
+                _appVer = $"{mt:x}-{(fi.Exists ? fi.Length : 0):x}-{pt:x}";
+            }
             return _appVer;
         }
         catch { return cacheVersion; }
+    }
+
+    /// <summary>
+    /// Штамп серверного патчера бандла (mtime+length QbitDownload/AppReplace.cs) — слагаемое
+    /// AppCacheVersion. Модуль не загружен или файла нет → 0: версия деградирует к прежнему
+    /// поведению «только вендоренный файл», а не падает.
+    /// </summary>
+    static long PatchStamp()
+    {
+        try
+        {
+            string p = ModuleFile("QbitDownload", "AppReplace.cs");
+            if (string.IsNullOrEmpty(p))
+                return 0;
+
+            var fi = new IO.FileInfo(p);
+            return fi.Exists ? fi.LastWriteTimeUtc.Ticks ^ (fi.Length * 31) : 0;
+        }
+        catch { return 0; }
     }
 
     // qdl 2.45: стабильный ?v для НАШИХ плагинов (qdl.js, music.js) — тот же приём, что уже спас
