@@ -261,12 +261,13 @@ limit @lim;", db);
                 if (string.IsNullOrWhiteSpace(magnet) && string.IsNullOrWhiteSpace(link)) continue;
 
                 long size = r.IsDBNull(4) ? 0 : r.GetInt64(4);
-                res.Add(new JObject
+                string tracker = r.IsDBNull(1) ? "индекс" : r.GetString(1);
+                var item = new JObject
                 {
                     ["title"] = title,
                     ["magnet"] = magnet,
                     ["parselink"] = link,
-                    ["tracker"] = r.IsDBNull(1) ? "индекс" : r.GetString(1),
+                    ["tracker"] = tracker,
                     ["sid"] = r.IsDBNull(5) ? 0 : r.GetInt32(5),
                     ["pir"] = r.IsDBNull(6) ? 0 : r.GetInt32(6),
                     ["size"] = HumanSize(size),
@@ -276,7 +277,12 @@ limit @lim;", db);
                     ["date"] = r.IsDBNull(9) ? null : r.GetDateTime(9).ToString("MM/dd/yyyy HH:mm:ss"),
                     // раздача уже привязана к карточке при записи — сверять имя не нужно
                     ["id_match"] = tmdb > 0
-                });
+                };
+                // Эхо DHT-строки: её сиды — тот же ненадёжный замер краулера, что у живой строки bitmagnet
+                // (qdl 2.107, sid_hint): без пометки эхо получало штраф «мёртвая»/бонус по сидам и могло
+                // забрать ⭐, которую живой строке bitmagnet не дают.
+                if (tracker == "bitmagnet") item["sid_hint"] = true;
+                res.Add(item);
             }
         }
         catch (Exception ex) { LiFail("чтение", ex); }

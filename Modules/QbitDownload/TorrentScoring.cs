@@ -213,8 +213,12 @@ public static class TorrentScoring
     // и «ru.subs» (русские СУБТИТРЫ при английском звуке) — 189 строк по базе. Допускается только в
     // паре с другим языком (Ru.Eng / Eng.Ru): так обозначают многодорожечные русские релизы.
     static readonly Regex _ruMarkRx = new Regex(
-        @"(?i)(?<![a-z0-9])(rus|rux|rus\.?dub|dub\.?rus|rudub|mvo|dvo|avo|kp|hdclub|hdt|new-?team|sofcj|kinoreys|lostfilm|newstudio|hdrezka|kubik|jaskier|tvshows|baibako|coldfilm|amedia|selezen|elektri4ka|dexter|kerob|scarabey|hellywood|domino|exkinoray|ultradox|newcomers|rhs|red[\s._-]?head[\s._-]?sound|anilibria|anidub|animedia|shiza|dreamcast|studio[\s._-]?band|ru[._-](eng|en|jp|ja)|(eng|en)[._-]ru)(?![a-z0-9])",
+        @"(?i)(?<![a-z0-9])(rus|rux|rus\.?dub|dub\.?rus|rudub|mvo|dvo|avo|kp|hdclub|hdt|new-?team|sofcj|kinoreys|lostfilm|newstudio|hdrezka|kubik|jaskier|tvshows|baibako|coldfilm|amedia|selezen|elektri4ka|kerob|scarabey|hellywood|exkinoray|ultradox|newcomers|rhs|red[\s._-]?head[\s._-]?sound|anilibria|anidub|animedia|shiza|dreamcast|studio[\s._-]?band|ru[._-](eng|en|jp|ja)|(eng|en)[._-]ru|(?<=[\s._-])(?:dexter|domino)(?=[\s._-]*(?:studio|&|$|[\]\)]|\.(?:mkv|avi|mp4|ts)$))|[\[(](?:dexter|domino)[\])])(?![a-z0-9])",
         RegexOptions.Compiled);
+    // Студии-омонимы (Dexter, DoMiNo): голое слово — это ещё и тайтлы «Dexter: Resurrection», «Domino»
+    // (2019), где маркер делал русскими ВСЕ scene-строки, а с 2.107 IsRussian — гейт донора и признак
+    // «русские есть» для свёртки. Поэтому только в позиции релиз-группы: после разделителя и перед
+    // концом имени/расширением/«& селезень»/«studio»/скобкой либо в скобках.
 
     // Украинское вето (qdl 2.107). Имя студии — не доказательство языка: HDRezka Studio и BaibaKo
     // выпускают и украинские дорожки («Silo.S01E10.WEBRip.1080p.ukr.5.1.HDREZKA.STUDIO.mkv»,
@@ -224,8 +228,16 @@ public static class TorrentScoring
     // «_»: «[Ukr_Eng]» иначе не матчился бы. 🔴 Границы ОБЯЗАНЫ включать кириллицу: без «а-яё» в
     // лукахеде «укр» матчился внутри «Укрытие», и все русские паки самого «Укрытия» без явного
     // «rus/дубляж» становились «нерусскими» (поймано на живой выдаче при раскатке 2.107).
-    static readonly Regex _ukrMarkRx = new Regex(@"(?i)(?<![a-z0-9_а-яё])(ukr|укр)(?![a-z0-9а-яё])|(?<![а-яё])серії|українськ|(?<![a-z0-9])toloka(?![a-z0-9])", RegexOptions.Compiled);
-    static readonly Regex _ruLangTokenRx = new Regex(@"(?i)(?<![a-z0-9])(rus|rux|rus\.?dub|dub\.?rus|rudub)(?![a-z0-9])|рус\w*|дубляж|многоголос|двухголос|одноголос|закадров", RegexOptions.Compiled);
+    // «2xUkr/Eng» (rutor: две украинские дорожки) — токен допускается и сразу после счётчика «Nx».
+    // Полные слова тоже: «Ukrainian», «UA», «Українською» (студийный токен HDRezka рядом ничего не доказывает).
+    static readonly Regex _ukrMarkRx = new Regex(@"(?i)(?:(?<![a-z0-9_а-яё])|(?<=\dx))(ukr|укр|ua)(?![a-z0-9а-яё])|(?<![a-z0-9])ukrain|(?<![а-яё])серії|(?<![а-яё])україн|(?<![a-z0-9])toloka(?![a-z0-9])", RegexOptions.Compiled);
+    // Явные русские языковые токены, снимающие вето. Кроме слов озвучки — легенды трекеров: rutor/torrent.by
+    // кодируют русскую дорожку буквами «| P, L |» (P профессиональный, L любительский, D дубляж, A авторский;
+    // UKR там — ДОПОЛНИТЕЛЬНАЯ украинская дорожка), kinozal — «ПМ/ЛМ/ДБ/АП», scene — MVO/DVO/AVO.
+    static readonly Regex _ruLangTokenRx = new Regex(
+        @"(?i)(?<![a-z0-9])(rus|rux|rus\.?dub|dub\.?rus|rudub|mvo|dvo|avo)(?![a-z0-9])|рус\w*|дубляж|многоголос|двухголос|одноголос|закадров"
+        + @"|\|\s*[PLDA](?:\s*,\s*[PLDA])*\s*\||(?<![а-яёa-z0-9])(?:ПМ|ЛМ|ДБ|АП|МВО|ДВО|АВО)(?![а-яёa-z0-9])",
+        RegexOptions.Compiled);
 
     /// <summary>
     /// Русская ли раздача: подсказка источника (может отсутствовать) + кириллица + маркеры озвучки,
@@ -515,7 +527,7 @@ public static class TorrentScoring
             if (r.nameMiss || r.nameGateOff || r.typeMiss || (t.Value<int?>("sid") ?? 0) < recommendMinSeeds) continue;
             // ⭐ не bitmagnet-строкам: parselink нет (re-grab не работает), сиды — подсказка, а с честным
             // greatest(tc, dht) английская одиночка PSA с 84 сидами иначе забирала бы звезду у русского пака.
-            if (t.Value<bool?>("sid_hint") == true) continue;
+            if (t.Value<bool?>("sid_hint") == true || t.Value<string>("tracker") == "bitmagnet") continue;
             t["rec"] = true;
             t["why"] = string.Join(" · ", r.why);
             break;   // ⭐ только у одной; никто не прошёл — списка без ⭐ достаточно

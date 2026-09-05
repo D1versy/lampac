@@ -110,6 +110,17 @@ public static class HunterAccess
     public static Task<JArray> HuntDry(string onlyHash, bool localOnly) => (Task<JArray>)Access.Call("HuntDry", onlyHash, localOnly);
     public static Task<int> HuntAll(string onlyHash, bool localOnly) => (Task<int>)Access.Call("HuntAll", onlyHash, localOnly);
     public static void SetLocalWanted(JObject m, List<int> wanted) => Access.Call("SetLocalWanted", m, wanted);
+    public static bool OtherRecordsReference(JArray all, JObject self, string hash) => (bool)Access.Call("OtherRecordsReference", all, self, hash);
+    public static List<JObject> ProbePool(List<JObject> eligible, int season, List<int> wanted, List<int> upgrades, JArray donors, JArray scored, int targetQuality, int minScoreGain)
+    {
+        var baselines = Access.Call("UpgradeBaselines", donors, scored, new HashSet<int>(), targetQuality);
+        return (List<JObject>)Access.Call("ProbePool", eligible, season, wanted, upgrades, baselines, targetQuality, minScoreGain);
+    }
+    public static void BlacklistAddNoEpisode(JObject item, string btih, string parselink, string title, int ttlDays) => Access.Call("BlacklistAddNoEpisode", item, btih, parselink, title, ttlDays);
+    public static Dictionary<string, string> BlacklistLinkTitles(JObject item, DateTime now) => (Dictionary<string, string>)Access.Call("BlacklistLinkTitles", item, now);
+    public static void SetBlacklistLinkTitles(object h, Dictionary<string, string> d) => HuntCtxT.GetField("blacklistLinkTitles").SetValue(h, d);
+    public static void TrimLocalWanted(JObject m, HashSet<int> inv) => Access.Call("TrimLocalWanted", m, inv);
+    public static int AiredCached(int id, int season) => (int)Access.Call("AiredCached", id, season);
     /// <summary>Посеять/снять запись кеша эфира TMDB (_airedCache[id:season]); aired &lt;= 0 — удалить.</summary>
     public static void SeedAiredCache(int id, int season, int aired)
     {

@@ -565,6 +565,204 @@ public class HuntBitmagnetTests
         Assert.False(HunterAccess.LocalTickWaiting(m, mainFiles, null, 3));
     }
 
+    // ── G2. правки по адверсариальному ревью 05.09 ─────────────────────────
+    [Fact]
+    public void TrimLocalWanted_ВычитаетДобытое_ОстальноеОставляет()
+    {
+        var m = new JObject { ["hash"] = MainHash, ["hunt"] = new JObject { ["localWanted"] = new JArray(9, 10) } };
+        HunterAccess.TrimLocalWanted(m, new HashSet<int> { 1, 2, 10 });
+        Assert.Equal(new[] { 9 }, ((JArray)m["hunt"]["localWanted"]).Select(x => x.Value<int>()));
+        // после добычи последней — пусто, и тик больше не ждёт (кеш эфира отсутствует)
+        HunterAccess.TrimLocalWanted(m, new HashSet<int> { 9 });
+        Assert.Empty((JArray)m["hunt"]["localWanted"]);
+        Assert.False(HunterAccess.LocalTickWaiting(m, MainFiles(), null, 3));
+        // без hunt / без localWanted — ничего не падает
+        HunterAccess.TrimLocalWanted(new JObject { ["hash"] = MainHash }, new HashSet<int> { 1 });
+        HunterAccess.TrimLocalWanted(m, null);
+    }
+
+    [Fact]
+    public void OtherRecordsReference_ЧужойДонорИЧужаяОсновная_Да_СвойНет()
+    {
+        const string P = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var self = new JObject { ["hash"] = MainHash, ["donors"] = new JArray(new JObject { ["hash"] = P }) };
+        var other = new JObject { ["hash"] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ["donors"] = new JArray(new JObject { ["hash"] = P.ToUpperInvariant() }) };
+        var all = new JArray(self, other);
+        Assert.True(HunterAccess.OtherRecordsReference(all, self, P));                       // донор другой записи (регистр не важен)
+        Assert.True(HunterAccess.OtherRecordsReference(all, self, other.Value<string>("hash"))); // основная другой записи
+        // только свой донор → сирота наш. Newtonsoft при повторном добавлении КЛОНИРУЕТ токен, поэтому
+        // «своя» запись узнаётся и по хешу основной, не только по ссылке (в HuntAll m — элемент того же list)
+        Assert.False(HunterAccess.OtherRecordsReference(new JArray(self), self, P));
+        Assert.False(HunterAccess.OtherRecordsReference(null, self, P));                      // без списка — как раньше
+        Assert.False(HunterAccess.OtherRecordsReference(all, self, null));
+    }
+
+    [Fact]
+    public void AiredCached_ТолькоКеш_БезСети()
+    {
+        try
+        {
+            Assert.Equal(0, HunterAccess.AiredCached(999002, 3));
+            HunterAccess.SeedAiredCache(999002, 3, 7);
+            Assert.Equal(7, HunterAccess.AiredCached(999002, 3));
+            Assert.Equal(0, HunterAccess.AiredCached(0, 3));
+        }
+        finally { HunterAccess.SeedAiredCache(999002, 3, 0); }
+    }
+
+    // Сторожа: цикл захвата различает дубликат (QbitAddMagnetStatus, не bool-обёртка) и усыновляет только
+    // своего сироту; fingerprint пишется на выходе, а не до проб; эфир в полном режиме — ДО поиска.
+    [Fact]
+    public void Source_ProbeLoop_DuplicateGate_FingerprintAtExit_AiredBeforeSearch()
+    {
+        var src = Strip(File.ReadAllText(ModuleFile("EpisodeHunter.cs")));
+        string one = Between(src, "static async Task<HuntOneResult> HuntOne(", "static bool OtherRecordsReference(");
+        Assert.Contains("QbitAddMagnetStatus(c, magnet, DonorCategory, DonorTag, stopAfterMeta: true)", one);
+        Assert.DoesNotContain("QbitAddMagnetEx(c, magnet, DonorCategory", one);
+        Assert.Contains("addSt == QbitAddStatus.Duplicate", one);
+        Assert.Contains("!OtherRecordsReference(records, m, btih)", one);
+        Assert.Contains("void FpDone() { if (localOnly) _localFp[p.mainHash] = p.localFp; }", one);
+        Assert.DoesNotContain("_localFp[p.mainHash] = p.localFp;\n            res.waiting", one);
+        int fpDef = one.IndexOf("void FpDone()", StringComparison.Ordinal);
+        int loop = one.IndexOf("foreach (var cand in plan.probes)", StringComparison.Ordinal);
+        Assert.True(fpDef > 0 && loop > fpDef);
+        Assert.Contains("TrimLocalWanted(m, inv);", one);
+
+        string prep = Between(src, "static async Task<HuntPrep> HuntPrepare(", "static async Task<HuntOneResult> HuntOne(");
+        int aired = prep.IndexOf("await AiredEpisodes(tmdbNum, season)", StringComparison.Ordinal);
+        int search = prep.IndexOf("await SearchScored(ctitle, ctitle", StringComparison.Ordinal);
+        Assert.True(aired > 0 && search > aired, "кеш эфира должен заполняться до похода в трекеры");
+        // локальный режим — только кеш, без AiredEpisodes
+        string local = Between(prep, "if (localOnly)", "else");
+        Assert.Contains("AiredCached(tmdbNum, season)", local);
+        Assert.DoesNotContain("await AiredEpisodes(", local);
+
+        string lf = Between(src, "static async Task<(JArray raw, string fp)> LocalFetch(", "public static async Task HuntLocalTick()");
+        Assert.Contains("if (isBm && !string.IsNullOrEmpty(key)) fpKeys.Add(key);", lf);   // отпечаток — только bitmagnet
+
+        string all = Between(src, "public static async Task<int> HuntAll(", "static async Task<HuntPrep> HuntPrepare(");
+        Assert.Contains("ModInit.RescheduleHunt(TimeSpan.FromMinutes(5))", all);
+        Assert.Contains("catch (Exception ex) { changed = true;", all);
+    }
+
+    // ── G3. гипотезы упавшего ревью логики гейтов (черновики скептиков, 05.09) ────
+    static JObject BmRow(string title, string btih, int quality, double score, long sizeBytes, int ep, int season = 3)
+        => new JObject { ["title"] = title, ["magnet"] = "magnet:?xt=urn:btih:" + btih, ["parselink"] = null, ["tracker"] = "bitmagnet",
+                         ["sid"] = 5, ["pir"] = 0, ["sid_hint"] = true, ["quality"] = quality, ["sizeBytes"] = sizeBytes, ["score"] = score,
+                         ["lang_ru"] = true, ["id_match"] = true, ["id_title"] = "Silo", ["bm_eps"] = new JArray(ep), ["bm_season"] = season };
+    static JObject DonorRec(string hash, double score, int quality, int ep)
+        => new JObject { ["hash"] = hash, ["link"] = "magnet:?xt=urn:btih:" + hash, ["score"] = score, ["quality"] = quality,
+                         ["eps"] = new JArray(new JObject { ["epkey"] = "s3e" + ep, ["season"] = 3, ["ep"] = ep, ["fileIndex"] = 0, ["status"] = "hunted" }) };
+    static string H40(char c) => new string(c, 40);
+
+    // Серию держат два донора (старый 720p + апгрейд 1080p в полёте) — база сравнения ЛУЧШАЯ копия, третьей нет
+    [Fact]
+    public void ComputeUpgrades_БазаЛучшаяКопия_НетТретьейКопии()
+    {
+        var oldRow = BmRow("Silo.S03E10.720p.rus.LostFilm.TV.mp4", H40('o'), 720, 100, 1_750_000_000, 10);
+        var bRow = BmRow("Silo.S03E10.1080p.rus.LostFilm.TV.mkv", H40('b'), 1080, 105, 3_110_000_000, 10);
+        var cRow = BmRow("Silo.S03E10.1080p.ColdFilm.mkv", H40('c'), 1080, 107, 2_352_351_365, 10);
+        var donors = new JArray(DonorRec(H40('o'), 100, 720, 10), DonorRec(H40('b'), 105, 1080, 10));
+        var scored = new JArray(oldRow, bRow, cRow);
+        Assert.Empty(HunterAccess.ComputeUpgrades(donors, scored, new List<JObject> { cRow }, new HashSet<int>(), 3, 15, 1080));
+        // а без копии B старый 720p действительно апгрейдится
+        Assert.Equal(new[] { 10 }, HunterAccess.ComputeUpgrades(new JArray(DonorRec(H40('o'), 100, 720, 10)), scored, new List<JObject> { cRow }, new HashSet<int>(), 3, 15, 1080));
+    }
+
+    // Решение об апгрейде и порядок проб — один компаратор (ранг → бакет → score): нет качелей
+    [Fact]
+    public void ComputeUpgrades_КомпараторКакУПорядкаПроб_БезКачелей()
+    {
+        var cold = BmRow("Silo.S03E10.1080p.ColdFilm.mkv", H40('c'), 1080, 107.1, 2_352_351_365, 10);   // бакет 1
+        var a = BmRow("Silo.S03E10.1080p.rus.LostFilm.TV.mkv", H40('a'), 1080, 100, 3_110_000_000, 10);  // бакет 2, score ниже
+        var b = BmRow("Silo.S03E10.1080p.rus.HDRezka.mkv", H40('b'), 1080, 125, 2_200_000_000, 10);      // бакет 1, score +18
+        // донор ColdFilm: A лучше по бакету (как и в порядке проб), B — по score
+        var up = HunterAccess.ComputeUpgrades(new JArray(DonorRec(H40('c'), 107.1, 1080, 10)), new JArray(cold, a, b), new List<JObject> { a, b }, new HashSet<int>(), 3, 15, 1080);
+        Assert.Equal(new[] { 10 }, up);
+        var order = HunterAccess.OrderByCover(new List<JObject> { a, b }, 3, new List<int> { 10 }, 1080);
+        Assert.Same(a, order[0]);
+        // после захвата A (бакет 2) B (бакет 1, score выше) апгрейдом уже НЕ считается — качелей нет
+        Assert.Empty(HunterAccess.ComputeUpgrades(new JArray(DonorRec(H40('a'), 100, 1080, 10)), new JArray(cold, a, b), new List<JObject> { b }, new HashSet<int>(), 3, 15, 1080));
+    }
+
+    // Пробы при апгрейде: кандидат хуже текущей копии в пробы не идёт; для настоящей дыры — идёт
+    [Fact]
+    public void ProbePool_ПриАпгрейде_ХужеТекущейКопии_НеПробуется()
+    {
+        var cold = BmRow("Silo.S03E10.1080p.ColdFilm.mkv", H40('c'), 1080, 107.1, 2_352_351_365, 10);
+        var pack = new JObject { ["title"] = "Укрытие / Бункер / Silo (2026) WEB-DL [H.264/1080p] (сезон 3, серии 1-10 из 10) LostFilm, HDRezka", ["tracker"] = "nnmclub.to",
+                                 ["parselink"] = "http://127.0.0.1:9118/nnmclub/parsemagnet?id=7", ["sid"] = 54, ["quality"] = 1080, ["sizeBytes"] = 30_000_000_000, ["score"] = 121.5 };
+        var low = BmRow("Silo.S03E10.720p.ColdFilm.mkv", H40('l'), 720, 103, 1_750_000_000, 10);
+        var donors = new JArray(DonorRec(H40('c'), 107.1, 1080, 10));
+        var scored = new JArray(cold, pack, low);
+        // E10 уже есть (донор ColdFilm), wanted = [10] только из-за апгрейда → 720p в пул не попадает
+        var pool = HunterAccess.ProbePool(new List<JObject> { pack, low }, 3, new List<int> { 10 }, new List<int> { 10 }, donors, scored, 1080, 15);
+        Assert.Single(pool);
+        Assert.Same(pack, pool[0]);
+        // E10 — настоящая дыра (апгрейдов нет) → 720p годится (пол 720)
+        var pool2 = HunterAccess.ProbePool(new List<JObject> { pack, low }, 3, new List<int> { 10 }, new List<int>(), donors, scored, 1080, 15);
+        Assert.Equal(2, pool2.Count);
+        // на сквозном плане: wouldProbe без 720p
+        var plan = HunterAccess.BuildHuntPlan(MainRecord(), MainFiles(), MainName, donors, null, scored, new[] { MainHash },
+                                              "Укрытие", "Silo", 3, 10, DateTime.UtcNow, new ModuleConf(), false);
+        Assert.Equal(new List<int> { 10 }, HunterAccess.PlanField<List<int>>(plan, "upgrades"));
+        var probes = HunterAccess.PlanField<List<JObject>>(plan, "probes");
+        Assert.DoesNotContain(probes, p => ReferenceEquals(p, low));
+        Assert.Contains(probes, p => ReferenceEquals(p, pack));
+    }
+
+    // Цель 2160: 720p и 1080p — разные ранги, 1080p раньше
+    [Fact]
+    public void QualityRank_Цель2160_1080Раньше720()
+    {
+        Assert.True(HunterAccess.QualityRank(1080, 2160) < HunterAccess.QualityRank(720, 2160));
+        var q720 = BmRow("Silo.S03E10.720p.rus.LostFilm.TV.mp4", H40('1'), 720, 100, 1_750_000_000, 10);
+        var q1080 = BmRow("Silo.S03E10.1080p.ColdFilm.mkv", H40('2'), 1080, 90, 2_350_000_000, 10);
+        var order = HunterAccess.OrderByCover(new List<JObject> { q720, q1080 }, 3, new List<int> { 10 }, 2160);
+        Assert.Same(q1080, order[0]);
+        Assert.Equal(new[] { 10 }, HunterAccess.ComputeUpgrades(new JArray(DonorRec(H40('1'), 100, 720, 10)), new JArray(q720, q1080), new List<JObject> { q1080 }, new HashSet<int>(), 3, 15, 2160));
+    }
+
+    // no-episode: btih — ключ; трекерная строка без магнета отсеивается по (parselink, то же название),
+    // а перевыкладка с новым названием («1-10 из 10») пробуется снова
+    [Fact]
+    public void NoEpisodeBlacklist_ParselinkСТемЖеНазванием_Отсев_НовоеНазвание_Проба()
+    {
+        var item = new JObject { ["hash"] = MainHash };
+        string link = "http://127.0.0.1:9118/nnmclub/parsemagnet?id=1";
+        string title = "Укрытие / Бункер / Silo (2026) WEB-DL [H.264/1080p] (сезон 3, серии 1-9 из 10) HDRezka";
+        HunterAccess.BlacklistAddNoEpisode(item, H40('c'), link, title, 30);
+        var keys = HunterAccess.BlacklistKeys(item, DateTime.UtcNow);
+        Assert.Contains(H40('c'), keys);
+        Assert.DoesNotContain(link, keys);   // parselink — не ключ: новый btih того же топика пробуется
+        var lt = HunterAccess.BlacklistLinkTitles(item, DateTime.UtcNow);
+        Assert.Equal(title, lt[link]);
+
+        var h = HunterAccess.MakeHuntCtx(MainHash, 3, new[] { MainHash }, keys, 3, 720, 150, 8, "укрытие", "silo", null, true, true, 1080);
+        HunterAccess.SetBlacklistLinkTitles(h, lt);
+        JObject Cand(string t) => new JObject { ["title"] = t, ["magnet"] = null, ["parselink"] = link, ["tracker"] = "nnmclub.to", ["sid"] = 50, ["quality"] = 1080, ["sizeBytes"] = 20_000_000_000, ["score"] = 120 };
+        Assert.Equal("blacklist", HunterAccess.DropReason(Cand(title), h));
+        Assert.Null(HunterAccess.DropReason(Cand(title.Replace("1-9 из 10", "1-10 из 10")), h));
+        // с магнетом решает btih
+        var withMagnet = Cand(title); withMagnet["magnet"] = "magnet:?xt=urn:btih:" + H40('d');
+        Assert.Null(HunterAccess.DropReason(withMagnet, h));
+    }
+
+    // Голова имени у аниме-нумерации « - 05», голых E05/Ep05 и группы в скобках
+    [Theory]
+    [InlineData("[AniDub] Gnosia - 05 [1080p].mkv")]
+    [InlineData("[AniLibria.TV] Gnosia - 05 [WEBRip 1080p].mkv")]
+    [InlineData("Gnosia - 05 [1080p][AniLibria].mkv")]
+    [InlineData("Gnosia.E05.1080p.AniDub.mkv")]
+    [InlineData("Gnosia Ep05 1080p AniDub.mkv")]
+    public void NameMatchesSeriesOrId_АнимеНумерация(string title)
+    {
+        var h = HunterAccess.MakeHuntCtx(MainHash, 1, new[] { MainHash }, null, 3, 720, 150, 8, "гносия", null, null, false, false, 1080);
+        var cand = new JObject { ["title"] = title, ["tracker"] = "bitmagnet", ["id_match"] = true, ["id_title"] = "GNOSIA", ["bm_eps"] = new JArray(5), ["bm_season"] = 1 };
+        Assert.True(HunterAccess.NameMatchesSeriesOrId(cand, h), HunterAccess.TitleHeadBeforeMarker(title));
+        Assert.False(HunterAccess.NameMatchesSeriesOrId(new JObject { ["title"] = "Gnosia.Killer - 05 [1080p].mkv", ["tracker"] = "bitmagnet", ["id_match"] = true, ["id_title"] = "GNOSIA" }, h));
+    }
+
     // ── H. текстовые сторожа исходника ──────────────────────────────────
     static string ModuleFile(string name)
     {
@@ -645,8 +843,9 @@ public class HuntBitmagnetTests
     {
         var src = Strip(File.ReadAllText(ModuleFile("EpisodeHunter.cs")));
         // у обновляемого топика parselink стабилен — бан по нему выключал лучший пак на 30 дней
-        Assert.Contains("BlacklistAdd(m, btih, null, \"no-episode\"", src);
+        Assert.Contains("BlacklistAddNoEpisode(m, btih, parselink, cand.Value<string>(\"title\")", src);
         Assert.DoesNotContain("BlacklistAdd(m, btih, parselink, \"no-episode\"", src);
+        Assert.Contains("if (b.Value<string>(\"reason\") == \"no-episode\") continue;", src);   // parselink у no-episode — не ключ
     }
 
     // ── I. сухой прогон: только чтение, ни одной записи ──────────────────

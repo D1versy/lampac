@@ -173,6 +173,42 @@ public class TorrentScoringTests
     [InlineData("Укрытие / Silo / Сезон: 3 / Серии: 1-9 из 10 [2026, WEB-DL 1080p] MVO", null)]
     public void IsRussian_True(string title, bool? hint) => Assert.True(TorrentScoring.IsRussian(title, hint));
 
+    // 05.09: русская раздача с ДОПОЛНИТЕЛЬНОЙ украинской дорожкой — язык закодирован легендой трекера
+    // (rutor «| P, L |», kinozal «ПМ»), и вето её терять не должно; студия-омоним в позиции релиз-группы
+    [Theory]
+    [InlineData("Дюна: Пророчество / Дюна. Пророцтво / Dune: Prophecy [S01] (2024) WEB-DL 1080p | P, L | UKR")]
+    [InlineData("Дом Дракона / Дім Дракона / House of the Dragon [S01-03] (2022-2026) WEB-DLRip-AVC | КПК | P | UKR")]
+    [InlineData("Дюна: Пророчество / Dune: Prophecy (1 сезон: 1-6 серии из 6) / 2024 / ПМ (HDrezka Studio), UKR")]
+    [InlineData("Dune.Prophecy.S01E03.1080p.WEB-DL.MVO.Ukr.Eng")]
+    [InlineData("Silo.S03E01.1080p.WEB-DL.DoMiNo.mkv")]
+    [InlineData("[Dexter] Silo.S03E01.1080p.mkv")]
+    public void IsRussian_True_LegendAndGroupContext(string title) => Assert.True(TorrentScoring.IsRussian(title));
+
+    [Theory]
+    [InlineData("Dexter.Resurrection.S01E01.1080p.WEB.H264-SuccessfulCrab.mkv")]
+    [InlineData("Dexter.Original.Sin.S01E01.1080p.WEB.H264-GRP.mkv")]
+    [InlineData("Domino.2019.1080p.BluRay.x264-GRP.mkv")]
+    [InlineData("The.Domino.Effect.2020.720p.WEB.x264")]
+    [InlineData("Дім Дракона / House of the Dragon (2022) WEB-DL 1080p | 2xUkr/Eng")]
+    [InlineData("Silo.S03E10.1080p.WEB-DL.Ukrainian.Dub.HDRezka.Studio.mkv")]
+    [InlineData("Silo.S03E10.1080p.WEB-DL.UA.HDREZKA.STUDIO.mkv")]
+    [InlineData("Бункер / Silo (Сезон 3) WEB-DL 1080p [Українською] HDRezka")]
+    public void IsRussian_False_TitleHomonymsAndUkr(string title) => Assert.False(TorrentScoring.IsRussian(title));
+
+    // Эхо DHT-строки из нашего индекса (tracker=bitmagnet, sid_hint нет — старые записи) ⭐ тоже не получает
+    [Fact]
+    public void BitmagnetEcho_WithoutSidHint_NeverStar()
+    {
+        var list = new JArray(new JObject
+        {
+            ["title"] = "Silo.S03E10.1080p.ATVP.WEB-DL.DDP5.1.H.264-NTb.mkv", ["tracker"] = "bitmagnet",
+            ["magnet"] = "magnet:?xt=urn:btih:" + new string('c', 40), ["sid"] = 84, ["pir"] = 3, ["quality"] = 1080, ["id_match"] = true
+        });
+        var sorted = TorrentScoring.SortAndMark(list, Ctx("Укрытие", "Silo", 2026, true), 5);
+        Assert.Single(sorted);
+        Assert.Null(sorted[0]["rec"]);
+    }
+
     [Theory]
     [InlineData("Minions.2015.UHD.BluRay.2160p.TrueHD.Atmos.7.1.HEVC.REMUX-FraMeSToR")]
     [InlineData("[ OxTorrent.com ] Minions.2015.TRUEFRENCH.BDRiP.XViD-AViTECH.avi")]

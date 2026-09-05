@@ -298,11 +298,13 @@ public class EpisodeHunterTests
     [InlineData(1080, 1080, 0)]
     [InlineData(1440, 1080, 4)]
     [InlineData(2160, 1080, 11)]
-    [InlineData(720, 1080, 460)]
-    [InlineData(480, 1080, 700)]
+    [InlineData(720, 1080, 280)]
+    [InlineData(480, 1080, 400)]
     [InlineData(0, 1080, 1000)]
     [InlineData(2160, 2160, 0)]
-    [InlineData(1080, 2160, 999)]   // ниже цели: 100 + (target − q), кап 999 — всё равно лучше «не распознано» (1000)
+    [InlineData(1080, 2160, 640)]   // ниже цели: 100 + (target − q)/2 — при цели 2160 1080 и 720 больше не один ранг
+    [InlineData(720, 2160, 820)]
+    [InlineData(240, 2160, 999)]    // кап 899 — всё равно лучше «не распознано» (1000)
     public void QualityRank_Order(int q, int target, int expected) => Assert.Equal(expected, HunterAccess.QualityRank(q, target));
 
     [Fact]
@@ -512,7 +514,7 @@ public class EpisodeHunterTests
         // (фиксированная дата делала тест бомбой замедленного действия — краснел сам по себе).
         var now = DateTime.UtcNow;
         var item = new JObject();
-        HunterAccess.BlacklistAdd(item, DonorHash, "http://t/parsemagnet?id=3", "no-episode", 30);
+        HunterAccess.BlacklistAdd(item, DonorHash, "http://t/parsemagnet?id=3", "wrong-season", 30);   // no-episode с 05.09 parselink ключом не делает (см. BlacklistAddNoEpisode)
         HunterAccess.BlacklistAdd(item, "cccccccccccccccccccccccccccccccccccccccc", null, "meta-timeout", 1);
 
         var keys = HunterAccess.BlacklistKeys(item);

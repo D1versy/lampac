@@ -332,6 +332,23 @@ public class BitmagnetTests
             Assert.DoesNotContain(forbidden, sql.ToLowerInvariant());
     }
 
+    // 05.09: фолбэк «одиночка по имени» — только явный эпизодный синтаксис. ParseEp читал «DD5.1»/«AAC2.0»
+    // как «серия 1»/«серия 0» и прятал иностранные ФИЛЬМЫ и паки с аудио-токеном.
+    [Theory]
+    [InlineData("Passengers.2016.1080p.WEB-DL.DD5.1.H264-FGT", false)]
+    [InlineData("passengers.2016.1080p.bluray.dd5.1.hevc.x265.rmteam.mkv", false)]
+    [InlineData("Silo.S03.1080p.WEB.H264-ETHEL", false)]
+    [InlineData("Silo.S03E01-E10.1080p.WEB.H264-GRP", false)]
+    [InlineData("Silo.S03E09E10.1080p.WEB.H264-GRP", false)]
+    [InlineData("Silo.S03E10.1080p.ATVP.WEB-DL.DDP5.1.H.264-NTb.mkv", true)]
+    [InlineData("Silo 3x10 720p HDTV x264-GRP", true)]
+    [InlineData("Silo.E10.1080p.WEB.mkv", true)]
+    public void IsForeignSingle_БезBm_ТолькоЯвныйЭпизод(string title, bool single)
+    {
+        var t = new JObject { ["title"] = title, ["tracker"] = "bitmagnet" };
+        Assert.Equal(single, QbitController.IsForeignSingle(t));
+    }
+
     // ── HideForeignSingles: иностранные поштучные серии видны только без русских ──
     // ⚠️ Этот заголовок kinozal сам IsRussian НЕ считает русским: «Укр» в начале «Укрытие» ловит
     // украинское вето _ukrMarkRx (хвостовой lookahead не исключает кириллицу), а русского языкового

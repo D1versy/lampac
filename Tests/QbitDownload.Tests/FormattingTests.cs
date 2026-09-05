@@ -82,6 +82,12 @@ public class FormattingTests
     [InlineData("Silo.S03E09.400p.ColdFilm.avi", 400)]
     [InlineData("Show.720x400.XviD.avi", 400)]
     [InlineData("Show.1920x1080.mkv", 1080)]
+    // 05.09: широкоформатные энкоды — класс по ширине (1280x544 = 720p, 1920x800/816 = 1080p, 3840x1600 = 2160p)
+    [InlineData("X-Men First Class (2011) HDRip [H.264] [MP4|1280x544]", 720)]
+    [InlineData("Show.S02E05.1920x816.WEB-DL.mkv", 1080)]
+    [InlineData("Show.S02E05.1918x800.WEB-DL.mkv", 1080)]
+    [InlineData("Movie.3840x1600.UHD.mkv", 2160)]
+    [InlineData("Movie.1024x576.DVDRip.avi", 576)]
     [InlineData("Show.1440p.mkv", 1440)]
     [InlineData("Show.576p.mkv", 576)]
     [InlineData("Show.1080i.HDTV.mkv", 1080)]

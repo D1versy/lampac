@@ -334,19 +334,21 @@ public partial class QbitController : BaseController
                 StaleRefresh(ckey, query, title, title_original, year, is_serial, season, apikey, tmdb_id);
             }
 
-            return ContentTo(SearchHideForeign(scored, title ?? query).ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+            return ContentTo(SearchHideForeign(scored, title ?? query, is_serial).ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
         }
 
         var sorted = await SearchScored(query, title, title_original, year, is_serial, season, apikey, tmdb_id);
-        return ContentTo(SearchHideForeign(sorted, title ?? query).ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+        return ContentTo(SearchHideForeign(sorted, title ?? query, is_serial).ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
     }
 
     // Пост-фильтр ручки (qdl 2.107, решение владельца): иностранные поштучные серии из bitmagnet — только
     // когда русских раздач нет. Ровно на выходе к человеку, в обеих ветках (кеш и живая): кеш, индекс,
     // охота и обходчик видят полную выдачу. Ответ остаётся массивом. Киллсвитч searchHideForeignSingles.
-    static JArray SearchHideForeign(JArray sorted, string forLog)
+    // Только для сериалов (is_serial == 2, как шлёт qdl.js): решение владельца — про поштучные СЕРИИ; у фильма
+    // «одиночек» нет, и иностранный релиз (оригинальная дорожка, UHD-ремукс) прятать не за что.
+    static JArray SearchHideForeign(JArray sorted, string forLog, int isSerial)
     {
-        if (!ModInit.conf.searchHideForeignSingles) return sorted;
+        if (!ModInit.conf.searchHideForeignSingles || isSerial != 2) return sorted;
         var (list, hidden) = HideForeignSingles(sorted);
         if (hidden > 0)
             Console.WriteLine($"[QbitDownload] поиск «{forLog}»: скрыто {hidden} иностранных поштучных серий bitmagnet (русские есть), осталось {list.Count}");
@@ -613,7 +615,13 @@ public partial class QbitController : BaseController
         var m = _qHeightPRx.Match(t);
         if (m.Success && int.TryParse(m.Groups[1].Value, out int hp) && hp >= 240 && hp <= 4320) return hp;
         m = _qWxHRx.Match(t);
-        if (m.Success && int.TryParse(m.Groups[2].Value, out int hh) && hh >= 240 && hh <= 4320) return hh;
+        if (m.Success && int.TryParse(m.Groups[1].Value, out int ww) && int.TryParse(m.Groups[2].Value, out int hh) && hh >= 240 && hh <= 4320)
+        {
+            // Широкоформатные энкоды обрезаны по чёрным полосам: 1280x544 — это 720p-класс, 1920x800 — 1080p
+            // (ColdFilm из §DJ — 1918×800). Класс — по ширине, если она стандартная; 720x400 остаётся 400.
+            int byW = ww >= 3800 ? 2160 : ww >= 1900 ? 1080 : ww >= 1260 ? 720 : 0;
+            return Math.Max(hh, byW);
+        }
         if (_q4kRx.IsMatch(t)) return 2160;
         m = _qLegacyRx.Match(t);
         return m.Success ? int.Parse(m.Groups[1].Value) : 0;

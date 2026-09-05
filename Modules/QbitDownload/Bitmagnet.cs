@@ -438,14 +438,21 @@ limit 1", db);
         return (keep, hidden);
     }
 
+    // Одиночка по имени — для строк без bm_eps (эхо индекса, снимки кеша до 2.107): явный эпизодный
+    // синтаксис S01E07 / 1x07 / E07 без диапазона. ParseEp здесь НЕЛЬЗЯ: он написан под имена файлов и
+    // читает «DD5.1» / «AAC2.0» как «серия 1» / «серия 0» — так прятались иностранные ФИЛЬМЫ и паки с
+    // аудио-токеном («Passengers.2016.1080p.WEB-DL.DD5.1.H264-FGT»).
+    static readonly Regex _singleEpRx = new Regex(
+        @"(?i)(?<![a-z0-9])S\d{1,2}[ ._-]?E\d{1,3}(?![0-9-])(?![ ._-]?E\d)|(?<![a-z0-9])\d{1,2}x\d{1,3}(?![0-9-])|(?<![a-z0-9-])E\d{1,3}(?![0-9-])",
+        RegexOptions.Compiled);
+
     internal static bool IsForeignSingle(JObject t)
     {
         if (t == null || t.Value<string>("tracker") != "bitmagnet") return false;
         if (TorrentScoring.IsRussian(t.Value<string>("title"), t.Value<bool?>("lang_ru"))) return false;
         if (t.Value<bool?>("bm_pack") == true || t.Value<bool?>("bm_multi") == true) return false;
         if (t["bm_eps"] is JArray eps) return eps.Count == 1;
-        var pe = ParseEp(StripSeasonMarks(t.Value<string>("title") ?? ""));
-        return pe != null && pe.any && pe.kind == null && pe.ep >= 0;
+        return _singleEpRx.IsMatch(t.Value<string>("title") ?? "");
     }
     #endregion
 }

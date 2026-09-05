@@ -358,6 +358,7 @@ public partial class QbitController
         public int season;
         public HashSet<string> knownHashes;    // основная + текущие доноры (lower)
         public HashSet<string> blacklistKeys;  // btih/parselink активного blacklist
+        public Dictionary<string, string> blacklistLinkTitles;   // no-episode: parselink → название на момент бана
         public int minSeeds, minQuality, minMb, maxGb;
         public string titleNorm, originalNorm;  // нормализованные названия сериала для строгого гейта имени
         public string selfTopicKey;             // топик САМОЙ основной раздачи (её перерегистрация — не донор)
@@ -387,7 +388,9 @@ public partial class QbitController
         if (target <= 0) return Math.Max(1, 500 - Math.Min(q, 499));   // без цели: выше = лучше
         if (q == target) return 0;
         if (q > target) return 1 + Math.Min(98, (q - target) / 100);
-        return 100 + Math.Min(899, target - q);
+        // Ниже цели: половина разницы. Полная разница с капом 899 при цели 2160 схлопывала 1080 и 720 в
+        // один ранг 999 (обе «≥899 ниже»), и порядок проб решали сиды/бакет — 720p шёл раньше 1080p.
+        return 100 + Math.Min(899, (target - q) / 2);
     }
 
     // Доминирующее качество по ПОЛНЫМ путям видеофайлов (папка несёт «1080p», сам файл — не всегда).
@@ -623,10 +626,11 @@ public partial class QbitController
     // 🔴 Гард на пустую нормализацию обязателен: SearchNameTo.Convert отдаёт null для CJK/скобок, и
     // без гарда null ∈ {…, null} открыл бы гейт для любой строки.
     static readonly System.Text.RegularExpressions.Regex _headMarkerRx = new(
-        @"(?i)(?:(?<![a-z0-9а-яё])(?:S\d{1,2}(?:E\d{1,3})?|\d{1,2}x\d{1,3}|(?:19|20)\d{2}|\d{3,4}[pi]|4K|UHD|season|сезон\w*|сери\w*|WEB-?DL|WEB-?RIP|BDRip|BluRay|HDTV|HDRip|DVDRip|[xh]\.?26[45]|HEVC|AV1|MULTI|Complete)(?![a-z0-9]))|[\[\(]",
+        @"(?i)(?:(?<![a-z0-9а-яё])(?:S\d{1,2}(?:E\d{1,3})?|E\d{1,3}|Ep\.?\s?\d{1,3}|\d{1,2}x\d{1,3}|(?:19|20)\d{2}|\d{3,4}[pi]|4K|UHD|season|сезон\w*|сери\w*|WEB-?DL|WEB-?RIP|BDRip|BluRay|HDTV|HDRip|DVDRip|[xh]\.?26[45]|HEVC|AV1|MULTI|Complete)(?![a-z0-9]))|\s[-–]\s*\d{1,3}(?![0-9a-z])|[\[\(]",
         System.Text.RegularExpressions.RegexOptions.Compiled);
     static readonly System.Text.RegularExpressions.Regex _leadGroupRx = new(@"^\s*\[([^\]]{1,40})\]\s*[_\-\. ]*", System.Text.RegularExpressions.RegexOptions.Compiled);
-    static readonly System.Text.RegularExpressions.Regex _domainLikeRx = new(@"(?i)www\.|\.(org|com|net|lol|to|info|cz|ru|su|me|tv|xyz|club|pw)(?![a-z])", System.Text.RegularExpressions.RegexOptions.Compiled);
+    // «.tv» доменом не считаем: это релиз-группы (AniLibria.TV, BaibaKo.tv, Kerob.tv), а не пиратские витрины.
+    static readonly System.Text.RegularExpressions.Regex _domainLikeRx = new(@"(?i)www\.|\.(org|com|net|lol|to|info|cz|ru|su|me|xyz|club|pw)(?![a-z])", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     static string TitleHeadBeforeMarker(string title)
     {
@@ -825,17 +829,19 @@ public partial class QbitController
     #region апгрейд донорской серии на раздачу получше
     // Текущие «ставки» донора: скор и качество. Сперва по СВЕЖЕЙ выдаче (скор плывёт вместе с сидами
     // и датой), иначе — то, что записали при захвате. (-1, -1) = не с чем сравнивать → не апгрейдим.
-    static (double score, int quality) DonorBaseline(JObject donor, JArray scored)
+    // База сравнения для апгрейда: score/качество/бакет размера раздачи, с которой взята серия. Бакет
+    // известен только когда раздача донора есть в текущей выдаче (-1 = неизвестен → сравниваем по score).
+    static (double score, int quality, int bucket) DonorBaseline3(JObject donor, JArray scored)
     {
         string dh = donor.Value<string>("hash") ?? "", link = donor.Value<string>("link") ?? "";
         foreach (var t in scored.OfType<JObject>())
         {
             bool same = (!string.IsNullOrEmpty(dh) && string.Equals(MagnetHash(t.Value<string>("magnet")), dh, StringComparison.OrdinalIgnoreCase))
                      || (!string.IsNullOrWhiteSpace(link) && string.Equals(t.Value<string>("parselink"), link, StringComparison.OrdinalIgnoreCase));
-            if (same) return (t.Value<double?>("score") ?? 0, t.Value<int?>("quality") ?? 0);
+            if (same) return (t.Value<double?>("score") ?? 0, t.Value<int?>("quality") ?? 0, SizeBucket(CandidateBytesPerEp(t)));
         }
         var s = donor.Value<double?>("score");
-        return s.HasValue ? (s.Value, donor.Value<int?>("quality") ?? 0) : (-1, -1);
+        return s.HasValue ? (s.Value, donor.Value<int?>("quality") ?? 0, -1) : (-1, -1, -1);
     }
 
     // Серия «временно с другой раздачи» стоит апгрейда, если среди годных кандидатов есть раздача
@@ -858,37 +864,85 @@ public partial class QbitController
         var ordered = eligible.ToList();
         ordered.Sort(DonorOrder(targetQuality));
 
-        foreach (var d in donors.OfType<JObject>())
+        var best = UpgradeBaselines(donors, scored, mainEps, targetQuality);
+        foreach (var kv in best.OrderBy(x => x.Key))
         {
-            var (bscore, bquality) = DonorBaseline(d, scored);
-            if (bscore < 0) continue;   // не с чем сравнивать (старая запись и раздачи нет в выдаче)
-            int brank = QualityRank(bquality, targetQuality);
-
-            foreach (var e in (d["eps"] as JArray ?? new JArray()).OfType<JObject>())
+            int ep = kv.Key; var b = kv.Value;
+            foreach (var t in ordered)
             {
-                if (e.Value<string>("status") != "hunted") continue;
-                int ep = e.Value<int?>("ep") ?? -1;
-                if (ep < 0 || mainEps.Contains(ep) || res.Contains(ep)) continue;
-
-                foreach (var t in ordered)
-                {
-                    var cover = TitleCoversEpItem(t, season, ep);
-                    if (cover == DonorCover.No) continue;
-                    double cs = t.Value<double?>("score") ?? 0;
-                    int cq = t.Value<int?>("quality") ?? 0;
-                    int crank = QualityRank(cq, targetQuality);
-                    if (cover == DonorCover.Maybe && crank >= brank) continue;
-                    bool better = crank < brank || (crank == brank && cs >= bscore + minScoreGain);
-                    if (!better) continue;
-                    if (SharesFilesWith(t, donorSig)) continue;   // тот же контент под другим btih
-                    res.Add(ep);
-                    if (why != null) why[ep] = $"E{ep}: {bquality}p/{Math.Round(bscore, 1)} → {cq}p/{Math.Round(cs, 1)}";
-                    break;
-                }
+                var cover = TitleCoversEpItem(t, season, ep);
+                if (cover == DonorCover.No) continue;
+                if (!BetterThanBaseline(t, b, targetQuality, minScoreGain, cover)) continue;
+                if (SharesFilesWith(t, donorSig)) continue;   // тот же контент под другим btih
+                res.Add(ep);
+                if (why != null) why[ep] = $"E{ep}: {b.quality}p/{Math.Round(b.score, 1)} → {t.Value<int?>("quality") ?? 0}p/{Math.Round(t.Value<double?>("score") ?? 0, 1)}";
+                break;
             }
         }
         res.Sort();
         return res;
+    }
+
+    // База сравнения на серию — ЛУЧШАЯ из уже взятых копий (ранг → бакет → score): серию могут держать
+    // два донора (старый + апгрейд в полёте), и сравнение со старым взводило бы третью копию.
+    static Dictionary<int, (double score, int quality, int bucket, int rank)> UpgradeBaselines(JArray donors, JArray scored, HashSet<int> mainEps, int targetQuality)
+    {
+        var best = new Dictionary<int, (double score, int quality, int bucket, int rank)>();
+        if (donors == null) return best;
+        foreach (var d in donors.OfType<JObject>())
+        {
+            var (bscore, bquality, bbucket) = DonorBaseline3(d, scored);
+            if (bscore < 0) continue;   // не с чем сравнивать (старая запись и раздачи нет в выдаче)
+            int brank = QualityRank(bquality, targetQuality);
+            foreach (var e in (d["eps"] as JArray ?? new JArray()).OfType<JObject>())
+            {
+                if (e.Value<string>("status") != "hunted") continue;
+                int ep = e.Value<int?>("ep") ?? -1;
+                if (ep < 0 || (mainEps != null && mainEps.Contains(ep))) continue;
+                if (!best.TryGetValue(ep, out var cur) || brank < cur.rank
+                    || (brank == cur.rank && (bbucket > cur.bucket || (bbucket == cur.bucket && bscore > cur.score))))
+                    best[ep] = (bscore, bquality, bbucket, brank);
+            }
+        }
+        return best;
+    }
+
+    // ТОТ ЖЕ компаратор, что у порядка проб (DonorOrder) и победителя в PlanReplacements:
+    // ранг → бакет → score(+minScoreGain). Иначе решение «апгрейд оправдан» принимала одна раздача
+    // (score +15), а в пробу первой шла другая (бакет выше) — и так по кругу. Maybe-кандидат (пак)
+    // допускается только при строго лучшем ранге.
+    static bool BetterThanBaseline(JObject t, (double score, int quality, int bucket, int rank) b, int targetQuality, int minScoreGain, DonorCover cover)
+    {
+        double cs = t.Value<double?>("score") ?? 0;
+        int crank = QualityRank(t.Value<int?>("quality") ?? 0, targetQuality);
+        int cbucket = SizeBucket(CandidateBytesPerEp(t));
+        if (cover == DonorCover.Maybe) return crank < b.rank;
+        return crank < b.rank
+            || (crank == b.rank && (b.bucket < 0 ? cs >= b.score + minScoreGain
+                                    : cbucket > b.bucket || (cbucket == b.bucket && cs >= b.score + minScoreGain)));
+    }
+
+    // Пул проб при апгрейде: кандидат, который закрывает ТОЛЬКО серии-апгрейды, обязан быть лучше их
+    // текущей копии — иначе третьим в пробы шёл 720p-одиночник «на замену» 1080p-донору, HuntOne его
+    // хватал (в цикле проверки «лучше ли» нет), а PlanReplacements потом выбрасывал недокачанным.
+    static List<JObject> ProbePool(List<JObject> eligible, int season, List<int> wanted, List<int> upgrades,
+                                   Dictionary<int, (double score, int quality, int bucket, int rank)> baselines, int targetQuality, int minScoreGain)
+    {
+        if (upgrades == null || upgrades.Count == 0 || baselines == null) return eligible;
+        var pool = new List<JObject>();
+        foreach (var t in eligible)
+        {
+            bool keep = false;
+            foreach (int ep in wanted)
+            {
+                var cover = TitleCoversEpItem(t, season, ep);
+                if (cover == DonorCover.No) continue;
+                if (!upgrades.Contains(ep) || !baselines.TryGetValue(ep, out var b)) { keep = true; break; }   // настоящая дыра — любой годный
+                if (BetterThanBaseline(t, b, targetQuality, minScoreGain, cover)) { keep = true; break; }
+            }
+            if (keep) pool.Add(t);
+        }
+        return pool;
     }
 
     static bool SharesFilesWith(JObject t, HashSet<string> sig)
@@ -1005,6 +1059,30 @@ public partial class QbitController
     static void BlacklistAdd(JObject item, string btih, string parselink, string reason, int ttlDays)
         => BlacklistAddMinutes(item, btih, parselink, reason, Math.Max(1, ttlDays) * 1440, 1);
 
+    // «Нужных серий в файлах нет»: ключ — btih (перевыкладка топика с новым btih пробуется снова), но
+    // трекерная строка без магнета до резолва btih не знает — для неё запоминаем (parselink, название):
+    // тот же топик с ТЕМ ЖЕ названием = тот же контент, с новым («1-10 из 10» вместо «1-9») — новая проба.
+    // Без этого забаненные parselink-строки занимали все три слота проб на каждом проходе.
+    static void BlacklistAddNoEpisode(JObject item, string btih, string parselink, string title, int ttlDays)
+    {
+        BlacklistAddMinutes(item, btih, parselink, "no-episode", Math.Max(1, ttlDays) * 1440, 1);
+        if (item["blacklist"] is JArray bl && bl.Count > 0 && bl[bl.Count - 1] is JObject last) last["title"] = title;
+    }
+
+    static Dictionary<string, string> BlacklistLinkTitles(JObject item, DateTime now)
+    {
+        var res = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (item["blacklist"] is JArray bl)
+            foreach (var b in bl)
+            {
+                if (b.Value<string>("reason") != "no-episode") continue;
+                if (!DateTime.TryParse(b.Value<string>("until"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var u) || u <= now) continue;
+                string p = b.Value<string>("parselink"), t = b.Value<string>("title");
+                if (!string.IsNullOrEmpty(p) && !string.IsNullOrEmpty(t)) res[p] = t;
+            }
+        return res;
+    }
+
     // TTL в МИНУТАХ + номер попытки. Старая форма клампила ttlDays к «не меньше суток», поэтому
     // разовый сетевой сбой резолва парселинка банил ЛУЧШЕГО кандидата на сутки — и охота ещё и
     // переставала учитывать его серии («Великий расхититель гробниц»: 5 вышедших серий, а в логе
@@ -1068,6 +1146,7 @@ public partial class QbitController
             {
                 if (!DateTime.TryParse(b.Value<string>("until"), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var u) || u <= now) continue;
                 var h = b.Value<string>("btih"); if (!string.IsNullOrEmpty(h)) res.Add(h);
+                if (b.Value<string>("reason") == "no-episode") continue;   // parselink у no-episode — не ключ (см. BlacklistAddNoEpisode)
                 var p = b.Value<string>("parselink"); if (!string.IsNullOrEmpty(p)) res.Add(p);
             }
         return res;
@@ -1108,7 +1187,14 @@ public partial class QbitController
         if (!await _watchGate.WaitAsync(0))   // общий фоновый гейт (был _hunting): сериализуем с CheckWatches/ScanEpisodeNotifications
         {
             if (localOnly) Interlocked.Increment(ref _ltBusy);
-            else Console.WriteLine("[QbitDownload] hunt: тик пропущен — занят другой фоновый проход (watch/notify/hunt)");
+            else
+            {
+                // Гейт теперь держит и локальный тик (пробы — до 3×90 с на сериал), поэтому плановый трекерный
+                // проход не теряем на весь период: просим таймер вернуться через 5 минут. Ручной прогон
+                // (onlyHash) расписание не двигает.
+                Console.WriteLine("[QbitDownload] hunt: тик пропущен — занят другой фоновый проход (watch/notify/hunt)" + (onlyHash == null ? ", повтор через 5 мин" : ""));
+                if (onlyHash == null) ModInit.RescheduleHunt(TimeSpan.FromMinutes(5));
+            }
             return 0;
         }
         int grabbed = 0, series = 0, searched = 0, barren = 0, waiting = 0, newRows = 0, probes = 0;
@@ -1126,7 +1212,7 @@ public partial class QbitController
                 if (onlyHash != null && !onlyHash.Equals(m.Value<string>("hash"), StringComparison.OrdinalIgnoreCase)) continue;
                 try
                 {
-                    var r = await HuntOne(c, m, localOnly);   // штамп hunt.lastRun ставит сам HuntOne — и только на удачном проходе
+                    var r = await HuntOne(c, m, localOnly, list);   // штамп hunt.lastRun ставит сам HuntOne — и только на удачном проходе
                     grabbed += r.grabbed; series++;
                     if (localOnly) { if (r.changed) changed = true; }
                     else changed = true;
@@ -1137,12 +1223,14 @@ public partial class QbitController
                     if (r.newRows) newRows++;
                     probes += r.probes;
                 }
-                catch (Exception ex) { Console.WriteLine("[QbitDownload] hunt item: " + ex); }
+                // Упавшая посреди проб запись всё равно сохраняется: правки записи append-only (донор уже
+                // добавлен в qBit, blacklist, штампы) — без сохранения донор жил бы невидимкой до рестарта.
+                catch (Exception ex) { changed = true; Console.WriteLine($"[QbitDownload] {(localOnly ? "hunt-local" : "hunt")} item: " + ex); }
             }
             if (changed) SaveWatchReconciled(list, orig);
             if (localOnly)
             {
-                Interlocked.Add(ref _ltWaiting, waiting);
+                if (waiting > _ltWaiting) Interlocked.Exchange(ref _ltWaiting, waiting);   // число сериалов, а не сумма по тикам
                 Interlocked.Add(ref _ltNewRows, newRows);
                 Interlocked.Add(ref _ltProbes, probes);
                 Interlocked.Add(ref _ltGrabbed, grabbed);
@@ -1152,7 +1240,8 @@ public partial class QbitController
             else if (series > 0)
                 Console.WriteLine($"[QbitDownload] hunt: проход завершён — записей {series}, опрошено {searched}, пустых выдач {barren}, добыто серий {grabbed}");
         }
-        catch (Exception ex) { Console.WriteLine("[QbitDownload] hunt: " + ex); }
+        // Локальный тик при лёгшем qBit иначе печатал бы стек раз в 10 минут под тегом полного прохода.
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] " + (localOnly ? "hunt-local: " + ex.Message : "hunt: " + ex)); }
         finally { _watchGate.Release(); }
 
         if (localOnly) return grabbed;   // ни re-grab, ни расписания трекерного прохода локальный тик не трогает
@@ -1276,6 +1365,9 @@ public partial class QbitController
         if (!string.IsNullOrEmpty(btih) && h.knownHashes.Contains(btih)) return "уже есть";
         if (!string.IsNullOrEmpty(btih) && h.blacklistKeys.Contains(btih)) return "blacklist";
         if (!string.IsNullOrWhiteSpace(parselink) && h.blacklistKeys.Contains(parselink)) return "blacklist";
+        if (string.IsNullOrEmpty(btih) && !string.IsNullOrWhiteSpace(parselink) && h.blacklistLinkTitles != null
+            && h.blacklistLinkTitles.TryGetValue(parselink, out var bannedTitle) && string.Equals(bannedTitle, title, StringComparison.Ordinal))
+            return "blacklist";   // тот же топик с тем же названием, что уже проверяли по файлам
         if (string.IsNullOrEmpty(btih) && string.IsNullOrWhiteSpace(parselink)) return "без ссылки";
 
         // ТОТ ЖЕ топик, что у основной раздачи, только перевыложенный (новые серии → новый infohash).
@@ -1451,6 +1543,7 @@ public partial class QbitController
         public List<JObject> eligible, claims, probes;
         public int maxClaim, claimBeforeCap, eligibleClaim, aired, bitmagnet, selfClaim;
         public List<int> missing = new(), wanted = new(), upgrades = new();
+        public Dictionary<int, (double score, int quality, int bucket, int rank)> upBase;   // базы апгрейда на серию (лучшая копия)
         public Dictionary<int, string> upWhy = new();
         public Dictionary<string, int> drops = new();
         public bool atCap;
@@ -1469,6 +1562,7 @@ public partial class QbitController
             season = season,
             knownHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { mainHash },
             blacklistKeys = BlacklistKeys(m, now),
+            blacklistLinkTitles = BlacklistLinkTitles(m, now),
             minSeeds = conf.donorMinSeeds,
             minQuality = conf.donorMinQuality,
             minMb = conf.epSizeMinMb,
@@ -1528,14 +1622,15 @@ public partial class QbitController
             plan.upgrades = ComputeUpgrades(donors, scored, plan.eligible, mainEps, season, conf.donorUpgradeMinScore, plan.upWhy, h.targetQuality, donorSig);
             foreach (int ep in plan.upgrades)
                 if (!plan.wanted.Contains(ep)) plan.wanted.Add(ep);
-            if (plan.upgrades.Count > 0) plan.wanted.Sort();
+            if (plan.upgrades.Count > 0) { plan.wanted.Sort(); plan.upBase = UpgradeBaselines(donors, scored, mainEps, h.targetQuality); }
         }
 
         if (plan.atCap) plan.wanted = localOnly ? new List<int>() : new List<int>(plan.upgrades);   // слотов нет: только ради замены на лучшее
 
         plan.drops = DropCounts(scored, h);
         plan.selfClaim = localOnly ? 0 : SelfTopicClaim(scored, h);   // сигнал re-grab — дело трекерного прохода
-        plan.probes = ProbeCandidates(plan.eligible, season, plan.wanted, conf.donorProbesPerRun, h.targetQuality);
+        plan.probes = ProbeCandidates(ProbePool(plan.eligible, season, plan.wanted, plan.upgrades, plan.upBase, h.targetQuality, conf.donorUpgradeMinScore),
+                                      season, plan.wanted, conf.donorProbesPerRun, h.targetQuality);
         return plan;
     }
 
@@ -1607,6 +1702,7 @@ public partial class QbitController
         string titleOriginal = ctx?.Value<string>("title_original");
         int year = ctx?.Value<int?>("year") ?? 0;
 
+        int tmdbNum = m.Value<int?>("id") ?? 0;
         if (localOnly)
         {
             // Локальный тик: только сериалы, у которых есть чего ждать; только локальные базы;
@@ -1614,6 +1710,17 @@ public partial class QbitController
             if (tmdbId == null) { p.skip = "no-tmdb"; return p; }
             p.localWaiting = LocalTickWaiting(m, mainFiles, donors, season);
             if (!p.localWaiting) { p.skip = "nothing-wanted"; return p; }
+            // Потолок серий — ТОЛЬКО из кеша эфира (правило «TMDB из кеша»: поход в прокси под _watchGate
+            // стоил бы 15 с на каждый сдвиг состава при лежащем TMDB и снимал бы потолок, отправляя паки
+            // «1-10 из 10» при вышедших 9 в пробу и no-episode на 30 дней). Кеша нет (рестарт, трекеры ещё
+            // не отвечали) → потолок = максимум localWanted: эти серии полный проход уже сверил с эфиром.
+            p.aired = conf.tmdbAiredCap ? AiredCached(tmdbNum, season) : 0;
+            if (conf.tmdbAiredCap && p.aired <= 0)
+            {
+                var lw = (m["hunt"] as JObject)?["localWanted"] as JArray;
+                p.aired = lw == null ? 0 : lw.Select(x => x.Value<int>()).DefaultIfEmpty(0).Max();
+                if (p.aired <= 0) { p.skip = "no-aired-cache"; return p; }
+            }
             var (raw, fp) = await LocalFetch(ctitle, year, season, tmdbId);
             p.localFp = fp;
             p.localChanged = !(_localFp.TryGetValue(mainHash, out var prevFp) && prevFp == fp);
@@ -1622,6 +1729,10 @@ public partial class QbitController
         }
         else
         {
+            // Кеш эфира заполняем ДО похода в трекеры: он нужен локальному тику (ветка «вышло больше, чем
+            // есть»), а при лежащем индексаторе после рестарта иначе оставался бы пустым до первой удачной
+            // выдачи — и тик молчал бы ровно тогда, когда серия есть только в DHT.
+            p.aired = conf.tmdbAiredCap ? await AiredEpisodes(tmdbNum, season) : 0;
             // Полный проход: трекеры + bitmagnet сезонным скоупом (без записи кеша/индекса) + наш индекс.
             p.scored = await SearchScored(ctitle, ctitle, titleOriginal, year, 2, season, null, tmdbId, tmdbId != null ? season : 0);
             // Пусто = либо трекеры отдали ошибку (JacRed InternalServerError и т.п.), либо индексатор лёг.
@@ -1652,13 +1763,13 @@ public partial class QbitController
             }
         }
 
-        p.aired = conf.tmdbAiredCap ? await AiredEpisodes(m.Value<int?>("id") ?? 0, season) : 0;
         p.plan = BuildHuntPlan(m, mainFiles, p.mainName, donors, donorSig, p.scored, lampaHashes, ctitle, titleOriginal, season, p.aired, p.now, conf, localOnly);
         p.ok = true;
         return p;
     }
 
-    static async Task<HuntOneResult> HuntOne(HttpClient c, JObject m, bool localOnly = false)
+    // records — весь список записей прохода (HuntAll): нужен, чтобы не усыновить донора ДРУГОЙ записи.
+    static async Task<HuntOneResult> HuntOne(HttpClient c, JObject m, bool localOnly = false, JArray records = null)
     {
         var res = new HuntOneResult();
         var conf = ModInit.conf;
@@ -1692,7 +1803,6 @@ public partial class QbitController
 
         if (localOnly)
         {
-            _localFp[p.mainHash] = p.localFp;
             res.waiting = true; res.newRows = true;
             SetLocalStamp(m, now); res.changed = true;
         }
@@ -1707,6 +1817,10 @@ public partial class QbitController
             if (plan.upgrades.Count > 0)
                 Console.WriteLine($"[QbitDownload] hunt «{stitle}» S{season}: апгрейд донорских серий — {string.Join("; ", plan.upgrades.Select(x => plan.upWhy[x]))}");
         }
+
+        // fingerprint состава фиксируем только на НОРМАЛЬНОМ выходе (обе точки ниже): исключение посреди
+        // проб (qBit оборвался после add) — состав не считается обработанным, следующий тик повторит план.
+        void FpDone() { if (localOnly) _localFp[p.mainHash] = p.localFp; }
 
         string tag = localOnly ? "hunt-local" : "hunt";
         string claimNote = plan.maxClaim != plan.eligibleClaim ? $" (годные заявляют {plan.eligibleClaim})" : "";
@@ -1728,7 +1842,7 @@ public partial class QbitController
             }
         }
 
-        if (wanted.Count == 0) return res;   // новее ничего не заявлено — основная и так самая полная
+        if (wanted.Count == 0) { FpDone(); return res; }   // новее ничего не заявлено — основная и так самая полная
 
         int grabbed = 0, probes = 0;
         long minB = conf.epSizeMinMb * 1024L * 1024, maxB = conf.epSizeMaxGb * 1024L * 1024 * 1024;
@@ -1742,8 +1856,6 @@ public partial class QbitController
         {
             if (probes >= Math.Max(1, conf.donorProbesPerRun)) break;
             if (((m["donors"] as JArray)?.Count ?? 0) >= conf.donorMaxPerSeries + (atCap ? 1 : 0)) break;
-            probes++; res.probes = probes; res.changed = true;
-
             string parselink = cand.Value<string>("parselink");
             string magnet = cand.Value<string>("magnet");
             if (string.IsNullOrWhiteSpace(magnet))
@@ -1756,12 +1868,15 @@ public partial class QbitController
                     int at = BlacklistAttempts(m, parselink, "resolve-failed") + 1;
                     int ttl = TransientFailMinutes(at);
                     BlacklistAddMinutes(m, null, parselink, "resolve-failed", ttl, at);
+                    res.changed = true;
                     Console.WriteLine($"[QbitDownload] hunt: парселинк не резолвится (попытка {at}) — пауза {ttl} мин («{cand.Value<string>("title")}»)");
                     continue;
                 }
             }
             string btih = MagnetHash(magnet);
             if (string.IsNullOrEmpty(btih) || h.knownHashes.Contains(btih) || h.blacklistKeys.Contains(btih)) continue;
+            // проба = поход в qBit; уже известный/забаненный btih, выяснившийся после резолва, слот не тратит
+            probes++; res.probes = probes; res.changed = true;
 
             // двойная страховка (сверх knownHashes из категории lampa): если инфохеш уже есть в qBit
             // и это НЕ наш донор — чужая загрузка, не усыновляем (QbitAddMagnetEx на дубле неотличим от add)
@@ -1770,11 +1885,27 @@ public partial class QbitController
             { BlacklistAdd(m, btih, parselink, "foreign", conf.donorBlacklistTtlDays); continue; }
 
             // двухфазный захват: add со стопом после метаданных → подтверждение по файлам
-            if (!await QbitAddMagnetEx(c, magnet, DonorCategory, DonorTag, stopAfterMeta: true))
+            var addSt = await QbitAddMagnetStatus(c, magnet, DonorCategory, DonorTag, stopAfterMeta: true);
+            if (addSt == QbitAddStatus.Failed)
             {
                 int at = BlacklistAttempts(m, btih, "add-failed") + 1;
                 BlacklistAddMinutes(m, btih, parselink, "add-failed", TransientFailMinutes(at), at);   // сбой qBit — транзиент
                 continue;
+            }
+            if (addSt == QbitAddStatus.Duplicate)
+            {
+                // Торрент уже сидел в qBit. Усыновляем ТОЛЬКО собственного сироту: донор нашей категории, на
+                // которого не ссылается другая запись (add прошёл, watch.json не сохранился). Остальное — чужое:
+                // pre-check не ответил (qBit моргнул) → это мог быть пользовательский торрент категории lampa,
+                // и filePrio(all,0) ниже остановил бы ему загрузку; донор ДРУГОЙ записи (общий многосезонный
+                // пак) → его выбор файлов сбросился бы, а delete-donor первой записи снёс бы файлы второй.
+                bool ownOrphan = pre != null && pre.Value<string>("category") == DonorCategory && !OtherRecordsReference(records, m, btih);
+                if (!ownOrphan)
+                {
+                    BlacklistAdd(m, btih, parselink, "foreign", conf.donorBlacklistTtlDays);
+                    Console.WriteLine($"[QbitDownload] {tag}: кандидат {btih} уже сидит в qBit не нашим донором — не усыновляем («{cand.Value<string>("title")}»)");
+                    continue;
+                }
             }
 
             // Аварийные выходы ниже удаляют кандидата С ФАЙЛАМИ — только через QbitDeleteDonorSafe.
@@ -1815,7 +1946,7 @@ public partial class QbitController
                 // Ключ — ТОЛЬКО btih (qdl 2.107): у обновляемого топика parselink стабилен, и бан по нему
                 // выключал лучший 1080p-пак на 30 дней, хотя следующая перевыкладка (новый btih) серию
                 // уже несёт. Тот же btih остаётся забаненным; перевыкладка = 5–7 btih за сезон → ~1 проба.
-                BlacklistAdd(m, btih, null, "no-episode", conf.donorBlacklistTtlDays);
+                BlacklistAddNoEpisode(m, btih, parselink, cand.Value<string>("title"), conf.donorBlacklistTtlDays);
                 Console.WriteLine($"[QbitDownload] {tag}: донор {btih} отвергнут — нужных серий в файлах нет («{cand.Value<string>("title")}»)");
                 continue;
             }
@@ -1852,12 +1983,41 @@ public partial class QbitController
             if (wanted.Count == 0) break;
         }
         if (grabbed > 0)
+        {
             ActivityTouch(h.mainHash);   // карточка всплывает в момент ЗАХВАТА серии, не дожидаясь докачки
+            TrimLocalWanted(m, inv);     // добытое — из hunt.localWanted, иначе тик до следующего полного прохода считал бы сериал «ожидающим»
+        }
         else
             Console.WriteLine($"[QbitDownload] {tag} «{stitle}» S{season}: ничего не добыто (проб {probes} из {plan.eligible.Count} годных)");
         res.grabbed = grabbed;
+        FpDone();
         return res;
     }
+
+    // Ссылается ли на торрент другая запись прохода (её основная или её донор).
+    static bool OtherRecordsReference(JArray all, JObject self, string hash)
+    {
+        if (all == null || string.IsNullOrEmpty(hash)) return false;
+        string selfHash = self?.Value<string>("hash");
+        foreach (var x in all.OfType<JObject>())
+        {
+            if (ReferenceEquals(x, self) || (!string.IsNullOrEmpty(selfHash) && selfHash.Equals(x.Value<string>("hash"), StringComparison.OrdinalIgnoreCase))) continue;
+            if (hash.Equals(x.Value<string>("hash"), StringComparison.OrdinalIgnoreCase)) return true;
+            if (x["donors"] is JArray ds && ds.OfType<JObject>().Any(d => hash.Equals(d.Value<string>("hash"), StringComparison.OrdinalIgnoreCase))) return true;
+        }
+        return false;
+    }
+
+    // Добытые серии вычитаем из hunt.localWanted (список пишет полный проход ДО захвата).
+    static void TrimLocalWanted(JObject m, HashSet<int> inv)
+    {
+        if (inv == null || (m["hunt"] as JObject)?["localWanted"] is not JArray lw || lw.Count == 0) return;
+        var keep = lw.Select(x => x.Value<int>()).Where(e => !inv.Contains(e)).ToList();
+        if (keep.Count != lw.Count) ((JObject)m["hunt"])["localWanted"] = new JArray(keep);
+    }
+
+    static int AiredCached(int id, int season)
+        => id > 0 && _airedCache.TryGetValue(id + ":" + season, out var e) ? e.aired : 0;
 
     // Сколько кандидатов пробуем за проход: топ-N в порядке OrderByCover (уверенные Yes, затем Maybe).
     // Кламп ≥1 — нулевой/отрицательный donorProbesPerRun не должен выключать охоту молча.
@@ -1897,7 +2057,13 @@ public partial class QbitController
 
         var raw = new JArray();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var t in bm.OfType<JObject>().Concat(li.OfType<JObject>().Where(x => x.Value<string>("tracker") == "bitmagnet")))
+        var fpKeys = new List<string>();
+        // fingerprint — ТОЛЬКО скоупная выборка bitmagnet (она без среза: bitmagnetHuntLimit выше числа
+        // строк сезона). Эхо индекса в отпечаток не входит: это окно top-200 по sid/last_seen, которое
+        // перетасовывает каждый /qdl/search и обходчик (IndexStore обновляет sid и last_seen у всех строк
+        // выдачи) — состав «менялся» бы без единой новой DHT-строки, а тик на каждое такое «изменение»
+        // делал скоринг, писал лог и watch.json.
+        foreach (var (t, isBm) in bm.OfType<JObject>().Select(x => (x, true)).Concat(li.OfType<JObject>().Where(x => x.Value<string>("tracker") == "bitmagnet").Select(x => (x, false))))
         {
             string mag = t.Value<string>("magnet");
             if (!string.IsNullOrWhiteSpace(mag))
@@ -1908,9 +2074,10 @@ public partial class QbitController
             string key = !string.IsNullOrWhiteSpace(mag) ? MagnetHash(mag) : t.Value<string>("parselink");
             if (!string.IsNullOrEmpty(key) && !seen.Add(key)) continue;
             raw.Add(t);
+            if (isBm && !string.IsNullOrEmpty(key)) fpKeys.Add(key);
         }
-        var keys = seen.ToList(); keys.Sort(StringComparer.Ordinal);
-        return (raw, Fnv(string.Join(",", keys)) + ":" + keys.Count);
+        fpKeys.Sort(StringComparer.Ordinal);
+        return (raw, Fnv(string.Join(",", fpKeys)) + ":" + fpKeys.Count);
     }
 
     // Таймер зовёт раз в минуту; интервал — из conf на лету (huntLocalIntervalMinutes, 0 = выкл).
@@ -1957,9 +2124,11 @@ public partial class QbitController
         return items;
     }
 
-    // Обёртка ради теста «dry не пишет»: сухой путь SearchScored с записью кеша/индекса не зовёт —
-    // scored собирается через LocalFetch/ScoreResult(store:false) при localOnly, а при полном режиме
-    // SearchScored со скоупом сам не пишет ни кеш, ни индекс (bmScopeSeason > 0).
+    // Обёртка ради теста «dry не пишет»: сухой путь ничего не меняет ни в qBit, ни в watch.json, ни в
+    // blacklist/штампах. Поиск: при localOnly — LocalFetch/ScoreResult(store:false); при полном режиме
+    // SearchScored со скоупом (bmScopeSeason > 0) не пишет ни кеш, ни индекс. Оговорка: у записи без
+    // tmdb id (или при huntBitmagnet:false) скоупа нет, и SearchScored пишет кеш/индекс — ровно то же,
+    // что пишет и обычный /qdl/search, и боевой проход в той же конфигурации; DHT-строк там нет.
     static Task<HuntPrep> HuntPrepareDry(HttpClient c, JObject m, bool localOnly) => HuntPrepare(c, m, localOnly, dry: true);
 
     static JObject DryReport(JObject m, HuntPrep p)
@@ -2013,12 +2182,22 @@ public partial class QbitController
     async public Task<ActionResult> HuntRun(string hash = null, int dry = 0, int local = 0)
     {
         string only = string.IsNullOrWhiteSpace(hash) ? null : hash;
+        if (only != null)
+        {
+            // Опечатка в хеше или снятая запись иначе выглядели бы как «wanted пуст / ничего не добыто».
+            bool known; lock (_watchLock) { known = LoadWatch().OfType<JObject>().Any(x => only.Equals(x.Value<string>("hash"), StringComparison.OrdinalIgnoreCase)); }
+            if (!known)
+                return ContentTo(new JObject { ["success"] = false, ["error"] = "hash не в watch.json" }.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+        }
         if (dry == 1)
         {
             // сухой прогон только читает — годится и на реплике, поэтому ДО ReplicaReadOnlyDeny.
             // ContentTo, а не Json(...): System.Text.Json про JToken не знает (см. SeasonWatchCheck).
+            // busy — «за время прогона гейт был занят»: снимок watch.json берётся в начале, и живой проход,
+            // уложившийся внутрь сухого, иначе оставался бы невидимым.
+            bool busyBefore = _watchGate.CurrentCount == 0;
             var items = await HuntDry(only, local == 1);
-            var body = new JObject { ["success"] = true, ["dry"] = true, ["local"] = local == 1, ["busy"] = _watchGate.CurrentCount == 0, ["items"] = items };
+            var body = new JObject { ["success"] = true, ["dry"] = true, ["local"] = local == 1, ["busy"] = busyBefore || _watchGate.CurrentCount == 0, ["items"] = items };
             return ContentTo(body.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
         }
         var ro = ReplicaReadOnlyDeny(); if (ro != null) return ro;   // охота живёт только дома
@@ -2092,7 +2271,7 @@ public partial class QbitController
                     // НЕдокачанную копию не хуже победителя (ранг ≤, при равном ранге score ≥) не трогаем:
                     // это и есть апгрейд в полёте, ради которого охота её и добавила. Снести её значило бы
                     // отменять апгрейд каждый проход и качать заново (§BA-5).
-                    if (!x.done && (x.rank < winner.rank || (x.rank == winner.rank && x.score >= winner.score))) continue;
+                    if (!x.done && (x.rank < winner.rank || (x.rank == winner.rank && (x.bucket > winner.bucket || (x.bucket == winner.bucket && x.score >= winner.score))))) continue;
                     upgradeLosers.Add(x.ep);
                 }
             }
