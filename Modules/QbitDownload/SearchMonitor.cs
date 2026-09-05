@@ -308,9 +308,17 @@ public partial class QbitController
                 SaveDiagState(st);
 
                 foreach (var text in alerts)
+                {
                     Console.WriteLine("[QbitDownload] searchmon: " + text);
+                    // qdl 2.111: в журнал владельца тревоги идут ВСЕГДА, независимо от
+                    // searchMonitorNotify — тот гейт был про показ зрителю, а зритель
+                    // диагностику поиска больше не видит вовсе. Дедуп на 12 ч: у самих
+                    // проверок кулдаун свой, но перезапуск модуля его обнуляет.
+                    if (NotiRoute.Enabled && !QdlEvents.Recent(QdlEvents.CatDiag, text, TimeSpan.FromHours(12)))
+                        QdlEvents.Log(QdlEvents.CatDiag, "Поиск раздач", text, key: text);
+                }
 
-                if (conf?.searchMonitorNotify == true && alerts.Count > 0)
+                if (conf?.searchMonitorNotify == true && alerts.Count > 0 && !NotiRoute.Enabled)
                 {
                     res.created = AddDiagNotifications(checks, alerts);
                     if (res.created > 0) PushNotiSignal(res.created);

@@ -87,6 +87,28 @@
     select.pick:focus{border-color:#4a7dff}
     .gtag{display:inline-block;padding:2px 8px;border-radius:6px;background:rgba(74,125,255,.18);color:#9ec1ff;font-size:12px}
 
+    /* уведомления — журнал событий */
+    .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+    .chip{padding:5px 12px;border:1px solid #2a3040;border-radius:20px;background:#13161d;color:#8b93a7;
+          font-size:13px;cursor:pointer;white-space:nowrap}
+    .chip:hover{color:#e6e9f0}
+    .chip.on{background:rgba(74,125,255,.18);border-color:#4a7dff;color:#9ec1ff}
+    .chip .n{opacity:.6;margin-left:5px}
+    .ecard{border:1px solid #6b4a17;background:#3a2a12;border-radius:12px;padding:14px 16px;margin-bottom:12px}
+    .ecard .et{font-size:15px;font-weight:600;color:#f0c987;margin-bottom:4px}
+    .ecard .ed{font-size:13px;color:#e2c79a;margin-bottom:12px}
+    .ecard .eb{display:flex;gap:10px;flex-wrap:wrap}
+    button.go{padding:7px 15px;border:0;border-radius:8px;background:#4a7dff;color:#fff;font-size:13px;cursor:pointer}
+    button.go:hover{background:#3f6ee6}
+    /* Категория — цветной ярлык фиксированной ширины: журнал листается глазами по левой кромке */
+    .cat{display:inline-block;min-width:104px;text-align:center;padding:2px 8px;border-radius:6px;
+         font-size:12px;background:#222733;color:#8b93a7}
+    .cat.user{background:rgba(60,170,110,.18);color:#6ddaa0}
+    .cat.release,.cat.quality{background:rgba(74,125,255,.18);color:#9ec1ff}
+    .cat.space,.cat.diag{background:rgba(217,96,106,.18);color:#f09aa2}
+    td.when{white-space:nowrap;color:#8b93a7;font-size:13px}
+    td.what{color:#c9cfdd}
+
     #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#1a1e28;
            border:1px solid #2a3040;border-radius:10px;padding:10px 18px;font-size:14px;opacity:0;
            transition:opacity .2s;pointer-events:none}
@@ -101,6 +123,7 @@
     <button class="tab on" data-pane="access">Доступы</button>
     <button class="tab" data-pane="groups">Группы</button>
     <button class="tab" data-pane="health">Хелс-чеки</button>
+    <button class="tab" data-pane="events">Уведомления</button>
   </div>
 
   <!-- ───────── доступы ───────── -->
@@ -193,6 +216,34 @@
     </div>
     <div class="scroll" id="hlist"><div class="empty">Загружаю…</div></div>
   </section>
+
+  <!-- ───────── уведомления ───────── -->
+  <section class="pane" id="pane-events">
+    <div class="sub">
+      Зритель видит в своей ленте только <b>«вышла новая серия»</b>, <b>«вышел сезон»</b> и итог
+      большой пачки. Вся механика — постановка в очередь, смена и перекачка раздач, охота за
+      сериями, апгрейд качества, диагностика поиска — приезжает сюда и никому больше не показывается.
+      Журнал живёт на диске сервера кольцом и переживает перезапуск контейнера.
+    </div>
+    <div class="warn" id="ekill" style="display:none">
+      Журнал выключен ключом <code>adminEvents:false</code> в init.conf — новые события не пишутся.
+    </div>
+
+    <div id="epend"></div>
+
+    <div class="bar">
+      <div class="find">
+        <input id="eq" type="search" placeholder="Поиск по тайтлу и тексту" autocomplete="off">
+        <button class="clr" id="eqclr" title="Очистить">&times;</button>
+      </div>
+      <span class="muted" id="ecnt"></span>
+      <button class="mini" id="ereload">Обновить</button>
+      <button class="mini" id="eclear">Очистить журнал</button>
+    </div>
+
+    <div class="chips" id="echips"></div>
+    <div class="scroll" id="elist"><div class="empty">Загружаю…</div></div>
+  </section>
 </div>
 <div id="toast"></div>
 
@@ -210,6 +261,9 @@
   var healthLoaded = false;
   var groupsLoaded = false;
   var gdata = { groups: [], devices: [] };
+  var eventsLoaded = false;
+  var edata = { items: [], pending: [], total: 0, shown: 0 };
+  var ecat = '';                 // выбранная категория; '' = все
 
   function toast(text) {
     toastEl.textContent = text;
@@ -269,6 +323,7 @@
       // хелс-чеки тянем лениво: пробы живые, дёргать их на каждом открытии админки незачем
       if (t.dataset.pane === 'health' && !healthLoaded) loadHealth();
       if (t.dataset.pane === 'groups' && !groupsLoaded) loadGroups();
+      if (t.dataset.pane === 'events' && !eventsLoaded) loadEvents();
       if (t.dataset.pane === 'access') qInput.focus();
     });
   });
@@ -606,6 +661,142 @@
       box.value = '';
       toast('Группа создана');
       loadGroups();
+    });
+  });
+
+
+  // ───────── уведомления: журнал событий ─────────
+
+  var CATS = [
+    { id: '',         name: 'Все' },
+    { id: 'user',     name: 'Ушло зрителям' },
+    { id: 'watch',    name: 'Подписки' },
+    { id: 'download', name: 'Загрузки' },
+    { id: 'release',  name: 'Раздачи' },
+    { id: 'hunt',     name: 'Охота' },
+    { id: 'quality',  name: 'Качество' },
+    { id: 'space',    name: 'Место' },
+    { id: 'diag',     name: 'Диагностика' }
+  ];
+
+  var eqInput = document.getElementById('eq');
+  var eqClr = document.getElementById('eqclr');
+
+  function loadEvents() {
+    eventsLoaded = true;
+    document.getElementById('elist').innerHTML = '<div class="empty">Загружаю…</div>';
+    getJson('/admin/d1v/api/events').then(function (res) {
+      if (!res.ok) throw new Error('http');
+      edata = res.j;
+      document.getElementById('ekill').style.display = (edata.enabled === false) ? '' : 'none';
+      renderEvents();
+    }).catch(function () {
+      document.getElementById('elist').innerHTML = '<div class="empty">Не удалось получить журнал</div>';
+    });
+  }
+
+  // Предложения сменить раздачу. Раньше этот вопрос выскакивал ЗРИТЕЛЮ диалогом в ленте —
+  // теперь решает владелец здесь, а поведение сервера (watchAutoSwitch) не менялось.
+  function renderPending() {
+    var box = document.getElementById('epend');
+    var list = edata.pending || [];
+    if (!list.length) { box.innerHTML = ''; return; }
+
+    box.innerHTML = '';
+    list.forEach(function (p) {
+      var eps = p.total > 0 ? (p.have + ' из ' + p.total) : ('' + p.have);
+      var card = document.createElement('div');
+      card.className = 'ecard';
+      card.innerHTML =
+        '<div class="et">' + esc(p.title || 'Без названия') + ' — найдена более полная раздача</div>' +
+        '<div class="ed">Серии ' + esc(eps) + ' · ' + esc(String(p.sid)) + ' сид. · ' +
+          esc(p.tracker || 'трекер неизвестен') + ' · ' + esc(ago(p.foundAt)) +
+          '<br>' + esc(p.candidate || '') +
+          '<br><b>Переключение перекачает сезон заново.</b></div>' +
+        '<div class="eb">' +
+          '<button class="go">Переключить</button>' +
+          '<button class="mini">Не надо</button>' +
+        '</div>';
+
+      card.querySelector('.go').addEventListener('click', function () {
+        if (!confirm('Переключить «' + (p.title || '') + '» на более полную раздачу? Сезон будет перекачан заново.')) return;
+        post2('/admin/d1v/api/events/switch', { hash: p.hash, accept: true }).then(function (r) {
+          toast(r.ok && r.j.switched ? 'Переключено' : (r.j.error || 'Не вышло'));
+          loadEvents();
+        });
+      });
+      card.querySelector('.mini').addEventListener('click', function () {
+        post2('/admin/d1v/api/events/switch', { hash: p.hash, accept: false }).then(function (r) {
+          toast(r.ok ? 'Предложение снято' : (r.j.error || 'Не вышло'));
+          loadEvents();
+        });
+      });
+      box.appendChild(card);
+    });
+  }
+
+  function eventMatches(e, q) {
+    if (ecat && e.cat !== ecat) return false;
+    if (!q) return true;
+    return ((e.title || '') + ' ' + (e.text || '')).toLowerCase().indexOf(q) >= 0;
+  }
+
+  function renderEvents() {
+    renderPending();
+
+    var items = edata.items || [];
+    var q = (eqInput.value || '').trim().toLowerCase();
+    eqClr.classList.toggle('on', q.length > 0);
+
+    // счётчики на чипах считаем по ПОЛНОМУ журналу, а не по текущему фильтру:
+    // иначе выбранная категория обнуляла бы все остальные и вернуться было бы некуда
+    var chips = document.getElementById('echips');
+    chips.innerHTML = '';
+    CATS.forEach(function (c) {
+      var n = c.id ? items.filter(function (e) { return e.cat === c.id; }).length : items.length;
+      if (!n && c.id && c.id !== ecat) return;          // пустые категории не показываем
+      var b = document.createElement('button');
+      b.className = 'chip' + (c.id === ecat ? ' on' : '');
+      b.innerHTML = esc(c.name) + '<span class="n">' + n + '</span>';
+      b.addEventListener('click', function () { ecat = c.id; renderEvents(); });
+      chips.appendChild(b);
+    });
+
+    var shown = items.filter(function (e) { return eventMatches(e, q); });
+    document.getElementById('ecnt').textContent = (edata.total > edata.shown)
+      ? ('показано ' + shown.length + ' · в журнале последние ' + edata.shown + ' из ' + edata.total)
+      : ('показано ' + shown.length + ' из ' + items.length);
+
+    var box = document.getElementById('elist');
+    if (!shown.length) {
+      box.innerHTML = '<div class="empty">' + (items.length ? 'Ничего не нашлось' : 'Журнал пуст') + '</div>';
+      return;
+    }
+
+    var html = '<table><thead><tr><th>Когда</th><th>Что</th><th>Тайтл</th><th>Событие</th></tr></thead><tbody>';
+    shown.forEach(function (e) {
+      var c = CATS.filter(function (x) { return x.id === e.cat; })[0];
+      html += '<tr>' +
+        '<td class="when">' + esc(ago(e.at)) + '</td>' +
+        '<td><span class="cat ' + esc(e.cat || '') + '">' + esc(c ? c.name : (e.cat || '—')) + '</span></td>' +
+        '<td>' + hi(e.title || '—', q) + '</td>' +
+        '<td class="what">' + hi(e.text || '', q) + '</td>' +
+      '</tr>';
+    });
+    box.innerHTML = html + '</tbody></table>';
+  }
+
+  eqInput.addEventListener('input', renderEvents);
+  eqClr.addEventListener('click', function () { eqInput.value = ''; eqInput.focus(); renderEvents(); });
+  eqInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && eqInput.value) { eqInput.value = ''; renderEvents(); }
+  });
+  document.getElementById('ereload').addEventListener('click', loadEvents);
+  document.getElementById('eclear').addEventListener('click', function () {
+    if (!confirm('Очистить журнал событий? Лента зрителей не изменится.')) return;
+    post2('/admin/d1v/api/events/clear', {}).then(function (r) {
+      toast(r.ok ? 'Журнал очищен' : 'Не вышло');
+      loadEvents();
     });
   });
 

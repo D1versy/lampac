@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -405,6 +405,105 @@ public class AdminTests
 
         Assert.Contains("\"apply\":false", json);
         Assert.True(Perms.Known(Perms.TestUidPrefix + "ab12cd34"));
+    }
+
+    // ══ вкладка «Уведомления» — журнал событий (qdl 2.111) ════════════════
+
+    [Fact]
+    public void Events_отдают_журнал_и_честный_счётчик()
+    {
+        TestEnv.FreshCache();
+        for (int i = 0; i < 5; i++) QdlEvents.Log(QdlEvents.CatHunt, "Тайтл", "событие " + i);
+
+        var c = Controller();
+        var json = (c.Events() as ContentResult)?.Content ?? "";
+        var o = JObject.Parse(json);
+
+        Assert.True(o.Value<bool>("enabled"));
+        Assert.Equal(5, o.Value<int>("total"));
+        Assert.Equal(5, o.Value<int>("shown"));
+        Assert.Equal(5, (o["items"] as JArray).Count);
+        Assert.NotNull(o["pending"]);
+    }
+
+    [Fact]
+    public void Events_режут_выдачу_но_total_говорят_полный()
+    {
+        // Традиция дома (AdminHistory): отдаём не больше — но ВСЕГДА говорим, сколько было всего.
+        TestEnv.FreshCache();
+        for (int i = 0; i < 12; i++) QdlEvents.Log(QdlEvents.CatDiag, "Поиск раздач", "строка " + i);
+
+        var o = JObject.Parse((Controller().Events(4) as ContentResult).Content);
+        Assert.Equal(12, o.Value<int>("total"));
+        Assert.Equal(4, o.Value<int>("shown"));
+    }
+
+    [Fact]
+    public void Events_это_чтение_и_маркера_не_требуют()
+    {
+        // read-only соседи (Devices, GroupsList, DeviceHistory) SameOrigin тоже не спрашивают
+        TestEnv.FreshCache();
+        var c = Controller(marker: false);
+        Assert.IsType<ContentResult>(c.Events());
+    }
+
+    [Fact]
+    async public Task Переключение_раздачи_без_маркера_отказано()
+    {
+        TestEnv.FreshCache();
+        var c = Controller(marker: false);
+        var r = await c.EventsSwitch(new D1VAdminController.SwitchBody { hash = new string('a', 40), accept = true });
+        Assert.Equal(403, StatusOf(r));
+    }
+
+    [Fact]
+    async public Task Переключение_раздачи_с_чужого_Origin_отказано()
+    {
+        TestEnv.FreshCache();
+        var c = Controller(origin: "http://evil.example");
+        var r = await c.EventsSwitch(new D1VAdminController.SwitchBody { hash = new string('a', 40), accept = true });
+        Assert.Equal(403, StatusOf(r));
+    }
+
+    [Fact]
+    async public Task Переключение_без_тела_это_400()
+    {
+        TestEnv.FreshCache();
+        var r = await Controller().EventsSwitch(null);
+        Assert.Equal(400, StatusOf(r));
+    }
+
+    [Fact]
+    async public Task Переключение_несуществующей_раздачи_отвечает_ошибкой_а_не_падает()
+    {
+        TestEnv.FreshCache();
+        var c = Controller();
+        var json = ((await c.EventsSwitch(new D1VAdminController.SwitchBody
+        { hash = new string('a', 40), accept = false })) as ContentResult)?.Content ?? "";
+        var o = JObject.Parse(json);
+
+        Assert.False(o.Value<bool>("success"));
+        Assert.Equal("not watched", o.Value<string>("error"));
+    }
+
+    [Fact]
+    public void Очистка_журнала_без_маркера_отказана()
+    {
+        TestEnv.FreshCache();
+        QdlEvents.Log(QdlEvents.CatHunt, "Тайтл", "событие");
+
+        Assert.Equal(403, StatusOf(Controller(marker: false).EventsClear()));
+        Assert.Equal(1, QdlEvents.Read(10).total);   // и журнал цел
+    }
+
+    [Fact]
+    public void Очистка_журнала_с_маркером_работает()
+    {
+        TestEnv.FreshCache();
+        QdlEvents.Log(QdlEvents.CatHunt, "Тайтл", "событие");
+
+        Assert.Equal(200, StatusOf(Controller().EventsClear()));
+        Assert.Equal(0, QdlEvents.Read(10).total);
     }
 }
 

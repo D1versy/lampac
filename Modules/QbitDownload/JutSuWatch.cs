@@ -544,8 +544,11 @@ public partial class QbitController
                     // ⚠️ Уведомляем ТОЛЬКО о fresh: долг уже уведомляли при первой постановке,
                     // повтор означал бы строку в ленте каждые сутки, пока сайт лежит.
                     var grabKeys = new HashSet<string>(toGrab.Select(x => x.epkey), StringComparer.Ordinal);
-                    foreach (var e in fresh)
-                        JutNotifyNewEpisode(slug, t.titleRu, e, auto && grabKeys.Contains(e.epkey));
+                    if (NotiRoute.Enabled)
+                        JutNotifyNewEpisodes(slug, t.titleRu, fresh, auto);
+                    else
+                        foreach (var e in fresh)
+                            JutNotifyNewEpisode(slug, t.titleRu, e, auto && grabKeys.Contains(e.epkey));
 
                     bool baselineHold = false;
                     if (auto && toGrab.Count > 0)
@@ -695,6 +698,81 @@ public partial class QbitController
     /// ⚠️ epkey = "new-" + epkey НЕ менять: совпадение с epkey из JutNotifyDone схлопнет
     /// «вышла» и «скачана» в одну запись по UNIQUE noti(seriesKey, epkey).
     /// </summary>
+    /// <summary>
+    /// Волна новых серий ОДНОЙ строкой (qdl 2.111). Раньше здесь стоял цикл по fresh, и за
+    /// сутки простоя сайта «Игра лжецов» с «Тяжёлым рыцарем» давали по строке на каждую серию.
+    /// У XSMART та же задача была решена одной строкой на тик с самого начала
+    /// (XsmartWatch.XsmartNotifyNew) — здесь просто не было сделано.
+    ///
+    /// На АВТОКАЧКЕ строка уходит в журнал владельца, а не зрителю: зритель узнаёт о серии,
+    /// когда её можно смотреть (JutNotifyDone/JutNotifyTitleDone) — решение владельца. В режиме
+    /// «только уведомляю» качать нечего, и «вышла» — единственный способ сообщить о серии,
+    /// поэтому там строка идёт в ленту.
+    /// </summary>
+    static void JutNotifyNewEpisodes(string slug, string title, List<JutEp> fresh, bool auto)
+    {
+        if (fresh == null || fresh.Count == 0) return;
+        try
+        {
+            using var db = new SqlContext();
+            string sk = "j" + slug;
+            int pushed = 0;
+
+            // Обычные серии складываются в одну волну; OVA/FILM остаются отдельными строками —
+            // их мало, и в счётчик серий «OVA 2» не сложить.
+            var eps = fresh.Where(x => x.kind == JutEpKind.Episode).ToList();
+            if (eps.Count > 0)
+            {
+                var nums = eps.Select(x => x.num).ToList();
+                int season = eps.Select(x => x.season).Distinct().Count() == 1 ? eps[0].season : -1;
+                string key = "newwave-" + (season >= 0 ? "s" + season : "") + "e" + nums.Max();
+                string text = season >= 0
+                    ? NotiRoute.Episodes(season, nums)
+                    : "Вышло новых серий: " + nums.Distinct().Count();
+                if (JutNewRow(db, sk, slug, title, season, nums.Max(), key, text, auto)) pushed++;
+            }
+
+            foreach (var e in fresh.Where(x => x.kind != JutEpKind.Episode))
+                if (JutNewRow(db, sk, slug, title, -1, e.num, "newwave-" + e.epkey,
+                              "Вышло: " + e.kind + " " + e.num, auto)) pushed++;
+
+            db.SaveChanges();
+            if (pushed > 0) PushNotiSignal(pushed);
+        }
+        catch (Exception ex) { JutNet.Log("watch", "noti волны: " + ex.Message); }
+    }
+
+    /// <summary>
+    /// Одна строка волны. Возвращает true, если строка ушла ЗРИТЕЛЮ (то есть нужен WS-пуш).
+    /// 🔴 Дедуп в seen, а не в noti: строки в ленте может не быть вовсе (автокачка), а ту, что
+    /// есть, чистит NotiPrune — после чистки волна пришла бы заново. seen не чистится никогда,
+    /// префикс «newwave-» с эпизодными ключами jut (s1e7) не пересекается.
+    /// </summary>
+    static bool JutNewRow(SqlContext db, string sk, string slug, string title,
+                          int season, int ep, string key, string text, bool auto)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+        if (db.seen.Any(x => x.seriesKey == sk && x.epkey == key)) return false;
+        db.seen.Add(new SeenModel { seriesKey = sk, epkey = key });
+
+        if (auto)
+        {
+            QdlEvents.Log(QdlEvents.CatWatch, title ?? slug, text + " — ставлю в очередь",
+                          JutNet.Hash(slug), sk, key: key);
+            return false;
+        }
+
+        db.noti.Add(new NotiModel
+        {
+            seriesKey = sk, seriesId = 0, hash = JutNet.Hash(slug),
+            title = title ?? slug, season = season, episode = ep,
+            kind = "NEW", epkey = key, label = text,
+            created = DateTime.UtcNow, read = false
+        });
+        QdlEvents.Log(QdlEvents.CatUser, title ?? slug, text, JutNet.Hash(slug), sk, key: key);
+        return true;
+    }
+
     static void JutNotifyNewEpisode(string slug, string title, JutEp e, bool auto)
     {
         try
@@ -734,13 +812,26 @@ public partial class QbitController
             using var db = new SqlContext();
             string sk = "j" + slug;
             string key = "nospace-" + DateTime.UtcNow.ToString("yyyyMMdd");
+            string label = $"Новые серии ({files}) не скачаны — {reason}";
+
+            // qdl 2.111: нехватка места — забота владельца, не зрителя (его выбор). Дедуп
+            // по дню переехал в seen: в ленте строки больше нет, а ретенция её всё равно съела бы.
+            if (NotiRoute.Enabled)
+            {
+                if (db.seen.Any(x => x.seriesKey == sk && x.epkey == key)) return;
+                db.seen.Add(new SeenModel { seriesKey = sk, epkey = key });
+                db.SaveChanges();
+                QdlEvents.Log(QdlEvents.CatSpace, title ?? slug, label, JutNet.Hash(slug), sk, key: key);
+                return;
+            }
+
             if (db.noti.Any(x => x.seriesKey == sk && x.epkey == key)) return;
             db.noti.Add(new NotiModel
             {
                 seriesKey = sk, seriesId = 0, hash = JutNet.Hash(slug),
                 title = title ?? slug, season = -1, episode = -1,
                 kind = "NOSPACE", epkey = key,
-                label = $"Новые серии ({files}) не скачаны — {reason}",
+                label = label,
                 created = DateTime.UtcNow, read = false
             });
             db.SaveChanges();
@@ -762,11 +853,14 @@ public partial class QbitController
                 seriesKey = sk, seriesId = 0, hash = JutNet.Hash(slug),
                 title = title ?? slug, season = season, episode = -1,
                 kind = "SEASON", epkey = key,
-                label = $"jut.su · вышел сезон {season} — слежу за ним",
+                // «jut.su ·» и «слежу за ним» — кухня: зрителю важен факт выхода сезона,
+                // откуда он приехал и что мы с ним делаем, он не спрашивал (qdl 2.111).
+                label = NotiRoute.Enabled ? NotiRoute.Season(season) : $"jut.su · вышел сезон {season} — слежу за ним",
                 created = DateTime.UtcNow, read = false
             });
             db.SaveChanges();
             PushNotiSignal(1);
+            QdlEvents.Log(QdlEvents.CatUser, title ?? slug, NotiRoute.Season(season), JutNet.Hash(slug), sk, key: key);
             Console.WriteLine("[QbitDownload] jut/watch: " + slug + " → переключился на сезон " + season);
         }
         catch { }

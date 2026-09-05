@@ -1991,6 +1991,11 @@ public partial class QbitController
             h.knownHashes.Add(btih);
             grabbed += found.Count;
             Console.WriteLine("[QbitDownload] " + tag + ": донор " + btih + " (" + cand.Value<string>("tracker") + ", " + (cand.Value<int?>("quality") ?? 0) + "p) — серии " + string.Join(",", found.Select(f => f.ep)) + " для «" + m.Value<string>("title") + "»");
+            // qdl 2.111: раньше это событие жило только в stdout контейнера, а логи ротируются —
+            // вопрос «откуда взялась эта раздача» задаётся через неделю. Теперь ещё и в журнал.
+            QdlEvents.Log(QdlEvents.CatHunt, m.Value<string>("title"),
+                          "донор " + (cand.Value<string>("tracker") ?? "?") + " " + (cand.Value<int?>("quality") ?? 0)
+                          + "p — серии " + string.Join(",", found.Select(f => f.ep)), h.mainHash);
             if (wanted.Count == 0) break;
         }
         if (grabbed > 0)
@@ -2444,12 +2449,16 @@ public partial class QbitController
                         if (a.kind == "wrong-season")
                             ForgetEpisodeNoti(SeriesKey(m.Value<int?>("id") ?? 0, m.Value<string>("link")), a.ep);
                         changed = true;
-                        Console.WriteLine("[QbitDownload] hunt: серия " + a.ep.Value<string>("epkey") + (a.kind switch
+                        string why = a.kind switch
                         {
                             "wrong-season" => " снята — файл оказался ЧУЖОГО сезона",
                             "upgraded" => " снята — ту же серию держит раздача получше",
                             _ => " замещена основной"
-                        }) + " (донор " + a.donorHash + ")");
+                        };
+                        Console.WriteLine("[QbitDownload] hunt: серия " + a.ep.Value<string>("epkey") + why + " (донор " + a.donorHash + ")");
+                        QdlEvents.Log(a.kind == "upgraded" ? QdlEvents.CatQuality : QdlEvents.CatHunt,
+                                      m.Value<string>("title"),
+                                      "серия " + a.ep.Value<string>("epkey") + why, mainHash);
                     }
                     else if (a.kind == "delete-donor" || a.kind == "dead-donor")
                     {
@@ -2460,6 +2469,8 @@ public partial class QbitController
                         donors.Remove(a.donor);
                         changed = true;
                         Console.WriteLine("[QbitDownload] hunt: донор " + a.donorHash + " снят (" + a.kind + ")");
+                        QdlEvents.Log(QdlEvents.CatHunt, m.Value<string>("title"),
+                                      "донор снят (" + a.kind + ")", mainHash);
                     }
                     else if (a.kind == "forget-donor")
                     {
@@ -2913,14 +2924,31 @@ public partial class QbitController
         try
         {
             using var db = new SqlContext();
-            if (!db.noti.Any(x => x.seriesKey == sk && x.epkey == epkeyN))   // один и тот же кандидат — одно уведомление
+            // 🔴 Дедуп кандидата переехал из noti в seen (qdl 2.111). В noti его держать больше
+            // нельзя: строки там теперь нет, а если бы и была — NotiPrune её удаляет, и после
+            // чистки предложение приходило бы заново каждый тик. seen не чистится никогда,
+            // а префикс «switch:» с эпизодными ключами не пересекается.
+            bool already = NotiRoute.Enabled
+                ? db.seen.Any(x => x.seriesKey == sk && x.epkey == epkeyN)
+                : db.noti.Any(x => x.seriesKey == sk && x.epkey == epkeyN);
+            if (!already)
             {
-                db.noti.Add(new NotiModel
+                if (NotiRoute.Enabled)
                 {
-                    seriesKey = sk, seriesId = seriesId, hash = curHash, title = m.Value<string>("title"),
-                    season = -1, episode = -1, kind = "SWITCH", epkey = epkeyN,
-                    label = label, created = now, read = false
-                });
+                    // Зрителю про смену раздач не пишем вовсе (решение владельца). Предложение
+                    // с кнопкой «Переключить» живёт во вкладке «Уведомления» админки, а сам
+                    // pendingSwitch уже лежит в watch.json — оттуда её и читает Admin.cs.
+                    db.seen.Add(new SeenModel { seriesKey = sk, epkey = epkeyN });
+                    QdlEvents.Log(QdlEvents.CatRelease, m.Value<string>("title"), label,
+                                  curHash, sk, act: "switch", key: epkeyN);
+                }
+                else
+                    db.noti.Add(new NotiModel
+                    {
+                        seriesKey = sk, seriesId = seriesId, hash = curHash, title = m.Value<string>("title"),
+                        season = -1, episode = -1, kind = "SWITCH", epkey = epkeyN,
+                        label = label, created = now, read = false
+                    });
                 db.SaveChanges();
                 Console.WriteLine("[QbitDownload] watch: предложено переключение «" + m.Value<string>("title") + "» → " + best.Value<string>("title"));
             }
@@ -2936,14 +2964,25 @@ public partial class QbitController
                 {
                     using var db = new SqlContext();
                     string ek = "switched:" + newHash;
-                    if (!db.noti.Any(x => x.seriesKey == sk && x.epkey == ek))
+                    bool seen2 = NotiRoute.Enabled
+                        ? db.seen.Any(x => x.seriesKey == sk && x.epkey == ek)
+                        : db.noti.Any(x => x.seriesKey == sk && x.epkey == ek);
+                    if (!seen2)
                     {
-                        db.noti.Add(new NotiModel
+                        if (NotiRoute.Enabled)
                         {
-                            seriesKey = sk, seriesId = seriesId, hash = newHash, title = m.Value<string>("title"),
-                            season = -1, episode = -1, kind = "INFO", epkey = ek,
-                            label = "Переключено на более полную раздачу — сезон перекачивается", created = DateTime.UtcNow, read = false
-                        });
+                            db.seen.Add(new SeenModel { seriesKey = sk, epkey = ek });
+                            QdlEvents.Log(QdlEvents.CatRelease, m.Value<string>("title"),
+                                          "Переключено на более полную раздачу — сезон перекачивается",
+                                          newHash, sk, key: ek);
+                        }
+                        else
+                            db.noti.Add(new NotiModel
+                            {
+                                seriesKey = sk, seriesId = seriesId, hash = newHash, title = m.Value<string>("title"),
+                                season = -1, episode = -1, kind = "INFO", epkey = ek,
+                                label = "Переключено на более полную раздачу — сезон перекачивается", created = DateTime.UtcNow, read = false
+                            });
                         db.SaveChanges();
                     }
                 }
@@ -2986,6 +3025,9 @@ public partial class QbitController
         }
         await QbitDelete(c, curHash, delOld);
         MigrateCache(curHash, newHash);
+        QdlEvents.Log(QdlEvents.CatRelease, m.Value<string>("title"),
+                      "раздача переключена: " + curHash + " → " + newHash
+                      + (delOld ? " (файлы старой удалены)" : " (файлы старой оставлены)"), newHash);
         ActivityTouch(newHash);   // переключение = свежая загрузка, даже если торрент был дубликатом (added_on старый)
         m["hash"] = newHash;
         m["link"] = !string.IsNullOrWhiteSpace(parselink) ? parselink : magnet;
@@ -2997,6 +3039,67 @@ public partial class QbitController
         return (true, newHash, null);
     }
 
+    /// <summary>
+    /// Принять или отклонить предложение смены раздачи. Вынесено из роута (qdl 2.111), потому
+    /// что теперь у этого действия ДВЕ точки входа: старый клиентский диалог (совместимость со
+    /// закешированными клиентами) и вкладка «Уведомления» в админке, куда предложение переехало.
+    /// </summary>
+    internal static async Task<(bool ok, bool switched, string newHash, string err)> WatchSwitchApply(string hash, bool accept)
+    {
+        if (!ValidHash(hash)) return (false, false, null, "invalid hash");
+
+        JArray list; lock (_watchLock) { list = LoadWatch(); }
+        var m = list.OfType<JObject>().FirstOrDefault(x => hash.Equals(x.Value<string>("hash"), StringComparison.OrdinalIgnoreCase));
+        if (m == null) return (false, false, null, "not watched");
+        if (m["pendingSwitch"] is not JObject) return (false, false, null, "no pending");
+
+        string title = m.Value<string>("title");
+        if (!accept)
+        {
+            m["pendingSwitch"] = null;
+            m["stale"] = 0;   // отказ: не предлагать сразу снова
+            lock (_watchLock) { SaveWatch(list); }
+            QdlEvents.Log(QdlEvents.CatRelease, title, "переключение отклонено вручную", hash);
+            return (true, false, null, null);
+        }
+
+        var (ok, newHash, err) = await ExecuteSwitch(m);
+        lock (_watchLock) { SaveWatch(list); }
+        if (!ok) QdlEvents.Log(QdlEvents.CatRelease, title, "переключение не удалось — " + err, hash);
+        return (ok, ok, newHash, err);
+    }
+
+    /// <summary>
+    /// Открытые предложения смены раздачи — из watch.json, для вкладки «Уведомления».
+    /// Источник тот же, что у контура: pendingSwitch пишет ConsiderSwitch, снимает WatchSwitchApply.
+    /// </summary>
+    internal static JArray AdminPendingSwitches()
+    {
+        var res = new JArray();
+        try
+        {
+            JArray list; lock (_watchLock) { list = LoadWatch(); }
+            foreach (var m in list.OfType<JObject>())
+            {
+                if (m["pendingSwitch"] is not JObject ps) continue;
+                var ep = ps["ep"] as JObject;
+                res.Add(new JObject
+                {
+                    ["hash"] = m.Value<string>("hash"),
+                    ["title"] = m.Value<string>("title"),
+                    ["candidate"] = ps.Value<string>("title"),
+                    ["tracker"] = ps.Value<string>("tracker"),
+                    ["sid"] = ps.Value<int?>("sid") ?? 0,
+                    ["have"] = ep?.Value<int?>("have") ?? 0,
+                    ["total"] = ep?.Value<int?>("total") ?? 0,
+                    ["foundAt"] = ps.Value<string>("foundAt")
+                });
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] pending switches: " + ex.Message); }
+        return res;
+    }
+
     [HttpGet, AllowAnonymous]
     [Route("qdl/watch/switch")]
     async public Task<ActionResult> WatchSwitch(string hash, int accept = 0)
@@ -3005,23 +3108,10 @@ public partial class QbitController
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         try
         {
-            JArray list; lock (_watchLock) { list = LoadWatch(); }
-            var m = list.OfType<JObject>().FirstOrDefault(x => hash.Equals(x.Value<string>("hash"), StringComparison.OrdinalIgnoreCase));
-            if (m == null) return Json(new { success = false, error = "not watched" });
-            if (m["pendingSwitch"] is not JObject) return Json(new { success = false, error = "no pending" });
-
-            if (accept != 1)
-            {
-                m["pendingSwitch"] = null;
-                m["stale"] = 0;   // отказ: не предлагать сразу снова
-                lock (_watchLock) { SaveWatch(list); }
-                return Json(new { success = true, switched = false });
-            }
-
-            var (ok, newHash, err) = await ExecuteSwitch(m);
-            lock (_watchLock) { SaveWatch(list); }
-            return ok ? Json(new { success = true, switched = true, hash = newHash })
-                      : Json(new { success = false, error = err });
+            var (ok, switched, newHash, err) = await WatchSwitchApply(hash, accept == 1);
+            if (!ok) return Json(new { success = false, error = err });
+            return switched ? Json(new { success = true, switched = true, hash = newHash })
+                            : Json(new { success = true, switched = false });
         }
         catch (Exception ex)
         {

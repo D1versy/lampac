@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using Microsoft.EntityFrameworkCore;
@@ -152,16 +152,18 @@ public class HlsCleanupTests
 
         using (var db = new QbitDownload.SqlContext())
         {
-            var n = Assert.Single(db.noti);
-            Assert.Equal("START", n.kind);
-            Assert.Equal(Access.StartKey(H1, null), n.epkey);
-            Assert.Equal(H1, n.hash);
-            Assert.Equal(sk, n.seriesKey);
-            Assert.Equal(-1, n.season);
-            Assert.Equal(-1, n.episode);
-            Assert.False(n.read);
-            Assert.False(string.IsNullOrWhiteSpace(n.label));
+            // qdl 2.111: «раздача обновилась» зрителю не показывается — строки в ленте нет
+            Assert.Empty(db.noti);
+            // а дедуп как был, так и остался на seen: ключ ровно один на три вызова
+            Assert.Single(db.seen.Where(x => x.seriesKey == sk && x.epkey == Access.StartKey(H1, null)));
         }
+
+        // событие ушло владельцу — в журнал админки, ОДНОЙ строкой
+        var (items, total) = QdlEvents.Read(50);
+        Assert.Equal(1, total);
+        Assert.Equal(QdlEvents.CatRelease, items[0].Value<string>("cat"));
+        Assert.Equal(H1, items[0].Value<string>("hash"));
+        Assert.Contains("раздача обновилась", items[0].Value<string>("text"));
     }
 
     [Fact]
@@ -179,7 +181,8 @@ public class HlsCleanupTests
         Assert.True(Access.AddStartNotification(777, "https://tracker/t1", H2, "Сериал", null));   // re-grab на новый infohash
 
         using var db2 = new QbitDownload.SqlContext();
-        Assert.Equal(2, db2.noti.Count());
+        Assert.Empty(db2.noti);                       // зрителю — ничего (qdl 2.111)
+        Assert.Equal(2, QdlEvents.Read(50).total);    // владельцу — два разных инфохеша
     }
 
     [Fact]

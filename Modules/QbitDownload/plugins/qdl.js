@@ -286,6 +286,26 @@
             '@media screen and (max-width:580px){.qdl-jut-page{padding:0 1.2em 1.5em}' +
             '.qdl-jut-head{gap:1.2em;padding:1em 0}.qdl-jut-poster{width:9.5em}}' +
             // бейдж непрочитанных на нашей иконке уведомлений в хедере (красный кружок с числом)
+            // Лента уведомлений (qdl 2.111). 🔥 Раньше вся строка была инлайновым стилем БЕЗ
+            // единого правила обрезки: длинное название («Изгнанный реинкарнированный тяжёлый
+            // рыцарь…») переносилось на 2-3 строки, высота строки ехала, и лента переставала
+            // читаться — жалоба владельца «всё летит в кучу и зависит от длины названия».
+            // Высоту строки задаёт постер, оба текста обрезаются многоточием в одну строку.
+            '.qdl-noti-row{display:flex;align-items:center;gap:1em;padding:.9em 1.1em;margin:.35em .6em;' +
+                'background:rgba(255,255,255,.05);border-radius:.7em}' +
+            '.qdl-noti-row.unread{background:rgba(74,125,255,.14)}' +
+            '.qdl-noti-dot{flex:none;width:.55em;height:.55em;border-radius:50%;background:transparent}' +
+            '.qdl-noti-row.unread .qdl-noti-dot{background:#4a7dff}' +
+            '.qdl-noti-pos{flex:none;width:3.6em;height:5.4em;object-fit:cover;border-radius:.4em;background:#222}' +
+            '.qdl-noti-txt{flex:1;min-width:0}' +
+            '.qdl-noti-ttl{font-size:1.3em;font-weight:600;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+            '.qdl-noti-sub{opacity:.85;font-size:1.15em;line-height:1.3;margin-top:.3em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+            '.qdl-noti-ico{margin-right:.45em}' +
+            '.qdl-noti-time{flex:none;opacity:.5;font-size:1.05em;white-space:nowrap;align-self:flex-start;margin-top:.35em}' +
+            '.qdl-noti-day{padding:1.1em 1.4em .35em;font-size:1.05em;opacity:.45;letter-spacing:.05em;text-transform:uppercase}' +
+            '.qdl-noti-id{padding:1.1em 1.4em;margin:1.2em .6em .4em;background:rgba(255,255,255,.04);' +
+                'border-radius:.7em;opacity:.75;font-size:1.15em}' +
+            '.qdl-noti-empty{padding:2em 1.4em;font-size:1.3em;opacity:.7;line-height:1.5}' +
             '.qdl-noti-head{position:relative}' +
             '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}' +
             // Автопилот jut.su. Выключен — приглушённый контур; включён — зелёный, как «Смотреть».
@@ -3073,17 +3093,27 @@
     }
 
     // ───────── Уведомления о скачанных сериях (тост + центр уведомлений) ─────────
-    function relTime(iso) {
+    var NOTI_MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+                       'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+
+    // Заголовок группы дня. Лента идёт от свежего к старому, и без разделителей 50 строк
+    // читаются как сплошное полотно: непонятно, это всё сегодня или за месяц.
+    function dayLabel(iso) {
         try {
             var d = new Date(iso), now = new Date();
-            var pad = function (n) { return (n < 10 ? '0' : '') + n; };
-            var hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
-            if (d.toDateString() === now.toDateString()) return 'сегодня ' + hm;
+            if (d.toDateString() === now.toDateString()) return 'Сегодня';
             var y = new Date(now); y.setDate(now.getDate() - 1);
-            if (d.toDateString() === y.toDateString()) return 'вчера ' + hm;
-            var days = Math.floor((now - d) / 86400000);
-            if (days >= 0 && days < 7) return days + ' дн назад';
-            return pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '.' + d.getFullYear();
+            if (d.toDateString() === y.toDateString()) return 'Вчера';
+            var t = d.getDate() + ' ' + NOTI_MONTHS[d.getMonth()];
+            return d.getFullYear() === now.getFullYear() ? t : (t + ' ' + d.getFullYear());
+        } catch (e) { return ''; }
+    }
+
+    // Время внутри группы — только часы:минуты: дату уже сказал заголовок дня.
+    function dayTime(iso) {
+        try {
+            var d = new Date(iso), pad = function (n) { return (n < 10 ? '0' : '') + n; };
+            return pad(d.getHours()) + ':' + pad(d.getMinutes());
         } catch (e) { return ''; }
     }
 
@@ -3120,6 +3150,9 @@
         var k = (n && n.kind) ? String(n.kind).toUpperCase() : '';
         if (!k || NOTI_DONE_KINDS[k]) return 'done';       // серия лежит на диске
         if (k === 'NEW') return 'new';                     // вышла на сайте (слежение jut.su)
+        // WAVE (qdl 2.111) — волна новых серий одной строкой («Вышли новые серии 8–10»).
+        // Своя корзина, а не 'done': текст готовый, дописывать к нему нечего.
+        if (k === 'WAVE') return 'wave';
         // TITLE — «пачка тайтла скачана» (qdl 2.38). Своя корзина, а не 'done': текст уже готовый
         // («Скачано серий: 60»), и приписывать к нему «скачана» значило бы говорить про серию.
         if (k === 'TITLE') return 'title';
@@ -3129,6 +3162,13 @@
         if (k === 'SWITCH' || k === 'INFO') return 'special';
         return 'other';
     }
+
+    // Значок вида в строке ленты. До qdl 2.111 эмодзи жили ТОЛЬКО в тостах, а в самой ленте
+    // все строки выглядели одинаково — «нет места» неотличимо от «вышла серия».
+    var NOTI_ICONS = { done: '📺', wave: '📺', 'new': '🆕', season: '🗓', title: '📦',
+                       warn: '⚠️', started: '⏬', special: '🔀' };
+
+    function notiIcon(n) { return NOTI_ICONS[notiBucket(n)] || '🔔'; }
 
     // опрос ленты: бейдж непрочитанных + тост для появившихся с прошлого опроса.
     // In-flight флаг обязателен: вызывается из 4 точек (старт, вставка иконки/меню, interval) —
@@ -3166,13 +3206,19 @@
                 var came = fresh.filter(function (x) { return notiBucket(x) === 'new'; });
                 var season = fresh.filter(function (x) { return notiBucket(x) === 'season'; });
                 var warn = fresh.filter(function (x) { return notiBucket(x) === 'warn'; });
+                var waves = fresh.filter(function (x) { return notiBucket(x) === 'wave'; });
                 var other = fresh.filter(function (x) { return notiBucket(x) === 'other'; });
                 if (special.length === 1) Lampa.Noty.show((special[0].kind === 'SWITCH' ? '🔀 ' : '📺 ') + esc(special[0].title) + ' — ' + esc(special[0].label));
                 else if (special.length > 1) Lampa.Noty.show('🔔 Новых уведомлений: ' + special.length);
                 if (started.length === 1) Lampa.Noty.show('⏬ ' + esc(started[0].title) + ' — ' + esc(started[0].label) + ' качается');
                 else if (started.length > 1) Lampa.Noty.show('⏬ Начата загрузка серий: ' + started.length);
-                if (dl.length === 1) Lampa.Noty.show('📺 ' + esc(dl[0].title) + ' — ' + esc(dl[0].label) + ' скачана');
-                else if (dl.length > 1) Lampa.Noty.show('📺 Скачано новых серий: ' + dl.length);
+                // ⚠️ «скачана» больше НЕ дописываем: с qdl 2.111 сервер шлёт готовую фразу
+                // («Вышла новая серия 10»), и приписка превращала её в «…серия 10 скачана».
+                // Старый сервер шлёт «Сезон 1 · серия 7» — тоже читается верно, просто суше.
+                if (dl.length === 1) Lampa.Noty.show('📺 ' + esc(dl[0].title) + ' — ' + esc(dl[0].label));
+                else if (dl.length > 1) Lampa.Noty.show('📺 Новых серий: ' + dl.length);
+                if (waves.length === 1) Lampa.Noty.show('📺 ' + esc(waves[0].title) + ' — ' + esc(waves[0].label));
+                else if (waves.length > 1) Lampa.Noty.show('📺 Новые серии в тайтлах: ' + waves.length);
                 // label уже несёт «Скачано серий: N» — дописывать нечего
                 if (titles.length === 1) Lampa.Noty.show('📦 ' + esc(titles[0].title) + ' — ' + esc(titles[0].label));
                 else if (titles.length > 1) Lampa.Noty.show('📦 Скачано тайтлов: ' + titles.length);
@@ -3294,9 +3340,16 @@
 
         this.build = function (items) {
             if (!items.length)
-                body.append($('<div style="padding:2em;font-size:1.4em;opacity:.7">Пока нет уведомлений. «🔔 Следить» в карточке тайтла jut.su — буду сообщать о новых сериях; то же в «Загрузках» — буду ещё и качать их.</div>'));
+                body.append($('<div class="qdl-noti-empty">Пока нет уведомлений. «🔔 Следить» в карточке тайтла jut.su — буду сообщать о новых сериях; то же в «Загрузках» — буду ещё и качать их.</div>'));
 
-            items.forEach(function (n) { comp.append(n); });
+            // Разделители дней. Лента приходит отсортированной сервером (по убыванию id),
+            // поэтому достаточно сравнивать с предыдущей строкой.
+            var day = null;
+            items.forEach(function (n) {
+                var d = dayLabel(n.created);
+                if (d && d !== day) { day = d; body.append($('<div class="qdl-noti-day"></div>').text(d)); }
+                comp.append(n);
+            });
             comp.appendId();
 
             // открыли центр → помечаем всё прочитанным, бейдж гаснет
@@ -3308,14 +3361,18 @@
 
         this.append = function (n) {
             var poster = notiPoster(n);
+            // Непрочитанное снимаем В МОМЕНТ СБОРКИ: build() сразу за этим метит всю ленту
+            // прочитанной, и без снимка точка не появилась бы никогда.
+            var unread = (n.read === false) ? ' unread' : '';
             var el = $(
-                '<div class="qdl-noti-row selector qdl-row-focus" style="display:flex;align-items:center;gap:1em;padding:1em;margin:.35em .6em;background:rgba(255,255,255,.05);border-radius:.7em">' +
-                  '<img src="' + poster + '" style="width:3.6em;height:5.4em;object-fit:cover;border-radius:.4em;background:#222;flex:none">' +
-                  '<div style="flex:1;min-width:0">' +
-                    '<div style="font-size:1.3em;font-weight:600">' + esc(n.title || 'Сериал') + '</div>' +
-                    '<div style="opacity:.85;font-size:1.15em;margin-top:.25em">' + esc(n.label || '') + '</div>' +
-                    '<div style="opacity:.5;font-size:.95em;margin-top:.25em">' + esc(relTime(n.created)) + '</div>' +
+                '<div class="qdl-noti-row selector qdl-row-focus' + unread + '">' +
+                  '<div class="qdl-noti-dot"></div>' +
+                  '<img class="qdl-noti-pos" src="' + poster + '">' +
+                  '<div class="qdl-noti-txt">' +
+                    '<div class="qdl-noti-ttl">' + esc(n.title || 'Сериал') + '</div>' +
+                    '<div class="qdl-noti-sub"><span class="qdl-noti-ico">' + notiIcon(n) + '</span>' + esc(n.label || '') + '</div>' +
                   '</div>' +
+                  '<div class="qdl-noti-time">' + esc(dayTime(n.created)) + '</div>' +
                 '</div>'
             );
             el.find('img').on('error', function () { this.src = PX1; });   // нейтральная плитка, не рваная заглушка
@@ -3338,8 +3395,7 @@
             if (card.platform) tail.push(card.platform + (card.client ? ' ' + card.client : ''));
 
             var text = 'ID устройства: ' + (uid || 'не определён') + (tail.length ? '   ·   ' + tail.join('   ·   ') : '');
-            var el = $('<div class="qdl-noti-id selector qdl-row-focus" style="padding:1.1em 1.4em;margin:1.2em .6em .4em;' +
-                'background:rgba(255,255,255,.04);border-radius:.7em;opacity:.75;font-size:1.15em">' + esc(text) + '</div>');
+            var el = $('<div class="qdl-noti-id selector qdl-row-focus">' + esc(text) + '</div>');
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
             el.on('hover:touch hover:hover', function () { last = markLast(el); });
             el.on('hover:enter', function () { Lampa.Noty.show(text); });

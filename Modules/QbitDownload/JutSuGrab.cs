@@ -1103,6 +1103,16 @@ public partial class QbitController
             using var db = new SqlContext();
             string sk = "j" + slug;
             string dedup = "start-" + DateTime.UtcNow.ToString("yyyyMMddHHmm");
+
+            // qdl 2.111: «в очереди на скачивание: N» — кухня. Зритель узнаёт о серии, когда
+            // её можно смотреть; ключ дедупа тут поминутный, так что журналу хватает своего.
+            if (NotiRoute.Enabled)
+            {
+                QdlEvents.Log(QdlEvents.CatDownload, title ?? slug,
+                              "в очереди на скачивание: " + count, JutNet.Hash(slug), sk, key: dedup);
+                return;
+            }
+
             if (db.noti.Any(x => x.seriesKey == sk && x.epkey == dedup)) return;
             db.noti.Add(new NotiModel
             {
@@ -1138,6 +1148,14 @@ public partial class QbitController
 
             if (!agg && !db.noti.Any(x => x.seriesKey == sk && x.epkey == it.epkey))
             {
+                // Текст берём из общего словаря NotiRoute: «Вышла новая серия 10» вместо
+                // «Сезон 1 · серия 10». Формулировка зрителя живёт в одном месте на все
+                // контуры (торренты, jut.su, XSMART), иначе они разъезжаются.
+                string lab = it.kind == "episode"
+                    ? (NotiRoute.Enabled
+                        ? NotiRoute.Episodes(it.season, new[] { it.ep })
+                        : $"Сезон {it.season} · серия {it.ep}")
+                    : $"{it.kind} {it.ep}";
                 db.noti.Add(new NotiModel
                 {
                     seriesKey = sk, seriesId = 0, hash = hash,
@@ -1146,11 +1164,10 @@ public partial class QbitController
                     episode = it.ep,
                     kind = it.kind == "episode" ? null : it.kind.ToUpperInvariant(),
                     epkey = it.epkey,
-                    label = it.kind == "episode"
-                        ? $"Сезон {it.season} · серия {it.ep}"
-                        : $"{it.kind} {it.ep}",
+                    label = lab,
                     created = DateTime.UtcNow, read = false
                 });
+                QdlEvents.Log(QdlEvents.CatUser, it.titleRu ?? it.slug, lab, hash, sk, key: it.epkey);
             }
             db.SaveChanges();
             // Пуш только когда есть что показать: в агрегате промежуточные серии строк не создают,
@@ -1182,6 +1199,22 @@ public partial class QbitController
         {
             int done = job.fileDone, total = job.filesTotal;
             using var db = new SqlContext();
+            // Недокачанное честно видно: отмена и «сдался после ретраев» дают N < M
+            string lab = NotiRoute.Enabled
+                ? NotiRoute.Batch(done, total, it.upgradeTo)
+                : (it.upgradeTo > 0
+                    ? $"Качество улучшено: {done} серий (до {it.upgradeTo}p)"
+                    : done < total ? $"Скачано серий: {done} из {total}" : $"Скачано серий: {done}");
+
+            // 🔴 Перекачка ради качества — это ровно «перекачивается новая раздача», о чём
+            // владелец просил зрителя НЕ уведомлять: серии у него уже были, новых не появилось.
+            if (NotiRoute.Enabled && it.upgradeTo > 0)
+            {
+                QdlEvents.Log(QdlEvents.CatQuality, it.titleRu ?? it.slug, lab, JutNet.Hash(it.slug), "j" + it.slug);
+                Console.WriteLine("[QbitDownload] jut/grab: тайтл " + it.slug + " — качество " + done + "/" + total);
+                return;
+            }
+
             db.noti.Add(new NotiModel
             {
                 seriesKey = "j" + it.slug, seriesId = 0, hash = JutNet.Hash(it.slug),
@@ -1189,14 +1222,12 @@ public partial class QbitController
                 season = -1, episode = -1,
                 kind = "TITLE",
                 epkey = (it.upgradeTo > 0 ? "up-" : "batch-") + DateTime.UtcNow.Ticks,
-                // Недокачанное честно видно: отмена и «сдался после ретраев» дают N < M
-                label = it.upgradeTo > 0
-                        ? $"Качество улучшено: {done} серий (до {it.upgradeTo}p)"
-                        : done < total ? $"Скачано серий: {done} из {total}" : $"Скачано серий: {done}",
+                label = lab,
                 created = DateTime.UtcNow, read = false
             });
             db.SaveChanges();
             PushNotiSignal(1);
+            QdlEvents.Log(QdlEvents.CatUser, it.titleRu ?? it.slug, lab, JutNet.Hash(it.slug), "j" + it.slug);
             Console.WriteLine("[QbitDownload] jut/grab: тайтл " + it.slug + " — скачано " + done + "/" + total);
         }
         catch (Exception ex) { JutNet.Log("grab", "noti тайтла: " + ex.Message); }

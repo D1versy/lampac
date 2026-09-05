@@ -174,7 +174,9 @@ public class WatchDebtTests
             Assert.Equal(0, res.Value<int?>("queued"));
             var keys = ((JArray)XsAccess.Rec("3-303")["known"]["keys"]).Select(x => x.Value<string>()).ToList();
             Assert.DoesNotContain("s1e3", keys);          // baseline держится
-            Assert.Equal(1, NotiCount("x3-303", "NOSPACE"));
+            // qdl 2.111: «нет места» — событие владельца, в ленту зрителя оно не идёт
+            Assert.Equal(0, NotiCount("x3-303", "NOSPACE"));
+            Assert.Single(Access.Events(QdlEvents.CatSpace));
         }
         finally { ModInit.conf.xsmartMinFreeGb = 1; }
     }

@@ -192,7 +192,8 @@ test('single SWITCH keeps the detailed toast; downloaded episodes keep their own
 
   assert.strictEqual(noty.length, 2);
   assert.ok(noty[0].indexOf('🔀 Сериал А — S01E05') === 0);
-  assert.strictEqual(noty[1], '📺 Скачано новых серий: 2');
+  // qdl 2.111: «скачана» к тексту сервера больше не дописывается — он приходит готовым
+  assert.strictEqual(noty[1], '📺 Новых серий: 2');
 });
 
 // ─────────────────── лента уведомлений: постеры строк (qdl 2.46) ───────────────────

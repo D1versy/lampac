@@ -232,7 +232,8 @@ test('pollNotifications: SWITCH-уведомление НЕ получает с�
   assert.strictEqual(sw.length, 1, 'SWITCH показан своим тостом');
   assert.ok(sw[0].indexOf('скачана') === -1, 'без «скачана»');
   assert.ok(sw[0].indexOf('🔀') !== -1, 'иконка переключения');
-  assert.ok(r.calls.noty.some(function (m) { return m.indexOf('серия 9') !== -1 && m.indexOf('скачана') !== -1; }), 'обычная серия — «скачана»');
+  // qdl 2.111: у обычной серии тост — значок + тайтл + готовый текст сервера, без приписок
+  assert.ok(r.calls.noty.some(function (m) { return m.indexOf('📺') === 0 && m.indexOf('серия 9') !== -1; }), 'обычная серия — свой тост');
 });
 
 // ─────────────────────────────── shortDate ───────────────────────────────

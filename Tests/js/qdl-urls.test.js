@@ -259,63 +259,57 @@ test('notiPoster: posterUrl главнее слага и хеша', () => {
   );
 });
 
-// ─────────────────────────── relTime ───────────────────────────
+// ──────────────────── дата и время в ленте уведомлений ────────────────────
+// qdl 2.111: relTime («сегодня 09:05» / «3 дн назад») заменена парой dayLabel + dayTime —
+// дату говорит заголовок группы дня, строка несёт только часы:минуты. Так лента одинаковой
+// высоты и читается сверху вниз, а не вычитывается по каждой строке.
 
 function pad(n) { return (n < 10 ? '0' : '') + n; }
 
-test('relTime: same calendar day => "сегодня HH:MM"', () => {
+test('dayLabel: сегодняшняя дата => «Сегодня»', () => {
   const { qdl } = H.loadQdl({});
   const d = new Date();
-  d.setHours(9, 5, 0, 0); // ensures HH:MM padding is exercised
-  const expected = 'сегодня ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-  assert.strictEqual(qdl.relTime(d.toISOString()), expected);
+  d.setHours(9, 5, 0, 0);
+  assert.strictEqual(qdl.dayLabel(d.toISOString()), 'Сегодня');
 });
 
-test('relTime: yesterday => "вчера HH:MM"', () => {
+test('dayLabel: вчерашняя дата => «Вчера»', () => {
   const { qdl } = H.loadQdl({});
   const d = new Date();
   d.setDate(d.getDate() - 1);
   d.setHours(14, 30, 0, 0);
-  const expected = 'вчера ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-  assert.strictEqual(qdl.relTime(d.toISOString()), expected);
+  assert.strictEqual(qdl.dayLabel(d.toISOString()), 'Вчера');
 });
 
-test('relTime: 3 days ago (0<days<7) => "N дн назад"', () => {
-  const { qdl } = H.loadQdl({});
-  // Use noon 3 days ago to stay safely inside the day and away from DST edges.
-  const d = new Date();
-  d.setDate(d.getDate() - 3);
-  d.setHours(12, 0, 0, 0);
-  const now = new Date();
-  const days = Math.floor((now - d) / 86400000);
-  // days should be 3 (2 or 3 possible only near midnight; noon anchor keeps it 3).
-  const expected = days + ' дн назад';
-  assert.strictEqual(qdl.relTime(d.toISOString()), expected);
-});
-
-test('relTime: ~10 days ago => "dd.mm.yyyy" padded date', () => {
+test('dayLabel: этот год => «3 сентября», без года', () => {
   const { qdl } = H.loadQdl({});
   const d = new Date();
-  d.setDate(d.getDate() - 10);
+  d.setMonth(0, 5);                 // 5 января текущего года
   d.setHours(12, 0, 0, 0);
-  const expected = pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '.' + d.getFullYear();
-  assert.strictEqual(qdl.relTime(d.toISOString()), expected);
+  if (d > new Date()) d.setFullYear(d.getFullYear() - 1);   // январь ещё не наступил
+  const out = qdl.dayLabel(d.toISOString());
+  const expected = d.getFullYear() === new Date().getFullYear() ? '5 января' : '5 января ' + d.getFullYear();
+  assert.strictEqual(out, expected);
 });
 
-test('relTime: fixed old date has both day and month zero-padded', () => {
+test('dayLabel: прошлый год => год дописан', () => {
   const { qdl } = H.loadQdl({});
-  // 2020-01-05 is far in the past => absolute-date branch, exercises padding on day & month.
-  const out = qdl.relTime('2020-01-05T00:00:00');
-  assert.strictEqual(out, '05.01.2020');
+  assert.strictEqual(qdl.dayLabel('2020-01-05T00:00:00'), '5 января 2020');
 });
 
-test('relTime: invalid iso => "" (NaN date throws/parses to empty)', () => {
+test('dayTime: часы и минуты с ведущим нулём', () => {
   const { qdl } = H.loadQdl({});
-  // Invalid Date: toDateString() = 'Invalid Date', getDate() = NaN, days = NaN.
-  // No branch matches (days>=0&&<7 false), falls to absolute: pad(NaN)... => 'NaN.NaN.NaN'.
-  // BUG?: invalid input yields 'NaN.NaN.NaN' rather than '' (the catch is never reached).
-  const out = qdl.relTime('not-a-date');
-  assert.strictEqual(out, 'NaN.NaN.NaN');
+  const d = new Date();
+  d.setHours(9, 5, 0, 0);
+  assert.strictEqual(qdl.dayTime(d.toISOString()), pad(d.getHours()) + ':' + pad(d.getMinutes()));
+});
+
+test('битая дата не роняет ленту', () => {
+  const { qdl } = H.loadQdl({});
+  // Оба обязаны вернуть строку, а не бросить: одна кривая запись не имеет права
+  // оставить экран уведомлений пустым.
+  assert.strictEqual(typeof qdl.dayLabel('not-a-date'), 'string');
+  assert.strictEqual(typeof qdl.dayTime('not-a-date'), 'string');
 });
 
 // ─────────────────────────── getAudioPref / setAudioPref ───────────────────────────

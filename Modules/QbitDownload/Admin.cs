@@ -388,6 +388,69 @@ public class D1VAdminController : BaseController
 
     #endregion
 
+    #region уведомления — журнал событий (qdl 2.111)
+
+    // Зритель видит в ленте только «вышла новая серия/сезон» и итог пачки; всё служебное —
+    // постановка в очередь, смена раздачи, охота, качество, диагностика — приезжает сюда
+    // (EventLog.cs, кольцо в <cachePath>/events.json). Предложения сменить раздачу, которые
+    // раньше выскакивали зрителю диалогом, тоже здесь — строкой с кнопкой «Переключить».
+
+    /// <summary>Сколько записей журнала отдаём разом. Фильтрация — на клиенте, как на «Доступах».</summary>
+    const int AdminEventsCap = 400;
+
+    [HttpGet]
+    [Route("/admin/d1v/api/events")]
+    public ActionResult Events(int limit = AdminEventsCap)
+    {
+        SetHeadersNoCache();
+
+        var (items, total) = QdlEvents.Read(Math.Clamp(limit, 1, AdminEventsCap));
+        var res = new JObject
+        {
+            ["enabled"] = QdlEvents.Enabled,
+            ["replica"] = QbitController.ReplicaMode,
+            // Отдаём не больше кэпа — но ВСЕГДА говорим, сколько было всего: молча резать нельзя
+            ["total"] = total,
+            ["shown"] = items.Count,
+            ["items"] = items,
+            ["pending"] = QbitController.AdminPendingSwitches()
+        };
+        return Content(res.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
+
+    /// <summary>
+    /// Принять/отклонить смену раздачи. 🔴 Только дом: на реплике слежения нет по построению,
+    /// а ExecuteSwitch трогает qBittorrent.
+    /// </summary>
+    [HttpPost]
+    [Route("/admin/d1v/api/events/switch")]
+    async public Task<ActionResult> EventsSwitch([FromBody] SwitchBody body)
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        var ro = GroupsReplicaDeny(); if (ro != null) return ro;
+        if (body == null || string.IsNullOrWhiteSpace(body.hash)) return BadRequest();
+
+        var (ok, switched, newHash, err) = await QbitController.WatchSwitchApply(body.hash, body.accept);
+        SetHeadersNoCache();
+        var res = new JObject { ["success"] = ok, ["switched"] = switched };
+        if (newHash != null) res["hash"] = newHash;
+        if (err != null) res["error"] = err;
+        return Content(res.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
+
+    [HttpPost]
+    [Route("/admin/d1v/api/events/clear")]
+    public ActionResult EventsClear()
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        QdlEvents.Clear();
+        return Done(true);
+    }
+
+    public class SwitchBody { public string hash { get; set; } public bool accept { get; set; } }
+
+    #endregion
+
     public class GrantBody { public string uid { get; set; } public string feature { get; set; } public bool on { get; set; } }
     public class NameBody { public string uid { get; set; } public string name { get; set; } }
     public class UidBody { public string uid { get; set; } }

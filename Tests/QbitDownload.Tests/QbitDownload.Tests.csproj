@@ -54,6 +54,8 @@
     <Compile Include="..\..\Modules\QbitDownload\DownloadWants.cs" Link="Module\DownloadWants.cs" />
     <Compile Include="..\..\Modules\QbitDownload\QualityUpgrade.cs" Link="Module\QualityUpgrade.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JsonStore.cs" Link="Module\JsonStore.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\EventLog.cs" Link="Module\EventLog.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\NotiRoute.cs" Link="Module\NotiRoute.cs" />
     <Compile Include="..\..\Modules\QbitDownload\HttpCache.cs" Link="Module\HttpCache.cs" />
     <Compile Include="..\..\Modules\QbitDownload\FfWorker.cs" Link="Module\FfWorker.cs" />
     <Compile Include="..\..\Modules\QbitDownload\TorrentScoring.cs" Link="Module\TorrentScoring.cs" />

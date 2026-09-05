@@ -11,6 +11,8 @@
     "DownloadWants.cs",
     "QualityUpgrade.cs",
     "JsonStore.cs",
+    "EventLog.cs",
+    "NotiRoute.cs",
     "HttpCache.cs",
     "Bitmagnet.cs",
     "FfWorker.cs",

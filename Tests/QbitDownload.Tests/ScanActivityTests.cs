@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using Xunit;
@@ -147,8 +147,15 @@ public class ScanActivityTests
 
         using var db = new SqlContext();
         var n = Assert.Single(db.noti.ToList());
-        Assert.Equal("s3e7", n.epkey);
-        Assert.EndsWith("· временно с другой раздачи", n.label);
+        // qdl 2.111: строка теперь ОДНА НА ВОЛНУ, а «временно с другой раздачи» — кухня
+        // охоты и уехала в журнал владельца. Зритель читает про серию, а не про раздачу.
+        Assert.Equal("WAVE", n.kind);
+        Assert.Equal("wave-s3e7", n.epkey);
+        Assert.Equal("Вышла новая серия 7 · сезон 3", n.label);
+        Assert.DoesNotContain("раздач", n.label);
+        Assert.Contains(QdlEvents.Read(50).items.OfType<Newtonsoft.Json.Linq.JObject>(),
+                        x => x.Value<string>("cat") == QdlEvents.CatHunt
+                             && x.Value<string>("text").EndsWith("· временно с другой раздачи"));
         var keys = db.seen.Select(x => x.epkey).ToList();
         Assert.Contains("s3e7", keys);
         Assert.DoesNotContain("s2e7", keys);            // чужой сезон в seen не оседает

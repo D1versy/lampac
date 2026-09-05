@@ -184,6 +184,17 @@ public class ModuleConf : ModuleBaseConf
     // (и он же выключает поход в TMDB из тестов сканера).
     public bool notifyAiredCap { get; set; } = true;
 
+    // ── Разделение потоков уведомлений (qdl 2.111, NotiRoute.cs + EventLog.cs) ──
+    // Зрителю остаётся только «вышла новая серия/сезон» и итог большой пачки; постановка в
+    // очередь, смена раздачи, охота, качество и диагностика уезжают в журнал владельца
+    // (вкладка «Уведомления» в /admin/d1v). false = прежнее поведение, всё летит в ленту.
+    public bool notiSplit { get; set; } = true;
+
+    // Журнал событий для админки: <cachePath>/events.json, кольцо на adminEventsKeep записей.
+    // false = не вести журнал вовсе (вкладка останется пустой, лента при этом не изменится).
+    public bool adminEvents { get; set; } = true;
+    public int adminEventsKeep { get; set; } = 2000;       // клампится 100..20000
+
     // ── Умная выдача /qdl/search (TorrentScoring) ──
     public bool searchScoring { get; set; } = true;        // false = старая сортировка только по сидам
     public int preferredQuality { get; set; } = 2160;      // согласовано с video_quality_default клиента

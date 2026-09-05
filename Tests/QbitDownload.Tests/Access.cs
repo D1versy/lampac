@@ -314,6 +314,14 @@ public static class Access
         set => F("_hlsCleanupAt").SetValue(null, value);
     }
 
+    /// <summary>
+    /// Журнал событий владельца (qdl 2.111, EventLog.cs). Служебные уведомления больше не
+    /// попадают в ленту зрителя — проверять их надо здесь.
+    /// </summary>
+    public static List<JObject> Events(string cat = null)
+        => QdlEvents.Read(500).items.OfType<JObject>()
+                    .Where(x => cat == null || x.Value<string>("cat") == cat).ToList();
+
     public static string StartKey(string hash, string ep) => (string)Call("StartKey", hash, ep);
     public static bool IsOurClientHost(string url) => (bool)Call("IsOurClientHost", url);
     public static bool AddStartNotification(int seriesId, string link, string hash, string title, string ep)
@@ -329,6 +337,21 @@ public static class Access
 
     public static List<string> EpKeyForms(string epkey, int season, int ep)
         => (List<string>)Call("EpKeyForms", epkey, season, ep);
+
+    /// <summary>
+    /// Отсечение «эту серию уже учитывали» (qdl 2.111 сделал его симметричным).
+    /// Ep собираем рефлексией: тип приватный и вложенный.
+    /// </summary>
+    public static bool SeenAlready(IEnumerable<string> seen, int season, int ep, string key, string kind = null)
+    {
+        object e = Activator.CreateInstance(EpT, nonPublic: true);
+        EpT.GetField("season").SetValue(e, season);
+        EpT.GetField("ep").SetValue(e, ep);
+        EpT.GetField("kind").SetValue(e, kind);
+        var set = new HashSet<string>(seen);
+        var m = C.GetMethod("SeenAlready", SF);
+        return (bool)m.Invoke(null, new object[] { set, e, key });
+    }
 
     public static int ForgetEpisodeNoti(string seriesKey, JObject epRec)
         => (int)Call("ForgetEpisodeNoti", seriesKey, epRec);

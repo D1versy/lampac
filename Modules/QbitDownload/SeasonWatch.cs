@@ -404,13 +404,32 @@ public partial class QbitController
         return SeriesHashesById(tmdbId).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).FirstOrDefault() ?? "";
     }
 
-    /// <summary>Уведомление контура. Дедуп — по (seriesKey, epkey), как у JutNotifySeason.</summary>
-    static void SeasonNotify(int tmdbId, string title, int season, string hash, string kind, string epkey, string label)
+    /// <summary>
+    /// Уведомление контура. Дедуп — по (seriesKey, epkey), как у JutNotifySeason.
+    /// qdl 2.111: cat != null — событие для владельца (журнал админки), а не для зрителя.
+    /// Зритель по сезону получает ровно одну строку «Вышел сезон N»; «ищу раздачу»,
+    /// «нашёл и качаю», «раздачи нет» — это ход поиска, ему он не нужен.
+    /// 🔴 Дедуп журнальных событий держится на seen: noti их больше не хранит, а если бы и
+    /// хранила — NotiPrune чистит ленту, и после чистки строка пришла бы заново.
+    /// </summary>
+    static void SeasonNotify(int tmdbId, string title, int season, string hash, string kind,
+                             string epkey, string label, string cat = null)
     {
         try
         {
             string sk = SeriesKey(tmdbId, null);
             using var db = new SqlContext();
+
+            if (cat != null && NotiRoute.Enabled)
+            {
+                if (db.seen.Any(x => x.seriesKey == sk && x.epkey == epkey)) return;
+                db.seen.Add(new SeenModel { seriesKey = sk, epkey = epkey });
+                db.SaveChanges();
+                QdlEvents.Log(cat, title, label, hash, sk, key: epkey);
+                Console.WriteLine("[QbitDownload] season watch: журнал «" + (title ?? "") + "» — " + label);
+                return;
+            }
+
             if (db.noti.Any(x => x.seriesKey == sk && x.epkey == epkey)) return;
             db.noti.Add(new NotiModel
             {
@@ -420,6 +439,7 @@ public partial class QbitController
             });
             db.SaveChanges();
             PushNotiSignal(1);
+            QdlEvents.Log(QdlEvents.CatUser, title, label, hash, sk, key: epkey);
             Console.WriteLine("[QbitDownload] season watch: уведомление «" + (title ?? "") + "» — " + label);
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] season watch noti: " + ex.Message); }
@@ -623,8 +643,12 @@ public partial class QbitController
                     string nhash = SeasonNotifyHash(id, null);
 
                     if (!dry)
+                    {
                         SeasonNotify(id, title, target, nhash, "SEASON", "season-" + target,
-                                     "вышел " + target + " сезон — ищу раздачу");
+                                     NotiRoute.Season(target));
+                        SeasonNotify(id, title, target, nhash, "INFO", "season-look-" + target,
+                                     "вышел " + target + " сезон — ищу раздачу", QdlEvents.CatWatch);
+                    }
 
                     string mode = (rec.Value<string>("mode") ?? "grab").ToLowerInvariant();
                     if (mode != "grab" || !(ModInit.conf?.seasonWatchAutoGrab ?? true))
@@ -687,7 +711,8 @@ public partial class QbitController
                             if (tries >= max)
                             {
                                 SeasonNotify(id, title, target, nhash, "INFO", "season-nofind-" + target,
-                                    target + " сезон вышел, подходящей раздачи нет — можно скачать вручную");
+                                    target + " сезон вышел, подходящей раздачи нет — можно скачать вручную",
+                                    QdlEvents.CatWatch);
                                 rec["tries"] = 0;   // считаем заново, ждать НЕ перестаём
                             }
                         }
@@ -724,7 +749,7 @@ public partial class QbitController
                     changed = true;
 
                     SeasonNotify(id, title, target, got, "SEASON", "season-grab-" + target,
-                                 target + " сезон найден и качается");
+                                 target + " сезон найден и качается", QdlEvents.CatDownload);
                 }
                 catch (Exception ex)
                 {

@@ -3751,7 +3751,30 @@ public partial class QbitController : BaseController
     {
         if (key == null) return false;
         if (seenKeys.Contains(key)) return true;
-        return e != null && e.kind == null && e.season >= 0 && e.ep >= 0 && seenKeys.Contains("e" + e.ep);
+        if (e == null || e.kind != null || e.ep < 0) return false;
+
+        // прямое направление: новый «s3e7» глушится лежащим «e7»
+        if (e.season >= 0) return seenKeys.Contains("e" + e.ep);
+
+        // 🔥 ОБРАТНОЕ направление (qdl 2.111): новый «e7» глушится лежащим «s*e7».
+        // Донорский пак распознаётся с сезоном и пишет «s1e10», а основная раздача того же
+        // сериала сезона в имени не несёт и даёт «e10» — раньше это не глушилось, и зритель
+        // получал вторую строку про ту же серию («Изгнанный реинкарнированный тяжёлый
+        // рыцарь»: «серия 10 · временно с другой раздачи» 04.09 и «Серия 10» 05.09.2026).
+        // Компромисс тот же, что уже принят в прямую сторону: у сериала со сквозной
+        // нумерацией «e10» может совпасть с «s2e10» и одна серия промолчит. Цена — молчание
+        // об одной серии против гарантированного дубля на каждой раздаче без сезона в имени.
+        string tail = "e" + e.ep;
+        foreach (var k in seenKeys)
+        {
+            if (k == null || k.Length <= tail.Length || k[0] != 's') continue;
+            if (!k.EndsWith(tail, StringComparison.Ordinal)) continue;
+            bool digits = k.Length - tail.Length > 1;              // между «s» и «e» есть цифры
+            for (int j = 1; digits && j < k.Length - tail.Length; j++)
+                if (!char.IsDigit(k[j])) digits = false;
+            if (digits) return true;
+        }
+        return false;
     }
 
     // человекочитаемая подпись серии
@@ -3818,12 +3841,22 @@ public partial class QbitController : BaseController
             if (db.seen.Any(x => x.seriesKey == sk && x.epkey == dedup)) return false;
 
             db.seen.Add(new SeenModel { seriesKey = sk, epkey = dedup });
-            db.noti.Add(new NotiModel
-            {
-                seriesKey = sk, seriesId = seriesId, hash = hash, title = title ?? "",
-                season = -1, episode = -1, kind = "START", epkey = dedup,
-                label = "раздача обновилась, качаются новые серии", created = DateTime.UtcNow, read = false
-            });
+
+            // qdl 2.111: «раздача обновилась, качаются новые серии» — кухня, зрителю она не
+            // нужна (владелец: «если раздачи 5 раз поменялись — не нужно об этом уведомлять»).
+            // Строка в noti больше не пишется, событие уходит в журнал админки. Дедуп при этом
+            // не пострадал: он и раньше держался на seen, а её ретенция не трогает.
+            if (NotiRoute.Enabled)
+                QdlEvents.Log(QdlEvents.CatRelease, title ?? "",
+                              "раздача обновилась, качаются новые серии", hash, sk, key: dedup);
+            else
+                db.noti.Add(new NotiModel
+                {
+                    seriesKey = sk, seriesId = seriesId, hash = hash, title = title ?? "",
+                    season = -1, episode = -1, kind = "START", epkey = dedup,
+                    label = "раздача обновилась, качаются новые серии", created = DateTime.UtcNow, read = false
+                });
+
             db.SaveChanges();
             Console.WriteLine("[QbitDownload] notify (start): " + (title ?? "") + " — " + hash);
             return true;
@@ -3938,6 +3971,19 @@ public partial class QbitController : BaseController
         return res;
     }
 
+    // Накопитель волны новых серий одного сериала за прогон сканера (qdl 2.111). Раньше каждая
+    // серия писала свою строку, и «Повелитель духов» выдал 14 строк одним залпом в 03:59
+    // (01.09.2026) — лента превращалась в простыню. Копится по seriesKey, а НЕ по watch-элементу:
+    // два рипа одного сериала делят seriesKey и обязаны дать одну строку.
+    sealed class NotiWave
+    {
+        public int seriesId;
+        public string hash, title;
+        public readonly List<int> eps = new List<int>();
+        public readonly HashSet<int> seasons = new HashSet<int>();
+        public HashSet<string> notiKeys;
+    }
+
     // основной сканер: для каждой отслеживаемой раздачи — новые докачавшиеся серии → записи в noti
     public static async Task<int> ScanEpisodeNotifications()
     {
@@ -3970,6 +4016,18 @@ public partial class QbitController : BaseController
                 return true;
             }
             bool StageNoti(string sk2, string key2) => staged.Add("N|" + sk2 + "|" + key2);
+
+            // волны новых серий: копим весь прогон, разворачиваем в строки перед SaveChanges
+            var waves = new Dictionary<string, NotiWave>(StringComparer.Ordinal);
+            void WaveAdd(string sk2, int sid, string h, string ttl, int season, int epn, HashSet<string> nk)
+            {
+                if (!waves.TryGetValue(sk2, out var w))
+                    waves[sk2] = w = new NotiWave { seriesId = sid, hash = h, title = ttl, notiKeys = nk };
+                if (string.IsNullOrEmpty(w.hash)) w.hash = h;
+                if (string.IsNullOrEmpty(w.title)) w.title = ttl;
+                w.eps.Add(epn);
+                if (season >= 0) w.seasons.Add(season);
+            }
 
             // Потолок эфира спрашиваем один раз на (сериал, сезон) за прогон. AiredEpisodes кеширует
             // на 6 ч только УСПЕХ, а на сбое возвращает 0 без кеша — при лежащем TMDB каждая серия
@@ -4026,13 +4084,21 @@ public partial class QbitController : BaseController
 
                         if (IsEpisodeLike(ep) && !notiKeys.Contains(key) && StageNoti(sk, key))
                         {
-                            db.noti.Add(new NotiModel
+                            // Обычная серия копится в волну — одна строка на сериал за прогон.
+                            // Спецвыпуски (OVA/SP/RANGE) остаются отдельными строками: их мало,
+                            // и «OVA 2» в общий счётчик серий не сложить.
+                            if (NotiRoute.Enabled && ep.kind == null)
+                                WaveAdd(sk, seriesId, hash, title, ep.season, ep.ep, notiKeys);
+                            else
                             {
-                                seriesKey = sk, seriesId = seriesId, hash = hash, title = title,
-                                season = ep.season, episode = ep.ep, kind = ep.kind, epkey = key,
-                                label = EpLabel(ep), created = DateTime.UtcNow, read = false
-                            });
-                            created++;
+                                db.noti.Add(new NotiModel
+                                {
+                                    seriesKey = sk, seriesId = seriesId, hash = hash, title = title,
+                                    season = ep.season, episode = ep.ep, kind = ep.kind, epkey = key,
+                                    label = EpLabel(ep), created = DateTime.UtcNow, read = false
+                                });
+                                created++;
+                            }
                             touched.Add(hash);
                             Console.WriteLine("[QbitDownload] notify: " + title + " — " + EpLabel(ep));
                         }
@@ -4076,13 +4142,25 @@ public partial class QbitController : BaseController
 
                                 if (!notiKeys.Contains(key) && StageNoti(sk, key))
                                 {
-                                    db.noti.Add(new NotiModel
+                                    // Зрителю донор не виден: серия попадает в ту же волну, что и
+                                    // серии основной раздачи, а пометка «временно с другой раздачи»
+                                    // (кухня охоты) уходит в журнал владельца.
+                                    if (NotiRoute.Enabled)
                                     {
-                                        seriesKey = sk, seriesId = seriesId, hash = hash, title = title,
-                                        season = es, episode = en, kind = null, epkey = key,
-                                        label = lab + " · временно с другой раздачи", created = DateTime.UtcNow, read = false
-                                    });
-                                    created++;
+                                        WaveAdd(sk, seriesId, hash, title, es, en, notiKeys);
+                                        QdlEvents.Log(QdlEvents.CatHunt, title,
+                                                      lab + " · временно с другой раздачи", hash, sk, key: key);
+                                    }
+                                    else
+                                    {
+                                        db.noti.Add(new NotiModel
+                                        {
+                                            seriesKey = sk, seriesId = seriesId, hash = hash, title = title,
+                                            season = es, episode = en, kind = null, epkey = key,
+                                            label = lab + " · временно с другой раздачи", created = DateTime.UtcNow, read = false
+                                        });
+                                        created++;
+                                    }
                                     touched.Add(hash);   // hash здесь — ОСНОВНОЙ (как и в noti): всплывает карточка сериала
                                     Console.WriteLine("[QbitDownload] notify (donor): " + title + " — " + lab);
                                 }
@@ -4096,6 +4174,33 @@ public partial class QbitController : BaseController
                     catch (Exception ex) { Console.WriteLine("[QbitDownload] auto-transcode: " + ex.Message); }
                 }
                 catch (Exception ex) { Console.WriteLine("[QbitDownload] noti scan item: " + ex); }
+            }
+
+            // Волны → по одной строке на сериал. Пишем ДО SaveChanges: серии и строка про них
+            // обязаны лечь одной транзакцией, иначе откат оставил бы seen без записи в ленте,
+            // а seen односторонняя — серия замолчала бы навсегда.
+            foreach (var kv in waves)
+            {
+                var w = kv.Value;
+                if (w.eps.Count == 0) continue;
+                int wseason = w.seasons.Count == 1 ? w.seasons.First() : -1;
+                string wkey = NotiRoute.WaveKey(wseason, w.eps);
+                if (wkey == null || w.notiKeys.Contains(wkey) || !StageNoti(kv.Key, wkey)) continue;
+
+                // серии из разных сезонов диапазоном не описать («8–10» соврало бы) — только счётчик
+                string wtext = w.seasons.Count > 1
+                    ? "Вышло новых серий: " + w.eps.Distinct().Count()
+                    : NotiRoute.Episodes(wseason, w.eps);
+                if (wtext == null) continue;
+
+                db.noti.Add(new NotiModel
+                {
+                    seriesKey = kv.Key, seriesId = w.seriesId, hash = w.hash, title = w.title ?? "",
+                    season = wseason, episode = w.eps.Max(), kind = "WAVE", epkey = wkey,
+                    label = wtext, created = DateTime.UtcNow, read = false
+                });
+                created++;
+                QdlEvents.Log(QdlEvents.CatUser, w.title ?? "", wtext, w.hash, kv.Key);
             }
 
             try
@@ -4267,10 +4372,21 @@ public partial class QbitController : BaseController
             // Лента режется по notiFeedLimit: клиент рисует ВСЁ, что пришло (ComponentNotifications
             // не пагинирует), и 200 строк с 200 постерами открывались заметно долго.
             int limit = Math.Clamp(ModInit.conf?.notiFeedLimit ?? 50, 1, 500);
-            var items = db.noti.OrderByDescending(x => x.Id).Take(limit).ToList();
+            // qdl 2.111: служебные виды (START/SWITCH/INFO/NOSPACE/DIAG) зритель не видит —
+            // они живут в журнале админки. Фильтр стоит и на ЧТЕНИИ, а не только у продюсеров:
+            // в таблице уже лежат старые служебные строки, и без него лента чистилась бы
+            // неделями, по мере ретенции. Пустой kind == обычная серия.
+            var kinds = NotiRoute.UserKinds;
+            bool split = NotiRoute.Enabled;
+
+            var q = db.noti.Where(x => !split || x.kind == null || x.kind == "" || kinds.Contains(x.kind));
+            var items = q.OrderByDescending(x => x.Id).Take(limit).ToList();
             // unread считается по ВСЕЙ таблице, а не по срезу: открытие центра метит прочитанным
             // всё сразу (qdl.js), поэтому бейдж и лента не разъезжаются.
-            int unread = db.noti.Count(x => !x.read);
+            // ⚠️ Тот же фильтр обязателен и здесь: иначе бейдж считал бы непрочитанными строки,
+            // которых в ленте нет, и погасить его было бы нечем.
+            int unread = db.noti.Count(x => !x.read
+                && (!split || x.kind == null || x.kind == "" || kinds.Contains(x.kind)));
             var arr = new JArray();
             // Дедуп резолва постера: строк в ленте 50, а тайтлов в ней обычно 3-10, и тело ответа
             // строится на КАЖДЫЙ запрос (из него считается ETag) — File.Exists на каждую строку лишний.

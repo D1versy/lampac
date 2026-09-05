@@ -205,7 +205,7 @@ test('М1.4: START не смешивается ни со «скачано», н�
   assert.strictEqual(noty.length, 3, 'три независимые корзины: special / START / скачанные');
   assert.strictEqual(noty[0], '🔔 Новых уведомлений: 2');
   assert.strictEqual(noty[1], '⏬ Начата загрузка серий: 2');
-  assert.ok(noty[2].indexOf('скачана') !== -1, noty[2]);
+  assert.ok(noty[2].indexOf('📺') === 0 && noty[2].indexOf('E3') !== -1, noty[2]);
 });
 
 test('М1.4: на самом первом опросе (lastid=0) START тоже не спамит историей', () => {
@@ -386,7 +386,7 @@ test('2.35: смешанная пачка раскладывается по не
   assert.strictEqual(noty.length, 5, 'пять корзин: special / START / скачанные / NEW / SEASON — ' + noty.join(' | '));
   assert.ok(noty[0].indexOf('полнее') !== -1);
   assert.ok(noty[1].indexOf('качается') !== -1);
-  assert.strictEqual(noty[2], '📺 Скачано новых серий: 2');
+  assert.strictEqual(noty[2], '📺 Новых серий: 2');
   assert.strictEqual(noty[3], '🆕 Вышли новые серии: 2');
   assert.ok(noty[4].indexOf('🗓') === 0);
   assert.strictEqual(lampa.Storage.get('qdl_noti_lastid'), 12);

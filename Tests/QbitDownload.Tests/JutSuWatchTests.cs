@@ -406,7 +406,7 @@ public class JutSuWatchTickNotifyTests
     }
 
     [Fact]
-    async public Task Режим_уведомлений_шлёт_NEW_на_каждую_новую_серию()
+    async public Task Режим_уведомлений_шлёт_ОДНУ_строку_на_волну()
     {
         JutWatchAccess.Env();
         JutWatchAccess.Subscribe("liar", JutWatchAccess.Title("liar", true, (1, 1)), 0, 0);
@@ -415,15 +415,17 @@ public class JutSuWatchTickNotifyTests
         using (JutWatchAccess.PinWorker())
             await JutWatchAccess.Tick(JutWatchAccess.Ongoing(true, ("liar", 3)), JutWatchAccess.One(after));
 
+        // qdl 2.111: две серии за тик = ОДНА строка. Раньше здесь стоял цикл по fresh, и
+        // за сутки простоя сайта лента получала по строке на каждую вышедшую серию.
         var noti = JutWatchAccess.Noti("liar");
-        Assert.Equal(2, noti.Count);
-        Assert.All(noti, n => Assert.Equal("NEW", n.kind));          // не null: иначе клиент печатает «скачана»
-        Assert.Empty(noti.Where(n => n.kind == null));
-        Assert.Equal(new[] { "new-s1e2", "new-s1e3" }, noti.Select(n => n.epkey).ToArray());
-        Assert.All(noti, n => Assert.Equal(JutNet.Hash("liar"), n.hash));
-        Assert.All(noti, n => Assert.Equal(1, n.season));
-        Assert.Contains("вышла", noti[0].label);
-        Assert.DoesNotContain("качаю", noti[0].label);               // в notify-режиме не обещаем скачивание
+        var n = Assert.Single(noti);
+        Assert.Equal("NEW", n.kind);                                 // не null: иначе клиент печатает «скачана»
+        Assert.Equal("newwave-s1e3", n.epkey);                       // ключ по МАКСИМАЛЬНОЙ серии волны
+        Assert.Equal(JutNet.Hash("liar"), n.hash);
+        Assert.Equal(1, n.season);
+        Assert.Equal("Вышли новые серии 2–3", n.label);
+        Assert.DoesNotContain("качаю", n.label);                     // в notify-режиме не обещаем скачивание
+        Assert.DoesNotContain("jut.su", n.label);                    // откуда приехало — не забота зрителя
     }
 
     [Fact]
@@ -487,7 +489,13 @@ public class JutSuWatchTickNotifyTests
                                       JutWatchAccess.One(JutWatchAccess.Title("liar", true, (1, 1), (1, 2))));
 
         using var db = new SqlContext();
-        Assert.Empty(db.seen.Where(x => x.seriesKey == "jliar").ToList());
+        // qdl 2.111: ключи дедупа волны («newwave-…») в seen лежать ОБЯЗАНЫ — иначе после
+        // ретенции ленты волна пришла бы заново. Инвариант же в другом: ЭПИЗОДНОГО ключа
+        // («уже скачано») в notify-режиме не появляется, и переподписка не считает серии
+        // виденными. Плюс сама переподписка чистит seen тайтла целиком (JutWatchRemove).
+        var keys = db.seen.Where(x => x.seriesKey == "jliar").Select(x => x.epkey).ToList();
+        Assert.All(keys, k => Assert.StartsWith("newwave-", k));
+        Assert.DoesNotContain("s1e2", keys);
     }
 
     [Fact]
@@ -567,9 +575,12 @@ public class JutSuWatchTickGrabTests
             await JutWatchAccess.Tick(JutWatchAccess.Ongoing(true, ("liar", 2)),
                                       JutWatchAccess.One(JutWatchAccess.Title("liar", true, (1, 1), (1, 2))));
 
-        var n = Assert.Single(JutWatchAccess.Noti("liar"));
-        Assert.Equal("NEW", n.kind);
-        Assert.Contains("качаю", n.label);
+        // qdl 2.111: на автокачке «вышла» зритель не видит — он узнает о серии, когда её
+        // можно смотреть. Событие уходит в журнал владельца.
+        Assert.Empty(JutWatchAccess.Noti("liar"));
+        var e = Assert.Single(Access.Events(QdlEvents.CatWatch));
+        Assert.Contains("ставлю в очередь", e.Value<string>("text"));
+        Assert.Contains("Вышла новая серия 2", e.Value<string>("text"));
     }
 
     [Fact]
@@ -590,7 +601,10 @@ public class JutSuWatchTickGrabTests
             Assert.Equal(1, res.Value<int>("queued"));
             Assert.Equal(new[] { "s1e3" }, JutWatchAccess.Queue().Select(x => x.epkey).ToArray());
         }
-        Assert.Equal(2, JutWatchAccess.Noti("liar").Count);
+        // qdl 2.111: зрителю на автокачке — ничего; владельцу — ОДНА запись про обе серии
+        Assert.Empty(JutWatchAccess.Noti("liar"));
+        var e = Assert.Single(Access.Events(QdlEvents.CatWatch));
+        Assert.Contains("Вышли новые серии 2–3", e.Value<string>("text"));
     }
 
     [Fact]
@@ -653,9 +667,11 @@ public class JutSuWatchTickGrabTests
             Assert.Equal(1, JutWatchAccess.Find("liar")["known"].Value<int>("count"));   // baseline на месте
             Assert.False(File.Exists(JutWatchAccess.MetaPath(JutNet.Hash("liar"))));
 
-            var kinds = JutWatchAccess.Noti("liar").Select(x => x.kind).ToList();
-            Assert.Contains("NEW", kinds);
-            Assert.Contains("NOSPACE", kinds);
+            // qdl 2.111: и «вышла», и «нет места» — события владельца (его выбор), лента чиста
+            Assert.Empty(JutWatchAccess.Noti("liar"));
+            Assert.Single(Access.Events(QdlEvents.CatWatch));
+            var sp = Assert.Single(Access.Events(QdlEvents.CatSpace));
+            Assert.Contains("не скачаны", sp.Value<string>("text"));
         }
         finally { ModInit.conf.jutMinFreeGb = 1; }
     }
@@ -675,7 +691,7 @@ public class JutSuWatchTickGrabTests
                 await JutWatchAccess.Tick(JutWatchAccess.Ongoing(true, ("liar", 2)), JutWatchAccess.One(after));
                 await JutWatchAccess.Tick(JutWatchAccess.Ongoing(true, ("liar", 2)), JutWatchAccess.One(after));
             }
-            Assert.Single(JutWatchAccess.Noti("liar").Where(x => x.kind == "NOSPACE"));
+            Assert.Single(Access.Events(QdlEvents.CatSpace));   // дедуп по дню — теперь в seen
         }
         finally { ModInit.conf.jutMinFreeGb = 1; }
     }
@@ -756,7 +772,8 @@ public class JutSuWatchTickGrabTests
                 Assert.Equal(1, res.Value<int>("queued"));
                 Assert.Equal(new[] { "s1e2" }, JutWatchAccess.Queue().Select(x => x.epkey).ToArray());
             }
-            Assert.Single(JutWatchAccess.Noti("liar"));
+            Assert.Empty(JutWatchAccess.Noti("liar"));                  // режим «качаю» → в журнал
+            Assert.Single(Access.Events(QdlEvents.CatWatch));
         }
         finally { ModInit.conf.jutWatchAutoGrab = true; }
     }
@@ -833,9 +850,9 @@ public class JutSuWatchSeasonTests
                 Assert.Equal(new[] { "s1e2" }, JutWatchAccess.Queue().Select(x => x.epkey).ToArray());
             }
             Assert.Equal(1, JutWatchAccess.Find("multi").Value<int>("season"));
-            var noti = JutWatchAccess.Noti("multi");
-            Assert.Single(noti);
-            Assert.Equal("NEW", noti[0].kind);
+            // qdl 2.111: подписка в режиме «качаю» → «вышла» видит только владелец
+            Assert.Empty(JutWatchAccess.Noti("multi"));
+            Assert.Single(Access.Events(QdlEvents.CatWatch));
         }
         finally { ModInit.conf.jutWatchSeasonSwitch = true; }
     }

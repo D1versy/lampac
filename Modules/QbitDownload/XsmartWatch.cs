@@ -607,11 +607,15 @@ public partial class QbitController
                 seriesKey = sk, seriesId = 0, hash = XsmartNet.Hash(cat, id),
                 title = title ?? sref, season = seasonNo, episode = -1,
                 kind = "SEASON", epkey = epkey,
-                label = "Вышел сезон " + seasonNo + " — слежу за ним",
+                // «— слежу за ним» это про нас, а не про сезон (qdl 2.111)
+                label = NotiRoute.Enabled ? NotiRoute.Season(seasonNo)
+                                          : "Вышел сезон " + seasonNo + " — слежу за ним",
                 created = DateTime.UtcNow, read = false
             });
             db.SaveChanges();
             PushNotiSignal(1);
+            QdlEvents.Log(QdlEvents.CatUser, title ?? sref, NotiRoute.Season(seasonNo),
+                          XsmartNet.Hash(cat, id), sk, key: epkey);
         }
         catch (Exception ex) { XsmartNet.Log("watch", "noti сезона: " + ex.Message); }
     }
@@ -631,13 +635,28 @@ public partial class QbitController
             // Ключ дедупа — по МАКСИМАЛЬНОЙ новой серии: повторный тик с тем же результатом
             // (например, после ошибки записи baseline) не создаст вторую строку.
             string epkey = "new-s" + fresh[0].seasonNo + "e" + fresh.Max(e => e.epNo);
+
+            string label = NotiRoute.Enabled
+                ? NotiRoute.Episodes(fresh[0].seasonNo, fresh.Select(e => e.epNo))
+                : (fresh.Count == 1
+                    ? $"Новая серия: сезон {fresh[0].seasonNo} · серия {fresh.Max(e => e.epNo)}"
+                    : $"Новых серий: {fresh.Count}") + (grab ? "" : " (только уведомляю)");
+            if (string.IsNullOrEmpty(label)) return;
+
+            // qdl 2.111: на АВТОКАЧКЕ «вышла» зрителю не показываем — он узнает о серии,
+            // когда её можно смотреть (XsmartNotifyDone). Дедуп переезжает в seen: строки
+            // в ленте больше нет, а ту, что была, съедала бы ретенция.
+            if (NotiRoute.Enabled && grab)
+            {
+                if (db.seen.Any(x => x.seriesKey == sk && x.epkey == epkey)) return;
+                db.seen.Add(new SeenModel { seriesKey = sk, epkey = epkey });
+                db.SaveChanges();
+                QdlEvents.Log(QdlEvents.CatWatch, title ?? sref, label + " — ставлю в очередь",
+                              XsmartNet.Hash(cat, id), sk, key: epkey);
+                return;
+            }
+
             if (db.noti.Any(x => x.seriesKey == sk && x.epkey == epkey)) return;
-
-            string label = fresh.Count == 1
-                ? $"Новая серия: сезон {fresh[0].seasonNo} · серия {fresh.Max(e => e.epNo)}"
-                : $"Новых серий: {fresh.Count}";
-            if (!grab) label += " (только уведомляю)";
-
             db.noti.Add(new NotiModel
             {
                 seriesKey = sk, seriesId = 0, hash = XsmartNet.Hash(cat, id),
@@ -649,6 +668,7 @@ public partial class QbitController
             });
             db.SaveChanges();
             PushNotiSignal(1);
+            QdlEvents.Log(QdlEvents.CatUser, title ?? sref, label, XsmartNet.Hash(cat, id), sk, key: epkey);
         }
         catch (Exception ex) { XsmartNet.Log("watch", "noti новых: " + ex.Message); }
     }
@@ -664,13 +684,25 @@ public partial class QbitController
             using var db = new SqlContext();
             string sk = "x" + sref;
             string epkey = "nospace-" + DateTime.UtcNow.ToString("yyyyMMdd");
+            string label = "Не качаю новые серии: " + why;
+
+            // qdl 2.111: нехватка места — забота владельца (его выбор), дедуп по дню в seen
+            if (NotiRoute.Enabled)
+            {
+                if (db.seen.Any(x => x.seriesKey == sk && x.epkey == epkey)) return;
+                db.seen.Add(new SeenModel { seriesKey = sk, epkey = epkey });
+                db.SaveChanges();
+                QdlEvents.Log(QdlEvents.CatSpace, title ?? sref, label, XsmartNet.Hash(cat, id), sk, key: epkey);
+                return;
+            }
+
             if (db.noti.Any(x => x.seriesKey == sk && x.epkey == epkey)) return;
             db.noti.Add(new NotiModel
             {
                 seriesKey = sk, seriesId = 0, hash = XsmartNet.Hash(cat, id),
                 title = title ?? sref, season = -1, episode = -1,
                 kind = "NOSPACE", epkey = epkey,
-                label = "Не качаю новые серии: " + why,
+                label = label,
                 created = DateTime.UtcNow, read = false
             });
             db.SaveChanges();

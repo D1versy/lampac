@@ -278,7 +278,11 @@ public partial class QbitController
                 budget -= rep.Value<int?>("scanned") ?? 0;
                 upgraded += rep.Value<int?>("queued") ?? 0;
             }
-            if (upgraded > 0) XsmartNet.Log("quality", "поставлено на перекачку — " + upgraded);
+            if (upgraded > 0)
+            {
+                XsmartNet.Log("quality", "поставлено на перекачку — " + upgraded);
+                QdlEvents.Log(QdlEvents.CatQuality, "XSMART", "поставлено на перекачку серий: " + upgraded);
+            }
         }
         catch (Exception ex) { XsmartNet.Log("quality", ex.Message); }
     }
@@ -399,7 +403,11 @@ public partial class QbitController
                 budget -= rep.Value<int?>("scanned") ?? 0;
                 upgraded += rep.Value<int?>("queued") ?? 0;
             }
-            if (upgraded > 0) JutNet.Log("quality", "поставлено на перекачку — " + upgraded);
+            if (upgraded > 0)
+            {
+                JutNet.Log("quality", "поставлено на перекачку — " + upgraded);
+                QdlEvents.Log(QdlEvents.CatQuality, "jut.su", "поставлено на перекачку серий: " + upgraded);
+            }
         }
         catch (Exception ex) { JutNet.Log("quality", ex.Message); }
     }
