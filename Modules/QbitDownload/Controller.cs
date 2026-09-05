@@ -4200,7 +4200,6 @@ public partial class QbitController : BaseController
                     label = wtext, created = DateTime.UtcNow, read = false
                 });
                 created++;
-                QdlEvents.Log(QdlEvents.CatUser, w.title ?? "", wtext, w.hash, kv.Key);
             }
 
             try

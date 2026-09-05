@@ -36,7 +36,10 @@ internal static class QdlEvents
     internal const string CatQuality  = "quality";    // перекачка ради 720/1080
     internal const string CatSpace    = "space";      // нет места
     internal const string CatDiag     = "diag";       // SearchMonitor
-    internal const string CatUser     = "user";       // зеркало того, что реально ушло зрителю
+    // Ярлык для строк, которые реально ушли зрителю. В журнал они НЕ пишутся: источник правды
+    // по ним — сама таблица noti, и админка подмешивает её при чтении (Admin.Events).
+    // Иначе одно и то же событие лежало бы в двух местах и ело бы кольцо вдвое быстрее.
+    internal const string CatUser     = "user";
 
     static string StorePath => Path.Combine(ModInit.conf?.cachePath ?? "/qdl-data", "events.json");
 

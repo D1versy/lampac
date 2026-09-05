@@ -32,7 +32,7 @@ function slice(from, to) {
 const AREAS = [
   { name: 'каталог jut.su', src: () => slice('function ComponentJutCatalog', 'function ComponentJutTitle'), url: 'bgFocus(psrc)' },
   { name: 'поиск jut.su', src: () => slice('function ComponentJutSearch', 'function healthRow'), url: 'bgFocus(psrc)' },
-  { name: '«Загрузки» и коллекции', src: () => slice('function ComponentDownloads', 'var NOTI_MONTHS'), url: 'bgFocus(posterUrl(' },
+  { name: '«Загрузки» и коллекции', src: () => slice('function ComponentDownloads', 'function dayTime'), url: 'bgFocus(posterUrl(' },
 ];
 
 test('bgFocus существует и гасит заглушку PX1', () => {

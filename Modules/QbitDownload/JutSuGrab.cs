@@ -1167,7 +1167,6 @@ public partial class QbitController
                     label = lab,
                     created = DateTime.UtcNow, read = false
                 });
-                QdlEvents.Log(QdlEvents.CatUser, it.titleRu ?? it.slug, lab, hash, sk, key: it.epkey);
             }
             db.SaveChanges();
             // Пуш только когда есть что показать: в агрегате промежуточные серии строк не создают,
@@ -1227,7 +1226,6 @@ public partial class QbitController
             });
             db.SaveChanges();
             PushNotiSignal(1);
-            QdlEvents.Log(QdlEvents.CatUser, it.titleRu ?? it.slug, lab, JutNet.Hash(it.slug), "j" + it.slug);
             Console.WriteLine("[QbitDownload] jut/grab: тайтл " + it.slug + " — скачано " + done + "/" + total);
         }
         catch (Exception ex) { JutNet.Log("grab", "noti тайтла: " + ex.Message); }

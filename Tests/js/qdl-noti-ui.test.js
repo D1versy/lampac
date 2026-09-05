@@ -61,6 +61,20 @@ test('высоту строки задаёт постер фиксированн
   assert.ok(rule.includes('flex:none'), 'постер сжимается — высота строки поедет');
 });
 
+test('строка занимает всю ширину — иначе .category-full ставит их в ряд', () => {
+  // 🔴 САМА причина жалобы «летит в кучу и зависит от длины названия»: контейнер ленты
+  // .category-full у Lampa — display:flex;flex-wrap:wrap (сделан под карточки). Строка без
+  // базиса была flex-элементом ПО СОДЕРЖИМОМУ, и ширина равнялась длине названия: замер на
+  // живом клиенте до фикса — 1000, 353, 542, 587, 554 px в одной ленте, по 2-3 строки в ряд.
+  const css = H.qdlSource();
+  for (const cls of ['.qdl-noti-row', '.qdl-noti-id']) {
+    const i = css.indexOf("'" + cls + "{");
+    assert.ok(i > 0, 'нет правила ' + cls);
+    const rule = css.slice(i, css.indexOf("}'", i));
+    assert.ok(/flex:1 1 100%/.test(rule), cls + ': нет flex:1 1 100% — встанет в ряд с соседями');
+  }
+});
+
 test('колонка текста не распирает строку', () => {
   const css = H.qdlSource();
   const i = css.indexOf("'.qdl-noti-txt{");
@@ -71,16 +85,18 @@ test('колонка текста не распирает строку', () => {
 
 // ─────────────────────────── 2. дни и время ───────────────────────────
 
-test('лента разбита на дни', () => {
+test('лента идёт подряд, без разделителей дней', () => {
+  // Решение владельца 05.09.2026: «Сегодня : Вчера — и даты не нужно показывать,
+  // просто шли подряд уведомления». Лента и так отсортирована от свежего к старому.
   const src = slice('this.build = function (items) {', 'this.append = function (n) {');
-  assert.ok(src.includes('dayLabel('), 'нет разделителей дней');
-  assert.ok(src.includes('qdl-noti-day'), 'нет класса заголовка дня');
+  assert.ok(!src.includes('qdl-noti-day'), 'разделители дней вернулись');
+  assert.ok(!H.qdlSource().includes('function dayLabel'), 'функция дня вернулась');
 });
 
-test('в строке — только часы:минуты, дату говорит заголовок дня', () => {
+test('в строке — только часы:минуты, без даты', () => {
   const src = slice('this.append = function (n) {', 'this.appendId = function () {');
   assert.ok(src.includes('dayTime('), 'время строки считается не dayTime');
-  assert.ok(!src.includes('dayLabel('), 'дата продублирована в каждой строке');
+  assert.ok(!/getFullYear|getMonth/.test(src), 'в строку просочилась дата');
 });
 
 test('непрочитанное снимается на сборке экрана', () => {

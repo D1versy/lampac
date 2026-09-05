@@ -439,7 +439,6 @@ public partial class QbitController
             });
             db.SaveChanges();
             PushNotiSignal(1);
-            QdlEvents.Log(QdlEvents.CatUser, title, label, hash, sk, key: epkey);
             Console.WriteLine("[QbitDownload] season watch: уведомление «" + (title ?? "") + "» — " + label);
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] season watch noti: " + ex.Message); }

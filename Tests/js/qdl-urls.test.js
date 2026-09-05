@@ -259,43 +259,12 @@ test('notiPoster: posterUrl главнее слага и хеша', () => {
   );
 });
 
-// ──────────────────── дата и время в ленте уведомлений ────────────────────
-// qdl 2.111: relTime («сегодня 09:05» / «3 дн назад») заменена парой dayLabel + dayTime —
-// дату говорит заголовок группы дня, строка несёт только часы:минуты. Так лента одинаковой
-// высоты и читается сверху вниз, а не вычитывается по каждой строке.
+// ──────────────────── время в ленте уведомлений ────────────────────
+// qdl 2.111: relTime («сегодня 09:05» / «3 дн назад») заменена на dayTime — в строке остались
+// только часы:минуты. Разделители дней («Сегодня»/«Вчера») были и сняты по решению владельца:
+// «даты не нужно показывать, просто шли подряд уведомления».
 
 function pad(n) { return (n < 10 ? '0' : '') + n; }
-
-test('dayLabel: сегодняшняя дата => «Сегодня»', () => {
-  const { qdl } = H.loadQdl({});
-  const d = new Date();
-  d.setHours(9, 5, 0, 0);
-  assert.strictEqual(qdl.dayLabel(d.toISOString()), 'Сегодня');
-});
-
-test('dayLabel: вчерашняя дата => «Вчера»', () => {
-  const { qdl } = H.loadQdl({});
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  d.setHours(14, 30, 0, 0);
-  assert.strictEqual(qdl.dayLabel(d.toISOString()), 'Вчера');
-});
-
-test('dayLabel: этот год => «3 сентября», без года', () => {
-  const { qdl } = H.loadQdl({});
-  const d = new Date();
-  d.setMonth(0, 5);                 // 5 января текущего года
-  d.setHours(12, 0, 0, 0);
-  if (d > new Date()) d.setFullYear(d.getFullYear() - 1);   // январь ещё не наступил
-  const out = qdl.dayLabel(d.toISOString());
-  const expected = d.getFullYear() === new Date().getFullYear() ? '5 января' : '5 января ' + d.getFullYear();
-  assert.strictEqual(out, expected);
-});
-
-test('dayLabel: прошлый год => год дописан', () => {
-  const { qdl } = H.loadQdl({});
-  assert.strictEqual(qdl.dayLabel('2020-01-05T00:00:00'), '5 января 2020');
-});
 
 test('dayTime: часы и минуты с ведущим нулём', () => {
   const { qdl } = H.loadQdl({});
@@ -304,11 +273,16 @@ test('dayTime: часы и минуты с ведущим нулём', () => {
   assert.strictEqual(qdl.dayTime(d.toISOString()), pad(d.getHours()) + ':' + pad(d.getMinutes()));
 });
 
+test('dayTime: в выводе нет даты', () => {
+  const { qdl } = H.loadQdl({});
+  const out = qdl.dayTime('2020-01-05T14:30:00');
+  assert.ok(/^\d{2}:\d{2}$/.test(out), 'ожидали только ЧЧ:ММ, получили ' + out);
+});
+
 test('битая дата не роняет ленту', () => {
   const { qdl } = H.loadQdl({});
-  // Оба обязаны вернуть строку, а не бросить: одна кривая запись не имеет права
+  // Обязана вернуть строку, а не бросить: одна кривая запись не имеет права
   // оставить экран уведомлений пустым.
-  assert.strictEqual(typeof qdl.dayLabel('not-a-date'), 'string');
   assert.strictEqual(typeof qdl.dayTime('not-a-date'), 'string');
 });
 

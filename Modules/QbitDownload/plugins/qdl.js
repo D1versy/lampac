@@ -291,7 +291,14 @@
             // рыцарь…») переносилось на 2-3 строки, высота строки ехала, и лента переставала
             // читаться — жалоба владельца «всё летит в кучу и зависит от длины названия».
             // Высоту строки задаёт постер, оба текста обрезаются многоточием в одну строку.
-            '.qdl-noti-row{display:flex;align-items:center;gap:1em;padding:.9em 1.1em;margin:.35em .6em;' +
+            // 🔴 flex:1 1 100% — САМА причина жалобы. Лента живёт в контейнере .category-full,
+            // а он у Lampa display:flex;flex-wrap:wrap (сделан под карточки). Строка без базиса
+            // была flex-элементом ПО СОДЕРЖИМОМУ: ширина = длина названия, и строки паковались
+            // по 2-3 в ряд рваной мозаикой. Замер до фикса: 1000, 353, 542, 587, 554 px в одной
+            // ленте. Базис 100% отправляет каждую строку на свою линию, shrink возвращает её
+            // в ширину контейнера вместе с полями.
+            '.qdl-noti-row{display:flex;flex:1 1 100%;min-width:0;align-items:center;gap:1em;' +
+                'padding:.9em 1.1em;margin:.35em .6em;box-sizing:border-box;' +
                 'background:rgba(255,255,255,.05);border-radius:.7em}' +
             '.qdl-noti-row.unread{background:rgba(74,125,255,.14)}' +
             '.qdl-noti-dot{flex:none;width:.55em;height:.55em;border-radius:50%;background:transparent}' +
@@ -302,10 +309,11 @@
             '.qdl-noti-sub{opacity:.85;font-size:1.15em;line-height:1.3;margin-top:.3em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
             '.qdl-noti-ico{margin-right:.45em}' +
             '.qdl-noti-time{flex:none;opacity:.5;font-size:1.05em;white-space:nowrap;align-self:flex-start;margin-top:.35em}' +
-            '.qdl-noti-day{padding:1.1em 1.4em .35em;font-size:1.05em;opacity:.45;letter-spacing:.05em;text-transform:uppercase}' +
-            '.qdl-noti-id{padding:1.1em 1.4em;margin:1.2em .6em .4em;background:rgba(255,255,255,.04);' +
+            // строке с айди тот же базис: иначе она встаёт В РЯД со строками ленты
+            '.qdl-noti-id{flex:1 1 100%;min-width:0;padding:1.1em 1.4em;margin:1.2em .6em .4em;' +
+                'box-sizing:border-box;background:rgba(255,255,255,.04);' +
                 'border-radius:.7em;opacity:.75;font-size:1.15em}' +
-            '.qdl-noti-empty{padding:2em 1.4em;font-size:1.3em;opacity:.7;line-height:1.5}' +
+            '.qdl-noti-empty{flex:1 1 100%;padding:2em 1.4em;font-size:1.3em;opacity:.7;line-height:1.5}' +
             '.qdl-noti-head{position:relative}' +
             '.qdl-noti-head-badge{position:absolute;top:-0.1em;right:-0.1em;min-width:1.5em;height:1.5em;padding:0 0.35em;box-sizing:border-box;background:#d33;color:#fff;border:0.12em solid #fff;border-radius:1em;font-size:0.62em;line-height:1.26em;font-weight:700;text-align:center}' +
             // Автопилот jut.su. Выключен — приглушённый контур; включён — зелёный, как «Смотреть».
@@ -3093,23 +3101,9 @@
     }
 
     // ───────── Уведомления о скачанных сериях (тост + центр уведомлений) ─────────
-    var NOTI_MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
-                       'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
-
-    // Заголовок группы дня. Лента идёт от свежего к старому, и без разделителей 50 строк
-    // читаются как сплошное полотно: непонятно, это всё сегодня или за месяц.
-    function dayLabel(iso) {
-        try {
-            var d = new Date(iso), now = new Date();
-            if (d.toDateString() === now.toDateString()) return 'Сегодня';
-            var y = new Date(now); y.setDate(now.getDate() - 1);
-            if (d.toDateString() === y.toDateString()) return 'Вчера';
-            var t = d.getDate() + ' ' + NOTI_MONTHS[d.getMonth()];
-            return d.getFullYear() === now.getFullYear() ? t : (t + ' ' + d.getFullYear());
-        } catch (e) { return ''; }
-    }
-
-    // Время внутри группы — только часы:минуты: дату уже сказал заголовок дня.
+    // Время в строке — только часы:минуты. Ни дат, ни разделителей «Сегодня»/«Вчера»
+    // (решение владельца 05.09.2026: «даты не нужно показывать, просто шли подряд
+    // уведомления»). Лента и так идёт от свежего к старому.
     function dayTime(iso) {
         try {
             var d = new Date(iso), pad = function (n) { return (n < 10 ? '0' : '') + n; };
@@ -3342,14 +3336,7 @@
             if (!items.length)
                 body.append($('<div class="qdl-noti-empty">Пока нет уведомлений. «🔔 Следить» в карточке тайтла jut.su — буду сообщать о новых сериях; то же в «Загрузках» — буду ещё и качать их.</div>'));
 
-            // Разделители дней. Лента приходит отсортированной сервером (по убыванию id),
-            // поэтому достаточно сравнивать с предыдущей строкой.
-            var day = null;
-            items.forEach(function (n) {
-                var d = dayLabel(n.created);
-                if (d && d !== day) { day = d; body.append($('<div class="qdl-noti-day"></div>').text(d)); }
-                comp.append(n);
-            });
+            items.forEach(function (n) { comp.append(n); });
             comp.appendId();
 
             // открыли центр → помечаем всё прочитанным, бейдж гаснет

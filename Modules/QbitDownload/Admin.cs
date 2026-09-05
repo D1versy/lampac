@@ -5,6 +5,8 @@ using Shared;
 using Shared.Attributes;
 using System;
 using System.IO;
+using System.Linq;
+using System.Collections.Generic;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -395,24 +397,110 @@ public class D1VAdminController : BaseController
     // (EventLog.cs, кольцо в <cachePath>/events.json). Предложения сменить раздачу, которые
     // раньше выскакивали зрителю диалогом, тоже здесь — строкой с кнопкой «Переключить».
 
-    /// <summary>Сколько записей журнала отдаём разом. Фильтрация — на клиенте, как на «Доступах».</summary>
-    const int AdminEventsCap = 400;
+    /// <summary>
+    /// Сколько записей отдаём владельцу разом. Зрителю лента режется отдельно и короче
+    /// (notiFeedLimit, 50) — решение владельца: «в админке показывай последние 100
+    /// уведомлений, а клиентам 50». Фильтрация — на клиенте, как на «Доступах».
+    /// </summary>
+    const int AdminEventsCap = 100;
 
+    /// <summary>
+    /// ВСЕ уведомления одним списком: журнал служебных событий (events.json) + то, что реально
+    /// видели зрители (таблица noti).
+    ///
+    /// 🔴 Почему слияние, а не только журнал. Журнал копится с момента выката, а лента зрителей
+    /// существует давно — сразу после деплоя вкладка была пуста, и владелец видел только
+    /// предложения переключить раздачу. Строки зрителя в журнал НЕ дублируются: источник правды
+    /// по ним — сама noti, иначе одно событие лежало бы в двух местах и вдвое быстрее вытесняло
+    /// кольцо.
+    /// </summary>
     [HttpGet]
     [Route("/admin/d1v/api/events")]
     public ActionResult Events(int limit = AdminEventsCap)
     {
         SetHeadersNoCache();
+        int cap = Math.Clamp(limit, 1, AdminEventsCap);
 
-        var (items, total) = QdlEvents.Read(Math.Clamp(limit, 1, AdminEventsCap));
+        var (jrn, jrnTotal) = QdlEvents.Read(cap);
+        var rows = new List<(DateTime at, JObject o)>();
+
+        foreach (var t in jrn.OfType<JObject>())
+            rows.Add((ParseAt(t.Value<string>("at")), t));
+
+        int notiTotal = 0;
+        try
+        {
+            using var db = new QbitDownload.SqlContext();
+            notiTotal = db.noti.Count();
+            foreach (var n in db.noti.OrderByDescending(x => x.Id).Take(cap).ToList())
+            {
+                var o = new JObject
+                {
+                    // SQLite теряет Kind — как и в /qdl/notifications, проставляем UTC явно
+                    ["at"] = DateTime.SpecifyKind(n.created, DateTimeKind.Utc).ToString("o"),
+                    ["cat"] = NotiCat(n.kind),
+                    ["title"] = n.title ?? "",
+                    ["text"] = n.label ?? ""
+                };
+                if (!string.IsNullOrEmpty(n.hash)) o["hash"] = n.hash;
+                if (!string.IsNullOrEmpty(n.kind)) o["kind"] = n.kind;
+                o["read"] = n.read;
+                rows.Add((DateTime.SpecifyKind(n.created, DateTimeKind.Utc), o));
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] admin events noti: " + ex.Message); }
+
+        var items = new JArray();
+        foreach (var r in rows.OrderByDescending(x => x.at).Take(cap)) items.Add(r.o);
+
         var res = new JObject
         {
             ["enabled"] = QdlEvents.Enabled,
             ["replica"] = QbitController.ReplicaMode,
             // Отдаём не больше кэпа — но ВСЕГДА говорим, сколько было всего: молча резать нельзя
-            ["total"] = total,
+            ["total"] = jrnTotal + notiTotal,
             ["shown"] = items.Count,
-            ["items"] = items,
+            ["cap"] = cap,
+            ["items"] = items
+        };
+        return Content(res.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
+    }
+
+    /// <summary>
+    /// Категория для строки ленты. «user» — только то, что зритель реально видит СЕЙЧАС; строки
+    /// служебных видов в таблице ещё лежат (их писал прежний код, ретенция съест не скоро), и
+    /// валить их в одну кучу с «вышла новая серия» значило бы соврать в фильтре.
+    /// </summary>
+    static string NotiCat(string kind)
+    {
+        if (NotiRoute.UserKind(kind)) return QdlEvents.CatUser;
+        switch ((kind ?? "").ToUpperInvariant())
+        {
+            case "START": return QdlEvents.CatDownload;
+            case "SWITCH": case "INFO": return QdlEvents.CatRelease;
+            case "NOSPACE": return QdlEvents.CatSpace;
+            default: return QdlEvents.CatDiag;
+        }
+    }
+
+    static DateTime ParseAt(string iso)
+        => DateTime.TryParse(iso, null, System.Globalization.DateTimeStyles.RoundtripKind, out var d)
+            ? d.ToUniversalTime() : DateTime.MinValue;
+
+    /// <summary>
+    /// Вкладка «Решения»: то, что ждёт ответа владельца. Сейчас это только предложения сменить
+    /// раздачу на более полную — раньше они выскакивали ЗРИТЕЛЮ диалогом посреди ленты.
+    /// Отдельно от журнала намеренно: журнал читают, решения — принимают, и терять их в
+    /// стострочной ленте нельзя.
+    /// </summary>
+    [HttpGet]
+    [Route("/admin/d1v/api/decisions")]
+    public ActionResult Decisions()
+    {
+        SetHeadersNoCache();
+        var res = new JObject
+        {
+            ["replica"] = QbitController.ReplicaMode,
             ["pending"] = QbitController.AdminPendingSwitches()
         };
         return Content(res.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");

@@ -1632,7 +1632,6 @@ public partial class QbitController
                     label = lab,
                     created = DateTime.UtcNow, read = false
                 });
-                QdlEvents.Log(QdlEvents.CatUser, it.titleRu ?? it.sref, lab, hash, sk, key: it.ep.epkey);
             }
             db.SaveChanges();
             if (!agg) XsmartPushDone(it.sref);
@@ -1691,8 +1690,6 @@ public partial class QbitController
             });
             db.SaveChanges();
             PushNotiSignal(1);
-            QdlEvents.Log(QdlEvents.CatUser, it.titleRu ?? it.sref, lab,
-                          XsmartNet.Hash(it.cat, it.id), XsmartSeriesKey(it.sref));
             Console.WriteLine("[QbitDownload] xsmart/grab: тайтл " + it.sref + " — скачано " + done + "/" + total);
         }
         catch (Exception ex) { XsmartNet.Log("grab", "noti тайтла: " + ex.Message); }

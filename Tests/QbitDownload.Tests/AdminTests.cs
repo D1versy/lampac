@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
 using QbitDownload;
@@ -423,8 +424,71 @@ public class AdminTests
         Assert.Equal(5, o.Value<int>("total"));
         Assert.Equal(5, o.Value<int>("shown"));
         Assert.Equal(5, (o["items"] as JArray).Count);
-        Assert.NotNull(o["pending"]);
     }
+
+    [Fact]
+    public void Events_подмешивают_то_что_видели_зрители()
+    {
+        // 🔴 Журнал копится с момента выката, а лента зрителей существует давно: сразу после
+        // деплоя вкладка была пуста и владелец видел только предложения переключить раздачу.
+        // «Все-все уведомления» = журнал + таблица noti одним списком.
+        TestEnv.FreshCache();
+        QdlEvents.Log(QdlEvents.CatHunt, "Тайтл", "донор взят");
+        using (var db = new QbitDownload.SqlContext())
+        {
+            db.Database.EnsureCreated();
+            db.noti.Add(SeenAndNoti());
+            db.SaveChanges();
+        }
+
+        var o = JObject.Parse((Controller().Events() as ContentResult).Content);
+        var items = o["items"] as JArray;
+
+        Assert.Equal(2, o.Value<int>("total"));
+        Assert.Contains(items.OfType<JObject>(), x => x.Value<string>("cat") == QdlEvents.CatHunt);
+        var user = Assert.Single(items.OfType<JObject>().Where(x => x.Value<string>("cat") == QdlEvents.CatUser));
+        Assert.Equal("Вышла новая серия 10", user.Value<string>("text"));
+        Assert.Equal("WAVE", user.Value<string>("kind"));
+    }
+
+    [Fact]
+    public void Старые_служебные_строки_ленты_не_выдаются_за_увиденное_зрителем()
+    {
+        // Строки прежних видов ещё лежат в noti (ретенция съест не скоро), и валить их в одну
+        // кучу с «вышла новая серия» значило бы соврать в фильтре вкладки.
+        TestEnv.FreshCache();
+        using (var db = new QbitDownload.SqlContext())
+        {
+            db.Database.EnsureCreated();
+            db.noti.Add(Row("START", "раздача обновилась", "start:a"));
+            db.noti.Add(Row("SWITCH", "найдена более полная раздача", "switch:a"));
+            db.noti.Add(Row("NOSPACE", "нет места", "nospace-1"));
+            db.noti.Add(Row("WAVE", "Вышла новая серия 10", "wave-s1e10"));
+            db.SaveChanges();
+        }
+
+        var items = (JObject.Parse((Controller().Events() as ContentResult).Content)["items"] as JArray)
+                    .OfType<JObject>().ToList();
+
+        Assert.Single(items.Where(x => x.Value<string>("cat") == QdlEvents.CatUser));
+        Assert.Single(items.Where(x => x.Value<string>("cat") == QdlEvents.CatDownload));
+        Assert.Equal(1, items.Count(x => x.Value<string>("cat") == QdlEvents.CatRelease));
+        Assert.Single(items.Where(x => x.Value<string>("cat") == QdlEvents.CatSpace));
+    }
+
+    static NotiModel Row(string kind, string label, string epkey) => new NotiModel
+    {
+        seriesKey = "t1", seriesId = 1, hash = new string('b', 40), title = "Сериал",
+        season = -1, episode = -1, kind = kind, epkey = epkey,
+        label = label, created = DateTime.UtcNow, read = false
+    };
+
+    static NotiModel SeenAndNoti() => new NotiModel
+    {
+        seriesKey = "t1", seriesId = 1, hash = new string('b', 40), title = "Сериал",
+        season = 1, episode = 10, kind = "WAVE", epkey = "wave-s1e10",
+        label = "Вышла новая серия 10", created = DateTime.UtcNow, read = false
+    };
 
     [Fact]
     public void Events_режут_выдачу_но_total_говорят_полный()
@@ -436,6 +500,32 @@ public class AdminTests
         var o = JObject.Parse((Controller().Events(4) as ContentResult).Content);
         Assert.Equal(12, o.Value<int>("total"));
         Assert.Equal(4, o.Value<int>("shown"));
+    }
+
+    [Fact]
+    public void Владельцу_сто_записей_зрителю_пятьдесят()
+    {
+        // Решение владельца: «в админке показывай последние 100 уведомлений, а клиентам 50»
+        TestEnv.FreshCache();
+        for (int i = 0; i < 150; i++) QdlEvents.Log(QdlEvents.CatDiag, "t", "строка " + i);
+
+        var o = JObject.Parse((Controller().Events(1000) as ContentResult).Content);
+        Assert.Equal(100, o.Value<int>("shown"));          // запрос больше кэпа кэпом и режется
+        Assert.Equal(100, o.Value<int>("cap"));
+        Assert.Equal(50, ModInit.conf.notiFeedLimit);      // а лента зрителя — вдвое короче
+    }
+
+    [Fact]
+    public void Решения_живут_на_своей_ручке()
+    {
+        // Отдельно от журнала намеренно: журнал читают, решения принимают — и терять их
+        // в стострочной ленте нельзя.
+        TestEnv.FreshCache();
+        var o = JObject.Parse((Controller().Decisions() as ContentResult).Content);
+
+        Assert.NotNull(o["pending"]);
+        Assert.IsType<JArray>(o["pending"]);
+        Assert.False(o.Value<bool>("replica"));
     }
 
     [Fact]

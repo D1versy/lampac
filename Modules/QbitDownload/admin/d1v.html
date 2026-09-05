@@ -88,6 +88,10 @@
     .gtag{display:inline-block;padding:2px 8px;border-radius:6px;background:rgba(74,125,255,.18);color:#9ec1ff;font-size:12px}
 
     /* уведомления — журнал событий */
+    /* счётчик ждущих решений прямо на вкладке: их легко пропустить, если не видно, что они есть */
+    .dn{display:none;margin-left:7px;padding:1px 7px;border-radius:20px;background:#d9606a;color:#fff;
+        font-size:11px;font-weight:700;vertical-align:middle}
+    .dn.on{display:inline-block}
     .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
     .chip{padding:5px 12px;border:1px solid #2a3040;border-radius:20px;background:#13161d;color:#8b93a7;
           font-size:13px;cursor:pointer;white-space:nowrap}
@@ -123,6 +127,7 @@
     <button class="tab on" data-pane="access">Доступы</button>
     <button class="tab" data-pane="groups">Группы</button>
     <button class="tab" data-pane="health">Хелс-чеки</button>
+    <button class="tab" data-pane="decisions">Решения<span class="dn" id="dbadge"></span></button>
     <button class="tab" data-pane="events">Уведомления</button>
   </div>
 
@@ -217,19 +222,34 @@
     <div class="scroll" id="hlist"><div class="empty">Загружаю…</div></div>
   </section>
 
+  <!-- ───────── решения ───────── -->
+  <section class="pane" id="pane-decisions">
+    <div class="sub">
+      То, что ждёт твоего ответа. Раньше эти вопросы выскакивали <b>зрителю</b> диалогом посреди
+      ленты — теперь решаешь только ты, а сервер ведёт себя как прежде и без ответа ничего не трогает.
+    </div>
+    <div class="warn" id="dreplica" style="display:none">
+      Это сервер-реплика: слежения за раздачами тут нет, решать нечего.
+    </div>
+    <div class="bar">
+      <span class="muted" id="dcnt"></span>
+      <button class="mini" id="dreload">Обновить</button>
+    </div>
+    <div id="dlist"><div class="empty">Загружаю…</div></div>
+  </section>
+
   <!-- ───────── уведомления ───────── -->
   <section class="pane" id="pane-events">
     <div class="sub">
-      Зритель видит в своей ленте только <b>«вышла новая серия»</b>, <b>«вышел сезон»</b> и итог
-      большой пачки. Вся механика — постановка в очередь, смена и перекачка раздач, охота за
-      сериями, апгрейд качества, диагностика поиска — приезжает сюда и никому больше не показывается.
-      Журнал живёт на диске сервера кольцом и переживает перезапуск контейнера.
+      <b>Все</b> уведомления сервера одним списком: и то, что ушло зрителям («вышла новая серия»),
+      и вся механика, которую они больше не видят — постановка в очередь, смена и перекачка раздач,
+      охота за сериями, апгрейд качества, диагностика поиска. Показываются последние
+      <b>100</b> записей (зрителю в его ленте — 50).
     </div>
     <div class="warn" id="ekill" style="display:none">
-      Журнал выключен ключом <code>adminEvents:false</code> в init.conf — новые события не пишутся.
+      Журнал выключен ключом <code>adminEvents:false</code> в init.conf — служебные события не пишутся,
+      останутся только строки, ушедшие зрителям.
     </div>
-
-    <div id="epend"></div>
 
     <div class="bar">
       <div class="find">
@@ -261,6 +281,8 @@
   var healthLoaded = false;
   var groupsLoaded = false;
   var gdata = { groups: [], devices: [] };
+  var decisionsLoaded = false;
+  var ddata = { pending: [] };
   var eventsLoaded = false;
   var edata = { items: [], pending: [], total: 0, shown: 0 };
   var ecat = '';                 // выбранная категория; '' = все
@@ -323,6 +345,7 @@
       // хелс-чеки тянем лениво: пробы живые, дёргать их на каждом открытии админки незачем
       if (t.dataset.pane === 'health' && !healthLoaded) loadHealth();
       if (t.dataset.pane === 'groups' && !groupsLoaded) loadGroups();
+      if (t.dataset.pane === 'decisions' && !decisionsLoaded) loadDecisions();
       if (t.dataset.pane === 'events' && !eventsLoaded) loadEvents();
       if (t.dataset.pane === 'access') qInput.focus();
     });
@@ -695,12 +718,41 @@
     });
   }
 
+  // ───────── решения ─────────
   // Предложения сменить раздачу. Раньше этот вопрос выскакивал ЗРИТЕЛЮ диалогом в ленте —
   // теперь решает владелец здесь, а поведение сервера (watchAutoSwitch) не менялось.
+
+  function loadDecisions() {
+    decisionsLoaded = true;
+    document.getElementById('dlist').innerHTML = '<div class="empty">Загружаю…</div>';
+    getJson('/admin/d1v/api/decisions').then(function (res) {
+      if (!res.ok) throw new Error('http');
+      ddata = res.j;
+      document.getElementById('dreplica').style.display = ddata.replica ? '' : 'none';
+      renderPending();
+    }).catch(function () {
+      document.getElementById('dlist').innerHTML = '<div class="empty">Не удалось получить список</div>';
+    });
+  }
+
   function renderPending() {
-    var box = document.getElementById('epend');
-    var list = edata.pending || [];
-    if (!list.length) { box.innerHTML = ''; return; }
+    var box = document.getElementById('dlist');
+    var list = ddata.pending || [];
+
+    // Бейдж на самой вкладке: решения легко пропустить, если не видно, что они есть.
+    var badge = document.getElementById('dbadge');
+    badge.textContent = list.length;
+    badge.classList.toggle('on', list.length > 0);
+
+    document.getElementById('dcnt').textContent = list.length
+      ? ('ждут ответа: ' + list.length)
+      : 'всё решено';
+
+    if (!list.length) {
+      box.innerHTML = '<div class="empty">Ничего не ждёт ответа.<br>Здесь появится предложение, '
+        + 'когда сервер найдёт более полную раздачу для отслеживаемого сериала.</div>';
+      return;
+    }
 
     box.innerHTML = '';
     list.forEach(function (p) {
@@ -722,13 +774,15 @@
         if (!confirm('Переключить «' + (p.title || '') + '» на более полную раздачу? Сезон будет перекачан заново.')) return;
         post2('/admin/d1v/api/events/switch', { hash: p.hash, accept: true }).then(function (r) {
           toast(r.ok && r.j.switched ? 'Переключено' : (r.j.error || 'Не вышло'));
-          loadEvents();
+          loadDecisions();
+          eventsLoaded = false;          // решение попадёт в журнал — перечитаем при заходе
         });
       });
       card.querySelector('.mini').addEventListener('click', function () {
         post2('/admin/d1v/api/events/switch', { hash: p.hash, accept: false }).then(function (r) {
           toast(r.ok ? 'Предложение снято' : (r.j.error || 'Не вышло'));
-          loadEvents();
+          loadDecisions();
+          eventsLoaded = false;
         });
       });
       box.appendChild(card);
@@ -742,8 +796,6 @@
   }
 
   function renderEvents() {
-    renderPending();
-
     var items = edata.items || [];
     var q = (eqInput.value || '').trim().toLowerCase();
     eqClr.classList.toggle('on', q.length > 0);
@@ -763,8 +815,9 @@
     });
 
     var shown = items.filter(function (e) { return eventMatches(e, q); });
+    // Честный счётчик: сколько видно после фильтра, сколько привезли и сколько есть всего
     document.getElementById('ecnt').textContent = (edata.total > edata.shown)
-      ? ('показано ' + shown.length + ' · в журнале последние ' + edata.shown + ' из ' + edata.total)
+      ? ('показано ' + shown.length + ' · привезены последние ' + edata.shown + ' из ' + edata.total)
       : ('показано ' + shown.length + ' из ' + items.length);
 
     var box = document.getElementById('elist');
@@ -791,6 +844,7 @@
   eqInput.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && eqInput.value) { eqInput.value = ''; renderEvents(); }
   });
+  document.getElementById('dreload').addEventListener('click', loadDecisions);
   document.getElementById('ereload').addEventListener('click', loadEvents);
   document.getElementById('eclear').addEventListener('click', function () {
     if (!confirm('Очистить журнал событий? Лента зрителей не изменится.')) return;
@@ -802,6 +856,7 @@
 
 
   load();
+  loadDecisions();               // бейдж «сколько ждёт ответа» рисуем сразу, не дожидаясь захода
   setInterval(load, 30000);   // чтобы новое устройство всплывало само, пока владелец ждёт с телефоном в руках
 })();
 </script>

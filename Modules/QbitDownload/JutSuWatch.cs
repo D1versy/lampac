@@ -769,7 +769,6 @@ public partial class QbitController
             kind = "NEW", epkey = key, label = text,
             created = DateTime.UtcNow, read = false
         });
-        QdlEvents.Log(QdlEvents.CatUser, title ?? slug, text, JutNet.Hash(slug), sk, key: key);
         return true;
     }
 
@@ -860,7 +859,6 @@ public partial class QbitController
             });
             db.SaveChanges();
             PushNotiSignal(1);
-            QdlEvents.Log(QdlEvents.CatUser, title ?? slug, NotiRoute.Season(season), JutNet.Hash(slug), sk, key: key);
             Console.WriteLine("[QbitDownload] jut/watch: " + slug + " → переключился на сезон " + season);
         }
         catch { }

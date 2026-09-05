@@ -614,8 +614,6 @@ public partial class QbitController
             });
             db.SaveChanges();
             PushNotiSignal(1);
-            QdlEvents.Log(QdlEvents.CatUser, title ?? sref, NotiRoute.Season(seasonNo),
-                          XsmartNet.Hash(cat, id), sk, key: epkey);
         }
         catch (Exception ex) { XsmartNet.Log("watch", "noti сезона: " + ex.Message); }
     }
@@ -668,7 +666,6 @@ public partial class QbitController
             });
             db.SaveChanges();
             PushNotiSignal(1);
-            QdlEvents.Log(QdlEvents.CatUser, title ?? sref, label, XsmartNet.Hash(cat, id), sk, key: epkey);
         }
         catch (Exception ex) { XsmartNet.Log("watch", "noti новых: " + ex.Message); }
     }
