@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.107';
+window.qdl_fork_version = '2.108';
 
    // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
@@ -109,7 +109,10 @@ lampainit_invc.appload = function appload() {
         + '.menu__item[data-action="mytorrents"],.menu__item[data-action="myperson"]{display:none!important}'
         // qdl 2.87: предупреждение «Взрослый контент» (18+) на карточке — вырезано патчами
         // adult-block/adult-flag; здесь фолбэк на случай, что якоря уедут при обновлении вендора
-        + '.warning-box--full-adult,.full-start-new__poster .card__type{display:none!important}';
+        + '.warning-box--full-adult,.full-start-new__poster .card__type{display:none!important}'
+        // qdl 2.108: гайд «Удерживайте кнопку (ОК) для вызова меню» — вырезан патчем remote-helper;
+        // здесь фолбэк на случай, что якорь уедет при обновлении вендора
+        + '.remote-helper{display:none!important}';
       st.textContent = css;
       document.head.appendChild(st);
 

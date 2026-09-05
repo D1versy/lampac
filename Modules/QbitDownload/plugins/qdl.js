@@ -617,7 +617,10 @@
     // Действие, которое умеет только КОНКРЕТНАЯ раздача. На обычной карточке выполняется
     // сразу, на склеенной — сперва спрашиваем сезон. allTitle (если задан) добавляет пункт
     // «ко всем частям»: run(null, parts).
-    function withPart(t, title, run, allTitle) {
+    // back — контроллер, которому вернуть управление по «Отмена»/Back (qdl 2.108: с карточки
+    // каталога это 'items_line', см. onCardMenu); по умолчанию 'content', как было.
+    function withPart(t, title, run, allTitle, back) {
+        back = back || 'content';
         var ps = cardParts(t);
         if (!ps) { run(t, null); return; }
         var items = ps.map(function (p) {
@@ -631,9 +634,9 @@
             onSelect: function (b) {
                 if (b.all) run(null, ps);
                 else if (b.part) run(partItem(t, b.part), null);
-                else Lampa.Controller.toggle('content');
+                else Lampa.Controller.toggle(back);
             },
-            onBack: function () { Lampa.Controller.toggle('content'); }
+            onBack: function () { Lampa.Controller.toggle(back); }
         });
     }
 
@@ -3459,7 +3462,8 @@
         }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
     }
 
-    function addToCollection(t) {
+    function addToCollection(t, back) {
+        back = back || 'content';
         req(API + '/qdl/collections', function (collections) {
             req(API + '/qdl/list', function (list) {
                 var items = buildCollectionPicker(t, collections || [], list || []);
@@ -3479,7 +3483,7 @@
                                 Lampa.Activity.replace();
                             });
                     },
-                    onBack: function () { Lampa.Controller.toggle('content'); }
+                    onBack: function () { Lampa.Controller.toggle(back); }
                 });
             }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
         }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
@@ -3570,7 +3574,8 @@
 
     // Запуск транскода. Сериал под слежением — выбор режима: оверлей (торрент и слежение
     // живут, новые серии транскодятся автоматически) или финализация (как фильм).
-    function startTranscode(t) {
+    function startTranscode(t, back) {
+        back = back || 'content';
         var title = (t.meta && t.meta.title) || t.name;
         var run = function (mode) {
             req(API + '/qdl/transcode?hash=' + t.hash + (mode ? '&mode=' + mode : ''), function (r) {
@@ -3592,8 +3597,8 @@
                     { title: '✔ Завершить: торрент удалится, слежение снимется', subtitle: 'новые серии перестанут приходить', mode: 'finalize' },
                     { title: 'Отмена' }
                 ],
-                onSelect: function (a) { if (a.mode) run(a.mode); else Lampa.Controller.toggle('content'); },
-                onBack: function () { Lampa.Controller.toggle('content'); }
+                onSelect: function (a) { if (a.mode) run(a.mode); else Lampa.Controller.toggle(back); },
+                onBack: function () { Lampa.Controller.toggle(back); }
             });
         }, function () { run(null); });
     }
@@ -3629,7 +3634,12 @@
         })();
     }
 
+    // ctx: { collection } — под-грид коллекции; { back, catalog } — открыто долгим нажатием с
+    // карточки КАТАЛОГА (qdl 2.108, onCardMenu): back — контроллер, которому вернуть управление
+    // ('items_line' на главной/в поиске, а не 'content'), catalog — экран не наш, поэтому
+    // Activity.replace() после удаления не делаем.
     function quickMenu(t, ctx) {
+        var back = (ctx && ctx.back) || 'content';
         var items = [
             { title: 'Открыть карточку', act: 'page' },
             { title: '▶ Смотреть (оффлайн)', act: 'play' },
@@ -3702,10 +3712,11 @@
                                 title: 'Озвучка',
                                 items: opts.map(function (o) { return { title: o.label, id: o.id }; }),
                                 onSelect: function (s) { setAudioPref(it.hash, s.id); Lampa.Noty.show('Озвучка: ' + s.title); },
-                                onBack: function () { Lampa.Controller.toggle('content'); }
+                                onBeforeClose: function () { Lampa.Controller.toggle(back); return true; },
+                                onBack: function () { Lampa.Controller.toggle(back); }
                             });
                         });
-                    });
+                    }, null, back);
                 }
                 else if (b.act === 'jutwatch') {
                     // «Загрузки» — ЕДИНСТВЕННАЯ точка, где включается автоскачивание.
@@ -3729,9 +3740,9 @@
                         ],
                         onSelect: function (a) {
                             if (a.want) jutWatchSet(jslug, 'notify', a.want, applyJm);
-                            else Lampa.Controller.toggle('content');
+                            else Lampa.Controller.toggle(back);
                         },
-                        onBack: function () { Lampa.Controller.toggle('content'); }
+                        onBack: function () { Lampa.Controller.toggle(back); }
                     });
                 }
                 else if (b.act === 'xswatch') {
@@ -3756,15 +3767,15 @@
                         ],
                         onSelect: function (a) {
                             if (a.want) xsWatchSet(xc, xi, 'notify', a.want, applyXm);
-                            else Lampa.Controller.toggle('content');
+                            else Lampa.Controller.toggle(back);
                         },
-                        onBack: function () { Lampa.Controller.toggle('content'); }
+                        onBack: function () { Lampa.Controller.toggle(back); }
                     });
                 }
                 else if (b.act === 'watch') {
                     // слежение живёт на КОНКРЕТНОЙ раздаче (по её infohash), поэтому на склеенной
                     // карточке спрашиваем сезон: новые серии приходят в последний
-                    withPart(t, 'Следить за новыми сериями', function (it) { watchToggle(it); });
+                    withPart(t, 'Следить за новыми сериями', function (it) { watchToggle(it); }, null, back);
                 }
                 else if (b.act === 'seasonwait') {
                     // 🔴 БЕЗ withPart: маркер живёт на сериале, а не на раздаче. Спрашивать
@@ -3772,8 +3783,8 @@
                     // а ждём мы тот, которого ещё нет.
                     seasonWaitToggle(t);
                 }
-                else if (b.act === 'mp4') withPart(t, 'Транскодировать — какой сезон?', function (it) { startTranscode(it); });
-                else if (b.act === 'addcol') addToCollection(t);
+                else if (b.act === 'mp4') withPart(t, 'Транскодировать — какой сезон?', function (it) { startTranscode(it, back); }, null, back);
+                else if (b.act === 'addcol') addToCollection(t, back);
                 else if (b.act === 'uncol') {
                     colPost('/qdl/collections/remove', { id: ctx.collection.id, hash: t.hash }, function (r) {
                         if (r.deleted) { Lampa.Noty.show('Коллекция удалена — это был последний фильм'); Lampa.Activity.backward(); }
@@ -3794,20 +3805,131 @@
                             title: 'Удалить ' + what + ' с файлами?',
                             items: [{ title: 'Удалить', ok: true }, { title: 'Отмена' }],
                             onSelect: function (a) {
-                                if (!a.ok) { Lampa.Controller.toggle('content'); return; }
+                                if (!a.ok) { Lampa.Controller.toggle(back); return; }
                                 deleteHashes(hashes, function (ok) {
                                     // 2.67: в ошибку приходит и 403 «нет права управления» (протухший
                                     // клиент или отозванный грант) — без колбэка экран молча ничего не делал
                                     Lampa.Noty.show(ok ? 'Удалено' : 'Не удалось удалить — нет права или сервер недоступен');
-                                    Lampa.Activity.replace();
+                                    // с карточки каталога перерисовывать чужой экран незачем
+                                    if (!(ctx && ctx.catalog)) Lampa.Activity.replace();
                                 });
                             },
-                            onBack: function () { Lampa.Controller.toggle('content'); }
+                            onBack: function () { Lampa.Controller.toggle(back); }
                         });
-                    }, '🗑 Весь сериал');
+                    }, '🗑 Весь сериал', back);
                 }
             },
-            onBack: function () { Lampa.Controller.toggle('content'); }
+            // 🔴 Штатный Select после ВЫБОРА пункта контроллер не восстанавливает (активным остаётся
+            // 'select' над скрытым списком): путь «выбор» закрывает onBeforeClose, путь «назад» —
+            // onBack. Ровно так делает штатное меню карточки Lampa.
+            onBeforeClose: function () { Lampa.Controller.toggle(back); return true; },
+            onBack: function () { Lampa.Controller.toggle(back); }
+        });
+    }
+
+    // ───────── Долгое нажатие на карточке КАТАЛОГА → наше меню (qdl 2.108) ─────────
+    // Бандл (AppPatch card-menu / card-menu-legacy) перед сборкой штатного меню закладок шлёт
+    // событие 'qdl_card' {type:'menu', data, params, enabled, handled}. Берём его на себя:
+    // скачанный тайтл → quickMenu «Загрузок» (следить / ждать сезон / озвучка / коллекции /
+    // удалить), нескачанный → «Скачать». handled=true — штатное меню не строится. Отказ
+    // (handled не трогаем) → всё как раньше: карточки «Клубнички» (у них закладки — единственный
+    // способ добавить видео в избранное) и персон.
+    //
+    // 🔴 e.data — ТОТ ЖЕ объект, что лежит в ряду и в клиентском кеше Request: не мутировать
+    // (в т.ч. не дописывать media_type). Тип выводим так же, как сама Lampa при открытии
+    // карточки (method: movie.name ? 'tv' : 'movie'): после конструктора карточки у сериала есть
+    // и title, и release_date (Arrays.extend), поэтому slimCard здесь соврал бы.
+    // 🔴 e.enabled — имя контроллера, которому вернуть управление. На главной / в категориях /
+    // в поиске при фокусе на карточке это 'items_line', а не 'content' (строка регистрирует
+    // свой контроллер); жёсткое 'content' из поиска уводило бы клавиши под оверлей.
+    function cardIsTitle(data, params) {
+        if (!data || data.id == null || data.id === '') return false;
+        if (!(data.title || data.name)) return false;
+        if (params && params.card_collection) return false;                                    // «Клубничка»
+        if (data.gender != null || data.profile_path || data.known_for_department) return false;  // персона
+        return true;
+    }
+
+    function cardType(data) {
+        if (!data) return 'movie';
+        if (data.media_type === 'tv' || data.media_type === 'movie') return data.media_type;
+        return data.name ? 'tv' : 'movie';
+    }
+
+    // копия карточки с выставленным типом — для «Скачать» (saveMeta/slimCard читают media_type)
+    function cardCopy(data, type) {
+        var c = {};
+        for (var k in data) if (Object.prototype.hasOwnProperty.call(data, k) && k !== 'params') c[k] = data[k];
+        c.media_type = type;
+        return c;
+    }
+
+    function selectOpen() {
+        try { return !!(document.body && document.body.classList.contains('selectbox--open')); } catch (e) { return false; }
+    }
+
+    function onCardMenu(e) {
+        if (!e || e.type !== 'menu' || !e.data) return;
+        // Уже открыт селектбокс → это второе событие: на десктопе удержание ПРАВОЙ кнопки ≥800 мс
+        // даёт hover:long дважды (таймер mousedown + contextmenu). Проглатываем: иначе
+        // enabled='select', и после закрытия управление вернулось бы скрытому списку.
+        if (e.enabled === 'select' || selectOpen()) { e.handled = true; return; }
+        if (!cardIsTitle(e.data, e.params)) return;
+
+        e.handled = true;
+        var data = e.data;
+        var back = e.enabled || 'content';
+        var type = cardType(data);
+        var probe = {
+            id: data.id, media_type: type, source: data.source,
+            title: data.title, name: data.name,
+            original_title: data.original_title, original_name: data.original_name
+        };
+        var act = null;
+        try { act = Lampa.Activity.active(); } catch (err) {}
+        // Зазор: пока шёл /qdl/list, Enter мог открыть карточку или всплыл другой селектбокс —
+        // тогда меню молча не показываем (легло бы поверх чужого экрана со старым enabled).
+        var stale = function () {
+            var a = null;
+            try { a = Lampa.Activity.active(); } catch (err) {}
+            return a !== act || selectOpen();
+        };
+        req(API + '/qdl/list', function (list) {
+            if (stale()) return;
+            var hit = findDownload(list || [], probe);
+            if (hit) quickMenu(hit, { back: back, catalog: true });
+            else catalogMenu(data, back, type);
+        }, function () {
+            if (stale()) return;
+            catalogMenu(data, back, type);
+        });
+    }
+
+    // Меню НЕскачанной карточки: «Скачать» (тот же поиск раздач, что у кнопки на экране
+    // карточки) и «Открыть карточку». Пунктов «следить» / «ждать сезон» здесь нет сознательно:
+    // оба контура привязаны к скачанному (слежение — к раздаче, ожидание сезона — к скачанным
+    // сезонам); после загрузки они появятся в этом же меню.
+    function catalogMenu(movie, back, type) {
+        back = back || 'content';
+        type = type || cardType(movie);
+        Lampa.Select.show({
+            title: movie.title || movie.name || '',
+            items: [
+                { title: '⬇ Скачать на сервер', act: 'download' },
+                { title: 'Открыть карточку', act: 'page' }
+            ],
+            onSelect: function (b) {
+                if (b.act === 'download') chooseAndDownload(cardCopy(movie, type), back);
+                else if (b.act === 'page') {
+                    // как сама Lampa по Enter на карточке: component 'full', method по типу
+                    Lampa.Activity.push({
+                        url: '', component: 'full', id: movie.id, method: type,
+                        card: movie, source: movie.source || 'tmdb'
+                    });
+                }
+            },
+            onBeforeClose: function () { Lampa.Controller.toggle(back); return true; },
+            onBack: function () { Lampa.Controller.toggle(back); }
         });
     }
 
@@ -3847,8 +3969,9 @@
         return parts.filter(Boolean).join('  •  ');
     }
 
-    function chooseAndDownload(movie) {
+    function chooseAndDownload(movie, back) {
         movie = movie || {};
+        back = back || 'content';
         var title = movie.title || movie.name || '';
         var original = movie.original_title || movie.original_name || '';
         var year = ((movie.release_date || movie.first_air_date || '') + '').slice(0, 4);
@@ -3894,7 +4017,7 @@
                     };
                 }),
                 onSelect: function (a) {
-                    Lampa.Controller.toggle('content');
+                    Lampa.Controller.toggle(back);
                     if (qdlManage() && (a.t.codec === 'hevc' || a.t.codec === 'av1'))
                         Lampa.Noty.show(a.t.codec.toUpperCase() + ': в браузере без транскода не заиграет (после загрузки — долгое нажатие → «Транскодировать в MP4»)');
                     var q = a.t.magnet
@@ -3913,7 +4036,7 @@
                         } else Lampa.Noty.show('Ошибка: ' + ((r && r.error) || 'qBittorrent'));
                     }, function () { Lampa.Noty.show('Ошибка запроса к серверу'); });
                 },
-                onBack: function () { Lampa.Controller.toggle('content'); }
+                onBack: function () { Lampa.Controller.toggle(back); }
             });
         }, function () { Lampa.Noty.show('Ошибка поиска раздач'); });
     }
@@ -7694,6 +7817,7 @@
         Lampa.Component.add('jut_episodes', ComponentJutEpisodes);
         Lampa.Component.add('jut_search', ComponentJutSearch);
         Lampa.Listener.follow('full', addButton);
+        Lampa.Listener.follow('qdl_card', onCardMenu);   // долгое нажатие на карточке каталога → наше меню (qdl 2.108)
         // Всё, что зависит от прав, перестраивается ОДНОЙ функцией — и на старте, и на каждом
         // перечитывании раз в минуту. 🔴 registerHealthSettings обязан быть именно здесь, а не
         // только в start(): там он отрабатывает ДО приезда прав, и устройство с грантом не увидело

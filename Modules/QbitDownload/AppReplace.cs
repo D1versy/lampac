@@ -33,6 +33,9 @@ namespace QbitDownload;
 //   grid-dedup-* — экран «Ещё» (полноэкранная сетка) рисовал одну и ту же карточку по два раза:
 //                  дедуп по id при догрузке страницы + насос, догружающий короткую страницу.
 //                  Оба патча тупые, вся политика — в qdl.js (qdl 2.94).
+//   card-menu / card-menu-legacy — долгое нажатие на карточке: вместо штатного меню закладок
+//                  бандл шлёт событие 'qdl_card', и наше меню строит qdl.js (qdl 2.108);
+//   remote-helper — гайд «Удерживайте кнопку (ОК) для вызова меню» на фокус карточки (qdl 2.108).
 // Якоря — неминглящиеся литералы бандла (пин tree в LampaWeb/ModInit). Смена tree →
 // якорь тихо не найдётся (warn в лог), остатки прячет CSS-фолбэк в lampainit-invc.js.
 public static class AppPatch
@@ -265,6 +268,42 @@ public static class AppPatch
             "try { if (typeof window.qdl_grid_next === 'function') " +
             "new_data = { results: window.qdl_grid_next(_this, new_data.results) || new_data.results }; } catch (e) {} " +
             "var split_total = Math.ceil(new_data.results.length / _this.limit_view);/*qdl-cut:grid-dedup-next*/"),
+        // ── qdl 2.108: долгое нажатие на карточке каталога → НАШЕ меню ─────────────────
+        // Штатное меню карточки (миксин Menu: «Действие» → Закладки/Нравится/Позже/История,
+        // CUB-статусы, расширения) заменяем СОБЫТИЕМ, а не вырезом: перед сборкой пунктов бандл
+        // шлёт Lampa.Listener 'qdl_card' {type:'menu', data, enabled, handled}. qdl.js
+        // (onCardMenu) открывает quickMenu «Загрузок» (следить / ждать сезон / …) или меню
+        // «Скачать» и ставит handled=true — штатное меню не строится. Обработчик отказался
+        // (карточка «Клубнички», персона) → всё как раньше.
+        // `enabled` — имя контроллера, вычисленное бандлом строкой выше: на главной и в поиске
+        // при фокусе на карточке это 'items_line', а не 'content', и наше меню обязано вернуть
+        // управление именно ему (штатный Menu делает ровно это в onBack/onBeforeClose).
+        // 🔴 `Lampa` как глобал внутри бандла доступен: сам бандл шлёт
+        // Lampa.Listener.send('line', …) из миксина строки. send синхронный — handled виден
+        // сразу после вызова. Падение подписчика ловится и не роняет карточку.
+        new P("card-menu",
+            "_this.menu_list.forEach(function (item, i) {",
+            "var qdl_ev = { type: 'menu', data: _this.data, enabled: enabled, handled: false };/*qdl-cut:card-menu*/\n" +
+            "        try { Lampa.Listener.send('qdl_card', qdl_ev); } catch (e) {}\n" +
+            "        if (qdl_ev.handled) return;\n" +
+            "        _this.menu_list.forEach(function (item, i) {"),
+        // Второй вход — устаревший Lampa.Card.onMenu: им рисуют карточки InteractionCategory /
+        // InteractionLine (витрины CUB, внешние плагины, «Клубничка»). Протокол тот же; params
+        // едет в событие, чтобы qdl.js отличил клубничку (card_collection) и оставил ей закладки.
+        new P("card-menu-legacy",
+            "var menu_plugins = [];",
+            "var qdl_ev = { type: 'menu', data: data, params: params, enabled: enabled, handled: false };/*qdl-cut:card-menu-legacy*/\n" +
+            "      try { Lampa.Listener.send('qdl_card', qdl_ev); } catch (e) {}\n" +
+            "      if (qdl_ev.handled) return;\n" +
+            "      var menu_plugins = [];"),
+        // Гайд «Удерживайте кнопку (ОК) для вызова меню» (RemoteHelper: только TV, ≥20 с после
+        // старта, раз в неделю) показывался на фокус карточки и звал в штатное меню, которого
+        // больше нет. Тумблера у него нет (Storage 'helper' гейтит ДРУГУЮ, мёртвую систему
+        // подсказок Lampa.Helper) — только патч. Фолбэк при смене tree — CSS .remote-helper
+        // в lampainit-invc.js.
+        new P("remote-helper",
+            "if (window.app_time_end < Date.now() - 20000) RemoteHelper.show({",
+            "if (false)/*qdl-cut:remote-helper*/ RemoteHelper.show({"),
     };
 
     public static void Attach() => EventListener.AppReplace += OnAppReplace;

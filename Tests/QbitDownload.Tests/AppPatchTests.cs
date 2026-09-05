@@ -134,6 +134,31 @@ public class AppPatchTests
             _this.loaded.push(new_data.results.slice(i * _this.limit_view, (i + 1) * _this.limit_view));
           }
         });
+      this.html.on('hover:long', function () {
+        var enabled = Controller.enabled().name;
+        var menu = [];
+
+        _this.menu_list.forEach(function (item, i) {
+          i !== 0 && menu.push({
+            title: item.title,
+            separator: true
+          });
+          menu = menu.concat(item.menu());
+        });
+      });
+      this.html.on('hover:focus', function () {
+        if (window.app_time_end < Date.now() - 20000) RemoteHelper.show({
+          name: 'card_menu'
+        });
+      });
+    this.onMenu = function (target, data) {
+      var _this3 = this;
+
+      var enabled = Controller.enabled().name;
+      var status = Favorite.check(data);
+      var menu_plugins = [];
+      var menu_favorite = [{
+        title: Lang.translate('title_book'),
     ";
 
     [Fact]
@@ -163,6 +188,66 @@ public class AppPatchTests
         Assert.Contains("/*qdl-cut:adult-flag*/", result);
         Assert.Contains("/*qdl-cut:grid-dedup-build*/", result);
         Assert.Contains("/*qdl-cut:grid-dedup-next*/", result);
+        Assert.Contains("/*qdl-cut:card-menu*/", result);
+        Assert.Contains("/*qdl-cut:card-menu-legacy*/", result);
+        Assert.Contains("/*qdl-cut:remote-helper*/", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_CardMenu_EventBeforeMenuBuild_BothPaths()
+    {
+        // qdl 2.108: долгое нажатие на карточке → событие 'qdl_card' ДО сборки штатного меню
+        // закладок; handled=true — штатное не строится. Два входа: миксин Menu и устаревший
+        // Lampa.Card.onMenu (витрины CUB, внешние плагины, «Клубничка»).
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.Equal(2, Count(result, "Lampa.Listener.send('qdl_card', qdl_ev)"));
+        Assert.Equal(2, Count(result, "if (qdl_ev.handled) return;"));
+
+        // событие стоит ДО сборки пунктов — иначе handled ничего не отменяет
+        int evMenu = result.IndexOf("/*qdl-cut:card-menu*/");
+        int build = result.IndexOf("_this.menu_list.forEach(function (item, i) {");
+        Assert.True(evMenu >= 0 && build > evMenu, "card-menu: событие должно стоять до menu_list.forEach");
+        int evLegacy = result.IndexOf("/*qdl-cut:card-menu-legacy*/");
+        int plugins = result.IndexOf("var menu_plugins = [];");
+        Assert.True(evLegacy >= 0 && plugins > evLegacy, "card-menu-legacy: событие должно стоять до menu_plugins");
+
+        // штатная сборка цела — это фолбэк для карточек, которые qdl.js не берёт
+        Assert.Contains("menu = menu.concat(item.menu());", result);
+        Assert.Contains("var menu_favorite = [{", result);
+        // `enabled` из бандла едет в событие: на главной/в поиске это 'items_line', а не 'content'
+        Assert.Contains("data: _this.data, enabled: enabled, handled: false", result);
+        Assert.Contains("data: data, params: params, enabled: enabled, handled: false", result);
+        // падение подписчика не роняет карточку
+        Assert.Equal(2, Count(result, "try { Lampa.Listener.send('qdl_card', qdl_ev); } catch (e) {}"));
+    }
+
+    [Fact]
+    public void PatchAppJs_RemoteHelper_HintNeverShown()
+    {
+        // гайд «Удерживайте кнопку (ОК) для вызова меню» — единственный вызов RemoteHelper в
+        // бандле, тумблера нет; гасим условие, тело вызова оставляем (синтаксис цел)
+        string result = AppPatch.PatchAppJs(AllAnchors);
+
+        Assert.DoesNotContain("window.app_time_end < Date.now() - 20000", result);
+        Assert.Contains("if (false)/*qdl-cut:remote-helper*/ RemoteHelper.show({", result);
+        Assert.Contains("name: 'card_menu'", result);
+    }
+
+    [Fact]
+    public void PatchAppJs_CardMenu_Idempotent()
+    {
+        // replacement обоих card-menu патчей содержит собственный якорь — гард Contains(replacement)
+        // обязан отработать на повторном прогоне Staticache
+        string once = AppPatch.PatchAppJs(AllAnchors);
+        string twice = AppPatch.PatchAppJs(once);
+
+        Assert.Equal(once, twice);
+        Assert.Equal(1, Count(twice, "/*qdl-cut:card-menu*/"));
+        Assert.Equal(1, Count(twice, "/*qdl-cut:card-menu-legacy*/"));
+        Assert.Equal(1, Count(twice, "/*qdl-cut:remote-helper*/"));
+        Assert.Equal(1, Count(twice, "_this.menu_list.forEach(function (item, i) {"));
+        Assert.Equal(1, Count(twice, "var menu_plugins = [];"));
     }
 
     [Fact]
