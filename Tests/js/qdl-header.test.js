@@ -171,7 +171,8 @@ test('multiple SWITCH/INFO in one poll are aggregated into a single toast', () =
   ] });
 
   assert.strictEqual(noty.length, 1);
-  assert.strictEqual(noty[0], '🔔 Новых уведомлений: 3');
+  // qdl 2.111: вместо эмодзи — свой SVG-значок корзины (просьба владельца)
+  assert.strictEqual(noty[0], qdl.notiIco('special') + 'Новых уведомлений: 3');
   assert.strictEqual(lampa.Storage.get('qdl_noti_lastid'), 8);
 });
 
@@ -191,9 +192,9 @@ test('single SWITCH keeps the detailed toast; downloaded episodes keep their own
   ] });
 
   assert.strictEqual(noty.length, 2);
-  assert.ok(noty[0].indexOf('🔀 Сериал А — S01E05') === 0);
+  assert.strictEqual(noty[0], qdl.notiIco('special') + 'Сериал А — S01E05');
   // qdl 2.111: «скачана» к тексту сервера больше не дописывается — он приходит готовым
-  assert.strictEqual(noty[1], '📺 Новых серий: 2');
+  assert.strictEqual(noty[1], qdl.notiIco('done') + 'Новых серий: 2');
 });
 
 // ─────────────────── лента уведомлений: постеры строк (qdl 2.46) ───────────────────

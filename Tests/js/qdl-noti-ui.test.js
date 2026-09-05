@@ -27,6 +27,9 @@ function slice(from, to) {
   return src.slice(i, j);
 }
 
+/** Любой эмодзи: значки в ленте и тостах обязаны быть SVG. */
+const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
+
 // ─────────────────────────── 1. геометрия строки ───────────────────────────
 
 test('строка ленты собрана классами, без инлайновых стилей', () => {
@@ -117,13 +120,35 @@ test('волна новых серий — своя корзина, а не «с
   assert.strictEqual(qdl.notiBucket({ kind: 'TITLE' }), 'title');
 });
 
+test('значки — нормальные SVG, а не эмодзи', () => {
+  // Просьба владельца: «вместо смайликов сделать нормальные значки». Стиль общий с
+  // остальными иконками плагина: 24x24, currentColor, stroke-width 2.
+  const { qdl } = H.loadQdl({});
+  for (const kind of ['WAVE', 'NEW', 'SEASON', 'TITLE', null]) {
+    const ico = qdl.notiIcon({ kind });
+    assert.ok(ico.startsWith('<svg'), kind + ': не svg — ' + ico.slice(0, 20));
+    assert.ok(ico.includes('currentColor'), kind + ': значок не наследует цвет текста');
+    assert.ok(!EMOJI.test(ico), kind + ': в значке остались эмодзи');
+  }
+});
+
 test('у каждой корзины свой значок, неизвестный вид не притворяется серией', () => {
   const { qdl } = H.loadQdl({});
-  assert.strictEqual(qdl.notiIcon({ kind: 'WAVE' }), '📺');
-  assert.strictEqual(qdl.notiIcon({ kind: 'NEW' }), '🆕');
-  assert.strictEqual(qdl.notiIcon({ kind: 'SEASON' }), '🗓');
-  assert.strictEqual(qdl.notiIcon({ kind: 'TITLE' }), '📦');
-  assert.strictEqual(qdl.notiIcon({ kind: 'ЧТО-ТО-НОВОЕ' }), '🔔');
+  const ep = qdl.notiIcon({ kind: 'WAVE' });
+  assert.strictEqual(qdl.notiIcon({ kind: null }), ep);            // «серия» и «волна» — один смысл
+  assert.notStrictEqual(qdl.notiIcon({ kind: 'NEW' }), ep);
+  assert.notStrictEqual(qdl.notiIcon({ kind: 'SEASON' }), ep);
+  assert.notStrictEqual(qdl.notiIcon({ kind: 'TITLE' }), ep);
+  assert.notStrictEqual(qdl.notiIcon({ kind: 'ЧТО-ТО-НОВОЕ' }), ep);   // неизвестное → колокольчик
+});
+
+test('во всплывашках уведомлений эмодзи не осталось', () => {
+  // Lampa.Noty кладёт текст через .html(), поэтому значок туда тоже уехал.
+  // Комментарии выбрасываем: ⚠️ в них — домашний маркер кода, а не текст для зрителя.
+  const src = slice('function pollNotifications', 'function openNotification');
+  const code = src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+  assert.ok(!EMOJI.test(code), 'эмодзи вернулись в тосты');
+  assert.ok(code.includes('notiIco('), 'тосты не берут значок из общей карты');
 });
 
 test('к готовому тексту сервера не дописывается «скачана»', () => {

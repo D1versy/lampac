@@ -166,7 +166,7 @@ test('М1.4: одиночный START — свой тост, без «скача
   assert.strictEqual(noty.length, 1);
   assert.ok(noty[0].indexOf('Сериал А') !== -1 && noty[0].indexOf('серия 3') !== -1, noty[0]);
   assert.ok(noty[0].indexOf('скачана') === -1, 'START — это НЕ готовая серия');
-  assert.ok(noty[0].indexOf('⏬') === 0, 'своя иконка: ' + noty[0]);
+  assert.ok(noty[0].indexOf(qdl.notiIco('started')) === 0, 'свой значок: ' + noty[0]);
 });
 
 test('М1.4: пачка START агрегируется в один тост', () => {
@@ -183,7 +183,7 @@ test('М1.4: пачка START агрегируется в один тост', ()
   ] });
 
   assert.strictEqual(noty.length, 1);
-  assert.strictEqual(noty[0], '⏬ Начата загрузка серий: 3');
+  assert.strictEqual(noty[0], qdl.notiIco('started') + 'Начата загрузка серий: 3');
   assert.strictEqual(lampa.Storage.get('qdl_noti_lastid'), 8);
 });
 
@@ -203,9 +203,9 @@ test('М1.4: START не смешивается ни со «скачано», н�
   ] });
 
   assert.strictEqual(noty.length, 3, 'три независимые корзины: special / START / скачанные');
-  assert.strictEqual(noty[0], '🔔 Новых уведомлений: 2');
-  assert.strictEqual(noty[1], '⏬ Начата загрузка серий: 2');
-  assert.ok(noty[2].indexOf('📺') === 0 && noty[2].indexOf('E3') !== -1, noty[2]);
+  assert.strictEqual(noty[0], qdl.notiIco('special') + 'Новых уведомлений: 2');
+  assert.strictEqual(noty[1], qdl.notiIco('started') + 'Начата загрузка серий: 2');
+  assert.ok(noty[2].indexOf(qdl.notiIco('done')) === 0 && noty[2].indexOf('E3') !== -1, noty[2]);
 });
 
 test('М1.4: на самом первом опросе (lastid=0) START тоже не спамит историей', () => {
@@ -283,7 +283,7 @@ test('2.35: NEW — своя корзина, без «скачана»', () => {
 
   assert.strictEqual(noty.length, 1);
   assert.ok(noty[0].indexOf('скачана') === -1, 'NEW не означает, что файл готов: ' + noty[0]);
-  assert.ok(noty[0].indexOf('🆕') === 0, 'своя иконка: ' + noty[0]);
+  assert.ok(noty[0].indexOf(qdl.notiIco('new')) === 0, 'свой значок: ' + noty[0]);
   assert.ok(noty[0].indexOf('вышла') !== -1);
 });
 
@@ -301,8 +301,8 @@ test('2.35: SEASON и NOSPACE — свои корзины, тоже без «с�
 
   assert.strictEqual(noty.length, 2);
   assert.ok(noty.every((m) => m.indexOf('скачана') === -1), noty.join(' | '));
-  assert.ok(noty.some((m) => m.indexOf('🗓') === 0));
-  assert.ok(noty.some((m) => m.indexOf('⚠️') === 0 && m.indexOf('мало места') !== -1));
+  assert.ok(noty.some((m) => m.indexOf(qdl.notiIco('season')) === 0));
+  assert.ok(noty.some((m) => m.indexOf(qdl.notiIco('warn')) === 0 && m.indexOf('мало места') !== -1));
 });
 
 test('2.35: незнакомый вид уведомления не притворяется скачанным', () => {
@@ -317,7 +317,7 @@ test('2.35: незнакомый вид уведомления не притво
 
   assert.strictEqual(noty.length, 1);
   assert.ok(noty[0].indexOf('скачана') === -1, noty[0]);
-  assert.ok(noty[0].indexOf('🔔') === 0, noty[0]);
+  assert.ok(noty[0].indexOf(qdl.notiIco('other')) === 0, noty[0]);
 });
 
 test('2.35: торренты не сломаны — kind=null и OVA по-прежнему «скачана»', () => {
@@ -386,9 +386,9 @@ test('2.35: смешанная пачка раскладывается по не
   assert.strictEqual(noty.length, 5, 'пять корзин: special / START / скачанные / NEW / SEASON — ' + noty.join(' | '));
   assert.ok(noty[0].indexOf('полнее') !== -1);
   assert.ok(noty[1].indexOf('качается') !== -1);
-  assert.strictEqual(noty[2], '📺 Новых серий: 2');
-  assert.strictEqual(noty[3], '🆕 Вышли новые серии: 2');
-  assert.ok(noty[4].indexOf('🗓') === 0);
+  assert.strictEqual(noty[2], qdl.notiIco('done') + 'Новых серий: 2');
+  assert.strictEqual(noty[3], qdl.notiIco('new') + 'Вышли новые серии: 2');
+  assert.ok(noty[4].indexOf(qdl.notiIco('season')) === 0);
   assert.strictEqual(lampa.Storage.get('qdl_noti_lastid'), 12);
 });
 

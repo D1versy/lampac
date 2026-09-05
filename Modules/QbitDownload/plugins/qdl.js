@@ -19,6 +19,14 @@
     // stroke-width 2 — иначе кнопка выбивалась бы из ряда наших иконок.
     var DETECT_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 8V5.5A2.5 2.5 0 015.5 3H8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M16 3h2.5A2.5 2.5 0 0121 5.5V8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M21 16v2.5a2.5 2.5 0 01-2.5 2.5H16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M8 21H5.5A2.5 2.5 0 013 18.5V16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="11" cy="11" r="3.2" stroke="currentColor" stroke-width="2"/><path d="M13.4 13.4L17 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
     var REC = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/></svg>';
+    // Значки видов уведомлений (qdl 2.111). Сначала были эмодзи — владелец попросил
+    // «нормальные значки». Стиль общий со всеми иконками плагина: 24x24, currentColor,
+    // stroke-width 2, иначе лента выбивалась бы из остального интерфейса.
+    var EP_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="18" height="14" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M10.5 9.6l4.4 2.4-4.4 2.4V9.6z" fill="currentColor"/></svg>';
+    var NEW_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3.2l2 5.3 5.3 2-5.3 2-2 5.3-2-5.3-5.3-2 5.3-2 2-5.3z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
+    var SEASON_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="18" height="16" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M3 10.5h18" stroke="currentColor" stroke-width="2"/><path d="M8 3v4M16 3v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+    var WARN_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 4.2l8.6 15.3H3.4L12 4.2z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v3.6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1.1" fill="currentColor"/></svg>';
+    var SWAP_ICON = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 8.5h13l-3.2-3.2M20 15.5H7l3.2 3.2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     var ANIME = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="4" width="18" height="14" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M10 8.5l4.5 2.5L10 13.5v-5z" fill="currentColor"/><path d="M8 21h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
     // ───────── Идентификатор устройства (для истории jut.su на сервере) ─────────
@@ -307,7 +315,11 @@
             '.qdl-noti-txt{flex:1;min-width:0}' +
             '.qdl-noti-ttl{font-size:1.3em;font-weight:600;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
             '.qdl-noti-sub{opacity:.85;font-size:1.15em;line-height:1.3;margin-top:.3em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
-            '.qdl-noti-ico{margin-right:.45em}' +
+            // inline-block с явным размером: svg внутри строки с nowrap+ellipsis иначе
+            // раздувается до своих 24px и ломает вертикальный ритм
+            '.qdl-noti-ico{display:inline-block;width:1.05em;height:1.05em;margin-right:.5em;' +
+                'vertical-align:-.16em;opacity:.7}' +
+            '.qdl-noti-ico svg{width:100%;height:100%;display:block}' +
             '.qdl-noti-time{flex:none;opacity:.5;font-size:1.05em;white-space:nowrap;align-self:flex-start;margin-top:.35em}' +
             // строке с айди тот же базис: иначе она встаёт В РЯД со строками ленты
             '.qdl-noti-id{flex:1 1 100%;min-width:0;padding:1.1em 1.4em;margin:1.2em .6em .4em;' +
@@ -3157,12 +3169,21 @@
         return 'other';
     }
 
-    // Значок вида в строке ленты. До qdl 2.111 эмодзи жили ТОЛЬКО в тостах, а в самой ленте
-    // все строки выглядели одинаково — «нет места» неотличимо от «вышла серия».
-    var NOTI_ICONS = { done: '📺', wave: '📺', 'new': '🆕', season: '🗓', title: '📦',
-                       warn: '⚠️', started: '⏬', special: '🔀' };
+    // Значок вида в строке ленты. До qdl 2.111 значков не было вовсе — все строки выглядели
+    // одинаково, и «нет места» было неотличимо от «вышла серия».
+    // ⚠️ started/warn/special зритель больше не получает (эти виды уехали в журнал админки),
+    // но карта их держит: у старого сервера с новым клиентом строка не должна остаться немой.
+    var NOTI_ICONS = { done: EP_ICON, wave: EP_ICON, 'new': NEW_ICON, season: SEASON_ICON,
+                       title: BOX_ICON, warn: WARN_ICON, started: ICON, special: SWAP_ICON };
 
-    function notiIcon(n) { return NOTI_ICONS[notiBucket(n)] || '🔔'; }
+    function notiIcon(n) { return NOTI_ICONS[notiBucket(n)] || BELL; }
+
+    // Значок для всплывашки. Lampa.Noty кладёт текст через .html(), поэтому свой значок
+    // туда положить можно — но ТОЛЬКО его: заголовок и текст по-прежнему идут через esc().
+    // Размер у .qdl-noti-ico задан в em, так что значок масштабируется вместе с тостом.
+    function notiIco(bucket) {
+        return '<span class="qdl-noti-ico">' + (NOTI_ICONS[bucket] || BELL) + '</span>';
+    }
 
     // опрос ленты: бейдж непрочитанных + тост для появившихся с прошлого опроса.
     // In-flight флаг обязателен: вызывается из 4 точек (старт, вставка иконки/меню, interval) —
@@ -3202,28 +3223,31 @@
                 var warn = fresh.filter(function (x) { return notiBucket(x) === 'warn'; });
                 var waves = fresh.filter(function (x) { return notiBucket(x) === 'wave'; });
                 var other = fresh.filter(function (x) { return notiBucket(x) === 'other'; });
-                if (special.length === 1) Lampa.Noty.show((special[0].kind === 'SWITCH' ? '🔀 ' : '📺 ') + esc(special[0].title) + ' — ' + esc(special[0].label));
-                else if (special.length > 1) Lampa.Noty.show('🔔 Новых уведомлений: ' + special.length);
-                if (started.length === 1) Lampa.Noty.show('⏬ ' + esc(started[0].title) + ' — ' + esc(started[0].label) + ' качается');
-                else if (started.length > 1) Lampa.Noty.show('⏬ Начата загрузка серий: ' + started.length);
+                // Одна строка корзины — «тайтл — текст», несколько — счётчик. Значок тот же,
+                // что и в ленте (qdl 2.111: были эмодзи, владелец попросил нормальные значки).
+                // tail — хвост одиночной строки: у START это « качается», иначе «Сериал — серия 3»
+                // читалось бы как «серия готова», а она только встала в очередь.
+                var pop = function (bucket, list, many, tail) {
+                    if (list.length === 1)
+                        Lampa.Noty.show(notiIco(bucket) + esc(list[0].title) + ' — '
+                                        + esc(list[0].label) + (tail || ''));
+                    else if (list.length > 1)
+                        Lampa.Noty.show(notiIco(bucket) + many + list.length);
+                };
+
+                pop('special', special, 'Новых уведомлений: ');
+                pop('started', started, 'Начата загрузка серий: ', ' качается');
                 // ⚠️ «скачана» больше НЕ дописываем: с qdl 2.111 сервер шлёт готовую фразу
                 // («Вышла новая серия 10»), и приписка превращала её в «…серия 10 скачана».
                 // Старый сервер шлёт «Сезон 1 · серия 7» — тоже читается верно, просто суше.
-                if (dl.length === 1) Lampa.Noty.show('📺 ' + esc(dl[0].title) + ' — ' + esc(dl[0].label));
-                else if (dl.length > 1) Lampa.Noty.show('📺 Новых серий: ' + dl.length);
-                if (waves.length === 1) Lampa.Noty.show('📺 ' + esc(waves[0].title) + ' — ' + esc(waves[0].label));
-                else if (waves.length > 1) Lampa.Noty.show('📺 Новые серии в тайтлах: ' + waves.length);
+                pop('done', dl, 'Новых серий: ');
+                pop('wave', waves, 'Новые серии в тайтлах: ');
                 // label уже несёт «Скачано серий: N» — дописывать нечего
-                if (titles.length === 1) Lampa.Noty.show('📦 ' + esc(titles[0].title) + ' — ' + esc(titles[0].label));
-                else if (titles.length > 1) Lampa.Noty.show('📦 Скачано тайтлов: ' + titles.length);
-                if (came.length === 1) Lampa.Noty.show('🆕 ' + esc(came[0].title) + ' — ' + esc(came[0].label));
-                else if (came.length > 1) Lampa.Noty.show('🆕 Вышли новые серии: ' + came.length);
-                if (season.length === 1) Lampa.Noty.show('🗓 ' + esc(season[0].title) + ' — ' + esc(season[0].label));
-                else if (season.length > 1) Lampa.Noty.show('🗓 Новых сезонов: ' + season.length);
-                if (warn.length === 1) Lampa.Noty.show('⚠️ ' + esc(warn[0].title) + ' — ' + esc(warn[0].label));
-                else if (warn.length > 1) Lampa.Noty.show('⚠️ Новые серии не скачаны: ' + warn.length);
-                if (other.length === 1) Lampa.Noty.show('🔔 ' + esc(other[0].title) + ' — ' + esc(other[0].label));
-                else if (other.length > 1) Lampa.Noty.show('🔔 Новых уведомлений: ' + other.length);
+                pop('title', titles, 'Скачано тайтлов: ');
+                pop('new', came, 'Вышли новые серии: ');
+                pop('season', season, 'Новых сезонов: ');
+                pop('warn', warn, 'Новые серии не скачаны: ');
+                pop('other', other, 'Новых уведомлений: ');
             }
         }, function () { notiPollBusy = false; });
     }
@@ -3334,7 +3358,7 @@
 
         this.build = function (items) {
             if (!items.length)
-                body.append($('<div class="qdl-noti-empty">Пока нет уведомлений. «🔔 Следить» в карточке тайтла jut.su — буду сообщать о новых сериях; то же в «Загрузках» — буду ещё и качать их.</div>'));
+                body.append($('<div class="qdl-noti-empty">Пока нет уведомлений. «Следить» в карточке тайтла — буду сообщать о новых сериях; то же в «Загрузках» — буду ещё и качать их.</div>'));
 
             items.forEach(function (n) { comp.append(n); });
             comp.appendId();
