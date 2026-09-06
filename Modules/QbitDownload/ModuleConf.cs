@@ -387,7 +387,18 @@ public class ModuleConf : ModuleBaseConf
     public string watchAutoSwitch { get; set; } = "notify"; // off | notify (уведомление+подтверждение) | auto
     public int watchStaleChecks { get; set; } = 8;          // проверок без смены infohash (~2 суток при 6ч)
     public int watchSwitchCooldownDays { get; set; } = 7;   // не чаще одного переключения в неделю
-    public bool switchDeleteOldFiles { get; set; } = false; // другой рип = другие файлы; старые по умолчанию оставляем
+    public bool switchDeleteOldFiles { get; set; } = false; // другой рип = другие файлы; старые по умолчанию оставляем (путь successorEnabled=false)
+
+    // ── Преемник раздачи (Successor.cs, qdl 2.115): перекачка без пропажи уже скачанных серий ──
+    // Re-grab перевыложенного топика и переключение на более полную раздачу больше не снимают
+    // старую сразу: новая качается РЯДОМ (своя подпапка /downloads/.next/<hash8>, при совпадении
+    // файлов — общий корень с перепроверкой), старая остаётся в qBit на стопе и играется, пока
+    // новая не докачает каждую её серию. Потом — жатва: старая снимается, кеш переезжает.
+    public bool successorEnabled { get; set; } = true;          // КИЛЛСВИТЧ на лету: false = прежняя мгновенная замена (уже начатые замены жнец доводит)
+    public int successorMaxDays { get; set; } = 7;              // новая не докачала всё за N дней → принудительная замена как раньше, файлы старой остаются
+    public bool successorDeleteOldFiles { get; set; } = true;   // после ПОДТВЕРЖДЁННОЙ замены в режиме aside — удалить папку старой (только safe-путь: категория, непересечение папок)
+    public int successorMetaWaitSec { get; set; } = 60;         // сколько ждать метаданных при старте замены; дальше решает жнец (15-минутный тик)
+    public int successorPlayedGraceMinutes { get; set; } = 30;  // старую только что смотрели (/qdl/stream или HLS) → жатву отложить до следующего тика
 
     // ── Локализация внешних источников (qdl 2.15, карта — E:\Media-server\claude\11) ──
     // mylocalip без api.ipify.org: внешний IP = A-запись СОБСТВЕННОГО домена (DNS самолечится при

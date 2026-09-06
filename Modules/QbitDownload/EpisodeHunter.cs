@@ -49,17 +49,19 @@ public partial class QbitController
     // старые версии игнорируют — фолбэк в QbitWaitFiles). Разбор ответа — как в /qdl/add (v4/v5).
     // ВАЖНО: дубликат отдаётся отдельным статусом — на нём qBit НЕ применяет переданные категорию/теги
     // к уже сидящему торренту (см. комментарий у QbitAddStatus).
-    static async Task<QbitAddStatus> QbitAddMagnetStatus(HttpClient c, string magnet, string category, string tags = null, bool stopAfterMeta = false)
+    static async Task<QbitAddStatus> QbitAddMagnetStatus(HttpClient c, string magnet, string category, string tags = null, bool stopAfterMeta = false, string savepath = null)
     {
         // Последний барьер перед qBittorrent. Здесь, а не на входе, потому что сюда сходятся
         // ЧЕТЫРЕ фоновых контура (re-grab, QbitAddMagnet, захват донора, переключение), и все
         // они читают магнеты из watch.json / индекса, записанных ДО появления санитайза.
         magnet = SanitizeMagnet(magnet);
 
+        // savepath задаёт только преемник раздачи (Successor.cs, qdl 2.115): своя подпапка, чтобы
+        // ни байта не лечь поверх файлов старой. Все прочие add — в плоский корень, как раньше.
         var content = new MultipartFormDataContent
         {
             { new StringContent(magnet), "urls" },
-            { new StringContent(ModInit.conf.downloadsPath), "savepath" },
+            { new StringContent(string.IsNullOrWhiteSpace(savepath) ? ModInit.conf.downloadsPath : savepath), "savepath" },
             { new StringContent(category ?? ModInit.conf.category), "category" }
         };
         if (!string.IsNullOrWhiteSpace(tags)) content.Add(new StringContent(tags), "tags");
@@ -1585,6 +1587,7 @@ public partial class QbitController
         if (donors != null)
             foreach (var d in donors.OfType<JObject>())
             { var dh = d.Value<string>("hash"); if (!string.IsNullOrEmpty(dh)) h.knownHashes.Add(dh); }
+        { var nh = NextHashOf(m); if (nh != null) h.knownHashes.Add(nh); }   // преемник — свой, не донор и не «перевыкладка» (Successor.cs)
         // защита от «усыновления» чужого: хеши всех пользовательских загрузок (категория lampa —
         // другие сериалы/фильмы, вторая карточка того же шоу) в knownHashes, чтобы кандидат с таким
         // infohash не прошёл гейты. Иначе QbitAddMagnetEx на дубликате вернул бы true, filePrio сбросил
@@ -1659,6 +1662,11 @@ public partial class QbitController
         string mainHash = m.Value<string>("hash");
         if (!ValidHash(mainHash)) { p.skip = "invalid-hash"; return p; }
         p.mainHash = mainHash;
+
+        // Преемник (Successor.cs, qdl 2.115): пока новая версия раздачи докачивается рядом, охота
+        // по этой записи стоит — иначе она добывала бы донорами серии, которые уже качает преемник.
+        // Окно ограничено successorMaxDays, после жатвы охота продолжается штатно.
+        if (NextOf(m) != null) { p.skip = "successor-pending"; return p; }
 
         // только сериалы: ctx.is_serial==2, иначе media_type из меты
         var ctx = m["ctx"] as JObject;
@@ -2580,6 +2588,13 @@ public partial class QbitController
     // На epkey одна запись: основная, если её файл докачан (или серии у доноров нет);
     // донор — если серии в основной нет или она там ещё качается. Экстры/RANGE — только из основной.
     static JArray MergeEpisodeFiles(string mainHash, JArray mainFiles, List<(JObject donor, JArray files)> donorData, string seriesKey, int season)
+        => MergeEpisodeFiles(mainHash, mainFiles, donorData, seriesKey, season, null, null, false);
+
+    // nextHash/nextFiles — преемник раздачи (Successor.cs, qdl 2.115): четвёртый источник плейлиста.
+    // nextTrustsSharedPath — режим flat и перепроверка окончена: файл с тем же путём на диске теперь
+    // описывает преемник (старая на стопе, её «1.0» про этот файл может врать после перезаписи).
+    static JArray MergeEpisodeFiles(string mainHash, JArray mainFiles, List<(JObject donor, JArray files)> donorData, string seriesKey, int season,
+                                    string nextHash, JArray nextFiles, bool nextTrustsSharedPath)
     {
         var parsed = new List<JObject>();     // серии с распознанным номером
         var unparsed = new List<JObject>();   // экстры/RANGE/непарсибельное — только из основной
@@ -2667,6 +2682,41 @@ public partial class QbitController
                     de["dquality"] = donor.Value<int?>("quality") ?? 0;      // служебное: ранг качества той же копии
                     parsed.Add(de);
                 }
+            }
+
+        // Преемник: серия есть у старой докачанной → показываем старую (кроме общего пути после
+        // перепроверки); у старой нет или качается → строка преемника (клиент сам глушит недокачанную
+        // строку и пишет процент); донор и преемник на одну серию — готовая копия побеждает, при обеих
+        // готовых — преемник (он и станет основной). Экстры преемника до жатвы не показываем.
+        if (nextFiles != null && ValidHash(nextHash))
+            foreach (var f in nextFiles)
+            {
+                if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
+                var e = ParseEp(BaseNoExt(f));
+                if (e == null || !e.any || e.kind != null || e.ep < 0) continue;
+                if (season > 0 && e.season > 0 && e.season != season) continue;
+                int es = e.season > 0 ? e.season : season;
+                double np = f.Value<double?>("progress") ?? 0;
+                bool newDone = np >= ProgressDone;
+
+                var same = parsed.FirstOrDefault(x => x.Value<int?>("episode") == e.ep && (x.Value<int?>("season") ?? season) == es);
+                if (same != null)
+                {
+                    double hp = same.Value<double?>("progress") ?? 0;
+                    bool haveDone = hp >= ProgressDone;
+                    bool isMain = same.Value<string>("source") == "main";
+                    bool newWins;
+                    if (isMain && nextTrustsSharedPath
+                        && string.Equals(NormPath(same.Value<string>("name")), NormPath(f.Value<string>("name")), StringComparison.Ordinal))
+                        newWins = true;
+                    else if (isMain)
+                        newWins = !haveDone && (newDone || np > hp);
+                    else
+                        newWins = newDone || (!haveDone && np > hp);
+                    if (!newWins) continue;
+                    parsed.Remove(same);
+                }
+                parsed.Add(entry(nextHash, f, "next", e.season, e.ep));
             }
 
         var ordered = parsed.OrderBy(x => x.Value<int?>("season") ?? 0).ThenBy(x => x.Value<int?>("episode") ?? 0).ToList();
@@ -2814,7 +2864,18 @@ public partial class QbitController
                 if (ValidHash(dh)) donorData.Add((d, await QbitFiles(c, dh)));
             }
 
-        return MergeEpisodeFiles(hash, mainFiles, donorData, sk, season);
+        // преемник раздачи (Successor.cs, qdl 2.115): его серии — по своему хешу, как у доноров
+        string nextHash = NextHashOf(watchItem);
+        JArray nextFiles = null; bool nextTrust = false;
+        if (nextHash != null)
+        {
+            nextFiles = await QbitFiles(c, nextHash);
+            var ni = await QbitTorrentInfo(c, nextHash);
+            bool checking = ni == null || (ni.Value<string>("state") ?? "").StartsWith("checking", StringComparison.OrdinalIgnoreCase);
+            nextTrust = !checking && NextOf(watchItem)?.Value<string>("mode") == SuccessorModeFlat;
+        }
+
+        return MergeEpisodeFiles(hash, mainFiles, donorData, sk, season, nextHash, nextFiles, nextTrust);
     }
     #endregion
 
@@ -2832,6 +2893,7 @@ public partial class QbitController
         var conf = ModInit.conf;
         string mode = (conf.watchAutoSwitch ?? "notify").ToLowerInvariant();
         if (mode == "off") return;
+        if (NextOf(m) != null) return;   // замена уже идёт (Successor.cs): второго предложения не нужно
         if ((m.Value<int?>("stale") ?? 0) < Math.Max(1, conf.watchStaleChecks)) return;
 
         var now = DateTime.UtcNow;
@@ -3006,6 +3068,24 @@ public partial class QbitController
         { m["pendingSwitch"] = null; return (false, null, "same hash"); }
 
         using var c = await Qbit();
+
+        // Преемник (Successor.cs, qdl 2.115): новая раздача качается рядом, старая остаётся в qBit и
+        // играется, пока новая не докачает каждую её серию; снятие старой и переезд кеша — в жатве.
+        // Immediate = хранить нечего (старая без единой докачанной серии / новая уже сидит видимой
+        // загрузкой) → прежняя мгновенная замена ниже.
+        var succ = await StartSuccessor(c, m, magnet, newHash, "switch",
+                                        !string.IsNullOrWhiteSpace(parselink) ? parselink : magnet,
+                                        new JObject { ["title"] = ps.Value<string>("title"), ["tracker"] = ps.Value<string>("tracker"),
+                                                      ["sid"] = ps.Value<int?>("sid") ?? 0, ["score"] = ps.Value<double?>("score") ?? 0 },
+                                        new[] { m });
+        if (succ == SuccessorStart.Failed) return (false, null, "qbit add failed");
+        if (succ == SuccessorStart.Started)
+        {
+            m["pendingSwitch"] = null;
+            Console.WriteLine("[QbitDownload] watch: переключение " + curHash + " -> " + newHash + " начато — новая качается рядом, старая пока в работе");
+            return (true, newHash, null);
+        }
+
         if (!await QbitAddMagnetEx(c, magnet, ModInit.conf.category)) return (false, null, "qbit add failed");
         // кандидат мог уже сидеть донором охоты — на дубликате add категорию не меняет (см. PromoteIfDonor)
         await PromoteIfDonor(c, newHash, new[] { m }, m.Value<string>("title"));

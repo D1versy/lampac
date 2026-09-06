@@ -208,6 +208,16 @@ public partial class QbitController
         // ── Поиск раздач ── живые поиски пользователя + канарейки идут через FetchIndexer
         AddPassiveRow(arr, HealthState.Ids.Indexer, "Индексатор (живые поиски)", GrpSearch, now, flap);
 
+        // ── Замена раздач (Successor.cs, qdl 2.115) ── замены в ходу: новая качается рядом, старая
+        // ещё играется. warn — без метаданных дольше часа или срок вышел, а жатва не прошла.
+        try
+        {
+            JArray wl; lock (_watchLock) wl = LoadWatch();
+            var (scStatus, scDetail) = SuccessorHealthVerdict(wl, now);
+            arr.Add(Svc(HealthState.Ids.Successor, "Замена раздач (слежение)", GrpSearch, scStatus, 0, scDetail));
+        }
+        catch (Exception ex) { arr.Add(Svc(HealthState.Ids.Successor, "Замена раздач (слежение)", GrpSearch, "fail", 0, ShortErr(ex))); }
+
         // ── jut.su ── вкладка выключена = киллсвитч, а не сбой
         string jutOff = JutOn ? null : "вкладка выключена";
         AddPassiveRow(arr, HealthState.Ids.JutHost, "jut.su", GrpJut, now, flap, jutOff);

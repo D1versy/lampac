@@ -893,6 +893,9 @@ public partial class QbitController : BaseController
                 var wh = w.Value<string>("hash"); if (!string.IsNullOrEmpty(wh)) watched.Add(wh);
                 if (w["donors"] is JArray ds)   // страховка: доноры и так в другой категории qBit
                     foreach (var d in ds) { var dh = d.Value<string>("hash"); if (!string.IsNullOrEmpty(dh)) donorHashes.Add(dh); }
+                // преемник раздачи (Successor.cs, qdl 2.115) — в категории lampa, но карточкой не
+                // показывается: зритель видит старую до самой жатвы (решение владельца)
+                var nh = NextHashOf(w); if (nh != null) donorHashes.Add(nh);
             }
 
             // снапшот штампов активности один на запрос (Touch пишет из фоновых потоков — не дёргать файл на каждый элемент)
@@ -1264,7 +1267,9 @@ public partial class QbitController : BaseController
         if (files.Count == 1 && !string.IsNullOrEmpty(contentPath) && System.IO.File.Exists(contentPath))
             full = contentPath;
         if (full == null) full = ConfinedCombine(savePath, rel);
-        if (full == null || !System.IO.File.Exists(full))
+        // Фолбэк на плоский корень — не для преемника в своей подпапке (Successor.cs): под его хешем
+        // иначе отдался бы СТАРЫЙ файл с тем же именем из /downloads.
+        if ((full == null || !System.IO.File.Exists(full)) && !IsSuccessorPath(savePath))
             full = ConfinedCombine(ModInit.conf.downloadsPath, rel);
         if (full == null || !System.IO.File.Exists(full)) return null;
         return full;
@@ -1403,6 +1408,10 @@ public partial class QbitController : BaseController
             }
 
             using var c = await Qbit();
+            // преемник раздачи (Successor.cs): снимаем ДО основной, иначе он остался бы в категории
+            // lampa невидимым сиротой (с файлами — только из своей подпапки .next)
+            try { await AbortSuccessorOf(c, hash, "загрузка удалена", resumeOld: false); }
+            catch (Exception ex) { Console.WriteLine("[QbitDownload] delete: successor abort: " + ex.Message); }
             // папку основной запоминаем ДО её удаления: каскад по донорам идёт после, а без этого пути
             // донор, сидящий в той же папке, снёс бы файлы вместе с собой (проверять было бы не с чем)
             string mainContentPath = (await QbitTorrentInfo(c, hash))?.Value<string>("content_path");
@@ -2941,6 +2950,9 @@ public partial class QbitController : BaseController
         var mg = ManageDenied(); if (mg != null) return mg;   // право «manage» или кука (2.67)
         if (!ValidHash(hash)) return BadRequest(new { error = "invalid hash" });
         if (Deploy.Draining) return Json(new { success = false, error = "идёт деплой — повторите через минуту" });   // очередь транскодов живёт в РАМ этого экземпляра
+        // Преемник (Successor.cs): финализация снесла бы старую С ФАЙЛАМИ посреди замены, оверлей лёг бы
+        // под хеш, который вот-вот сменится. Окно ограничено successorMaxDays.
+        if (SuccessorPendingFor(hash)) return Json(new { success = false, error = "идёт замена раздачи — повторите, когда новая докачается" });
         try
         {
             var loc0 = LoadLocal(hash);
@@ -3498,16 +3510,27 @@ public partial class QbitController : BaseController
     {
         try
         {
-            string link = null; int seriesId = 0; JArray donors = null;
+            string link = null; int seriesId = 0; JArray donors = null; JObject nextObj = null; string wtitle = null;
             lock (_watchLock)
             {
                 var a = LoadWatch(); var b = new JArray();
                 foreach (var m in a)
                 {
                     if (m.Value<string>("hash") != hash) b.Add(m);
-                    else { link = m.Value<string>("link"); seriesId = m.Value<int?>("id") ?? 0; donors = m["donors"] as JArray; }
+                    else { link = m.Value<string>("link"); seriesId = m.Value<int?>("id") ?? 0; donors = m["donors"] as JArray; nextObj = m["next"] as JObject; wtitle = m.Value<string>("title"); }
                 }
                 SaveWatch(b);
+            }
+            // преемник раздачи (Successor.cs): «не следить» = не трогать мою раздачу — незавершённую
+            // замену отменяем, старую возвращаем в работу
+            if (nextObj != null)
+            {
+                try
+                {
+                    using var cn = await Qbit();
+                    await AbortSuccessorCore(cn, hash, nextObj, wtitle, "слежение снято", resumeOld: true);
+                }
+                catch (Exception ex) { Console.WriteLine("[QbitDownload] watch remove successor: " + ex.Message); }
             }
             // каскад: без слежения раздачи-доноры (охота) не нужны — удаляем с файлами
             if (donors != null && donors.Count > 0)
@@ -3563,6 +3586,9 @@ public partial class QbitController : BaseController
                 string newHash = MagnetHash(magnet);
                 if (string.IsNullOrWhiteSpace(newHash)) continue;
 
+                var nextObj = NextOf(m);
+                string nextHash = NextHashOf(m);
+
                 if (newHash.Equals(curHash, StringComparison.OrdinalIgnoreCase))
                 {
                     // топик не обновился → счётчик застоя; на пороге — поискать более полную раздачу
@@ -3576,12 +3602,40 @@ public partial class QbitController : BaseController
                         await PromoteIfDonor(cc, curHash, list.OfType<JObject>(), m.Value<string>("title"));
                     }
                     catch (Exception ex) { Console.WriteLine("[QbitDownload] watch promote retry: " + ex.Message); }
-                    try { await ConsiderSwitch((JObject)m); }
+                    try { await ConsiderSwitch((JObject)m); }   // при живом преемнике сам выходит
                     catch (Exception ex) { Console.WriteLine("[QbitDownload] switch consider: " + ex); }
                     continue;
                 }
 
+                // Преемник (Successor.cs, qdl 2.115). Топик уже указывает на него — это ожидаемое
+                // состояние до жатвы: ни застоя, ни второго add. Идёт переключение на ДРУГОЙ топик —
+                // перевыкладка старого нас больше не интересует (запись переезжает на новый link).
+                if (nextHash != null && newHash.Equals(nextHash, StringComparison.OrdinalIgnoreCase)) continue;
+                if (nextObj != null && nextObj.Value<string>("reason") == "switch") continue;
+                // Заморозка экземпляра: SaveWatchReconciled запись пропустит, и преемник остался бы
+                // в qBit без ссылки — новых замен в этом состоянии не начинаем.
+                if (Deploy.Draining) continue;
+
                 using var c = await Qbit();
+                if (nextObj != null)
+                {
+                    // топик перевыложен ещё раз, пока предыдущий преемник не докачал: его сносим (с файлами
+                    // только из своей подпапки), старую возвращаем в работу и начинаем заново
+                    await AbortSuccessor(c, (JObject)m, "топик перевыложен ещё раз (" + newHash + ")", resumeOld: true);
+                    changed = true;
+                }
+                var succ = await StartSuccessor(c, (JObject)m, magnet, newHash, "regrab", link, null, list.OfType<JObject>());
+                if (succ == SuccessorStart.Failed) continue;
+                if (succ == SuccessorStart.Started)
+                {
+                    changed = true; regrabbed++;
+                    Console.WriteLine("[QbitDownload] watch: re-grab " + m.Value<string>("title") + " " + curHash + "->" + newHash + " — преемник качается рядом, старая пока в работе");
+                    AddStartNotification(m.Value<int?>("id") ?? 0, link, newHash, m.Value<string>("title"));
+                    continue;
+                }
+
+                // Immediate: хранить нечего (старая без докачанных серий / новая уже сидит видимой
+                // загрузкой) — прежняя мгновенная замена.
                 var add = await QbitAddMagnetStatus(c, magnet, ModInit.conf.category);   // qBit перепроверит и дотянет новые серии
                 if (add == QbitAddStatus.Failed) continue;
 
@@ -4144,40 +4198,59 @@ public partial class QbitController : BaseController
                     var notiKeys = new HashSet<string>(db.noti.Where(x => x.seriesKey == sk).Select(x => x.epkey));
                     int dom = DominantSeason(files);
 
-                    foreach (var f in files)
+                    // Один проход по списку файлов. Для преемника раздачи (Successor.cs, qdl 2.115) —
+                    // второй, тем же кодом: его докачавшаяся серия уже играбельна с экрана серий,
+                    // значит и волна «вышла новая серия» обязана её включать, не дожидаясь жатвы.
+                    void ScanFileSet(JArray fs, int domSeason)
                     {
-                        if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
-                        var ep = NormSeason(ParseEp(BaseNoExt(f)), dom);
-                        string key = EpKey(ep);
-                        if (key == null || SeenAlready(seenKeys, ep, key)) continue;
-
-                        if (baseline) { StageSeen(sk, key); seenKeys.Add(key); continue; }
-
-                        double progress = f.Value<double?>("progress") ?? 0;
-                        if (progress < 0.999) continue;   // серия ещё качается
-
-                        if (IsEpisodeLike(ep) && !notiKeys.Contains(key) && StageNoti(sk, key))
+                        foreach (var f in fs)
                         {
-                            // Обычная серия копится в волну — одна строка на сериал за прогон.
-                            // Спецвыпуски (OVA/SP/RANGE) остаются отдельными строками: их мало,
-                            // и «OVA 2» в общий счётчик серий не сложить.
-                            if (NotiRoute.Enabled && ep.kind == null)
-                                WaveAdd(sk, seriesId, hash, title, ep.season, ep.ep, notiKeys);
-                            else
+                            if (!_videoExtRx.IsMatch(f.Value<string>("name") ?? "")) continue;
+                            var ep = NormSeason(ParseEp(BaseNoExt(f)), domSeason);
+                            string key = EpKey(ep);
+                            if (key == null || SeenAlready(seenKeys, ep, key)) continue;
+
+                            if (baseline) { StageSeen(sk, key); seenKeys.Add(key); continue; }
+
+                            double progress = f.Value<double?>("progress") ?? 0;
+                            if (progress < 0.999) continue;   // серия ещё качается
+
+                            if (IsEpisodeLike(ep) && !notiKeys.Contains(key) && StageNoti(sk, key))
                             {
-                                db.noti.Add(new NotiModel
+                                // Обычная серия копится в волну — одна строка на сериал за прогон.
+                                // Спецвыпуски (OVA/SP/RANGE) остаются отдельными строками: их мало,
+                                // и «OVA 2» в общий счётчик серий не сложить.
+                                if (NotiRoute.Enabled && ep.kind == null)
+                                    WaveAdd(sk, seriesId, hash, title, ep.season, ep.ep, notiKeys);
+                                else
                                 {
-                                    seriesKey = sk, seriesId = seriesId, hash = hash, title = title,
-                                    season = ep.season, episode = ep.ep, kind = ep.kind, epkey = key,
-                                    label = EpLabel(ep), created = DateTime.UtcNow, read = false
-                                });
-                                created++;
+                                    db.noti.Add(new NotiModel
+                                    {
+                                        seriesKey = sk, seriesId = seriesId, hash = hash, title = title,
+                                        season = ep.season, episode = ep.ep, kind = ep.kind, epkey = key,
+                                        label = EpLabel(ep), created = DateTime.UtcNow, read = false
+                                    });
+                                    created++;
+                                }
+                                touched.Add(hash);
+                                Console.WriteLine("[QbitDownload] notify: " + title + " — " + EpLabel(ep));
                             }
-                            touched.Add(hash);
-                            Console.WriteLine("[QbitDownload] notify: " + title + " — " + EpLabel(ep));
+                            StageSeen(sk, key);
+                            seenKeys.Add(key);
                         }
-                        StageSeen(sk, key);
-                        seenKeys.Add(key);
+                    }
+                    ScanFileSet(files, dom);
+
+                    string nextScan = NextHashOf(m);
+                    if (!baseline && nextScan != null)
+                    {
+                        JArray nfiles = null;
+                        try { nfiles = await QbitFiles(c, nextScan); } catch { }
+                        if (nfiles != null && nfiles.Count > 0)
+                        {
+                            int ndom = DominantSeason(nfiles);
+                            ScanFileSet(nfiles, ndom > 0 ? ndom : dom);
+                        }
                     }
 
                     // серии, докачавшиеся у ДОНОРОВ (охота по всем раздачам): уведомление с пометкой.
@@ -4284,6 +4357,12 @@ public partial class QbitController : BaseController
             catch (Exception ex) { Console.WriteLine("[QbitDownload] noti save: " + ex); }
 
             if (created > 0) PushNotiSignal(created);   // не ждём следующего опроса колокольчика
+
+            // жатва преемников (Successor.cs, qdl 2.115): новая докачала все серии старой → старая
+            // снимается, кеш переезжает. Раньше замещения доноров: после жатвы основная = новая,
+            // и PlanReplacements сразу видит у неё докачанные серии.
+            try { await ScanSuccessors(c, list, orig); }
+            catch (Exception ex) { Console.WriteLine("[QbitDownload] successors: " + ex); }
 
             // замещение: основная догнала и докачала свою версию серии → файл донора убираем,
             // опустевшие/мёртвые доноры удаляем целиком (EpisodeHunter.ScanReplacements)

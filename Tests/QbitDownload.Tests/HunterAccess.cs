@@ -195,7 +195,7 @@ public static class HunterAccess
     public static Task<bool> QbitAddMagnetEx(HttpClient c, string magnet, string category, string tags = null, bool stopAfterMeta = false)
         => (Task<bool>)Access.Call("QbitAddMagnetEx", c, magnet, category, tags, stopAfterMeta);
     public static Task<QbitAddStatus> QbitAddMagnetStatus(HttpClient c, string magnet, string category, string tags = null, bool stopAfterMeta = false)
-        => (Task<QbitAddStatus>)Access.Call("QbitAddMagnetStatus", c, magnet, category, tags, stopAfterMeta);
+        => (Task<QbitAddStatus>)Access.Call("QbitAddMagnetStatus", c, magnet, category, tags, stopAfterMeta, null);   // savepath — только у преемника (Successor.cs)
     public static Task<bool> PromoteDonorToMain(HttpClient c, string hash) => (Task<bool>)Access.Call("PromoteDonorToMain", c, hash);
     public static Task<bool> PromoteIfDonor(HttpClient c, string newHash, IEnumerable<JObject> items, string title)
         => (Task<bool>)Access.Call("PromoteIfDonor", c, newHash, items, title);

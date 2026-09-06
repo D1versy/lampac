@@ -735,26 +735,48 @@
     });
   }
 
+  function successorModeLabel(m) {
+    if (m === 'flat') return 'в общей папке, докачиваются только новые серии';
+    if (m === 'aside') return 'в отдельной папке, старая не тронута';
+    return 'ждёт метаданных';
+  }
+
   function renderPending() {
     var box = document.getElementById('dlist');
     var list = ddata.pending || [];
+    var succ = ddata.successors || [];
 
     // Бейдж на самой вкладке: решения легко пропустить, если не видно, что они есть.
     var badge = document.getElementById('dbadge');
     badge.textContent = list.length;
     badge.classList.toggle('on', list.length > 0);
 
-    document.getElementById('dcnt').textContent = list.length
+    document.getElementById('dcnt').textContent = (list.length
       ? ('ждут ответа: ' + list.length)
-      : 'всё решено';
+      : 'всё решено') + (succ.length ? ' · замен в ходу: ' + succ.length : '');
 
-    if (!list.length) {
+    if (!list.length && !succ.length) {
       box.innerHTML = '<div class="empty">Ничего не ждёт ответа.<br>Здесь появится предложение, '
         + 'когда сервер найдёт более полную раздачу для отслеживаемого сериала.</div>';
       return;
     }
 
     box.innerHTML = '';
+
+    // Замены в ходу (преемник раздачи): решения не требуют — старая играется, пока новая не
+    // докачает все её серии, потом снимается сама. Показываем, чтобы «перекачивается» не было загадкой.
+    succ.forEach(function (s) {
+      var pct = (typeof s.progress === 'number') ? Math.round(s.progress * 100) + ' %' : (s.state === 'missing' ? 'пропала из qBit' : '—');
+      var card = document.createElement('div');
+      card.className = 'ecard';
+      card.innerHTML =
+        '<div class="et">' + esc(s.title || 'Без названия') + ' — идёт замена раздачи</div>' +
+        '<div class="ed">' + (s.reason === 'switch' ? 'переключение на более полную' : 'топик перевыложен') +
+          ' · ' + esc(successorModeLabel(s.mode)) + ' · новая: ' + esc(pct) + ' · с ' + esc(ago(s.since)) +
+          (s.candidate ? '<br>' + esc(s.candidate) : '') +
+          '<br>Старая раздача доступна зрителю до докачки новой; снимется сама (крайний срок ' + esc(ago(s.deadline)) + ').</div>';
+      box.appendChild(card);
+    });
     list.forEach(function (p) {
       var eps = p.total > 0 ? (p.have + ' из ' + p.total) : ('' + p.have);
       var card = document.createElement('div');

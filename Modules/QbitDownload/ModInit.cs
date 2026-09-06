@@ -112,6 +112,9 @@ public class ModInit : IModuleLoaded
         _ = System.Threading.Tasks.Task.Run(async () => {
             try { await QbitController.ReconcileDonors(); }
             catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] donor reconcile: " + ex); }
+            // преемники раздач (Successor.cs): тег без ссылки → снять тег; ссылка без торрента → старую вернуть в работу
+            try { await QbitController.ReconcileSuccessors(); }
+            catch (System.Exception ex) { System.Console.WriteLine("[QbitDownload] successor reconcile: " + ex); }
         });
 
         // Охота за сериями (EpisodeHunter) дорогая — опрос индексатора → всех трекеров, поэтому свой

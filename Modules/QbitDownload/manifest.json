@@ -21,6 +21,7 @@
     "SeriesMerge.cs",
     "Progress.cs",
     "SeasonWatch.cs",
+    "Successor.cs",
     "LiveTs.cs",
     "Live.cs",
     "LiveDetect.cs",

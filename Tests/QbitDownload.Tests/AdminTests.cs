@@ -516,15 +516,16 @@ public class AdminTests
     }
 
     [Fact]
-    public void Решения_живут_на_своей_ручке()
+    public async Task Решения_живут_на_своей_ручке()
     {
         // Отдельно от журнала намеренно: журнал читают, решения принимают — и терять их
         // в стострочной ленте нельзя.
         TestEnv.FreshCache();
-        var o = JObject.Parse((Controller().Decisions() as ContentResult).Content);
+        var o = JObject.Parse((await Controller().Decisions() as ContentResult).Content);
 
         Assert.NotNull(o["pending"]);
         Assert.IsType<JArray>(o["pending"]);
+        Assert.IsType<JArray>(o["successors"]);   // замены в ходу (Successor.cs, qdl 2.115) — на той же ручке
         Assert.False(o.Value<bool>("replica"));
     }
 

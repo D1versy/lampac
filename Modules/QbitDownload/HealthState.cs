@@ -50,6 +50,10 @@ public static class HealthState
         // а этот на «на полке лежит то, что просили», и смешивать их нельзя: при отравленной
         // записи апстрим как раз здоров.
         public const string CubPage = "cub-page";
+
+        // Замена раздач (Successor.cs, qdl 2.115): через реестр наблюдений не проходит — вердикт
+        // считается из watch.json (поле next) целиком, id здесь ради единого места ключей.
+        public const string Successor = "successor";
     }
 
     public const string StatusOk = "ok";

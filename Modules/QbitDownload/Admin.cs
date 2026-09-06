@@ -495,13 +495,15 @@ public class D1VAdminController : BaseController
     /// </summary>
     [HttpGet]
     [Route("/admin/d1v/api/decisions")]
-    public ActionResult Decisions()
+    async public Task<ActionResult> Decisions()
     {
         SetHeadersNoCache();
         var res = new JObject
         {
             ["replica"] = QbitController.ReplicaMode,
-            ["pending"] = QbitController.AdminPendingSwitches()
+            ["pending"] = QbitController.AdminPendingSwitches(),
+            // замены в ходу (Successor.cs, qdl 2.115): решения не требуют, показываются ради видимости
+            ["successors"] = await QbitController.AdminPendingSuccessors()
         };
         return Content(res.ToString(Newtonsoft.Json.Formatting.None), "application/json; charset=utf-8");
     }

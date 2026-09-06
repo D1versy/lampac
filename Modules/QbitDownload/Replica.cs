@@ -150,12 +150,17 @@ public partial class QbitController
         try
         {
             foreach (var w in LoadWatch())
+            {
                 if (w["donors"] is JArray ds)
                     foreach (var d in ds)
                     {
                         var dh = d.Value<string>("hash");
                         if (!string.IsNullOrEmpty(dh)) donorHashes.Add(dh);
                     }
+                // преемник раздачи (Successor.cs, qdl 2.115): реплике достаётся при жатве, как и
+                // раньше при смене хеша (§CC), — а до неё он в known, чтобы не сойти за сироту
+                var nh = NextHashOf(w); if (nh != null) donorHashes.Add(nh);
+            }
         }
         catch { }
 

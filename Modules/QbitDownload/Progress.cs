@@ -275,6 +275,8 @@ public partial class QbitController
         {
             string wh = w.Value<string>("hash");
             if (wh == null || !targets.Any(t => t.Equals(wh, StringComparison.OrdinalIgnoreCase))) continue;
+            // преемник раздачи (Successor.cs, qdl 2.115): его строки на экране серий живут по своему хешу
+            var nhp = NextHashOf(w); if (nhp != null) targets.Add(nhp);
             if (w["donors"] is not JArray ds) continue;
             foreach (var d in ds.OfType<JObject>())
             {

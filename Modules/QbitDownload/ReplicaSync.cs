@@ -1,5 +1,6 @@
 using Newtonsoft.Json.Linq;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -112,13 +113,21 @@ public partial class QbitController
     /// <summary>
     /// Отметка «это играли здесь». Ротация обязана её уважать: домашний activity про местный
     /// просмотр ничего не знает, а выбросить фильм из-под зрителя — худшее, что может сделать
-    /// бекап-сервер. Пишется из /qdl/stream только на реплике.
+    /// бекап-сервер. Пишется из /qdl/stream. С qdl 2.115 — и дома: жнец преемника (Successor.cs)
+    /// по ней откладывает снятие старой раздачи, которую только что смотрели.
     /// </summary>
+    static readonly ConcurrentDictionary<string, long> _playedMem = new(StringComparer.OrdinalIgnoreCase);
+
     internal static void ReplicaTouchPlayed(string hash)
     {
-        if (!ReplicaMode || !ValidHash(hash)) return;
+        if (!ValidHash(hash)) return;
         try
         {
+            // Дома /qdl/stream — горячий путь (Range-seek'и очередями): троттлим в памяти,
+            // до JsonStore доходит один раз в 5 минут на хеш.
+            long nowMem = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            if (_playedMem.TryGetValue(hash, out long lastMem) && lastMem > nowMem - 300) return;
+            _playedMem[hash] = nowMem;
             lock (_replicaPlayedLock)
             {
                 var j = JsonStore.ReadObject(ReplicaPlayedPath) ?? new JObject();
