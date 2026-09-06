@@ -318,3 +318,39 @@ test('livePct склеенной карточки взвешен по разме
   assert.ok(Math.abs(qdl.livePct(merged) - (20 + 0.5) / 21) < 1e-9);
   qdl.pgReset();
 });
+
+// ─────────────────────────── закачки «в полёте» (qdl 2.114) ───────────────────────────
+// XSMART/jut до первого готового файла: сервер отдаёт карточку с local:false и progress < 1,
+// а сериал с добором — local:true и progress < 1. Раньше local сразу давал «MP4», и зритель
+// не видел, что что-то качается (жалоба владельца по фильму XSMART «Вскрытие демона»).
+
+const XS_INFLIGHT = { hash: HB, name: 'Вскрытие демона', progress: 0.3, local: false, state: 'downloading',
+  xsmart: { cat: 6, id: '10425171', ref: '6-10425171', watch: 'off' }, inflight: { state: 'downloading', pending: 1 },
+  meta: { id: 0, media_type: 'movie', title: 'Вскрытие демона', source: 'xsmart' } };
+
+test('local-карточка с progress<1 (сериал с добором) показывает процент, а не MP4', () => {
+  const { comp, html, qdl } = mount({}, { list: [Object.assign({}, HALF, { local: true, state: 'local', progress: 0.4 })], collections: [] });
+  qdl.pgReset();
+  const badge = () => html.find('.qdl-dl-badge');
+  assert.strictEqual(badge().text(), '40%');
+
+  qdl.pgApply({ ok: true, stamp: '1', active: 1, pending: 0, items: [{ h: HA, p: 0.77, s: 'downloading' }] });
+  comp.refreshBadges();
+  assert.strictEqual(badge().text(), '77%');
+
+  qdl.pgApply({ ok: true, stamp: '2', active: 0, pending: 0, items: [] });   // пачка досталась
+  comp.refreshBadges();
+  assert.strictEqual(badge().text(), 'MP4', 'готовая local-карточка — снова MP4');
+  qdl.pgReset();
+});
+
+test('карточка XSMART без маркера: бейдж-процент, Enter открывает qdl_card, а не плеер', () => {
+  const { html, qdl, calls } = mount({}, { list: [XS_INFLIGHT], collections: [] });
+  qdl.pgReset();
+  assert.strictEqual(html.find('.qdl-dl-badge').text(), '30%');
+  html.find('.card').trigger('hover:enter');
+  const p = calls.pushes[calls.pushes.length - 1];
+  assert.ok(p, 'карточка не открылась');
+  assert.strictEqual(p.component, 'qdl_card', 'меты TMDB нет (id:0) → свой экран карточки');
+  qdl.pgReset();
+});

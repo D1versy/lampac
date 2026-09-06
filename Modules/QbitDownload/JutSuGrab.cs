@@ -86,6 +86,7 @@ public partial class QbitController
         // а начатая продолжает жить по своему режиму — иначе часть серий уведомит, часть нет.
         if ((ModInit.conf?.jutNotifyAggregate ?? true) && JutAggFor(freshBatch, queued)) job.agg = true;
         JutSetState(job, "queued");
+        DropListCache();   // карточка «в полёте» в /qdl/list (кеш 30 с) — единая точка всех путей постановки (qdl 2.114)
         return job;
     }
 
@@ -634,7 +635,84 @@ public partial class QbitController
         }
         foreach (var it in _jutQueue) if (it.slug == slug) it.cancel = true;
         if (_jutJobs.TryGetValue(slug, out var j)) { j.canceled = true; j.state = "canceled"; j.touched = DateTime.UtcNow; }
+        DropListCache();   // карточка «в полёте» обязана исчезнуть из «Загрузок» сразу (qdl 2.114)
         return JutJson(new JObject { ["ok"] = true });
+    }
+
+    #endregion
+
+    #region карточка «в полёте» — /qdl/list и /qdl/progress (qdl 2.114)
+
+    /// <summary>
+    /// Тайтлы jut.su, которые качаются или должны качаться прямо сейчас. Зеркало
+    /// XsmartInflight (XsmartGrab.cs) — там же разбор, почему кап на 99 % обязателен (литерал — только в форме Math.Min, его стережёт ProgressTests): у jut
+    /// байты файла доезжают до File.Move и маркера, и «100 %» до них — ложь для гейта.
+    /// </summary>
+    internal static List<JObject> JutInflight()
+    {
+        var res = new List<JObject>();
+        if (!JutOn || ReplicaMode) return res;
+
+        var slugs = new HashSet<string>(StringComparer.Ordinal);
+        try { foreach (string s in DownloadWants.Jut.Titles()) slugs.Add(s); } catch { }
+        foreach (string k in _jutJobs.Keys) slugs.Add(k);
+
+        foreach (string slug in slugs)
+        {
+            try
+            {
+                if (!JutSuParse.IsValidSlug(slug)) continue;
+                _jutJobs.TryGetValue(slug, out var job);
+                if (job != null && job.state == "canceled") job = null;
+                int pending = JutPendingFor(slug);
+                var (owed, parked, err) = DownloadWants.Jut.Stat(slug);
+                if (pending == 0 && owed + parked == 0) continue;
+
+                double cur = 0;
+                if (job != null && job.state == "running" && job.total > 0)
+                    cur = (double)job.done / job.total;
+                cur = Math.Min(0.99, Math.Max(0, cur));
+                double p = 0;
+                if (job != null) p = (job.fileDone + cur) / Math.Max(job.filesTotal, 1);
+                p = Math.Min(0.99, Math.Max(0, p));
+
+                string state = job != null && job.state == "running" ? "downloading"
+                             : (owed > 0 || pending > 0) ? "queued" : "stuck";
+                long since = DownloadWants.Jut.OldestAt(slug);
+                if (since <= 0 && job != null) since = new DateTimeOffset(job.touched).ToUnixTimeSeconds();
+
+                string title = null;
+                try { title = JutCacheRead("title", slug, TimeSpan.MaxValue, out _)?.Value<string>("title"); } catch { }
+
+                res.Add(new JObject
+                {
+                    ["hash"] = JutNet.Hash(slug),
+                    ["jut"] = true,
+                    ["slug"] = slug,
+                    ["title"] = title ?? slug,
+                    ["p"] = Math.Round(p, 4),
+                    ["state"] = state,
+                    ["pending"] = pending,
+                    ["error"] = job?.error ?? err,
+                    ["since"] = since
+                });
+            }
+            catch (Exception ex) { JutNet.Log("inflight", slug + ": " + ex.Message); }
+        }
+        return res;
+    }
+
+    /// <summary>slug по псевдо-infohash — для «Удалить» на карточке без маркера.</summary>
+    internal static string JutSlugByHash(string hash)
+    {
+        if (string.IsNullOrEmpty(hash) || !JutOn) return null;
+        var slugs = new HashSet<string>(StringComparer.Ordinal);
+        try { foreach (string s in DownloadWants.Jut.Titles()) slugs.Add(s); } catch { }
+        foreach (string k in _jutJobs.Keys) slugs.Add(k);
+        foreach (string slug in slugs)
+            if (JutSuParse.IsValidSlug(slug) && string.Equals(JutNet.Hash(slug), hash, StringComparison.OrdinalIgnoreCase))
+                return slug;
+        return null;
     }
 
     #endregion

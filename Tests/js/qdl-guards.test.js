@@ -411,3 +411,16 @@ test('pollTranscode: повторный вызов того же hash не со�
   r.qdl.pollTranscode('h1', 'Кино');
   assert.strictEqual(r.calls.ticks.length, 1);
 });
+
+// qdl 2.114: карточка XSMART/jut «в полёте» приезжает с local:false и живым процентом —
+// гейт обязан её держать (файла на диске ещё нет), в отличие от готовой local-карточки.
+test('gatePartial: карточка «в полёте» (local:false, живой 0.3) → «Дождитесь загрузки — скачано 30%»', () => {
+  const { qdl, calls } = rig();
+  qdl.pgReset();
+  qdl.pgApply({ ok: true, stamp: '1', active: 1, pending: 0, items: [{ h: 'c'.repeat(40), p: 0.3, s: 'downloading' }] });
+  let runs = 0;
+  qdl.gatePartial({ hash: 'c'.repeat(40), progress: 0.1, local: false, state: 'downloading', xsmart: { id: '1' } }, () => runs++);
+  assert.strictEqual(runs, 0);
+  assert.ok(/Дождитесь загрузки — скачано 30%/.test(last(calls.selects).title), last(calls.selects).title);
+  qdl.pgReset();
+});

@@ -119,6 +119,10 @@ public partial class QbitController
         // а начатая доживает по своему режиму — иначе часть серий уведомит, часть нет.
         if ((ModInit.conf?.xsmartNotifyAggregate ?? true) && XsmartAggFor(freshBatch, queued)) job.agg = true;
         XsmartSetState(job, "queued");
+        // qdl 2.114: карточка «в полёте» живёт в /qdl/list, а он кешируется 30 с. Это единая
+        // точка всех четырёх путей постановки (ручное, тик слежения, восстановление, свип) —
+        // сбрасываем здесь, иначе новая закачка появлялась бы в «Загрузках» с опозданием.
+        DropListCache();
         return job;
     }
 
@@ -639,7 +643,134 @@ public partial class QbitController
             job.state = "canceled";
             job.touched = DateTime.UtcNow;
         }
+        DropListCache();   // карточка «в полёте» обязана исчезнуть из «Загрузок» сразу (qdl 2.114)
         return XsmartJson(new JObject { ["ok"] = true, ["message"] = "Скачивание отменено" });
+    }
+
+    #endregion
+
+    #region карточка «в полёте» — /qdl/list и /qdl/progress (qdl 2.114)
+
+    /// <summary>
+    /// Тайтлы, которые качаются или должны качаться прямо сейчас: питают карточку «Загрузок»
+    /// ДО первого готового файла и живой прогресс поллера.
+    ///
+    /// 🔥 Зачем. Маркер local/&lt;hash&gt;.json пишет только XsmartFinishFile — после ремукса первого
+    /// готового mp4. До этого /qdl/list тайтла не видел вовсе: у фильма (один файл, часы) зритель
+    /// всё это время смотрел на пустоту, а тост «смотри «Загрузки»» врал (жалоба владельца
+    /// 06.09.2026, «Вскрытие демона»).
+    ///
+    /// 🔴 Прогресс единицы капается на 99 % (Math.Min — единственная форма литерала, которую пропускает сторож ProgressTests). job.seg == segTotal наступает ДО ремукса и ДО маркера
+    /// (XsmartGrabOne: сегменты → XsmartRemux → XsmartFinishFile): без капа поллер отдал бы «готово»,
+    /// клиент снял бы гейт и открыл файл, которого ещё нет. Тот же кап — на весь тайтл: пока в
+    /// нём хоть что-то должно качаться, «готово» он не бывает по определению.
+    ///
+    /// Предикат «в полёте»: ключи в очереди (XsmartPendingFor) ИЛИ долг в журнале намерений
+    /// (Stat.owed + parked). Второе покрывает рестарт: _xsJobs пуст, а queue.json жив. Job в
+    /// состоянии canceled — не полёт (Freeze/отмена). Чтение строго без записи: List() зовётся и
+    /// на дежурном цвете, где JsonStore.WritesEnabled = false.
+    /// Порядок замков: wants-стор — лист, изнутри _xsEnqLock его не зовём (XsmartPendingFor
+    /// берёт _xsEnqLock сам и отпускает до Stat).
+    /// </summary>
+    internal static List<JObject> XsmartInflight()
+    {
+        var res = new List<JObject>();
+        if (!XsmartNet.On || ReplicaMode) return res;
+
+        var srefs = new HashSet<string>(StringComparer.Ordinal);
+        try { foreach (string s in DownloadWants.Xsmart.Titles()) srefs.Add(s); } catch { }
+        foreach (string k in _xsJobs.Keys) srefs.Add(k);
+
+        foreach (string sref in srefs)
+        {
+            try
+            {
+                var parts = sref.Split('-');
+                if (parts.Length != 2 || !int.TryParse(parts[0], out int cat) || !XsmartNet.Valid(cat, parts[1])) continue;
+                string id = parts[1];
+
+                _xsJobs.TryGetValue(sref, out var job);
+                if (job != null && job.state == "canceled") job = null;
+                int pending = XsmartPendingFor(sref);
+                var (owed, parked, err) = DownloadWants.Xsmart.Stat(sref);
+                if (pending == 0 && owed + parked == 0) continue;
+
+                double cur = 0;
+                if (job != null && job.state == "running")
+                    cur = job.segTotal > 0 ? (double)job.seg / job.segTotal
+                        : job.total > 0 ? (double)job.done / job.total : 0;
+                cur = Math.Min(0.99, Math.Max(0, cur));
+                double p = 0;
+                if (job != null)
+                {
+                    int filesTotal = Math.Max(job.filesTotal, 1);
+                    p = (job.fileDone + cur) / filesTotal;
+                }
+                p = Math.Min(0.99, Math.Max(0, p));
+
+                string state = job != null && job.state == "running" ? "downloading"
+                             : (owed > 0 || pending > 0) ? "queued" : "stuck";
+                long since = DownloadWants.Xsmart.OldestAt(sref);
+                if (since <= 0 && job != null) since = new DateTimeOffset(job.touched).ToUnixTimeSeconds();
+
+                var t = XsmartTitleFromCache(cat, id);
+                res.Add(new JObject
+                {
+                    ["hash"] = XsmartNet.Hash(cat, id),
+                    ["xsmart"] = true,
+                    ["ref"] = sref,
+                    ["cat"] = cat,
+                    ["id"] = id,
+                    ["title"] = t?.title ?? sref,
+                    ["series"] = t?.series ?? false,
+                    ["p"] = Math.Round(p, 4),
+                    ["state"] = state,
+                    ["pending"] = pending,
+                    ["error"] = job?.error ?? err,
+                    ["since"] = since
+                });
+            }
+            catch (Exception ex) { XsmartNet.Log("inflight", sref + ": " + ex.Message); }
+        }
+        return res;
+    }
+
+    /// <summary>ref тайтла по псевдо-infohash — для «Удалить» на карточке без маркера.</summary>
+    internal static string XsmartRefByHash(string hash)
+    {
+        if (string.IsNullOrEmpty(hash) || !XsmartNet.On) return null;
+        var srefs = new HashSet<string>(StringComparer.Ordinal);
+        try { foreach (string s in DownloadWants.Xsmart.Titles()) srefs.Add(s); } catch { }
+        foreach (string k in _xsJobs.Keys) srefs.Add(k);
+        foreach (string sref in srefs)
+        {
+            var parts = sref.Split('-');
+            if (parts.Length != 2 || !int.TryParse(parts[0], out int cat) || !XsmartNet.Valid(cat, parts[1])) continue;
+            if (string.Equals(XsmartNet.Hash(cat, parts[1]), hash, StringComparison.OrdinalIgnoreCase)) return sref;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Убрать хвосты незаконченной закачки тайтла (.part, .part.json, .parts/) и пустую папку.
+    /// Готовые mp4 не трогаем: у них есть маркер, и их удаляет DeleteLocalFiles.
+    /// </summary>
+    internal static void XsmartPurgePartials(string sref)
+    {
+        try
+        {
+            string dir = XsmartTitleDir(sref);
+            if (!Directory.Exists(dir)) return;
+            foreach (string f in Directory.EnumerateFiles(dir))
+                if (f.EndsWith(".part", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".part.json", StringComparison.OrdinalIgnoreCase))
+                    try { System.IO.File.Delete(f); } catch { }
+            foreach (string d in Directory.EnumerateDirectories(dir))
+                if (d.EndsWith(".parts", StringComparison.OrdinalIgnoreCase))
+                    try { Directory.Delete(d, true); } catch { }
+            if (!Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir);
+            JsonStore.ForgetDir(dir);
+        }
+        catch (Exception ex) { XsmartNet.Log("purge", sref + ": " + ex.Message); }
     }
 
     #endregion
@@ -1363,6 +1494,43 @@ public partial class QbitController
         return t?.items.FirstOrDefault(x => x.epkey == epkey);
     }
 
+    /// <summary>
+    /// Мета карточки «Загрузок» из тайтла XSMART. ⚠️ "source":"xsmart" — это ПОЯС 2 изоляции:
+    /// IndexCrawler по нему пропускает такие меты и не идёт за ними на трекеры; id:0 — «TMDB id нет»,
+    /// клиент по нему открывает свой экран qdl_card, а не полную карточку.
+    /// </summary>
+    internal static JObject XsmartMetaJson(XsmartTitle t) => new JObject
+    {
+        ["source"] = "xsmart",
+        ["xsmart_cat"] = t.cat,
+        ["xsmart_id"] = t.id,
+        ["title"] = t.title ?? XsmartNet.Ref(t.cat, t.id),
+        ["original_title"] = t.titleOrig,
+        ["year"] = t.year,
+        ["id"] = 0,
+        ["media_type"] = t.series ? "tv" : "movie",
+        ["overview"] = t.descr
+    };
+
+    /// <summary>
+    /// Мета без сети — из кеша тайтла. Для тика слежения: он ставит серии в очередь, минуя
+    /// XsmartEnsureMeta, и до qdl 2.114 карточка «в полёте» такого тайтла приезжала бы без меты —
+    /// клиентский enrich() дописал бы ей TMDB-мету без source:"xsmart" (потеря пояса изоляции).
+    /// </summary>
+    internal static void XsmartEnsureMetaFile(int cat, string id)
+    {
+        try
+        {
+            string hash = XsmartNet.Hash(cat, id);
+            if (System.IO.File.Exists(MetaPath(hash))) return;
+            var t = XsmartTitleFromCache(cat, id);
+            if (t == null) return;
+            Directory.CreateDirectory(Path.GetDirectoryName(MetaPath(hash)));
+            SaveMeta(hash, XsmartMetaJson(t));
+        }
+        catch { }
+    }
+
     /// <summary>Мету и постер пишем при постановке в очередь — карточка появляется сразу.</summary>
     static async Task XsmartEnsureMeta(XsmartTitle t)
     {
@@ -1371,22 +1539,7 @@ public partial class QbitController
         {
             Directory.CreateDirectory(Path.GetDirectoryName(MetaPath(hash)));
             if (!System.IO.File.Exists(MetaPath(hash)))
-            {
-                // ⚠️ "source":"xsmart" — это ПОЯС 2 изоляции: IndexCrawler по нему пропускает
-                // такие меты и не идёт за ними на трекеры.
-                SaveMeta(hash, new JObject
-                {
-                    ["source"] = "xsmart",
-                    ["xsmart_cat"] = t.cat,
-                    ["xsmart_id"] = t.id,
-                    ["title"] = t.title ?? XsmartNet.Ref(t.cat, t.id),
-                    ["original_title"] = t.titleOrig,
-                    ["year"] = t.year,
-                    ["id"] = 0,
-                    ["media_type"] = t.series ? "tv" : "movie",
-                    ["overview"] = t.descr
-                });
-            }
+                SaveMeta(hash, XsmartMetaJson(t));
         }
         catch { }
 
@@ -1740,12 +1893,19 @@ public partial class QbitController
         if (loc?["xsmart"] is not JObject xs) return;
         string sref = xs.Value<string>("ref");
         if (string.IsNullOrEmpty(sref)) return;
+        XsmartDecorateListItem(item, xs.Value<int?>("cat") ?? 0, xs.Value<string>("id"), modes);
+    }
 
+    /// <summary>То же для карточки «в полёте» — маркера у неё ещё нет, cat/id известны напрямую.</summary>
+    internal static void XsmartDecorateListItem(JObject item, int cat, string id,
+                                                IReadOnlyDictionary<string, string> modes)
+    {
+        string sref = XsmartNet.Ref(cat, id);
         string mode = modes != null && modes.TryGetValue(sref, out string m) ? m : "off";
         item["xsmart"] = new JObject
         {
-            ["cat"] = xs.Value<int?>("cat") ?? 0,
-            ["id"] = xs.Value<string>("id"),
+            ["cat"] = cat,
+            ["id"] = id,
             ["ref"] = sref,
             ["watch"] = mode
         };

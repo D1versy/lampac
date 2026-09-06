@@ -1002,6 +1002,48 @@ public partial class QbitController : BaseController
                         if (lmeta != null) item["meta"] = lmeta;
                         result.Add(item);
                     }
+
+                    // qdl 2.114: закачки XSMART/jut «в полёте» — карточка ДО первого готового файла.
+                    // Маркера у такого тайтла ещё нет (его пишет *FinishFile после ремукса), а
+                    // зрителю нужно видеть, что закачка идёт, и её процент. Если маркер уже есть
+                    // (сериал: первые серии готовы, остальные качаются) — карточке достаётся только
+                    // живой progress < 1, local/state не трогаем: готовые серии играются как раньше.
+                    // Строго ДО MergeSeriesCards (он пропускает карточки по полю xsmart/jut) и ДО
+                    // ActivityPrune (иначе он счёл бы такой хеш мёртвым). Только чтение: List() зовётся
+                    // и на дежурном цвете, где записи выключены, поэтому никакого MetaHealKick/SaveMeta.
+                    foreach (var inf in XsmartInflight().Concat(JutInflight()))
+                    {
+                        string h = inf.Value<string>("hash");
+                        if (!ValidHash(h)) continue;
+                        double p = inf.Value<double?>("p") ?? 0;
+                        var existing = result.OfType<JObject>()
+                            .FirstOrDefault(x => string.Equals(x.Value<string>("hash"), h, StringComparison.OrdinalIgnoreCase));
+                        if (existing != null) { existing["progress"] = p; existing["inflight"] = InflightBrief(inf); continue; }
+
+                        long since = inf.Value<long?>("since") ?? 0;
+                        if (since <= 0) since = nowUnix;
+                        var item = new JObject
+                        {
+                            ["hash"] = h,
+                            ["name"] = inf.Value<string>("title"),
+                            ["progress"] = p,
+                            ["state"] = inf.Value<string>("state") ?? "queued",
+                            ["local"] = false,
+                            ["size"] = 0,
+                            ["has_poster"] = HasPoster(h),
+                            ["watched"] = false,
+                            ["added"] = since,
+                            ["inflight"] = InflightBrief(inf)
+                        };
+                        if (inf.Value<bool?>("xsmart") == true)
+                            XsmartDecorateListItem(item, inf.Value<int?>("cat") ?? 0, inf.Value<string>("id"), xsModes);
+                        else
+                            JutDecorateListItem(item, inf.Value<string>("slug"), jutModes);
+                        DecorateListPoster(item);
+                        item["activity"] = Math.Max(since, ActivityStored(act, h));
+                        item["meta"] = LoadMeta(h) ?? InflightMeta(inf);
+                        result.Add(item);
+                    }
                 }
             }
             catch (Exception ex) { Console.WriteLine("[QbitDownload] list local: " + ex.Message); }
@@ -1308,6 +1350,34 @@ public partial class QbitController : BaseController
         {
             // локальный транскод: удаляем файлы + маркер + все следы (в qBit его уже нет)
             var loc = LoadLocal(hash);
+
+            // qdl 2.114: карточка «в полёте» XSMART/jut — маркера ещё нет, в qBit её нет тоже.
+            // Раньше такой хеш уходил в торрентную ветку: PurgeCache сносил мету и постер, а
+            // закачка продолжалась и по готовности воскрешала карточку безымянной. Теперь
+            // «Удалить» = отменить закачку (очередь, намерения, подписка) + убрать хвосты .part.
+            if (loc == null)
+            {
+                string xsRefLive = XsmartRefByHash(hash);
+                string jutSlugLive = xsRefLive == null ? JutSlugByHash(hash) : null;
+                if (xsRefLive != null || jutSlugLive != null)
+                {
+                    if (xsRefLive != null)
+                    {
+                        XsmartForgetOnDelete(xsRefLive);
+                        if (deleteFiles) XsmartPurgePartials(xsRefLive);
+                    }
+                    else
+                    {
+                        JutForgetOnDelete(jutSlugLive);   // сам чистит .part (JutPurgePartials)
+                    }
+                    DropHlsCache(hash);
+                    DropResolveCache(hash);
+                    PurgeCache(hash);
+                    DropListCache();
+                    return Json(new { success = true, canceled = true });
+                }
+            }
+
             if (loc != null && !LocalIsOverlay(loc))
             {
                 // jut.su: подписка живёт в ОТДЕЛЬНОМ файле, о котором PurgeCache не знает.
@@ -1318,7 +1388,11 @@ public partial class QbitController : BaseController
 
                 // XSMART: та же история — свой файл подписок, о котором PurgeCache не знает.
                 string xsRef = (loc["xsmart"] as JObject)?.Value<string>("ref");
-                if (!string.IsNullOrEmpty(xsRef)) XsmartForgetOnDelete(xsRef);
+                if (!string.IsNullOrEmpty(xsRef))
+                {
+                    XsmartForgetOnDelete(xsRef);
+                    if (deleteFiles) XsmartPurgePartials(xsRef);   // хвосты серий, что качались в этот момент (qdl 2.114)
+                }
 
                 if (deleteFiles) DeleteLocalFiles(loc);
                 try { using var c2 = await Qbit(); await DeleteDonorsOf(c2, hash); } catch { }   // хвосты охоты, если были
@@ -4994,6 +5068,41 @@ public partial class QbitController : BaseController
     internal static void DropListCache()
     {
         lock (_listCacheLock) _listCache = null;
+    }
+
+    /// <summary>Что клиенту знать о закачке «в полёте» (qdl 2.114): состояние, сколько ещё единиц, ошибка.</summary>
+    static JObject InflightBrief(JObject inf)
+    {
+        var b = new JObject
+        {
+            ["state"] = inf.Value<string>("state") ?? "queued",
+            ["pending"] = inf.Value<int?>("pending") ?? 0
+        };
+        string err = inf.Value<string>("error");
+        if (!string.IsNullOrEmpty(err)) b["error"] = err;
+        return b;
+    }
+
+    /// <summary>
+    /// Мета карточки «в полёте», когда файла меты ещё нет. Без неё клиентский enrich() нашёл бы
+    /// тайтл в TMDB и записал мету без source — потеря пояса изоляции (IndexCrawler пошёл бы за ним
+    /// на трекеры) и чужой экран карточки. id:0 — «TMDB id нет» → свой экран qdl_card.
+    /// </summary>
+    static JObject InflightMeta(JObject inf)
+    {
+        bool xs = inf.Value<bool?>("xsmart") == true;
+        if (xs)
+        {
+            var t = XsmartTitleFromCache(inf.Value<int?>("cat") ?? 0, inf.Value<string>("id"));
+            if (t != null) return XsmartMetaJson(t);
+        }
+        return new JObject
+        {
+            ["source"] = xs ? "xsmart" : "jutsu",
+            ["title"] = inf.Value<string>("title"),
+            ["id"] = 0,
+            ["media_type"] = !xs || inf.Value<bool?>("series") == true ? "tv" : "movie"
+        };
     }
 
     // ── ETag/304 для горячих JSON-ручек (qdl 2.45) ───────────────────────

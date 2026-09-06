@@ -53,6 +53,7 @@
     "Xsmart.cs",
     "XsmartGrab.cs",
     "XsmartWatch.cs",
+    "XsmartHistory.cs",
     "TorrentHash.cs",
     "MetaHeal.cs",
     "Perms.cs",

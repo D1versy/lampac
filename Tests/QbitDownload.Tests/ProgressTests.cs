@@ -310,6 +310,107 @@ public class ProgressTests
 
     // ─────────────────────── сторож общего порога ───────────────────────
 
+    // ─────────────────── закачки XSMART «в полёте» (qdl 2.114) ───────────────────
+    // Карточка XSMART/jut до первого готового файла живёт в /qdl/list, а живой процент ей даёт
+    // этот же поллер под псевдо-infohash. Контракт тот же: в items только недокачанное,
+    // «качается» → active (быстрый опрос), «в очереди» → pending (медленный пульс).
+
+    const string SREF = "6-10425171";
+    static string XsHash => XsmartNet.Hash(6, "10425171");
+
+    /// <summary>Окружение XSMART + настройки поллера. ⚠️ Не вместе с Conf(): оба зовут FreshCache.</summary>
+    static void ConfXs()
+    {
+        XsAccess.Env();
+        ModInit.conf.progressPollSeconds = 5;
+        ModInit.conf.progressSnapshotSeconds = 0;
+        ModInit.conf.progressIdlePollSeconds = 30;
+        ModInit.conf.progressIdleBudgetMinutes = 10;
+        ModInit.conf.partialPlayBlock = true;
+        ModInit.conf.replicaRole = "";
+    }
+
+    [Fact]
+    public async Task Xsmart_в_полёте_едет_в_items_и_считается_active()
+    {
+        ConfXs();
+        using var pin = XsAccess.PinWorker();
+        WantsAccess.CommitXs(SREF, 6, "10425171", WantsAccess.Film());
+        XsAccess.JobSet(SREF, "running", seg: 40, segTotal: 100);
+
+        var (body, _, _) = await Run(Qbit("[]"));
+        Assert.True(body.Value<bool>("ok"));
+        var it = ((JArray)body["items"]).OfType<JObject>().FirstOrDefault(x => x.Value<string>("h") == XsHash);
+        Assert.NotNull(it);
+        Assert.Equal(0.4, it.Value<double>("p"), 3);
+        Assert.Equal("downloading", it.Value<string>("s"));
+        Assert.Equal(1, body.Value<int>("active"));
+        Assert.Equal(0, body.Value<int>("pending"));
+    }
+
+    [Fact]
+    public async Task Xsmart_queued_считается_pending()
+    {
+        ConfXs();
+        using var pin = XsAccess.PinWorker();
+        WantsAccess.CommitXs(SREF, 6, "10425171", WantsAccess.Film());
+        XsAccess.JobSet(SREF, "queued");
+
+        var (body, _, _) = await Run(Qbit("[]"));
+        var it = ((JArray)body["items"]).OfType<JObject>().FirstOrDefault(x => x.Value<string>("h") == XsHash);
+        Assert.NotNull(it);
+        Assert.Equal("queued", it.Value<string>("s"));
+        Assert.Equal(0, body.Value<int>("active"));
+        Assert.Equal(1, body.Value<int>("pending"));
+    }
+
+    [Fact]
+    public async Task Xsmart_на_ремуксе_не_читается_как_готовое()
+    {
+        // 🔴 seg == segTotal наступает ДО ремукса и ДО маркера. Без капа хеш пропал бы из items,
+        // клиент прочитал бы «готово», снял гейт и открыл файл, которого ещё нет.
+        ConfXs();
+        using var pin = XsAccess.PinWorker();
+        WantsAccess.CommitXs(SREF, 6, "10425171", WantsAccess.Film());
+        XsAccess.JobSet(SREF, "running", seg: 911, segTotal: 911);
+
+        var (body, _, _) = await Run(Qbit("[]"));
+        var it = ((JArray)body["items"]).OfType<JObject>().FirstOrDefault(x => x.Value<string>("h") == XsHash);
+        Assert.NotNull(it);
+        Assert.True(it.Value<double>("p") < QbitController.ProgressDone);
+        Assert.Equal(0.99, it.Value<double>("p"), 3);
+    }
+
+    [Fact]
+    public async Task Xsmart_завершённая_пачка_в_items_не_едет()
+    {
+        // Долга нет, очередь пуста, job лежит «done» до уборки — это не полёт: хеша в items нет,
+        // и клиент честно читает «готово».
+        ConfXs();
+        using var pin = XsAccess.PinWorker();
+        XsAccess.JobSet(SREF, "done", fileDone: 1, filesTotal: 1);
+
+        var (body, _, _) = await Run(Qbit("[]"));
+        Assert.True(body.Value<bool>("ok"));
+        Assert.DoesNotContain(((JArray)body["items"]).OfType<JObject>(), x => x.Value<string>("h") == XsHash);
+        Assert.Equal(0, body.Value<int>("active"));
+    }
+
+    [Fact]
+    public async Task Лёгший_qBittorrent_с_xsmart_в_полёте_всё_равно_ok_false()
+    {
+        // Иначе недокачанные торренты прочитались бы как готовые (нет хеша при ok:true = готово).
+        ConfXs();
+        using var pin = XsAccess.PinWorker();
+        WantsAccess.CommitXs(SREF, 6, "10425171", WantsAccess.Film());
+        XsAccess.JobSet(SREF, "running", seg: 10, segTotal: 100);
+
+        var fake = new FakeQbit().Text("/torrents/info", "down", System.Net.HttpStatusCode.InternalServerError);
+        var (body, _, _) = await Run(fake);
+        Assert.False(body.Value<bool>("ok"));
+        Assert.Empty((JArray)body["items"]);
+    }
+
     [Fact]
     public void Порог_готовности_один_на_весь_модуль()
     {

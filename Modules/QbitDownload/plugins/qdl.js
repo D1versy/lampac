@@ -3016,12 +3016,15 @@
         // на месте по тику поллера — карточка при этом остаётся ТЕМ ЖЕ узлом, фокус пульта жив.
         this.dlBadge = function (t) {
             var css = 'position:absolute;left:.4em;top:.4em;color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.9em;z-index:5;';
+            // qdl 2.114: процент — ПЕРВЫМ. Раньше local-карточка сразу получала «MP4», и закачка
+            // XSMART/jut «в полёте» (маркера ещё нет, local:false) или сериал с добором
+            // (маркер есть, но сервер отдал progress < 1) не показывали, что что-то качается.
+            var pct = Math.round(livePct(t) * 100);
+            if (pct < 100)
+                return '<div class="qdl-dl-badge" style="' + css + 'background:rgba(0,0,0,.75)">' + pct + '%</div>';
             if (t.local || t.state === 'local')
                 return '<div class="qdl-dl-badge" style="' + css + 'background:rgba(30,120,220,.9)">MP4</div>';
-            var pct = Math.round(livePct(t) * 100);
-            return pct < 100
-                ? '<div class="qdl-dl-badge" style="' + css + 'background:rgba(0,0,0,.75)">' + pct + '%</div>'
-                : '<div class="qdl-dl-badge" style="' + css + 'background:rgba(20,160,40,.9)">✓</div>';
+            return '<div class="qdl-dl-badge" style="' + css + 'background:rgba(20,160,40,.9)">✓</div>';
         };
 
         this.append = function (t, ctx) {
@@ -3741,7 +3744,10 @@
                 act: 'xswatch'
             });
         }
-        else if (!t.local && t.state !== 'local')
+        // ⚠️ Гейт по контуру, а не только по local: с qdl 2.114 карточка XSMART/jut «в полёте»
+        // (маркера ещё нет) приезжает с local:false, и без этой оговорки фильм XSMART получал бы
+        // ТОРРЕНТНЫЙ «Следить» → /qdl/watch → пояс изоляции пробит.
+        else if (!t.local && t.state !== 'local' && !isXsmart(t) && !isJut(t))
             items.push({ title: t.watched ? '🔔 Не следить за новыми сериями' : '🔔 Следить за новыми сериями', act: 'watch' });
         // Ожидание СЛЕДУЮЩЕГО сезона (qdl 2.79) — отдельный пункт, а не режим слежения выше:
         // то следит за раздачей (её новыми сериями), это ждёт сезон, которого ещё нет в природе.
@@ -3756,10 +3762,13 @@
         }
         // в под-гриде коллекции — «Убрать», в общем гриде/карточке — «Добавить».
         // qdl 2.67: коллекции — тоже «Управление» (решение владельца), сервер их мутации гейтит.
+        // Карточка «в полёте» (XSMART/jut без маркера): удалить = отменить закачку. Сервер
+        // (Delete, qdl 2.114) снимает очередь, намерения, подписку и хвосты .part.
+        var inflight = (isXsmart(t) || isJut(t)) && !t.local && t.state !== 'local';
         if (qdlManage()) {
             if (ctx && ctx.collection) items.push({ title: '📁 Убрать из коллекции', act: 'uncol' });
             else items.push({ title: '📁 Добавить в коллекцию', act: 'addcol' });
-            items.push({ title: '🗑 Удалить (с файлами)', act: 'del' });
+            items.push({ title: inflight ? '🗑 Отменить закачку и удалить' : '🗑 Удалить (с файлами)', act: 'del' });
         }
 
         Lampa.Select.show({

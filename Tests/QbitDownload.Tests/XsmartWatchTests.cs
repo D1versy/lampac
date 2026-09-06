@@ -60,6 +60,33 @@ static class XsAccess
         queued.GetType().GetMethod("Clear").Invoke(queued, null);
         // Журнал намерений — тоже статика, и без сброса долг одного кейса воскресает в другом.
         DownloadWants.Xsmart.Reset(flush: false);
+        // Job'ы — тоже статика: с qdl 2.114 их читают /qdl/list и /qdl/progress (карточка «в полёте»),
+        // и running-job прошлого кейса всплыл бы карточкой в чужом тесте.
+        JobClear();
+    }
+
+    /// <summary>
+    /// Job тайтла напрямую — как её видит воркер посреди закачки (qdl 2.114: карточка «в полёте»).
+    /// Сам воркер в тестах запинен, поэтому состояние выставляем руками.
+    /// </summary>
+    public static void JobSet(string sref, string state, long done = 0, long total = 0,
+                              int seg = 0, int segTotal = 0, int fileDone = 0, int filesTotal = 1)
+    {
+        var jobs = F("_xsJobs").GetValue(null);
+        var jobType = C.GetNestedType("XsmartGrabJob", BindingFlags.NonPublic | BindingFlags.Public)
+                      ?? throw new MissingMemberException("QbitController.XsmartGrabJob");
+        const BindingFlags IF = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
+        object job = Activator.CreateInstance(jobType);
+        void Set(string f, object v) => (jobType.GetField(f, IF) ?? throw new MissingFieldException(f)).SetValue(job, v);
+        Set("state", state); Set("done", done); Set("total", total);
+        Set("seg", seg); Set("segTotal", segTotal); Set("fileDone", fileDone); Set("filesTotal", filesTotal);
+        jobs.GetType().GetProperty("Item").SetValue(jobs, job, new object[] { sref });
+    }
+
+    public static void JobClear()
+    {
+        var jobs = F("_xsJobs").GetValue(null);
+        jobs.GetType().GetMethod("Clear").Invoke(jobs, null);
     }
 
     /// <summary>Воркер «занят»: постановка в очередь не поднимет реальную качалку.</summary>

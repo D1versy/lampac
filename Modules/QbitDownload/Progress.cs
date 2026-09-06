@@ -226,6 +226,22 @@ public partial class QbitController
                 });
             }
 
+            // qdl 2.114: закачки XSMART/jut «в полёте» — под своим псевдо-infohash, тем же контрактом
+            // (в items только недокачанное; «качается» → active, «в очереди/застряло» → pending —
+            // от этого зависит, будет ли клиент опрашивать раз в 5 с). Внутри того же try: при
+            // лёгшем qBit ответ обязан остаться ok:false, иначе недокачанные торренты прочитались
+            // бы как готовые. Прогресс единицы там капается на 99 % до ремукса и маркера (XsmartInflight).
+            foreach (var inf in XsmartInflight().Concat(JutInflight()))
+            {
+                double ip = inf.Value<double?>("p") ?? 0;
+                if (ip >= ProgressDone) continue;
+                string ih = inf.Value<string>("hash");
+                if (string.IsNullOrEmpty(ih)) continue;
+                string istate = inf.Value<string>("state") ?? "queued";
+                if (istate == "downloading") active++; else pending++;
+                items.Add(new JObject { ["h"] = ih, ["p"] = Math.Round(Math.Clamp(ip, 0, 1), 4), ["s"] = istate });
+            }
+
             JObject files = null;
             if (hash != null)
                 files = await ProgressFilesFor(hash);

@@ -298,3 +298,28 @@ test('jut-уведомление по-прежнему уходит на сво�
   qdl.openNotification({ kind: 'NEW', hash: 'f'.repeat(40), title: 'Игра лжецов', slug: 'liar-game' });
   assert.strictEqual(last(calls.pushes).component, 'jut_title');
 });
+
+// ─────────────────────── карточка «в полёте» (qdl 2.114) ───────────────────────
+// До первого готового файла сервер отдаёт xsmart-карточку с local:false. Торрентная ветка
+// «Следить» гейтится по !local — без гейта по контуру фильм XSMART получал бы /qdl/watch.
+
+test('in-flight xsmart-фильм без маркера не получает торрентный «Следить»', () => {
+  const { qdl, calls } = rig();
+  qdl.quickMenu(XS_FILM({ local: false, state: 'downloading', progress: 0.3 }));
+  assert.ok(!acts(calls).includes('watch'), 'торрентный контур не при делах: ' + acts(calls).join(','));
+  assert.ok(!acts(calls).includes('xswatch'), 'у фильма слежения нет');
+});
+
+test('in-flight xsmart-сериал без маркера получает СВОЙ «Следить», а не торрентный', () => {
+  const { qdl, calls } = rig();
+  qdl.quickMenu(XS({ local: false, state: 'queued', progress: 0 }));
+  assert.ok(acts(calls).includes('xswatch'));
+  assert.ok(!acts(calls).includes('watch'));
+});
+
+test('у карточки «в полёте» пункт удаления подписан как отмена закачки', () => {
+  const { qdl, calls } = rig();
+  qdl.quickMenu(XS_FILM({ local: false, state: 'downloading', progress: 0.3 }));
+  const del = titles(calls).filter((t) => /Удалить|Отменить/.test(t))[0];
+  if (del) assert.ok(/Отменить закачку/.test(del), 'подпись: ' + del);   // пункт есть только с правом «действия»
+});

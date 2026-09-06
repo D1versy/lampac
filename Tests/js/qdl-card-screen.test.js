@@ -211,3 +211,15 @@ test('экран: img_broken.svg на карточке загрузки боль
   assert.ok(!doc.body.innerHTML.includes('img_broken'),
     'битый значок читается как поломка приложения, а «постера нет» — штатный случай');
 });
+
+// qdl 2.114: карточка XSMART «в полёте» — файлов ещё нет, есть только процент.
+test('карточка «в полёте» без файлов: чип «30% загружено», без «Продолжить», без исключений', () => {
+  const { doc } = rig([], [], {
+    hash: 'c'.repeat(40), name: 'Вскрытие демона', progress: 0.3, local: false, state: 'downloading',
+    xsmart: { cat: 6, id: '10425171', ref: '6-10425171' },
+    meta: { id: 0, media_type: 'movie', title: 'Вскрытие демона', source: 'xsmart' },
+  });
+  assert.ok(/30% загружено/.test(doc.querySelector('.qdl-chip-dl').textContent));
+  assert.strictEqual(doc.querySelectorAll('.qdl-continue').length, 0);
+  assert.strictEqual(doc.querySelectorAll('.qdl-watch').length, 1);
+});

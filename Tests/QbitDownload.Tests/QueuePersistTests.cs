@@ -88,6 +88,10 @@ static class WantsAccess
     public static XsmartEp Ep(string sid, int sno, int epno)
         => new XsmartEp { kind = XsmartKind.Episode, seasonId = sid, seasonNo = sno, epNo = epno, epId = sid + "-" + epno };
 
+    /// <summary>Фильм ровно таким, каким его строит Xsmart.cs: kind Film, без seasonId/epId.</summary>
+    public static XsmartEp Film()
+        => new XsmartEp { kind = XsmartKind.Film, seasonNo = 1, epNo = 1 };
+
     /// <summary>Контроллер с пустым HttpContext: экшены трогают заголовки ответа.</summary>
     public static QbitController Ctrl()
         => new QbitController { ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() } };
@@ -384,6 +388,70 @@ public class QueuePersistTests
 
         Assert.Empty(XsAccess.Queue());
         Assert.False(DownloadWants.Xsmart.HasTitle("3-788"));   // выброшена, а не припаркована
+    }
+
+    // ── фильмы (qdl 2.114) ────────────────────────────────────────────────
+
+    [Fact]
+    public void Фильм_переживает_рестарт_без_eid()
+    {
+        // У фильма XSMART epId пуст по конструкции — резолв идёт по cat/id. До 2.114 ворота
+        // восстановления требовали eid и от фильма, и после рестарта он не вставал в очередь.
+        XsAccess.Env();
+        using var pin = XsAccess.PinWorker();
+
+        WantsAccess.CommitXs("6-10425171", 6, "10425171", WantsAccess.Film());
+        WantsAccess.RestartXsmart();
+        QbitController.XsmartWantsRestore();
+
+        var q = XsAccess.Queue();
+        Assert.Single(q);
+        Assert.Equal("film", q[0].epkey);
+        Assert.True(DownloadWants.Xsmart.HasTitle("6-10425171"));
+    }
+
+    [Fact]
+    public void Свип_не_выбрасывает_фильм()
+    {
+        // 🔥 Дословно бой 06.09.2026, через 2,5 минуты после «Скачать» на «Вскрытии демона»:
+        //   [QbitDownload] xsmart/wants: выброшена запись 6-10425171:film — нет eid
+        // Свип (4 мин после старта, потом каждые 5) поднимал запись, ворота её отвергали,
+        // и страховка «пережить рестарт» на фильмы не действовала ВООБЩЕ.
+        XsAccess.Env();
+        using var pin = XsAccess.PinWorker();
+
+        WantsAccess.CommitXs("6-10425171", 6, "10425171", WantsAccess.Film());
+        WantsAccess.RestartXsmart();
+
+        Assert.Equal(1, QbitController.XsmartWantsSweep());     // поставил
+        Assert.Equal(0, QbitController.XsmartWantsSweep());     // уже в очереди — ничего не выбросил
+        Assert.True(DownloadWants.Xsmart.HasTitle("6-10425171"));
+        Assert.Single(XsAccess.Queue());
+    }
+
+    [Fact]
+    public void Фильм_с_чужим_epkey_всё_же_выбрасывается()
+    {
+        // Ворота по eid сняты, но ворота по epkey остались: запись «film» под ключом серии —
+        // мусор, и паркой такое не лечится.
+        XsAccess.Env();
+        using var pin = XsAccess.PinWorker();
+
+        WantsAccess.CommitXs("6-10425172", 6, "10425172", WantsAccess.Film());
+        JsonStore.Flush();
+
+        var raw = WantsAccess.OnDisk(WantsAccess.XsPath());
+        var rec = (JObject)raw["items"]["6-10425172:film"];
+        rec["e"] = "s1e1";
+        ((JObject)raw["items"]).Remove("6-10425172:film");
+        raw["items"]["6-10425172:s1e1"] = rec;
+        File.WriteAllText(WantsAccess.XsPath(), raw.ToString());
+
+        WantsAccess.RestartXsmart();
+        QbitController.XsmartWantsRestore();
+
+        Assert.Empty(XsAccess.Queue());
+        Assert.False(DownloadWants.Xsmart.HasTitle("6-10425172"));
     }
 
     [Fact]

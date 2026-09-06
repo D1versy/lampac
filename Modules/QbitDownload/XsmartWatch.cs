@@ -582,6 +582,7 @@ public partial class QbitController
         if (put > 0)
         {
             XsmartJobForBatch(sref, freshBatch, put);
+            XsmartEnsureMetaFile(cat, id);   // карточка «в полёте» без меты ушла бы в enrich() клиента (qdl 2.114)
             XsmartKickWorker();
         }
         return put;

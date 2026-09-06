@@ -63,6 +63,7 @@ public partial class QbitController
             ["uids"] = new JArray(),
             ["devices"] = 0,
             ["jut"] = 0,
+            ["xsmart"] = 0,
             ["bookmarks"] = 0,
             ["timecodes"] = 0,
             ["blobs"] = 0,
@@ -119,6 +120,7 @@ public partial class QbitController
             ((JArray)report["uids"]).Add(key);
 
             Bump(report, "jut", PurgeJutHistory(key, apply, errors));
+            Bump(report, "xsmart", PurgeXsmartHistory(key, apply, errors));
             Bump(report, "blobs", PurgeStorageBlob(key, apply, errors));
             Bump(report, "bookmarks", PurgeSqlRows(SyncDbPath, "bookmarks", "user", key, apply, errors));
             Bump(report, "timecodes", PurgeSqlRows(TimeCodeDbPath, "timecodes", "user", key, apply, errors));
@@ -167,6 +169,26 @@ public partial class QbitController
             return 1;
         }
         catch (Exception ex) { errors.Add("jut " + key + ": " + ex.Message); return 0; }
+    }
+
+    /// <summary>История и поиски XSMART (qdl 2.114): тот же бакет-на-устройство, что у jut.</summary>
+    static int PurgeXsmartHistory(string key, bool apply, JArray errors)
+    {
+        try
+        {
+            string bucket = JutHistoryBucket(key);
+            if (bucket == JutSharedBucket) return 0;          // общий бакет — не устройство и не тест
+
+            string path = XsmartHistoryPath(bucket);
+            if (!JsonStore.Exists(path)) return 0;
+            if (!apply) return 1;
+
+            JsonStore.Remove(path);
+            JsonStore.ForgetDir(XsmartHistoryDir());
+            Console.WriteLine("[QbitDownload] test-purge xsmart: " + bucket);
+            return 1;
+        }
+        catch (Exception ex) { errors.Add("xsmart " + key + ": " + ex.Message); return 0; }
     }
 
     /// <summary>

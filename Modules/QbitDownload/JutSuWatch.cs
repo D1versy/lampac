@@ -107,6 +107,13 @@ public partial class QbitController
     {
         string jslug = (loc?["jut"] as JObject)?.Value<string>("slug");
         if (string.IsNullOrEmpty(jslug)) return;
+        JutDecorateListItem(item, jslug, modes);
+    }
+
+    /// <summary>То же для карточки «в полёте» (qdl 2.114): маркера ещё нет, slug известен напрямую.</summary>
+    internal static void JutDecorateListItem(JObject item, string jslug, IReadOnlyDictionary<string, string> modes)
+    {
+        if (string.IsNullOrEmpty(jslug)) return;
         string jmode = modes != null && modes.TryGetValue(jslug, out string m) ? m : "off";
         item["jut"] = new JObject { ["slug"] = jslug, ["watch"] = jmode };
         item["watched"] = jmode != "off";

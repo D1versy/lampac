@@ -137,6 +137,132 @@ public class ListLocalFreshnessTests
         finally { ModInit.conf.downloadsPath = prev; }
     }
 
+    // ── закачки XSMART «в полёте» (qdl 2.114) ─────────────────────────────
+    // До первого готового mp4 маркера нет, и тайтла в «Загрузках» не было вовсе: у фильма
+    // (один файл, часы) зритель смотрел на пустоту. Теперь карточка есть с первой секунды.
+
+    const string SREF = "6-10425171";
+    static string XsHash => XsmartNet.Hash(6, "10425171");
+
+    static void XsList()
+    {
+        XsAccess.Env();
+        ModInit.conf.listCacheSeconds = 0;
+    }
+
+    [Fact]
+    public async Task Xsmart_в_полёте_без_маркера_виден_с_прогрессом_и_метой()
+    {
+        XsList();
+        using var pin = XsAccess.PinWorker();
+        Access.SaveMeta(XsHash, new JObject { ["source"] = "xsmart", ["title"] = "Вскрытие демона", ["id"] = 0, ["media_type"] = "movie" });
+        WantsAccess.CommitXs(SREF, 6, "10425171", WantsAccess.Film());
+        XsAccess.JobSet(SREF, "running", seg: 300, segTotal: 1000);
+
+        var card = (await RunList()).FirstOrDefault(x => x.Value<string>("hash") == XsHash);
+        Assert.NotNull(card);
+        Assert.False(card.Value<bool?>("local") ?? false);
+        Assert.Equal("downloading", card.Value<string>("state"));
+        Assert.Equal(0.3, card.Value<double>("progress"), 3);
+        Assert.Equal("xsmart", card["meta"]?.Value<string>("source"));
+        Assert.Equal("Вскрытие демона", card["meta"]?.Value<string>("title"));
+        Assert.Equal(SREF, card["xsmart"]?.Value<string>("ref"));
+        Assert.Equal("downloading", card["inflight"]?.Value<string>("state"));
+    }
+
+    [Fact]
+    public async Task Xsmart_без_меты_не_остаётся_безымянным()
+    {
+        // Карточка без meta ушла бы в клиентский enrich() → TMDB-мета без source:"xsmart"
+        // (потеря пояса изоляции и чужой экран карточки). Мету собираем из кеша тайтла.
+        XsList();
+        using var pin = XsAccess.PinWorker();
+        QbitController.XsmartCacheWrite(XsAccess.Title(6, "10425171", ("s1", 1, 1)));
+        WantsAccess.CommitXs(SREF, 6, "10425171", WantsAccess.Ep("s1", 1, 1));
+        XsAccess.JobSet(SREF, "queued");
+
+        var card = (await RunList()).FirstOrDefault(x => x.Value<string>("hash") == XsHash);
+        Assert.NotNull(card);
+        Assert.Equal("xsmart", card["meta"]?.Value<string>("source"));
+        Assert.Equal(0, card["meta"]?.Value<int?>("id"));
+        Assert.Equal("Тайтл 10425171", card["meta"]?.Value<string>("title"));
+        Assert.Equal("queued", card.Value<string>("state"));
+    }
+
+    [Fact]
+    public async Task Маркер_плюс_полёт_держит_local_и_прогресс_меньше_1()
+    {
+        // Сериал: первая серия готова (маркер есть), вторая качается. Карточка остаётся local
+        // (готовое играется), но progress — живой процент пачки, а не 1.0.
+        var (_, downloads) = XsAccess.Env();
+        ModInit.conf.listCacheSeconds = 0;
+        using var pin = XsAccess.PinWorker();
+        string dir = Path.Combine(downloads, SREF);
+        Directory.CreateDirectory(dir);
+        string e1 = Path.Combine(dir, SREF + ".s01e01.1080p.mp4");
+        File.WriteAllText(e1, new string('x', 100));
+        Access.SaveLocal(XsHash, new JObject
+        {
+            ["name"] = "Тайтл", ["dir"] = dir, ["size"] = 100, ["added"] = 1_700_000_000L, ["overlay"] = false,
+            ["files"] = new JArray { new JObject { ["index"] = 0, ["name"] = Path.GetFileName(e1), ["path"] = e1, ["size"] = 100 } },
+            ["xsmart"] = new JObject { ["cat"] = 6, ["id"] = "10425171", ["ref"] = SREF }
+        });
+        WantsAccess.CommitXs(SREF, 6, "10425171", WantsAccess.Ep("s1", 1, 2));
+        XsAccess.JobSet(SREF, "running", seg: 50, segTotal: 100, fileDone: 1, filesTotal: 2);
+
+        var card = (await RunList()).FirstOrDefault(x => x.Value<string>("hash") == XsHash);
+        Assert.NotNull(card);
+        Assert.True(card.Value<bool>("local"));
+        Assert.Equal("local", card.Value<string>("state"));
+        Assert.Equal(0.75, card.Value<double>("progress"), 3);
+
+        // Пачка досталась: долга нет, job убран → progress снова 1.0
+        DownloadWants.Xsmart.DropTitle(SREF);
+        XsAccess.JobClear();
+        card = (await RunList()).FirstOrDefault(x => x.Value<string>("hash") == XsHash);
+        Assert.Equal(1.0, card.Value<double>("progress"));
+    }
+
+    [Fact]
+    public async Task Постановка_в_очередь_сбрасывает_кеш_списка()
+    {
+        // /qdl/list кешируется 30 с; без сброса в JobForBatch карточка появлялась бы с опозданием.
+        XsAccess.Env();
+        ModInit.conf.listCacheSeconds = 30;
+        using var pin = XsAccess.PinWorker();
+        try
+        {
+            Assert.DoesNotContain(await RunList(), x => x.Value<string>("hash") == XsHash);   // ответ закеширован
+            WantsAccess.CommitXs(SREF, 6, "10425171", WantsAccess.Film());
+            Access.Call("XsmartJobForBatch", SREF, true, 1);
+            Assert.Contains(await RunList(), x => x.Value<string>("hash") == XsHash);
+        }
+        finally { ModInit.conf.listCacheSeconds = 0; QbitController.DropListCache(); }
+    }
+
+    [Fact]
+    public async Task Удаление_карточки_в_полёте_отменяет_закачку_и_чистит_хвосты()
+    {
+        // Раньше хеш без маркера уходил в торрентную ветку: мета и постер сносились, а закачка
+        // продолжалась и по готовности воскрешала карточку безымянной.
+        var (_, downloads) = XsAccess.Env();
+        ModInit.conf.listCacheSeconds = 0;
+        using var pin = XsAccess.PinWorker();
+        WantsAccess.CommitXs(SREF, 6, "10425171", WantsAccess.Film());
+        XsAccess.JobSet(SREF, "running", seg: 10, segTotal: 100);
+        string dir = Path.Combine(downloads, SREF);
+        Directory.CreateDirectory(Path.Combine(dir, SREF + ".film.1080p.mp4.parts"));
+        File.WriteAllText(Path.Combine(dir, SREF + ".film.1080p.mp4.part"), "x");
+
+        Assert.Equal(SREF, QbitController.XsmartRefByHash(XsHash));
+        QbitController.XsmartForgetOnDelete(SREF);
+        QbitController.XsmartPurgePartials(SREF);
+
+        Assert.False(DownloadWants.Xsmart.HasTitle(SREF));
+        Assert.False(Directory.Exists(dir));
+        Assert.DoesNotContain(await RunList(), x => x.Value<string>("hash") == XsHash);   // полёта больше нет
+    }
+
     [Fact]
     public async Task Маркер_без_единого_живого_файла_карточку_не_даёт()
     {

@@ -267,6 +267,29 @@ sealed class WantStore
         lock (_lock) { EnsureLoaded(); return _items.ContainsKey(title + ":" + epkey); }
     }
 
+    /// <summary>
+    /// Самая ранняя постановка тайтла (unix), 0 — записей нет. Даёт карточке «в полёте»
+    /// в /qdl/list устойчивое «added»: «сейчас» там нельзя — тело ETag'ится, а порядок
+    /// «Загрузок» считается по этому полю и прыгал бы на каждом запросе.
+    /// </summary>
+    public long OldestAt(string title)
+    {
+        if (string.IsNullOrEmpty(title)) return 0;
+        string p = title + ":";
+        long best = 0;
+        lock (_lock)
+        {
+            EnsureLoaded();
+            foreach (var kv in _items)
+            {
+                if (!kv.Key.StartsWith(p, StringComparison.Ordinal)) continue;
+                long at = kv.Value.at;
+                if (at > 0 && (best == 0 || at < best)) best = at;
+            }
+        }
+        return best;
+    }
+
     public bool HasTitle(string title)
     {
         if (string.IsNullOrEmpty(title)) return false;
@@ -515,6 +538,14 @@ public partial class QbitController
     /// Восстановление XsmartEp из payload + санитарные ворота. Без них один битый JSON
     /// отравил бы очередь на все последующие старты: серия без sid/eid не резолвится
     /// НИКОГДА, и паркой после двенадцати бесполезных попыток тут не отделаться.
+    ///
+    /// 🔴 Фильму eid НЕ нужен — и требовать его нельзя. У фильма XSMART epId пуст по
+    /// конструкции (Xsmart.cs: единица «film» строится без id серии), а резолв шлёт
+    /// season/episode только у kind == Episode. До qdl 2.114 ворота требовали eid и от
+    /// фильма, и первый же свип (4 мин после старта, потом каждые 5) выбрасывал запись
+    /// как битую: боевая строка 06.09.2026 — «xsmart/wants: выброшена запись
+    /// 6-10425171:film — нет eid». Страховка «пережить рестарт» на фильмы не действовала
+    /// вовсе; ловится QueuePersistTests.Свип_не_выбрасывает_фильм.
     /// </summary>
     static XsmartEp XsmartEpFromWant(WantRec r, out string bad)
     {
@@ -532,7 +563,6 @@ public partial class QbitController
         };
         if (!film && (string.IsNullOrEmpty(e.seasonId) || string.IsNullOrEmpty(e.epId)))
         { bad = "нет sid/eid"; return null; }
-        if (film && string.IsNullOrEmpty(e.epId)) { bad = "нет eid"; return null; }
         if (e.epkey != r.e) { bad = "epkey не сходится (" + e.epkey + " ≠ " + r.e + ")"; return null; }
         return e;
     }
