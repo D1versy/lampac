@@ -4455,6 +4455,21 @@
         try { return Lampa.Timeline.view(Lampa.Utils.hash('qdllive:' + rec.id)); } catch (e) { return null; }
     }
 
+    // ── Сессии upload-камер (qdl 2.113) ──
+    // Регистратор через ~5 мин после конца сессии Mac-рекордера склеивает её чанки в ОДИН mp4
+    // (compression_preset=merged) под id первого чанка; остальные id исчезают (404). Для таких дней
+    // сервер отдаёт mode:'sessions' — одна строка = один файл, играем напрямую /qdl/live/stream?id=
+    // (moov в начале, перемотка мгновенная), а сшитый дневной HLS не собираем и ремукс не будим.
+    // RTSP-камеры и дни с неслитыми 'original' чанками — прежний mode:'day'.
+    function liveSessions(r) { return !!(r && r.mode === 'sessions'); }
+
+    // «начало – конец» одной записи; сессия через полночь подписывается относительно показанного дня.
+    function liveSpan(rec) {
+        var s = (rec.prevDay ? 'вчера ' : '') + rec.start;
+        var e = rec.end + (rec.nextDay ? ' (+1 день)' : '');
+        return s + ' – ' + e;
+    }
+
     // ── «Весь день одной записью» ──
     // Сервер склеивает куски суток в ОДИН HLS-поток (склейка регистратора: сегменты + DISCONTINUITY),
     // поэтому у дня один таймлайн и нет «следующего файла». Пока задние куски ремуксятся, плейлист
@@ -4474,6 +4489,10 @@
 
     function liveWarmDay(cam, date) {
         clearTimeout(liveWarmTimer);
+
+        // Склеенные сессии играются напрямую mp4 — будить ремукс многочасового файла на регистраторе
+        // не за чем (он бы перемолол его в TS и занял диск ради плейлиста, который никто не откроет).
+        if (liveSessions(cam)) return;
 
         var key = cam.id + ':' + (date || '');
         if (liveWarmed[key]) return;
@@ -4547,6 +4566,15 @@
                     if (!info || info.error) { stop((info && info.error) || 'Не вышло собрать запись'); return; }
                     if (info.empty) { stop('За этот день записей нет'); return; }
 
+                    // Склеенные сессии upload-камеры: сервер HLS не собирал, отдал сами файлы —
+                    // играем их подряд напрямую (каждая со своим таймлайном), см. liveSessions.
+                    if (liveSessions(info)) {
+                        if (my === liveDayToken) liveDayToken++;
+                        if (!info.items || !info.items.length) { Lampa.Noty.show('За этот день записей нет'); return; }
+                        livePlay(cam, info.items, 0);
+                        return;
+                    }
+
                     // всё готово, но играть нечего — все куски битые
                     if (info.complete && !info.ready) { stop('Записи за этот день не читаются'); return; }
 
@@ -4576,7 +4604,7 @@
     function livePlay(cam, items, index) {
         if (!items || !items.length) { Lampa.Noty.show('Записей нет'); return; }
         var playlist = items.map(function (r) {
-            var item = { title: r.start + ' – ' + r.end + '   ·   ' + (cam.name || 'Камера'), url: withUid(API + '/qdl/live/stream?id=' + r.id) };
+            var item = { title: liveSpan(r) + '   ·   ' + (cam.name || 'Камера'), url: withUid(API + '/qdl/live/stream?id=' + r.id) };
             var tl = liveTimeline(r);
             if (tl) item.timeline = tl;
             return item;
@@ -6111,12 +6139,15 @@
         }
 
         function camRow(c) {
+            var sessions = liveSessions(c);
+            var sub = c.first + ' – ' + c.last + '   ·   ' + liveDur(c.seconds);
+            if (sessions) sub += '   ·   ' + c.count + ' ' + livePlural(c.count, 'сессия', 'сессии', 'сессий');
             var el = $(
                 '<div class="selector qdl-row-focus" style="display:flex;align-items:center;gap:1.2em;padding:.9em;margin:.45em 1.4em;background:rgba(255,255,255,.06);border-radius:.8em">' +
                   '<img style="width:12em;height:6.8em;object-fit:cover;border-radius:.5em;background:#111;flex:none">' +
                   '<div style="flex:1;min-width:0">' +
                     '<div style="font-size:1.7em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(c.name) + '</div>' +
-                    '<div style="opacity:.75;font-size:1.25em;margin-top:.35em">' + esc(c.first + ' – ' + c.last) + '   ·   ' + liveDur(c.seconds) + '</div>' +
+                    '<div style="opacity:.75;font-size:1.25em;margin-top:.35em">' + esc(sub) + '</div>' +
                   '</div>' +
                   '<div style="opacity:.45;font-size:1.8em;padding-right:.4em">▶</div>' +
                 '</div>'
@@ -6125,15 +6156,24 @@
             img.attr('src', withUid(API + '/qdl/live/thumb?id=' + c.thumb));
             img.on('error', function () { this.src = './img/img_broken.svg'; });
             // Наводка будит ремукс суток — к нажатию Enter день обычно уже готов целиком.
+            // (у склеенных сессий liveWarmDay сам ничего не делает — их HLS не нужен)
             el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); liveWarmDay(c, date); });
             el.on('hover:touch hover:hover', function () { last = markLast(el); });
             // Обычный вход = весь день одной записью. Разбивка на куски осталась запасным путём
             // (долгое нажатие) — на случай, если склейка почему-то не собралась.
-            el.on('hover:enter', function () { livePlayDay(c, date, currentLabel); });
+            // Склеенные сессии upload-камеры: вход открывает СПИСОК сессий (одна строка = один файл),
+            // долгое нажатие — все сессии дня подряд.
+            el.on('hover:enter', function () {
+                if (sessions) Lampa.Activity.push({ url: '', title: c.name, component: 'qdl_live_camera', qdl_camera: c, qdl_date: date, page: 1 });
+                else livePlayDay(c, date, currentLabel);
+            });
             el.on('hover:long', function () {
                 Lampa.Select.show({
                     title: c.name || 'Камера',
-                    items: [
+                    items: sessions ? [
+                        { title: '▶ Все сессии подряд (' + c.count + ')', day: true },
+                        { title: 'Список сессий' }
+                    ] : [
                         { title: '▶ Смотреть весь день', day: true },
                         { title: 'Фрагменты по отдельности (' + c.count + ')' }
                     ],
@@ -6194,22 +6234,39 @@
         this.build = function (r) {
             var items = r.items || [];
             var name = (r.camera && r.camera.name) || cam.name || 'Камера';
+            // Склеенные сессии upload-камеры: строка = файл, дневного HLS нет (см. liveSessions).
+            var sessions = liveSessions(r);
+            var word = sessions ? livePlural(items.length, 'сессия', 'сессии', 'сессий') : livePlural(items.length, 'запись', 'записи', 'записей');
 
             body.append($('<div style="padding:1.2em 1.6em .4em"><div style="font-size:2em;font-weight:700">' + esc(name) + '</div>' +
-                '<div style="opacity:.6;font-size:1.25em;margin-top:.25em">' + esc(r.label || '') + (items.length ? '   ·   ' + items.length + ' ' + livePlural(items.length, 'запись', 'записи', 'записей') : '') + '</div></div>'));
+                '<div style="opacity:.6;font-size:1.25em;margin-top:.25em">' + esc(r.label || '') + (items.length ? '   ·   ' + items.length + ' ' + word : '') + '</div></div>'));
 
             if (r.error)
                 body.append(liveMsg('⚠️ ' + r.error));
             else if (!items.length)
                 body.append(liveMsg('За этот день записей с этой камеры нет.'));
             else {
-                body.append(playAll(items, r.label));
+                body.append(sessions ? playSessions(items) : playAll(items, r.label));
                 items.forEach(function (rec, i) { body.append(recRow(rec, items, i)); });
             }
 
             this.activity.loader(false);
             this.activity.toggle();
         };
+
+        // Режим sessions: одна кнопка — все сессии дня подряд, каждая напрямую mp4 со своим таймлайном.
+        // Кнопки «весь день одной записью» здесь нет намеренно: она собирала бы сшитый HLS из
+        // многочасовых файлов — ровно те многофайловые сшивки с багами перемотки, ради которых
+        // регистратор и склеивает сессии.
+        function playSessions(items) {
+            var total = 0;
+            items.forEach(function (r) { total += r.seconds || 0; });
+            var all = $('<div class="selector qdl-btn-green" style="margin:.6em 1.4em;padding:1em 1.2em;background:rgba(20,160,40,.85);border-radius:.8em;font-size:1.5em;font-weight:600">▶ Все сессии подряд   ·   ' + liveDur(total) + '</div>');
+            all.on('hover:focus', function () { last = all[0]; scroll.update(all, true); });
+            all.on('hover:touch hover:hover', function () { last = markLast(all); });
+            all.on('hover:enter', function () { livePlay(cam, items, 0); });
+            return $('<div></div>').append(all);
+        }
 
         function playAll(items, label) {
             var total = 0;
@@ -6237,11 +6294,13 @@
             var mark = pct >= 90 ? '✓ ' : (pct >= 5 ? '► ' + Math.round(pct) + '%   ·   ' : '');
             var meta = [liveDur(rec.seconds), liveSize(rec.size), rec.trigger === 'motion' ? 'движение' : (rec.trigger === 'human' ? 'человек' : '')].filter(Boolean).join('   ·   ');
 
+            // Постер — /qdl/live/thumb?id= этой строки: у склеенной сессии это id ПЕРВОГО чанка,
+            // единственный уцелевший после склейки (остальные регистратор удалил, они 404).
             var el = $(
                 '<div class="selector qdl-row-focus" style="display:flex;align-items:center;gap:1.2em;padding:.8em;margin:.4em 1.4em;background:rgba(255,255,255,.06);border-radius:.8em">' +
                   '<img style="width:10em;height:5.65em;object-fit:cover;border-radius:.5em;background:#111;flex:none">' +
                   '<div style="flex:1;min-width:0">' +
-                    '<div style="font-size:1.6em;font-weight:600">' + esc(mark + rec.start + ' – ' + rec.end) + '</div>' +
+                    '<div style="font-size:1.6em;font-weight:600">' + esc(mark + liveSpan(rec)) + '</div>' +
                     '<div style="opacity:.7;font-size:1.2em;margin-top:.3em">' + esc(meta) + '</div>' +
                   '</div>' +
                   '<div style="opacity:.45;font-size:1.6em;padding-right:.4em">▶</div>' +

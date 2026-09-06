@@ -83,6 +83,15 @@ public static class LiveAccess
         public int Seconds => (int)F("seconds");
         public long Size => (long)F("size");
         public string Trigger => (string)F("trigger");
+
+        // qdl 2.113: склеенные сессии upload-камер
+        public string Preset => (string)F("preset");
+        public bool IsMerged => (bool)T.GetProperty("IsMerged", BindingFlags.Public | BindingFlags.Instance).GetValue(_raw);
+        public DateTime EndUtc => (DateTime)T.GetProperty("EndUtc", BindingFlags.Public | BindingFlags.Instance).GetValue(_raw);
+
+        /// <summary>Сырой LiveRec — для передачи в статические хелперы через reflection.</summary>
+        internal object Raw => _raw;
+        internal static Type RawType => T;
     }
 
     public static RecView ParseLiveRec(JToken t) => new RecView(Access.Call("ParseLiveRec", t));

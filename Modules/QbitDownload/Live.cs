@@ -200,6 +200,16 @@ public partial class QbitController
         public int seconds;     // 0 = длительность неизвестна
         public long size;
         public string trigger;
+        public string preset;   // compression_preset: original | merged (склеенная сессия upload-камеры)
+
+        public DateTime EndUtc => startUtc.AddSeconds(seconds);
+
+        /// <summary>
+        /// Склеенная сессия (регистратор, merge_service): через ~5 мин после конца сессии upload-камеры
+        /// все её чанки склеены в ОДИН mp4 под id и именем ПЕРВОГО чанка; строки и файлы остальных
+        /// удалены, их id больше не существуют. Такая запись до 6 ч и может пересекать полночь.
+        /// </summary>
+        public bool IsMerged => string.Equals(preset, "merged", StringComparison.OrdinalIgnoreCase);
     }
 
     static LiveRec ParseLiveRec(JToken t)
@@ -223,8 +233,63 @@ public partial class QbitController
             startUtc = start,
             seconds = Math.Max(0, secs),
             size = (long?)t["file_size_bytes"] ?? 0,
-            trigger = (string)t["trigger_type"] ?? "continuous"
+            trigger = (string)t["trigger_type"] ?? "continuous",
+            preset = ((string)t["compression_preset"] ?? "").Trim()
         };
+    }
+
+    /// <summary>
+    /// Попадает ли запись в окно [from, to). overlap=false — СТАРТ в окне: так собирается дневной HLS
+    /// RTSP-камер, где кусок обязан принадлежать ровно одному дню (иначе он задвоится на стыке суток).
+    /// overlap=true — ПЕРЕСЕЧЕНИЕ [start, start+duration) с окном: так считаются сессии upload-камер,
+    /// склеенная запись до 6 ч начинается вечером и заканчивается утром — она видна в обоих днях.
+    /// Запись без длительности (ещё пишется) считается по старту в обоих режимах.
+    /// </summary>
+    static bool LiveInWindow(LiveRec r, DateTime from, DateTime to, bool overlap)
+    {
+        if (r == null || r.startUtc >= to)
+            return false;
+        if (r.startUtc >= from)
+            return true;
+        return overlap && r.EndUtc > from;
+    }
+
+    /// <summary>Сколько секунд записи лежит внутри окна (для сводки дня: сессия через полночь делится между днями).</summary>
+    static int LiveSecondsIn(LiveRec r, DateTime from, DateTime to)
+    {
+        if (r == null || r.seconds <= 0)
+            return 0;
+        var a = r.startUtc > from ? r.startUtc : from;
+        var b = r.EndUtc < to ? r.EndUtc : to;
+        return b > a ? (int)Math.Round((b - a).TotalSeconds) : 0;
+    }
+
+    /// <summary>
+    /// Режим дня камеры. "sessions" — upload-камера, все записи дня склеены (compression_preset=merged):
+    /// каждая сессия играется напрямую как mp4 (/qdl/live/stream?id=, moov в начале, Range, мгновенная
+    /// перемотка) — ради этого склейка и делалась, баги перемотки жили на многофайловых сшивках.
+    /// "day" — прежний сшитый дневной HLS: RTSP-камеры всегда, upload-камера — пока в дне остались
+    /// 'original' чанки (сессия ещё пишется или воркер склейки до неё не дошёл).
+    /// </summary>
+    static string LiveDayMode(LiveCam cam, List<LiveRec> recs)
+    {
+        if (cam == null || !cam.IsUpload || recs == null || recs.Count == 0)
+            return "day";
+        foreach (var r in recs)
+        {
+            if (!r.IsMerged)
+                return "day";
+        }
+        return "sessions";
+    }
+
+    /// <summary>UTC-даты регистратора, которые задевает окно [from, to) (у локальных суток их две).</summary>
+    static List<DateTime> LiveUtcDates(DateTime from, DateTime to)
+    {
+        var res = new List<DateTime>();
+        for (var d = from.Date; d <= to.AddTicks(-1).Date; d = d.AddDays(1))
+            res.Add(d);
+        return res;
     }
 
     /// <summary>Камера регистратора в нашем виде. Наружу уходят ТОЛЬКО эти поля: ip/логины клиенту не нужны.</summary>
@@ -269,25 +334,95 @@ public partial class QbitController
             .Select(c => new KeyValuePair<int, string>(c.id, c.name))
             .ToList();
 
+    // ── Кэш by-date и устойчивость к исчезновению id ──
+    //
+    // После склейки сессии (merge_service регистратора) id всех чанков, кроме первого, ИСЧЕЗАЮТ:
+    // /api/recordings/{id}/stream|thumbnail и /hls/_vod/{id}/* отвечают 404, а у первого id меняется
+    // содержимое (длительность, размер, preset) и его /hls/_vod/ тоже снесён до следующего ремукса.
+    // Всё, где лежат id (дневной плейлист, списки by-date, лента), обязано это пережить:
+    //  • списки by-date живут коротко (LiveByDateTtl, у upload-камер список меняется после каждой сессии);
+    //  • любой 404 по id (stream/thumb/сегмент/индекс) → LiveForgetRec: кэши камеры сбрасываются,
+    //    следующий запрос перечитывает by-date — и удалённых id в нём уже нет.
+    static readonly TimeSpan LiveByDateTtl = TimeSpan.FromSeconds(30);
+    static readonly ConcurrentDictionary<string, (DateTime exp, List<LiveRec> recs)> _liveByDateCache = new();
+
+    // id записи → камера: чтобы по 404 на «голый» id (в /qdl/live/stream камеры нет) знать, чьи кэши сносить.
+    static readonly ConcurrentDictionary<int, int> _liveRecCam = new();
+
+    static string LiveByDateKey(int cameraId, DateTime utcDate) => cameraId + "|" + LiveDayKey(utcDate);
+
+    /// <summary>Сырой ответ by-date одной камеры за одну UTC-дату (короткий кэш). Пусто — пустой список.</summary>
+    async Task<List<LiveRec>> LiveByDate(int cameraId, DateTime utcDate, CancellationToken ct)
+    {
+        string key = LiveByDateKey(cameraId, utcDate);
+        if (_liveByDateCache.TryGetValue(key, out var hit) && hit.exp > DateTime.UtcNow)
+            return hit.recs;
+
+        var res = new List<LiveRec>();
+        if (await LiveApiJson($"/api/recordings/camera/{cameraId}/by-date?date={LiveDayKey(utcDate)}", ct).ConfigureAwait(false) is JArray arr)
+        {
+            foreach (var t in arr)
+            {
+                var r = ParseLiveRec(t);
+                if (r == null)
+                    continue;
+                res.Add(r);
+                _liveRecCam[r.id] = r.camera > 0 ? r.camera : cameraId;
+            }
+        }
+
+        if (_liveByDateCache.Count > 512)
+            _liveByDateCache.Clear();   // камер единицы, дат десятки — переполнение это утечка ключей, чистим целиком
+        _liveByDateCache[key] = (DateTime.UtcNow.Add(LiveByDateTtl), res);
+        return res;
+    }
+
     /// <summary>
-    /// Записи камеры, НАЧАВШИЕСЯ внутри UTC-окна (= локальные сутки). Регистратор умеет фильтр
-    /// только по своей (UTC) дате, а локальные сутки задевают до двух его дат — спрашиваем обе
-    /// и режем окном сами. Старт-в-окне (а не пересечение) — чтобы сегмент не дублировался в двух днях.
+    /// Забыть всё, где мог лежать этот id (запись исчезла или переродилась после склейки): списки by-date
+    /// и дневные сборки её камеры, база PTS, лента. Камера неизвестна → по содержимому кэшей.
+    /// Дёшево: словари крошечные, зовётся только на 404 регистратора.
     /// </summary>
-    async Task<List<LiveRec>> LiveDayRecs(int cameraId, DateTime from, DateTime to, CancellationToken ct)
+    static void LiveForgetRec(int rec)
+    {
+        if (rec <= 0)
+            return;
+
+        _liveRecCam.TryRemove(rec, out int camera);
+        _livePtsBase.TryRemove(rec, out _);
+        _liveFeedCache.Clear();
+
+        foreach (var kv in _liveByDateCache)
+        {
+            bool mine = camera > 0 && kv.Key.StartsWith(camera + "|", StringComparison.Ordinal);
+            if (mine || kv.Value.recs.Exists(r => r.id == rec))
+                _liveByDateCache.TryRemove(kv.Key, out _);
+        }
+
+        foreach (var kv in _liveDayCache)
+        {
+            bool mine = camera > 0 && kv.Key.StartsWith(camera + ":", StringComparison.Ordinal);
+            if (mine || (kv.Value.build?.recs != null && kv.Value.build.recs.Contains(rec)))
+                _liveDayCache.TryRemove(kv.Key, out _);
+        }
+    }
+
+    /// <summary>
+    /// Записи камеры за UTC-окно (= локальные сутки). Регистратор фильтрует по своей (UTC) дате
+    /// (с 6-часовым lookback — отдаёт и записи, начавшиеся до полуночи и залезшие в дату), а локальные
+    /// сутки задевают до двух его дат — спрашиваем обе и режем окном сами.
+    /// overlap=false — старт-в-окне (дневной HLS: кусок не должен задвоиться в двух днях);
+    /// overlap=true — пересечение с окном (сессии upload-камер, см. LiveInWindow).
+    /// </summary>
+    async Task<List<LiveRec>> LiveDayRecs(int cameraId, DateTime from, DateTime to, CancellationToken ct, bool overlap = false)
     {
         var seen = new HashSet<int>();
         var res = new List<LiveRec>();
 
-        for (var d = from.Date; d <= to.AddTicks(-1).Date; d = d.AddDays(1))
+        foreach (var d in LiveUtcDates(from, to))
         {
-            if (await LiveApiJson($"/api/recordings/camera/{cameraId}/by-date?date={LiveDayKey(d)}", ct).ConfigureAwait(false) is not JArray arr)
-                continue;
-
-            foreach (var t in arr)
+            foreach (var r in await LiveByDate(cameraId, d, ct).ConfigureAwait(false))
             {
-                var r = ParseLiveRec(t);
-                if (r == null || r.startUtc < from || r.startUtc >= to)
+                if (!LiveInWindow(r, from, to, overlap))
                     continue;
                 if (seen.Add(r.id))
                     res.Add(r);
@@ -296,6 +431,27 @@ public partial class QbitController
 
         res.Sort((a, b) => a.startUtc.CompareTo(b.startUtc));
         return res;
+    }
+
+    /// <summary>Одна запись/сессия в JSON для клиента (общая форма /recordings и /day в режиме sessions).</summary>
+    static JObject LiveRecJson(LiveRec r, DateTime from, DateTime to, TimeZoneInfo tz)
+    {
+        var j = new JObject
+        {
+            ["id"] = r.id,
+            ["start"] = LiveTime(r.startUtc, tz),
+            ["end"] = LiveTime(r.EndUtc, tz),
+            ["seconds"] = r.seconds,
+            ["size"] = r.size,
+            ["trigger"] = r.trigger,
+            ["preset"] = string.IsNullOrEmpty(r.preset) ? "original" : r.preset,
+            ["merged"] = r.IsMerged
+        };
+        // Сессия через полночь: началась вчера / закончится завтра относительно показанного дня —
+        // клиенту нужно это подписать, иначе «23:00 – 01:30» в списке «сегодня» читается как ошибка.
+        if (r.startUtc < from) j["prevDay"] = true;
+        if (r.seconds > 0 && r.EndUtc > to) j["nextDay"] = true;
+        return j;
     }
 
     #endregion
@@ -316,15 +472,16 @@ public partial class QbitController
         var today = LiveToday(tz);
         var (from, to) = LiveDayWindow(day, tz);
 
-        List<KeyValuePair<int, string>> cams;
+        List<LiveCam> cams;
         List<LiveRec>[] perCam;
         try
         {
-            cams = await LiveCameraList(ct).ConfigureAwait(false);
+            cams = await LiveCameraListFull(ct).ConfigureAwait(false);
             if (cams.Count == 0)
                 return LiveErr("Регистратор не отдал список камер");
 
-            perCam = await Task.WhenAll(cams.Select(c => LiveDayRecs(c.Key, from, to, ct))).ConfigureAwait(false);
+            // upload-камеры — по пересечению с окном: склеенная сессия через полночь видна в обоих днях.
+            perCam = await Task.WhenAll(cams.Select(c => LiveDayRecs(c.id, from, to, ct, overlap: c.IsUpload))).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { return new EmptyResult(); }
         catch (Exception ex)
@@ -334,7 +491,7 @@ public partial class QbitController
         }
 
         // Только камеры с записями за этот день; свежие сверху (последняя запись позже — выше).
-        var rows = new List<(KeyValuePair<int, string> cam, List<LiveRec> recs)>();
+        var rows = new List<(LiveCam cam, List<LiveRec> recs)>();
         for (int i = 0; i < cams.Count; i++)
         {
             if (perCam[i].Count > 0)
@@ -346,15 +503,22 @@ public partial class QbitController
         foreach (var (cam, recs) in rows)
         {
             var last = recs[^1];
+            // Сводка режется окном дня: у сессии, начавшейся вчера в 23:00, «первая» здесь — 00:00,
+            // а в секунды дня идёт только её сегодняшняя часть.
+            var firstUtc = recs[0].startUtc > from ? recs[0].startUtc : from;
+            var lastUtc = last.EndUtc < to ? last.EndUtc : to;
+            if (last.seconds <= 0) lastUtc = last.startUtc;   // ещё пишется — конца нет
             items.Add(new JObject
             {
-                ["id"] = cam.Key,
-                ["name"] = cam.Value,
+                ["id"] = cam.id,
+                ["name"] = cam.name,
                 ["count"] = recs.Count,
-                ["first"] = LiveTime(recs[0].startUtc, tz),
-                ["last"] = LiveTime(last.startUtc.AddSeconds(last.seconds), tz),
-                ["seconds"] = recs.Sum(r => (long)r.seconds),
-                ["thumb"] = last.id          // постер камеры = кадр из самой свежей записи дня
+                ["first"] = LiveTime(firstUtc, tz),
+                ["last"] = LiveTime(lastUtc, tz),
+                ["seconds"] = recs.Sum(r => (long)LiveSecondsIn(r, from, to)),
+                ["thumb"] = last.id,         // постер камеры = кадр из самой свежей записи дня
+                ["upload"] = cam.IsUpload,
+                ["mode"] = LiveDayMode(cam, recs)   // sessions → клиент открывает список сессий, а не дневной HLS
             });
         }
 
@@ -389,16 +553,12 @@ public partial class QbitController
         var today = LiveToday(tz);
         var (from, to) = LiveDayWindow(day, tz);
 
-        string name = null;
+        LiveCam cam;
         List<LiveRec> recs;
         try
         {
-            var cams = await LiveCameraList(ct).ConfigureAwait(false);
-            foreach (var c in cams)
-            {
-                if (c.Key == camera) { name = c.Value; break; }
-            }
-            recs = await LiveDayRecs(camera, from, to, ct).ConfigureAwait(false);
+            cam = await LiveCamera(camera, ct).ConfigureAwait(false);
+            recs = await LiveDayRecs(camera, from, to, ct, overlap: cam.IsUpload).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { return new EmptyResult(); }
         catch (Exception ex)
@@ -409,25 +569,29 @@ public partial class QbitController
 
         var items = new JArray();
         foreach (var r in recs)
-        {
-            items.Add(new JObject
-            {
-                ["id"] = r.id,
-                ["start"] = LiveTime(r.startUtc, tz),
-                ["end"] = LiveTime(r.startUtc.AddSeconds(r.seconds), tz),
-                ["seconds"] = r.seconds,
-                ["size"] = r.size,
-                ["trigger"] = r.trigger
-            });
-        }
+            items.Add(LiveRecJson(r, from, to, tz));
 
         return LiveJsonOut(new JObject
         {
             ["date"] = LiveDayKey(day),
             ["label"] = LiveDayLabel(day, today),
-            ["camera"] = new JObject { ["id"] = camera, ["name"] = name ?? ("Камера " + camera) },
+            ["camera"] = new JObject { ["id"] = camera, ["name"] = cam.name, ["upload"] = cam.IsUpload },
+            // sessions — одна строка = один файл (склеенная сессия), играть напрямую через /qdl/live/stream;
+            // day — прежний список чанков с кнопкой «весь день одной записью» (HLS).
+            ["mode"] = LiveDayMode(cam, recs),
             ["items"] = items
         });
+    }
+
+    /// <summary>Камера по id (протокол нужен для выбора режима дня). Нет такой — заглушка с именем «Камера N», не ошибка.</summary>
+    async Task<LiveCam> LiveCamera(int camera, CancellationToken ct)
+    {
+        foreach (var c in await LiveCameraListFull(ct).ConfigureAwait(false))
+        {
+            if (c.id == camera)
+                return c;
+        }
+        return new LiveCam { id = camera, name = "Камера " + camera, protocol = "" };
     }
 
     #endregion
@@ -642,6 +806,7 @@ public partial class QbitController
         public int ready;           // сколько кусков уже вошло
         public int total;           // сколько всего кусков за день
         public bool complete;       // все куски готовы (или битые) → VOD
+        public HashSet<int> recs;   // id всех записей дня — чтобы по 404 одного id снести именно эту сборку (LiveForgetRec)
     }
 
     // Готовый плейлист живёт секунды: EVENT-режим клиент перечитывает часто, а собирается он
@@ -662,7 +827,13 @@ public partial class QbitController
         {
             using var resp = await _liveApi.GetAsync(LiveBase() + "/hls/_vod/" + recId + "/index.m3u8", ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
+            {
+                // Индекса нет у записи, которую stitched.json назвал готовой → её /hls/_vod/ снесла склейка
+                // (или сама запись исчезла). Сбрасываем кэши камеры: следующая сборка перечитает by-date.
+                if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    LiveForgetRec(recId);
                 return null;
+            }
             body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
@@ -888,7 +1059,8 @@ public partial class QbitController
             seconds = total,
             ready = parts.Count,
             total = recs.Count,
-            complete = complete
+            complete = complete,
+            recs = recs.Select(r => r.id).ToHashSet()
         };
 
         // Готовый день кэшируем дольше: он уже не изменится, а перечитывать плейлист плеер может.
@@ -971,13 +1143,42 @@ public partial class QbitController
         var today = LiveToday(tz);
 
         LiveDayBuild build;
-        string name = null;
+        LiveCam cam;
         try
         {
-            foreach (var c in await LiveCameraList(ct).ConfigureAwait(false))
+            cam = await LiveCamera(camera, ct).ConfigureAwait(false);
+
+            // upload-камера, все записи дня склеены → режим sessions: сшитый HLS НЕ собираем и ремукс
+            // на регистраторе НЕ пинаем (это перемололо бы многочасовой mp4 в TS ради ничего),
+            // отдаём сами сессии — клиент играет их напрямую через /qdl/live/stream?id=.
+            if (cam.IsUpload)
             {
-                if (c.Key == camera) { name = c.Value; break; }
+                var (from, to) = LiveDayWindow(day, tz);
+                var recs = await LiveDayRecs(camera, from, to, ct, overlap: true).ConfigureAwait(false);
+                if (LiveDayMode(cam, recs) == "sessions")
+                {
+                    var items = new JArray();
+                    foreach (var r in recs)
+                        items.Add(LiveRecJson(r, from, to, tz));
+
+                    return LiveJsonOut(new JObject
+                    {
+                        ["date"] = LiveDayKey(day),
+                        ["label"] = LiveDayLabel(day, today),
+                        ["camera"] = new JObject { ["id"] = camera, ["name"] = cam.name, ["upload"] = true },
+                        ["mode"] = "sessions",
+                        // path оставлен для клиента СТАРОЙ версии: он не знает mode и пойдёт за плейлистом —
+                        // тот соберётся по-прежнему (медленно, но заиграет). Новый клиент path не трогает.
+                        ["path"] = $"/qdl/live/day/{camera}/{LiveDayKey(day)}/stream.m3u8",
+                        ["ready"] = recs.Count,
+                        ["total"] = recs.Count,
+                        ["complete"] = true,
+                        ["seconds"] = recs.Sum(r => (long)r.seconds),
+                        ["items"] = items
+                    });
+                }
             }
+
             build = await LiveBuildDay(camera, day, tz, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { return new EmptyResult(); }
@@ -994,7 +1195,8 @@ public partial class QbitController
         {
             ["date"] = LiveDayKey(day),
             ["label"] = LiveDayLabel(day, today),
-            ["camera"] = new JObject { ["id"] = camera, ["name"] = name ?? ("Камера " + camera) },
+            ["camera"] = new JObject { ["id"] = camera, ["name"] = cam.name, ["upload"] = cam.IsUpload },
+            ["mode"] = "day",
             ["path"] = $"/qdl/live/day/{camera}/{LiveDayKey(day)}/stream.m3u8",
             ["ready"] = build.ready,
             ["total"] = build.total,
@@ -1067,7 +1269,7 @@ public partial class QbitController
         // сдвигать не станем, отдадим как есть (испортить этим можно только свой же таймлайн,
         // но молчаливо принимать мусор незачем).
         if (o < 0 || o > 172800 || double.IsNaN(o))
-            return await LiveProxy(path, passRange: true, timeout: TimeSpan.FromSeconds(60)).ConfigureAwait(false);
+            return await LiveProxy(path, passRange: true, timeout: TimeSpan.FromSeconds(60), rec: rec).ConfigureAwait(false);
 
         return await LiveSegmentShifted(path, rec, o).ConfigureAwait(false);
     }
@@ -1098,7 +1300,12 @@ public partial class QbitController
 
             using var resp = await _liveMedia.GetAsync(LiveBase() + path, cts.Token).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
+            {
+                // Сегмента нет — запись исчезла или её /hls/_vod/ снесла склейка: плейлист дня протух.
+                if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    LiveForgetRec(rec);
                 return StatusCode((int)resp.StatusCode);
+            }
 
             body = await resp.Content.ReadAsByteArrayAsync(cts.Token).ConfigureAwait(false);
         }
@@ -1439,7 +1646,7 @@ public partial class QbitController
         if (id <= 0)
             return BadRequest();
 
-        return await LiveProxy($"/api/recordings/{id}/stream", passRange: true, timeout: null).ConfigureAwait(false);
+        return await LiveProxy($"/api/recordings/{id}/stream", passRange: true, timeout: null, rec: id).ConfigureAwait(false);
     }
 
     // Кадр-превью. Первый запрос может подождать ffmpeg на стороне регистратора (дальше кэш).
@@ -1452,13 +1659,18 @@ public partial class QbitController
         if (id <= 0)
             return BadRequest();
 
-        return await LiveProxy($"/api/recordings/{id}/thumbnail", passRange: false, timeout: TimeSpan.FromSeconds(60)).ConfigureAwait(false);
+        return await LiveProxy($"/api/recordings/{id}/thumbnail", passRange: false, timeout: TimeSpan.FromSeconds(60), rec: id).ConfigureAwait(false);
     }
 
     static readonly string[] _liveFwdReq = { "Range", "If-Range", "If-None-Match", "If-Modified-Since" };
     static readonly string[] _liveFwdResp = { "Content-Type", "Content-Length", "Content-Encoding", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag", "Cache-Control" };
 
-    async Task<ActionResult> LiveProxy(string path, bool passRange, TimeSpan? timeout)
+    /// <param name="rec">
+    /// id записи, чьи байты проксируем (0 — не запись). На 404 регистратора — LiveForgetRec: после
+    /// склейки сессии id чанков исчезают, и всё, где они лежали в кэше, обязано перечитаться.
+    /// Сам 404 клиенту отдаётся как есть — это честный ответ, а не ошибка прокси.
+    /// </param>
+    async Task<ActionResult> LiveProxy(string path, bool passRange, TimeSpan? timeout, int rec = 0)
     {
         var ct = HttpContext.RequestAborted;
         using var cts = timeout.HasValue
@@ -1497,6 +1709,9 @@ public partial class QbitController
         using (resp)
         {
             Response.StatusCode = (int)resp.StatusCode;
+
+            if (rec > 0 && resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+                LiveForgetRec(rec);
 
             foreach (string h in _liveFwdResp)
             {
