@@ -32,7 +32,7 @@ namespace QbitDownload;
 // Простой form-POST такой заголовок поставить не может, а preflight для него уйдёт на OPTIONS.
 // ─────────────────────────────────────────────────────────────────────────────
 [Authorization(redirectUri: "/admin/d1v/auth")]
-public class D1VAdminController : BaseController
+public partial class D1VAdminController : BaseController
 {
     #region страницы
 

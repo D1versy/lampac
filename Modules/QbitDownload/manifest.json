@@ -71,6 +71,7 @@
     "TestSandbox.cs",
     "Deploy.cs",
     "OnlineImport.cs",
+    "OnlineAdmin.cs",
 
     "Controller.cs"
   ]

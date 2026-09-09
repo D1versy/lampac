@@ -116,6 +116,7 @@
     <Compile Include="..\..\Modules\QbitDownload\TestSandbox.cs" Link="Module\TestSandbox.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Deploy.cs" Link="Module\Deploy.cs" />
     <Compile Include="..\..\Modules\QbitDownload\OnlineImport.cs" Link="Module\OnlineImport.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\OnlineAdmin.cs" Link="Module\OnlineAdmin.cs" />
 
 
     <!-- JacRed: линкуем ТОЛЬКО ProxyFallback.cs — он намеренно не обращается ни к ModInit, ни к

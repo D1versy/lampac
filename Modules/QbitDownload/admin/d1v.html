@@ -129,6 +129,7 @@
     <button class="tab" data-pane="health">Хелс-чеки</button>
     <button class="tab" data-pane="decisions">Решения<span class="dn" id="dbadge"></span></button>
     <button class="tab" data-pane="events">Уведомления</button>
+    <button class="tab" data-pane="online">Online<span class="dn" id="obadge"></span></button>
   </div>
 
   <!-- ───────── доступы ───────── -->
@@ -267,6 +268,60 @@
 </div>
 <div id="toast"></div>
 
+  <!-- ───────── Online: эфир по ссылке (контейнер online) ───────── -->
+  <section class="pane" id="pane-online">
+    <div class="sub">
+      Раздел <b>Online</b> — эфир по ссылке для всех устройств: контейнер <code>online</code> сам тянет
+      поток (YouTube/VK/Twitch/трансляции Apple, прямые mp4/m3u8/rtsp), раздаёт как HLS и пишет запись.
+      Пункт «Online» у зрителей стоит над «Главной» и виден <b>только пока идёт эфир</b> — и только если
+      галочка ниже включена. Записи живут здесь и на панели контейнера
+      (<a href="http://192.168.87.24:9150/online/" target="_blank">192.168.87.24:9150/online/</a>);
+      кнопка «В Загрузки» кладёт запись в раздел «Загрузки», где любой зритель смотрит её сам.
+      DRM-сервисы (Megogo, Кинопоиск, Okko, ivi) не тянутся — поток зашифрован.
+    </div>
+    <div class="warn" id="odown" style="display:none"></div>
+
+    <div class="bar">
+      <label class="sw" style="font-size:14px"><input type="checkbox" id="ovisible"> раздел Online виден зрителям</label>
+      <button class="mini" id="oreload">Обновить</button>
+      <span class="muted" id="ohint"></span>
+    </div>
+
+    <div id="olive" style="display:none;margin:10px 0 18px;padding:14px 16px;border:1px solid #2a3040;border-radius:10px">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+        <img id="oposter" alt="" style="width:240px;border-radius:8px;background:#000;display:none">
+        <div style="flex:1;min-width:260px">
+          <div style="font-size:17px;font-weight:600"><span style="color:#e53935">●</span> <span id="otitle"></span></div>
+          <div class="muted" id="ometa" style="margin-top:6px"></div>
+          <div class="muted" id="ocodecs" style="margin-top:4px"></div>
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="mini" id="ostop" style="background:#8f2a27;color:#fff">Стоп</button>
+            <span class="muted" id="ostopnote"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="ostart" style="margin:10px 0 18px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="ourl" type="url" placeholder="Ссылка: https://www.youtube.com/watch?v=… · https://…/stream.m3u8 · apple.com/apple-events/…" style="flex:1;min-width:320px;padding:8px 10px;border-radius:8px;border:1px solid #2a3040;background:#12141a;color:#fff">
+        <input id="otitlein" type="text" placeholder="Название (необязательно)" maxlength="200" style="width:260px;padding:8px 10px;border-radius:8px;border:1px solid #2a3040;background:#12141a;color:#fff">
+        <button class="mini" id="ogo" style="background:#e53935;color:#fff">В эфир</button>
+        <span class="muted" id="ogonote"></span>
+      </div>
+      <div class="muted" id="olast" style="margin-top:8px"></div>
+    </div>
+
+    <div class="muted" id="oexport" style="display:none;margin-bottom:10px"></div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Запись</th><th>Когда</th><th>Длит.</th><th>Размер</th><th>В Загрузках</th><th></th></tr></thead>
+        <tbody id="orows"></tbody>
+      </table>
+      <div class="empty" id="oempty" style="display:none">Записей пока нет</div>
+    </div>
+  </section>
+
 <script>
 (function () {
   'use strict';
@@ -347,6 +402,7 @@
       if (t.dataset.pane === 'groups' && !groupsLoaded) loadGroups();
       if (t.dataset.pane === 'decisions' && !decisionsLoaded) loadDecisions();
       if (t.dataset.pane === 'events' && !eventsLoaded) loadEvents();
+      if (t.dataset.pane === 'online') loadOnline();
       if (t.dataset.pane === 'access') qInput.focus();
     });
   });
@@ -877,7 +933,172 @@
   });
 
 
+  // ───────── Online: эфир по ссылке (qdl 2.116) ─────────
+  // Всё через прокси lampac /admin/d1v/api/online/*: пароля панели контейнера у админки нет,
+  // lampac ходит в контейнер по служебному токену из общего бинда.
+  var odata = null;
+  var oExportWas = false;
+
+  function ohhmm(sec) {
+    sec = Math.max(0, Math.round(sec || 0));
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), x = sec % 60;
+    var two = function (n) { return (n < 10 ? '0' : '') + n; };
+    return h ? h + ':' + two(m) + ':' + two(x) : two(m) + ':' + two(x);
+  }
+  function obytes(b) {
+    b = Number(b) || 0;
+    if (b > 1073741824) return (b / 1073741824).toFixed(2) + ' ГБ';
+    if (b > 1048576) return Math.round(b / 1048576) + ' МБ';
+    return Math.round(b / 1024) + ' КБ';
+  }
+  function odate(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (isNaN(d)) return iso;
+    return d.toLocaleDateString('ru-RU') + ' ' + d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function loadOnline() {
+    getJson('/admin/d1v/api/online').then(function (res) {
+      var down = document.getElementById('odown');
+      if (!res.ok) {
+        odata = null;
+        down.style.display = '';
+        down.textContent = '⏸ ' + (res.j.message || 'контейнер online не отвечает');
+        document.getElementById('olive').style.display = 'none';
+        document.getElementById('obadge').textContent = '';
+        return;
+      }
+      down.style.display = 'none';
+      odata = res.j;
+      renderOnline();
+    }).catch(function () {
+      document.getElementById('odown').style.display = '';
+      document.getElementById('odown').textContent = 'Админка не ответила';
+    });
+  }
+
+  function renderOnline() {
+    var st = odata.status || {};
+    var live = st.live;
+    var cur = st.current || {};
+    document.getElementById('ovisible').checked = !odata.hidden;
+    document.getElementById('ohint').textContent = odata.hidden
+      ? 'скрыт: пункта «Online» у зрителей нет, эфир (если идёт) продолжается'
+      : (live ? 'пункт «Online» сейчас виден у всех' : 'эфира нет — пункта у зрителей нет');
+    document.getElementById('obadge').textContent = live ? '●' : '';
+
+    document.getElementById('olive').style.display = live ? '' : 'none';
+    document.getElementById('ostart').style.display = live || st.state !== 'idle' ? 'none' : '';
+    if (live) {
+      document.getElementById('otitle').textContent = live.title;
+      document.getElementById('ometa').textContent = 'идёт ' + ohhmm(live.elapsedSec) + ' · зрителей ' + (live.viewers || 0) +
+        ' · сегментов ' + (cur.segments || 0) + (live.restarts ? ' · перезапусков ' + live.restarts : '') +
+        (cur.record === false ? ' · повтор записи (без записи)' : ' · пишется');
+      document.getElementById('ocodecs').textContent = (cur.vcodec || '?') + (cur.copyVideo ? ' (copy)' : ' → h264') + ' / ' +
+        (cur.acodec || '—') + (cur.copyAudio ? ' (copy)' : ' → aac') + (cur.height ? ' · ' + cur.height + 'p' : '') +
+        (cur.sourceUrl ? ' · ' + cur.sourceUrl.slice(0, 80) : '');
+      var img = document.getElementById('oposter');
+      if (live.poster) { img.src = 'http://' + location.hostname + ':9150' + live.poster; img.style.display = ''; }
+      else img.style.display = 'none';
+    }
+    var lr = st.lastResult;
+    document.getElementById('olast').textContent = lr
+      ? 'Последний эфир: «' + lr.title + '» · ' + ohhmm(lr.durationSec) + ' · ' + lr.reason + (lr.recorded ? ' · запись сохранена' : '') + (lr.error ? ' · ошибка: ' + lr.error : '')
+      : (st.state === 'resolving' ? 'Запускаем…' : st.state === 'finalizing' ? 'Дописываем запись…' : '');
+
+    var ex = (odata.status && odata.status.export) || {};
+    var exBox = document.getElementById('oexport');
+    if (ex.running) {
+      var pct = ex.total ? Math.round(ex.bytes / ex.total * 100) : 0;
+      exBox.style.display = '';
+      exBox.textContent = 'Сохраняем в «Загрузки» ' + ex.id + ': ' + pct + '% (' + obytes(ex.bytes) + ' из ' + obytes(ex.total) + ')';
+    } else {
+      exBox.style.display = ex.error ? '' : 'none';
+      if (ex.error) exBox.textContent = 'Экспорт ' + ex.id + ' не удался: ' + ex.error;
+      if (oExportWas) toast(ex.error ? 'Экспорт не удался' : 'Сохранено в «Загрузки»');
+    }
+    oExportWas = Boolean(ex.running);
+
+    var recs = odata.recordings || [];
+    var tb = document.getElementById('orows');
+    tb.innerHTML = '';
+    document.getElementById('oempty').style.display = recs.length ? 'none' : '';
+    recs.forEach(function (m) {
+      var tr = document.createElement('tr');
+      var exported = m.exported && m.exported.hash;
+      tr.innerHTML =
+        '<td><input class="oname" value="' + esc(m.title || m.id) + '" maxlength="200" style="width:100%;background:transparent;border:1px solid transparent;color:inherit;padding:3px 6px;border-radius:6px"></td>' +
+        '<td class="when">' + esc(odate(m.started)) + '</td>' +
+        '<td>' + (m.duration ? ohhmm(m.duration) : '—') + '</td>' +
+        '<td>' + obytes(m.bytes) + '</td>' +
+        '<td>' + (exported ? '✅' : '—') + '</td>' +
+        '<td style="white-space:nowrap">' +
+          '<button class="mini oact" data-a="rebroadcast">В эфир заново</button> ' +
+          '<button class="mini oact" data-a="export"' + (exported ? ' disabled' : '') + '>В Загрузки</button> ' +
+          '<button class="mini oact" data-a="delete">Удалить</button>' +
+        '</td>';
+      tr.querySelector('.oname').addEventListener('change', function (e) {
+        post2('/admin/d1v/api/online/rec', { id: m.id, action: 'rename', title: e.target.value }).then(function (r) { toast(r.ok ? 'Переименовано' : (r.j.message || 'Не вышло')); });
+      });
+      tr.querySelectorAll('.oact').forEach(function (b) {
+        b.addEventListener('click', function () {
+          var a = b.dataset.a;
+          if (a === 'delete' && !confirm('Удалить запись «' + (m.title || m.id) + '»?' + (exported ? ' Копия в «Загрузках» останется.' : ''))) return;
+          if (a === 'rebroadcast' && !confirm('Запустить «' + (m.title || m.id) + '» как эфир для всех?')) return;
+          b.disabled = true;
+          post2('/admin/d1v/api/online/rec', { id: m.id, action: a }).then(function (r) {
+            toast(r.ok ? (a === 'export' ? 'Копируем в «Загрузки»…' : a === 'delete' ? 'Удалено' : 'Переэфир начат') : (r.j.message || 'Не вышло'));
+            if (a === 'export' && r.ok) oExportWas = true;
+            loadOnline();
+          });
+        });
+      });
+      tb.appendChild(tr);
+    });
+  }
+
+  document.getElementById('ovisible').addEventListener('change', function (e) {
+    post2('/admin/d1v/api/online/visibility', { hidden: !e.target.checked }).then(function (r) {
+      toast(r.ok ? (e.target.checked ? 'Раздел открыт зрителям' : 'Раздел скрыт у зрителей') : (r.j.message || 'Не вышло'));
+      loadOnline();
+    });
+  });
+  document.getElementById('ogo').addEventListener('click', function () {
+    var url = document.getElementById('ourl').value.trim();
+    if (!url) { toast('Вставь ссылку'); return; }
+    var btn = document.getElementById('ogo');
+    btn.disabled = true;
+    document.getElementById('ogonote').textContent = 'резолвим источник…';
+    post2('/admin/d1v/api/online/start', { url: url, title: document.getElementById('otitlein').value.trim() }).then(function (r) {
+      btn.disabled = false;
+      document.getElementById('ogonote').textContent = '';
+      if (r.ok) { toast('В эфире: ' + (r.j.title || '')); document.getElementById('ourl').value = ''; document.getElementById('otitlein').value = ''; }
+      else toast(r.j.message || 'Не вышло');
+      loadOnline();
+    });
+  });
+  document.getElementById('ostop').addEventListener('click', function () {
+    if (!confirm('Остановить эфир?')) return;
+    var btn = document.getElementById('ostop');
+    btn.disabled = true;
+    document.getElementById('ostopnote').textContent = 'дописываем запись…';
+    post2('/admin/d1v/api/online/stop', {}).then(function (r) {
+      btn.disabled = false;
+      document.getElementById('ostopnote').textContent = '';
+      toast(r.ok ? 'Эфир остановлен' : (r.j.message || 'Не вышло'));
+      loadOnline();
+      setTimeout(loadOnline, 3000);
+    });
+  });
+  document.getElementById('oreload').addEventListener('click', loadOnline);
+  // Пока вкладка открыта — живой статус раз в 5 с; бейдж на самой вкладке обновляется вместе с ним.
+  setInterval(function () {
+    if (document.getElementById('pane-online').classList.contains('on')) loadOnline();
+  }, 5000);
+
   load();
+  loadOnline();                  // бейдж «● в эфире» на вкладке — сразу
   loadDecisions();               // бейдж «сколько ждёт ответа» рисуем сразу, не дожидаясь захода
   setInterval(load, 30000);   // чтобы новое устройство всплывало само, пока владелец ждёт с телефоном в руках
 })();
