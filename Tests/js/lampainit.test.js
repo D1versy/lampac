@@ -194,8 +194,9 @@ test('lampainit: appload calls Lampa.Utils.putScriptAsync for qdl.js, music.js a
   const { mod } = H.loadLampaInit({ lampa });
   mod.appload();
   // 2.13: qdl.js + music.js (модуль Music upstream, включён флипом манифеста);
-  // 2.68: третьим — плагин раздела XSMART, его отдаёт отдельный контейнер xsmart-proxy.
-  assert.strictEqual(scripts.length, 3);
+  // 2.68: третьим — плагин раздела XSMART, его отдаёт отдельный контейнер xsmart-proxy;
+  // 2.116: четвёртым — плагин раздела Online (контейнер online, порт 9150).
+  assert.strictEqual(scripts.length, 4);
   // NB: array is created inside the vm sandbox (different realm's Array),
   // so deepStrictEqual on the array object rejects it — compare contents instead.
   assert.strictEqual(scripts[0].length, 1);
@@ -203,6 +204,25 @@ test('lampainit: appload calls Lampa.Utils.putScriptAsync for qdl.js, music.js a
   assert.strictEqual(scripts[0][0], '{localhost}/qdl.js?v={version}');
   assert.strictEqual(scripts[1][0], '{localhost}/music.js?v={version}');
   assert.ok(/\/xsmart\/xsmart\.js\?v=\{version\}$/.test(scripts[2][0]), scripts[2][0]);
+  assert.ok(/\/online\/online\.js\?v=\{version\}$/.test(scripts[3][0]), scripts[3][0]);
+});
+
+// 🔴 Та же развилка по адресу для раздела Online (qdl 2.116): дома — свой порт 9150, снаружи —
+// тот же origin через Caddy. Обе ветки обязаны быть верными по той же причине, что и у XSMART.
+test('lampainit 2.116: в LAN плагин Online грузится с порта 9150', () => {
+  const scripts = [];
+  const lampa = H.makeLampa({ Utils: { putScriptAsync: (a) => scripts.push(a) } });
+  const { mod } = H.loadLampaInit({ lampa, host: 'http://192.168.87.24:9118' });
+  mod.appload();
+  assert.strictEqual(scripts[3][0], 'http://192.168.87.24:9150/online/online.js?v={version}');
+});
+
+test('lampainit 2.116: снаружи плагин Online грузится с того же origin (через Caddy)', () => {
+  const scripts = [];
+  const lampa = H.makeLampa({ Utils: { putScriptAsync: (a) => scripts.push(a) } });
+  const { mod } = H.loadLampaInit({ lampa, host: 'https://tv.d1versy.com:9443' });
+  mod.appload();
+  assert.strictEqual(scripts[3][0], 'https://tv.d1versy.com:9443/online/online.js?v={version}');
 });
 
 // 🔴 Адрес контейнера XSMART вычисляется ИЗ хоста запроса, и обе ветки обязаны быть верными:

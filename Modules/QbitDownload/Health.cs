@@ -112,7 +112,10 @@ public partial class QbitController
                 Guard("ipcam", "IPCamLive (регистратор)", GrpInfra, ProbeIpcam),
                 // xsmart-proxy — такой же свой контейнер в сети media. Спрашиваем его ручку здоровья,
                 // а не портал: сессию она не трогает (логин из фона роняет подписку — см. ProbeXsmart).
-                Guard("xsmart", "XSMART (портал)", GrpInfra, ProbeXsmart)
+                Guard("xsmart", "XSMART (портал)", GrpInfra, ProbeXsmart),
+                // online — контейнер раздела «Online» (эфир по ссылке). Остановленный контейнер —
+                // штатное состояние (пункт меню просто исчезает), поэтому «не отвечает» = ⏸, а не ❌.
+                Guard("online", "Online (эфир по ссылке)", GrpInfra, ProbeOnline)
             };
 
             foreach (var o in await Task.WhenAll(tasks))
@@ -489,9 +492,85 @@ public partial class QbitController
     }
 
     /// <summary>
-    /// Вердикт по телу /xsmart/health. Чистая функция: живая проба только приносит JSON.
-    /// Порядок проверок = порядок важности, первое совпадение и есть вердикт.
+    /// Online — контейнер `online` в сети media (E:\Media-server\online\service). Ручка
+    /// /online/health отвечает из памяти процесса и всегда 200 — вердикт по полям.
+    /// 🔴 Соединение отказано = контейнер остановлен, а это ШТАТНО (владелец гасит раздел
+    /// `docker compose stop online`, пункт меню исчезает сам) → ⏸, не ❌. Таймаут/5xx — уже сбой.
     /// </summary>
+    internal async static Task<JObject> ProbeOnline()
+    {
+        const string id = "online", name = "Online (эфир по ссылке)";
+        string url = ModInit.conf?.onlineApi;
+        if (string.IsNullOrWhiteSpace(url)) return Svc(id, name, GrpInfra, "off", 0, "не настроено");
+
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            using var cts = new CancellationTokenSource(2500);
+            using var resp = await _healthHttp.GetAsync(NoSlash(url) + "/online/health", cts.Token);
+            string txt = await resp.Content.ReadAsStringAsync(cts.Token);
+            sw.Stop();
+            if (!resp.IsSuccessStatusCode)
+                return Svc(id, name, GrpInfra, "fail", sw.ElapsedMilliseconds, "http " + (int)resp.StatusCode);
+            var (status, detail) = OnlineVerdict(JObject.Parse(txt));
+            return Svc(id, name, GrpInfra, status, sw.ElapsedMilliseconds, detail);
+        }
+        catch (HttpRequestException ex) when (OnlineRefused(ex))
+        {
+            return Svc(id, name, GrpInfra, "off", sw.ElapsedMilliseconds, "контейнер остановлен");
+        }
+        catch (Exception ex) { return Svc(id, name, GrpInfra, "fail", sw.ElapsedMilliseconds, ShortErr(ex)); }
+    }
+
+    /// <summary>«Соединение отказано» и «имени нет в DNS» — остановленный контейнер compose.</summary>
+    internal static bool OnlineRefused(Exception ex)
+    {
+        for (var e = ex; e != null; e = e.InnerException)
+        {
+            if (e is System.Net.Sockets.SocketException se &&
+                (se.SocketErrorCode == System.Net.Sockets.SocketError.ConnectionRefused ||
+                 se.SocketErrorCode == System.Net.Sockets.SocketError.HostNotFound ||
+                 se.SocketErrorCode == System.Net.Sockets.SocketError.NoData))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>Вердикт по телу /online/health. Чистая функция.</summary>
+    internal static (string status, string detail) OnlineVerdict(JObject b)
+    {
+        if (b == null) return ("fail", "пустой ответ");
+        if (b.Value<bool?>("ok") == false) return ("fail", "сервис сообщает о сбое");
+
+        string ver = b.Value<string>("version");
+        string tail = string.IsNullOrEmpty(ver) ? "" : " · v" + ver;
+        int recs = b.Value<int?>("recordings") ?? 0;
+        string yt = (b["ytdlp"] as JObject)?.Value<string>("version");
+        string ytNote = string.IsNullOrEmpty(yt) ? " · yt-dlp не найден" : "";
+
+        string state = b.Value<string>("state") ?? "idle";
+        if (b["live"] is JObject live && state == "live")
+        {
+            string title = live.Value<string>("title") ?? "";
+            int viewers = live.Value<int?>("viewers") ?? 0;
+            int restarts = live.Value<int?>("restarts") ?? 0;
+            string d = "в эфире: «" + title + "» · зрителей " + viewers + (restarts > 0 ? " · перезапусков " + restarts : "") + tail;
+            return (restarts >= 3 ? "warn" : "ok", d + ytNote);
+        }
+        if (state == "resolving" || state == "finalizing")
+            return ("ok", (state == "resolving" ? "запускаем эфир" : "дописываем запись") + tail);
+
+        var last = b["lastResult"] as JObject;
+        string lastNote = "";
+        if (last != null && !string.IsNullOrEmpty(last.Value<string>("error")))
+            lastNote = " · последний эфир: " + last.Value<string>("error");
+        var ex = b["export"] as JObject;
+        string exNote = ex != null && !string.IsNullOrEmpty(ex.Value<string>("error")) ? " · экспорт: " + ex.Value<string>("error") : "";
+
+        string status = string.IsNullOrEmpty(yt) || lastNote != "" || exNote != "" ? "warn" : "ok";
+        return (status, "нет эфира · записей " + recs + tail + ytNote + lastNote + exNote);
+    }
+
     /// <summary>
     /// Вердикт по состоянию прогрева полок «Музыки» (MusicWarm.HealthSnapshot).
     /// Чистая функция: ни одного запроса, всё уже посчитал тик прогрева.

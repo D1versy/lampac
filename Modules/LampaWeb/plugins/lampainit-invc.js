@@ -10,7 +10,7 @@ var lampainit_invc = {};
 // бампать минор. Кэш-бастер URL (?v=) обновляется сам при рестарте контейнера
 // (cacheVersion в ApiController: lampainit.js в Index(), qdl.js в LamInit) —
 // эта версия нужна как человекочитаемый маркер «какой код реально крутится у клиента».
-window.qdl_fork_version = '2.115';
+window.qdl_fork_version = '2.116';
 
    // полный changelog — E:\lampac\CHANGELOG-qdl.md (вынесен из этого файла в 2.16: комментарий инлайнился в /lampainit.js и отдавался каждому клиенту, ~6.5 КБ на старт)
 
@@ -41,6 +41,11 @@ lampainit_invc.appload = function appload() {
     var lan = /^https?:\/\/(localhost|127\.0\.0\.1|\[?::1\]?|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(L);
     var base = lan ? L.replace(/:\d+$/, '') + ':9140' : L;
     Lampa.Utils.putScriptAsync([base + '/xsmart/xsmart.js?v={version}']);
+    // Online (qdl 2.116): раздел «эфир по ссылке» — такой же отдельный контейнер (`online`, порт
+    // 9150, снаружи /online/* через Caddy). Плагин сам решает, показывать ли пункт: он есть только
+    // пока идёт эфир; остановленный контейнер = плагина нет = пункта нет. Та же развилка по адресу.
+    var onlineBase = lan ? L.replace(/:\d+$/, '') + ':9150' : L;
+    Lampa.Utils.putScriptAsync([onlineBase + '/online/online.js?v={version}']);
   })();
   // qdl 2.50: десктоп-адаптации ТОЛЬКО для windows/mac (плавный скролл колесом, ранняя
   // подгрузка, ресинк фокуса) — ТВ/мобилка файл даже не скачивают; откат = убрать строку

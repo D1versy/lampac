@@ -655,6 +655,18 @@ public class ModuleConf : ModuleBaseConf
     // :ro, писать можно только в явно перечисленные подпапки (как /downloads/jutsu).
     public string xsmartDownloadsPath { get; set; } = "/downloads/xsmart";
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Online (OnlineImport.cs) — раздел «Online» медиасервера (контейнер `online`): эфир по ссылке.
+    // Здесь только регистрация записи в «Загрузках» и строка хелса; сам эфир живёт в контейнере.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Адрес контейнера ВНУТРИ сети media (хелс-проба /online/health). Пусто = строка хелса ⏸.
+    public string onlineApi { get; set; } = "http://online:9150";
+
+    // Общий с контейнером бинд: туда он копирует запись, отсюда мы её отдаём. Смонтирован rw в
+    // якоре x-lampac-base (корень /downloads :ro). Путь в POST /qdl/online/import обязан лежать здесь.
+    public string onlineDownloadsPath { get; set; } = "/downloads/online";
+
     public int xsmartGrabRetries { get; set; } = 5;
     public int xsmartGrabIdleSec { get; set; } = 60;       // обрыв «нет данных от CDN» (0 = выключить)
     public int xsmartGrabPaceMs { get; set; } = 0;         // мягкий кап скорости (>0 = пауза между чанками)

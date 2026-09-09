@@ -46,7 +46,8 @@ public partial class QbitController
     /// </summary>
     internal static bool NonTorrentSource(string source)
         => string.Equals(source, "jutsu", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(source, "xsmart", StringComparison.OrdinalIgnoreCase);
+        || string.Equals(source, "xsmart", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(source, "online", StringComparison.OrdinalIgnoreCase);   // запись эфира (OnlineImport.cs)
 
     static List<CrawlTarget> TargetsFromMeta()
     {

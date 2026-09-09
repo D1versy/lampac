@@ -193,6 +193,37 @@ public class D1VContentPolicyTests
         {
             var (ctx, _) = Run(path, On());
             Assert.DoesNotContain("{xsmart}", Csp(ctx));
+            Assert.DoesNotContain("{online}", Csp(ctx));
         }
+    }
+
+    /// <summary>
+    /// 🔴 Раздел Online (qdl 2.116) — такой же отдельный контейнер на порту 9150: без своего
+    /// origin в CSP плагин не грузится, и пункт «Online» не появится никогда (та же грабля, что
+    /// поймал xsmartcheck). Дома добавляем :9150 во все пять директив, снаружи — ничего.
+    /// </summary>
+    [Theory]
+    [InlineData("192.168.87.24")]
+    [InlineData("localhost")]
+    public void Lan_AllowsOnlineOrigin(string host)
+    {
+        var (ctx, _) = Run("/", On(), host);
+        string csp = Csp(ctx);
+        Assert.Contains($"http://{host}:9150", csp);
+        foreach (var dir in new[] { "script-src", "style-src", "img-src", "media-src", "connect-src" })
+        {
+            int i = csp.IndexOf(dir, StringComparison.Ordinal);
+            int end = csp.IndexOf(';', i);
+            Assert.Contains(":9150", csp.Substring(i, end - i));
+        }
+    }
+
+    [Theory]
+    [InlineData("tv.d1versy.com")]
+    [InlineData("172.32.0.1")]
+    public void Wan_NoOnlineOrigin(string host)
+    {
+        var (ctx, _) = Run("/", On(), host);
+        Assert.DoesNotContain(":9150", Csp(ctx));
     }
 }

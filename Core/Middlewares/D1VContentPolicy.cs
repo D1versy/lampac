@@ -55,13 +55,15 @@ public class D1VContentPolicy
     // как «просто пропал пункт меню» (поймал xsmartcheck при первом включении CSP).
     // Снаружи адрес тот же, что у Lampa (Caddy проксирует /xsmart/*) — там хватает 'self'.
     // Развилка ниже намеренно повторяет isLanHost() из lampainit-invc.js: одно понятие «дом».
+    // {online} — то же самое для раздела «Online» (контейнер `online`, порт 9150): плагин, состояние
+    // эфира, плейлист и постер приезжают с него. Без плейсхолдера пункт «Online» не появится никогда.
     const string DefaultPolicy =
         "default-src 'self'; " +
-        "script-src 'self' {xsmart} 'unsafe-inline' 'unsafe-eval'; " +
-        "style-src 'self' {xsmart} 'unsafe-inline'; " +
-        "img-src 'self' {xsmart} data: blob: https://img.youtube.com; " +
-        "media-src 'self' {xsmart} blob:; " +
-        "connect-src 'self' {xsmart} ws: wss:; " +
+        "script-src 'self' {xsmart} {online} 'unsafe-inline' 'unsafe-eval'; " +
+        "style-src 'self' {xsmart} {online} 'unsafe-inline'; " +
+        "img-src 'self' {xsmart} {online} data: blob: https://img.youtube.com; " +
+        "media-src 'self' {xsmart} {online} blob:; " +
+        "connect-src 'self' {xsmart} {online} ws: wss:; " +
         "frame-src 'self'; " +
         "font-src 'self'; " +
         "manifest-src 'self'; " +
@@ -94,7 +96,7 @@ public class D1VContentPolicy
                 ? (conf.cspYoutube ?? YoutubeBridgePolicy)
                 : (conf.csp ?? DefaultPolicy);
 
-            policy = ExpandXsmart(policy, httpContext);
+            policy = ExpandSidecars(policy, httpContext);
 
             if (!string.IsNullOrWhiteSpace(policy))
             {
@@ -110,19 +112,23 @@ public class D1VContentPolicy
     }
 
     /// <summary>
-    /// Подставить origin контейнера xsmart-proxy вместо плейсхолдера {xsmart}.
-    /// Дома это тот же хост на порту 9140, снаружи — наш же адрес (Caddy), там подставлять нечего.
-    /// Правило «дом» — ровно как isLanHost() в lampainit-invc.js, чтобы понятие было одно.
+    /// Подставить origin контейнеров-сайдкаров вместо плейсхолдеров: {xsmart} → порт 9140,
+    /// {online} → порт 9150. Дома это тот же хост на своём порту, снаружи — наш же адрес (Caddy),
+    /// там подставлять нечего. Правило «дом» — ровно как isLanHost() в lampainit-invc.js.
     /// </summary>
-    static string ExpandXsmart(string policy, HttpContext ctx)
+    static string ExpandSidecars(string policy, HttpContext ctx)
     {
-        if (policy == null || policy.IndexOf("{xsmart}", StringComparison.Ordinal) < 0)
+        if (policy == null) return policy;
+        if (policy.IndexOf("{xsmart}", StringComparison.Ordinal) < 0 && policy.IndexOf("{online}", StringComparison.Ordinal) < 0)
             return policy;
 
         string host = ctx.Request.Host.Host;
-        string origin = IsLanHost(host) ? $"http://{host}:9140" : string.Empty;
+        bool lan = IsLanHost(host);
 
-        return policy.Replace("{xsmart}", origin).Replace("  ", " ");
+        return policy
+            .Replace("{xsmart}", lan ? $"http://{host}:9140" : string.Empty)
+            .Replace("{online}", lan ? $"http://{host}:9150" : string.Empty)
+            .Replace("  ", " ");
     }
 
     static bool IsLanHost(string host)
