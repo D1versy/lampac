@@ -309,11 +309,16 @@
         <input id="ourl" type="url" placeholder="Ссылка: https://www.youtube.com/watch?v=… · https://…/stream.m3u8 · apple.com/apple-events/…" style="flex:1;min-width:320px;padding:8px 10px;border-radius:8px;border:1px solid #2a3040;background:#12141a;color:#fff">
         <input id="otitlein" type="text" placeholder="Название (необязательно)" maxlength="200" style="width:260px;padding:8px 10px;border-radius:8px;border:1px solid #2a3040;background:#12141a;color:#fff">
         <button class="mini" id="ogo" style="background:#e53935;color:#fff">В эфир</button>
+        <button class="mini" id="odl" title="Без эфира: скачать целиком на полной скорости, запись сама ляжет в «Загрузки» (только готовые видео, не живые потоки)">Скачать в Загрузки</button>
         <span class="muted" id="ogonote"></span>
       </div>
       <div class="muted" id="olast" style="margin-top:8px"></div>
     </div>
 
+    <div id="odlbox" style="display:none;margin:0 0 12px;padding:10px 14px;border:1px solid #2a3040;border-radius:10px">
+      <span id="odltext"></span>
+      <button class="mini" id="odlcancel" style="margin-left:10px">Отменить</button>
+    </div>
     <div class="muted" id="oexport" style="display:none;margin-bottom:10px"></div>
     <div class="scroll">
       <table>
@@ -945,6 +950,7 @@
   // lampac ходит в контейнер по служебному токену из общего бинда.
   var odata = null;
   var oExportWas = false;
+  var oDlWas = false;
 
   function ohhmm(sec) {
     sec = Math.max(0, Math.round(sec || 0));
@@ -1018,6 +1024,21 @@
       ? 'Последний эфир: «' + lr.title + '» · ' + ohhmm(lr.durationSec) + ' · ' + lr.reason + (lr.recorded ? ' · запись сохранена' : '') + (lr.error ? ' · ошибка: ' + lr.error : '')
       : (st.state === 'resolving' ? 'Запускаем…' : st.state === 'finalizing' ? 'Дописываем запись…' : '');
 
+    var dl = (odata.status && odata.status.download) || {};
+    var dlBox = document.getElementById('odlbox');
+    if (dl.running) {
+      dlBox.style.display = '';
+      var dlPct = dl.percent == null ? '' : dl.percent + '% · ';
+      document.getElementById('odltext').textContent = (dl.phase === 'resolving' ? 'Резолвим ' : dl.phase === 'exporting' ? 'Кладём в «Загрузки» ' : dl.phase === 'finishing' ? 'Оформляем запись ' : 'Качаем ') +
+        '«' + (dl.title || dl.sourceUrl || '') + '»: ' + dlPct + ohhmm(dl.outTimeSec) + (dl.durationSec ? ' из ' + ohhmm(dl.durationSec) : '') + ' · ' + obytes(dl.bytes);
+      document.getElementById('odlcancel').style.display = dl.phase === 'downloading' ? '' : 'none';
+    } else {
+      dlBox.style.display = (dl.phase === 'error' && dl.error) ? '' : 'none';
+      if (dl.phase === 'error' && dl.error) { document.getElementById('odltext').textContent = 'Закачка «' + (dl.title || dl.sourceUrl || '') + '» не удалась: ' + dl.error; document.getElementById('odlcancel').style.display = 'none'; }
+      if (oDlWas) toast(dl.phase === 'done' ? 'Скачано и сохранено в «Загрузки»' : dl.phase === 'cancelled' ? 'Закачка отменена' : 'Закачка не удалась');
+    }
+    oDlWas = Boolean(dl.running);
+
     var ex = (odata.status && odata.status.export) || {};
     var exBox = document.getElementById('oexport');
     if (ex.running) {
@@ -1081,6 +1102,27 @@
   document.getElementById('ovisible').addEventListener('change', function (e) {
     post2('/admin/d1v/api/online/visibility', { hidden: !e.target.checked }).then(function (r) {
       toast(r.ok ? (e.target.checked ? 'Раздел открыт зрителям' : 'Раздел скрыт у зрителей') : (r.j.message || 'Не вышло'));
+      loadOnline();
+    });
+  });
+  document.getElementById('odl').addEventListener('click', function () {
+    var url = document.getElementById('ourl').value.trim();
+    if (!url) { toast('Вставь ссылку'); return; }
+    var btn = document.getElementById('odl');
+    btn.disabled = true;
+    document.getElementById('ogonote').textContent = 'резолвим источник…';
+    post2('/admin/d1v/api/online/download', { url: url, title: document.getElementById('otitlein').value.trim() }).then(function (r) {
+      btn.disabled = false;
+      document.getElementById('ogonote').textContent = '';
+      if (r.ok) { toast('Качаем: ' + (r.j.title || '')); document.getElementById('ourl').value = ''; document.getElementById('otitlein').value = ''; }
+      else toast(r.j.message || 'Не вышло');
+      loadOnline();
+    });
+  });
+  document.getElementById('odlcancel').addEventListener('click', function () {
+    if (!confirm('Отменить закачку? Скачанное удалится.')) return;
+    post2('/admin/d1v/api/online/download/cancel', {}).then(function (r) {
+      toast(r.ok ? 'Отменяем…' : (r.j.message || 'Не вышло'));
       loadOnline();
     });
   });

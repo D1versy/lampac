@@ -131,6 +131,30 @@ public partial class D1VAdminController
         return OnlineJson(s, b);
     }
 
+    /// <summary>
+    /// «Скачать в Загрузки» без эфира (online 1.0.3): контейнер тянет VOD на полной скорости в запись
+    /// и сам кладёт её в «Загрузки». Резолв синхронный (ошибка источника — 422 сразу), ход — в
+    /// status.download обзора. Живой поток так не скачать (422 LIVE) — его пишет эфир.
+    /// </summary>
+    [HttpPost]
+    [Route("/admin/d1v/api/online/download")]
+    async public Task<ActionResult> OnlineDownload([FromBody] OnlineStartBody body)
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        if (body == null || string.IsNullOrWhiteSpace(body.url)) return BadRequest();
+        var (s, b) = await OnlineCtl("POST", "/online/ctl/download", new JObject { ["url"] = body.url.Trim(), ["title"] = body.title ?? "" }, 150);
+        return OnlineJson(s, b);
+    }
+
+    [HttpPost]
+    [Route("/admin/d1v/api/online/download/cancel")]
+    async public Task<ActionResult> OnlineDownloadCancel()
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        var (s, b) = await OnlineCtl("POST", "/online/ctl/download/cancel", new JObject(), 15);
+        return OnlineJson(s, b);
+    }
+
     /// <summary>Чекбокс «раздел виден зрителям»: hidden=true → у всех исчезает пункт «Online», эфир идёт.</summary>
     [HttpPost]
     [Route("/admin/d1v/api/online/visibility")]

@@ -45,6 +45,8 @@ public class OnlineAdminTests
         Assert.Equal(403, StatusOf(await c.OnlineStop()));
         Assert.Equal(403, StatusOf(await c.OnlineVisibility(new D1VAdminController.OnlineVisibilityBody { hidden = true })));
         Assert.Equal(403, StatusOf(await c.OnlineRec(new D1VAdminController.OnlineRecBody { id = "2026-09-09_20-00-00", action = "export" })));
+        Assert.Equal(403, StatusOf(await c.OnlineDownload(new D1VAdminController.OnlineStartBody { url = "https://x/y.mp4" })));
+        Assert.Equal(403, StatusOf(await c.OnlineDownloadCancel()));
     }
 
     [Fact]
@@ -54,6 +56,8 @@ public class OnlineAdminTests
         var c = Controller();
         Assert.Equal(400, StatusOf(await c.OnlineStart(null)));
         Assert.Equal(400, StatusOf(await c.OnlineStart(new D1VAdminController.OnlineStartBody { url = "  " })));
+        Assert.Equal(400, StatusOf(await c.OnlineDownload(null)));
+        Assert.Equal(400, StatusOf(await c.OnlineDownload(new D1VAdminController.OnlineStartBody { url = " " })));
         Assert.Equal(400, StatusOf(await c.OnlineRec(new D1VAdminController.OnlineRecBody { id = "../x", action = "delete" })));
         Assert.Equal(400, StatusOf(await c.OnlineRec(new D1VAdminController.OnlineRecBody { id = "2026-09-09_20-00-00", action = "format" })));
     }
