@@ -142,6 +142,16 @@ public partial class D1VAdminController
         return OnlineJson(s, b);
     }
 
+    /// <summary>Обновить рабочий yt-dlp на томе контейнера (`yt-dlp -U`).</summary>
+    [HttpPost]
+    [Route("/admin/d1v/api/online/ytdlp")]
+    async public Task<ActionResult> OnlineYtdlpUpdate()
+    {
+        if (!SameOrigin()) return StatusCode(403);
+        var (s, b) = await OnlineCtl("POST", "/online/ctl/ytdlp/update", new JObject(), 150);
+        return OnlineJson(s, b);
+    }
+
     /// <summary>Записи: export (в «Загрузки») · delete · rename · rebroadcast (эфир заново).</summary>
     [HttpPost]
     [Route("/admin/d1v/api/online/rec")]

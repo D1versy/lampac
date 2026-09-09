@@ -294,10 +294,12 @@
           <div style="font-size:17px;font-weight:600"><span style="color:#e53935">●</span> <span id="otitle"></span></div>
           <div class="muted" id="ometa" style="margin-top:6px"></div>
           <div class="muted" id="ocodecs" style="margin-top:4px"></div>
-          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
             <button class="mini" id="ostop" style="background:#8f2a27;color:#fff">Стоп</button>
-            <span class="muted" id="ostopnote"></span>
+            <button class="mini" id="om3u8">Скопировать m3u8</button>
+            <span class="muted" id="ostopnote">m3u8 можно открыть в VLC на компьютере</span>
           </div>
+          <pre id="olog" class="muted" style="margin:12px 0 0;max-height:160px;overflow:auto;white-space:pre-wrap;font-size:12px;background:#0c0d10;border-radius:8px;padding:8px 10px"></pre>
         </div>
       </div>
     </div>
@@ -319,6 +321,11 @@
         <tbody id="orows"></tbody>
       </table>
       <div class="empty" id="oempty" style="display:none">Записей пока нет</div>
+    </div>
+    <video id="oplayer" controls preload="none" style="display:none;width:100%;max-width:820px;margin-top:12px;border-radius:8px;background:#000"></video>
+    <div class="bar" style="margin-top:14px">
+      <span class="muted">yt-dlp: <b id="oyt">—</b> <span id="oytnote"></span></span>
+      <button class="mini" id="oytupd">Обновить yt-dlp</button>
     </div>
   </section>
 
@@ -1001,7 +1008,11 @@
       var img = document.getElementById('oposter');
       if (live.poster) { img.src = 'http://' + location.hostname + ':9150' + live.poster; img.style.display = ''; }
       else img.style.display = 'none';
+      document.getElementById('olog').textContent = (cur.ffmpegTail || []).join('\n') || '(ffmpeg молчит — это хорошо)';
     }
+    var yt = st.ytdlp || {};
+    document.getElementById('oyt').textContent = yt.version || '—';
+    document.getElementById('oytnote').textContent = yt.lastUpdate ? ('(' + (yt.lastUpdate.ok ? 'проверено' : 'сбой') + ' ' + odate(yt.lastUpdate.at) + ')') : '';
     var lr = st.lastResult;
     document.getElementById('olast').textContent = lr
       ? 'Последний эфир: «' + lr.title + '» · ' + ohhmm(lr.durationSec) + ' · ' + lr.reason + (lr.recorded ? ' · запись сохранена' : '') + (lr.error ? ' · ошибка: ' + lr.error : '')
@@ -1034,6 +1045,7 @@
         '<td>' + obytes(m.bytes) + '</td>' +
         '<td>' + (exported ? '✅' : '—') + '</td>' +
         '<td style="white-space:nowrap">' +
+          '<button class="mini oact" data-a="watch">Смотреть</button> ' +
           '<button class="mini oact" data-a="rebroadcast">В эфир заново</button> ' +
           '<button class="mini oact" data-a="export"' + (exported ? ' disabled' : '') + '>В Загрузки</button> ' +
           '<button class="mini oact" data-a="delete">Удалить</button>' +
@@ -1044,6 +1056,14 @@
       tr.querySelectorAll('.oact').forEach(function (b) {
         b.addEventListener('click', function () {
           var a = b.dataset.a;
+          if (a === 'watch') {
+            var v = document.getElementById('oplayer');
+            v.style.display = '';
+            v.src = 'http://' + location.hostname + ':9150/online/rec/' + m.id + '/video.mp4';
+            v.play();
+            v.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return;
+          }
           if (a === 'delete' && !confirm('Удалить запись «' + (m.title || m.id) + '»?' + (exported ? ' Копия в «Загрузках» останется.' : ''))) return;
           if (a === 'rebroadcast' && !confirm('Запустить «' + (m.title || m.id) + '» как эфир для всех?')) return;
           b.disabled = true;
@@ -1092,6 +1112,20 @@
     });
   });
   document.getElementById('oreload').addEventListener('click', loadOnline);
+  document.getElementById('om3u8').addEventListener('click', function () {
+    var u = 'http://' + location.hostname + ':9150/online/live/index.m3u8';
+    (navigator.clipboard ? navigator.clipboard.writeText(u) : Promise.reject()).then(function () { toast('Скопировано: ' + u); })
+      .catch(function () { prompt('Ссылка m3u8', u); });
+  });
+  document.getElementById('oytupd').addEventListener('click', function () {
+    var btn = document.getElementById('oytupd');
+    btn.disabled = true;
+    post2('/admin/d1v/api/online/ytdlp', {}).then(function (r) {
+      btn.disabled = false;
+      toast(r.ok ? ('yt-dlp: ' + (r.j.out || r.j.version || 'ок')) : (r.j.message || 'Не вышло'));
+      loadOnline();
+    });
+  });
   // Пока вкладка открыта — живой статус раз в 5 с; бейдж на самой вкладке обновляется вместе с ним.
   setInterval(function () {
     if (document.getElementById('pane-online').classList.contains('on')) loadOnline();
