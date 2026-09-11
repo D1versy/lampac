@@ -143,9 +143,13 @@ public partial class QbitController
         long nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         JObject act; lock (_activityLock) act = ActivityLoad();
 
-        // Доноры охоты — по тому же фильтру, что в /qdl/list. Прямой снимок category=lampa их
-        // НЕ отсекает, и реплика начала бы качать промежуточные раздачи охоты, съедая бюджет
-        // мусором, который дома живёт часы.
+        // Доноры охоты и преемники — из torrents[] вон. Доноры живут в своей категории и в снимок
+        // category=lampa не попадают (фильтр по ним — страховка от коллизии «донор = чья-то основная»),
+        // а преемник (тег qdl-next) лежит в lampa и без фильтра уехал бы реплике как самостоятельная
+        // раздача, съедая бюджет мусором, который дома живёт дни.
+        // С qdl 2.116.1 доноры реплике всё-таки едут — но НЕ пунктами torrents[], а полем donors у
+        // своей основной (ReplicaDonorsSnapshot): временная серия с чужой раздачи на tv2 нужна так же,
+        // как дома, иначе после падения дома зритель видит «вышла серия 11» без самой серии.
         var donorHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -163,6 +167,10 @@ public partial class QbitController
             }
         }
         catch { }
+
+        Dictionary<string, JArray> donorMap = null;
+        bool donorsOk = false;
+        try { (donorMap, donorsOk) = await ReplicaDonorsSnapshot(); } catch { }
 
         // Доноры в манифест не идут, но дом про них знает. Без этой строки коллизия «донор И ЕСТЬ
         // основная» (EpisodeHunter.cs, PromoteIfDonor вернул false) прятала бы живую основную
@@ -194,7 +202,7 @@ public partial class QbitController
                 // потому что тем же passkey раздача засветится со второго адреса.
                 bool priv = t.Value<bool?>("private") ?? true;
 
-                torrents.Add(new JObject
+                var item = new JObject
                 {
                     ["hash"] = h,
                     ["name"] = t.Value<string>("name"),
@@ -209,7 +217,10 @@ public partial class QbitController
                     ["numComplete"] = t.Value<int?>("num_complete") ?? -1,
                     ["metaAt"] = FileStampUtc(MetaPath(h)),
                     ["posterAt"] = FileStampUtc(PosterPath(h))
-                });
+                };
+                // доноры охоты этой основной (ReplicaDonors.cs): поле аддитивное, manifestVersion не меняем
+                if (donorMap != null && donorMap.TryGetValue(h, out var dsArr) && dsArr.Count > 0) item["donors"] = dsArr;
+                torrents.Add(item);
             }
         }
         catch (Exception ex)
@@ -299,7 +310,10 @@ public partial class QbitController
             // некому и нечем — руками файлом каждый раз ставить нельзя.
             // Поле аддитивное, manifestVersion не меняем (см. known ниже): старая реплика его
             // просто игнорирует, новая при старом доме не увидит и оставит своё.
-            ["catalogFilter"] = CatalogFilter.Load()
+            ["catalogFilter"] = CatalogFilter.Load(),
+            // qdl 2.116.1: «про доноров знаю» (ReplicaDonorsSnapshot прочитал watch.json и категорию).
+            // false — реплика в этот тик доноров не трогает: ни добора, ни снятия. Аддитивно.
+            ["donorsOk"] = donorsOk
         };
 
         // 🔴 Fail-closed: неполный known ХУЖЕ отсутствующего. Отсутствие реплика читает как

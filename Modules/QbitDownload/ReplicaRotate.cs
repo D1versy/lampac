@@ -48,7 +48,8 @@ public partial class QbitController
         Dictionary<string, JObject> myLocal,
         HashSet<string> targetSet,
         long highMark,
-        HashSet<string> gone = null)
+        HashSet<string> gone = null,
+        long extraBytes = 0)
     {
         long budget = Math.Max(1, ModInit.conf.replicaBudgetGb) * GiB;
         long lowMark = budget * Math.Clamp(ModInit.conf.replicaLowWatermark, 10, 99) / 100;
@@ -59,7 +60,9 @@ public partial class QbitController
         // уехали бы вместе с раздачей. Поэтому снимок остаётся полным, а исключения точечные.
         bool Gone(string h) => gone != null && gone.Contains(h);
 
-        long total = 0;
+        // extraBytes — доноры охоты (ReplicaDonors.cs): в mine их нет и кандидатами они не бывают,
+        // но место занимают, и без них занятость врала бы ниже ватерлинии.
+        long total = Math.Max(0, extraBytes);
         foreach (var kv in mine) { if (!Gone(kv.Key)) total += kv.Value.Value<long?>("size") ?? 0; }
         foreach (var kv in myLocal) { if (!Gone(kv.Key)) total += LocalMarkerSize(kv.Value); }
 
@@ -326,7 +329,7 @@ public partial class QbitController
     static void ReplicaEvictLog(string line, string tag = "бюджет")
     {
         string stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-        Console.WriteLine($"[QbitDownload] replica {(tag == "сирота" ? "mirror" : "rotate")}: {line}");
+        Console.WriteLine($"[QbitDownload] replica {(tag == "сирота" || tag == "донор" ? "mirror" : "rotate")}: {line}");
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(ReplicaEvictLogPath));

@@ -108,6 +108,12 @@ public partial class QbitController
         public long metaAt;
         public long posterAt;
         public bool IsJut => !string.IsNullOrEmpty(slug);
+
+        // Доноры охоты этой основной (ReplicaDonors.cs, qdl 2.116.1): в план входят приложением к ней,
+        // а не своими пунктами — бюджет считает их байты вместе с основной (planSize).
+        public List<ReplicaDonor> donors = new List<ReplicaDonor>();
+        public long donorBytes;
+        public long planSize => size + Math.Max(0, donorBytes);
     }
 
     /// <summary>
@@ -249,6 +255,7 @@ public partial class QbitController
         {
             string h = (t.Value<string>("hash") ?? "").ToLowerInvariant();
             if (!ValidHash(h)) continue;
+            var donors = ReplicaParseDonors(t);
             all.Add(new ReplicaItem
             {
                 hash = h,
@@ -259,7 +266,9 @@ public partial class QbitController
                 priv = t.Value<bool?>("private") ?? true,
                 numComplete = t.Value<int?>("numComplete") ?? -1,
                 metaAt = t.Value<long?>("metaAt") ?? 0,
-                posterAt = t.Value<long?>("posterAt") ?? 0
+                posterAt = t.Value<long?>("posterAt") ?? 0,
+                donors = donors,
+                donorBytes = donors.Sum(d => d.size)
             });
         }
         foreach (var l in (manifest["local"] as JArray) ?? new JArray())
@@ -293,7 +302,7 @@ public partial class QbitController
         long highMark = budget * Math.Clamp(ModInit.conf.replicaHighWatermark, 20, 100) / 100;
 
         var target = ReplicaPlan(all, budget, ModInit.conf.replicaLowWatermark, ModInit.conf.replicaMaxItemPercent);
-        long planned = target.Sum(x => x.size);
+        long planned = target.Sum(x => x.planSize);
         var targetSet = new HashSet<string>(target.Select(x => x.hash), StringComparer.OrdinalIgnoreCase);
 
         // ── 4. что уже есть у нас ────────────────────────────────────────────────
@@ -317,6 +326,23 @@ public partial class QbitController
             return;
         }
 
+        // Доноры охоты у нас (ReplicaDonors.cs): своя категория, в mine не попадают намеренно —
+        // ни в план, ни в ротацию, ни в зеркало. null = категорию не прочитали → доноров в этот
+        // тик не трогаем вовсе (ни добора, ни снятия).
+        Dictionary<string, JObject> myDonors = null;
+        try
+        {
+            using var c = await Qbit();
+            string draw = await c.GetStringAsync($"/api/v2/torrents/info?category={HttpUtility.UrlEncode(DonorCategory)}");
+            myDonors = new Dictionary<string, JObject>(StringComparer.OrdinalIgnoreCase);
+            foreach (var t in JArray.Parse(draw))
+            {
+                string h = (t.Value<string>("hash") ?? "").ToLowerInvariant();
+                if (ValidHash(h)) myDonors[h] = (JObject)t;
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] replica: доноры не прочитаны: " + ex.Message); }
+
         var myLocal = new Dictionary<string, JObject>(StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -338,6 +364,18 @@ public partial class QbitController
         {
             if (mine.ContainsKey(it.hash) || myLocal.ContainsKey(it.hash)) continue;
 
+            // Дом повысил донора до основной (PromoteIfDonor): у нас тот же хеш лежит донором с
+            // одной серией. Повышаем, а не добавляем — add ответил бы «уже был» и ничего не поменял.
+            if (myDonors != null && myDonors.ContainsKey(it.hash))
+            {
+                using var pc = await Qbit();
+                bool promoted = await PromoteDonorToMain(pc, it.hash);
+                Console.WriteLine($"[QbitDownload] replica: донор «{it.name}» стал у дома основной — повышение "
+                    + (promoted ? "выполнено" : "не довелось, повтор в следующий тик"));
+                if (promoted) added++;
+                continue;
+            }
+
             if (it.IsJut || ShouldBridge(it))
             {
                 // Мост (аниме, приватные раздачи и те, у кого единственный источник — дом).
@@ -357,6 +395,13 @@ public partial class QbitController
 
             if (await ReplicaAddFromSwarm(main, it)) added++;
         }
+
+        // ── 5б. доноры охоты (ReplicaDonors.cs, qdl 2.116.1) ─────────────────────
+        // Добор нужной серии с чужой раздачи для основных из плана, доводка приоритетов, снятие
+        // тех, кого дом больше не держит. Всё под своим снимком donorsOk и тем же allowRotate.
+        var (donorNote, donorBridge) = await ReplicaDonorsSync(main, manifest, all, targetSet, mine, myDonors, allowRotate);
+        bridgePending += donorBridge;
+        long donorBytes = myDonors?.Values.Sum(t => t.Value<long?>("size") ?? 0) ?? 0;
 
         // ── 6. мета и постеры (килобайты, идут вперёд контента) ──────────────────
         int metaSynced = 0, postersSynced = 0;
@@ -403,7 +448,8 @@ public partial class QbitController
             orphansPending = pend;
             brakeWhy = brake;
 
-            evicted = await ReplicaRotate(mine, myLocal, targetSet, highMark, gone);
+            // доноры в mine не входят, а место занимают — их байты в занятость (не в кандидаты)
+            evicted = await ReplicaRotate(mine, myLocal, targetSet, highMark, gone, donorBytes);
         }
         else
             Console.WriteLine("[QbitDownload] replica: удаления пропущены — " + rotateBlockedWhy);
@@ -429,7 +475,8 @@ public partial class QbitController
 
         string summary = $"план {target.Count} шт / {Bytes(planned)}; добавлено {added}; мост ждёт {bridgePending}; мета {metaSynced}, постеры {postersSynced}; {mirrorNote}вычищено {evicted}"
             + (historyNote != null ? "; " + historyNote : "")
-            + (notiNote != null ? "; " + notiNote : "");
+            + (notiNote != null ? "; " + notiNote : "")
+            + (donorNote != null ? "; " + donorNote : "");
         Console.WriteLine("[QbitDownload] replica: " + summary);
 
         // 🔴 Вердикт здоровья ставится РОВНО ЗДЕСЬ и больше нигде. Раньше его писали три места
@@ -464,15 +511,15 @@ public partial class QbitController
 
             // Элемент крупнее капа пропускаем НАВСЕГДА, а не останавливаем набор: жадный обход
             // на 300-ГБ ремуксе сверху не набрал бы вообще ничего, а без капа один такой файл
-            // вытеснил бы всю библиотеку.
-            if (it.size > maxItem) continue;
+            // вытеснил бы всю библиотеку. Считаем вместе с донорами основной (planSize).
+            if (it.planSize > maxItem) continue;
 
             // skip-and-continue: не влез — пробуем следующий, остаток добьётся мелкими.
             // Разрыв между ватерлиниями (85→95) гасит дребезг на границе.
-            if (planned + it.size > lowMark) continue;
+            if (planned + it.planSize > lowMark) continue;
 
             target.Add(it);
-            planned += it.size;
+            planned += it.planSize;
         }
 
         return target;
@@ -485,11 +532,14 @@ public partial class QbitController
     /// ⚠️ numComplete &lt; 0 = трекер не ответил, состав swarm неизвестен. Отправлять всё
     /// неизвестное в мост нельзя — он узкий; идём в swarm, как раньше.
     /// </summary>
-    internal static bool ShouldBridge(ReplicaItem it)
+    internal static bool ShouldBridge(ReplicaItem it) => ShouldBridge(it.priv, it.numComplete);
+
+    // Та же проверка для донора охоты (ReplicaDonors.cs): у него те же два признака.
+    internal static bool ShouldBridge(bool priv, int numComplete)
     {
-        if (it.priv) return true;
+        if (priv) return true;
         if (!ModInit.conf.replicaBridgeWhenOnlyHomeSeeds) return false;
-        return it.numComplete >= 0 && it.numComplete <= 1;
+        return numComplete >= 0 && numComplete <= 1;
     }
 
     static bool ReplicaHasRoomFor(long size)
@@ -508,44 +558,16 @@ public partial class QbitController
     {
         try
         {
-            var r = await _replicaHttp.GetAsync(main + "/qdl/replica/torrent?hash=" + HttpUtility.UrlEncode(it.hash));
-            if (!r.IsSuccessStatusCode)
-            {
-                Console.WriteLine($"[QbitDownload] replica: .torrent для {it.hash} не отдан ({(int)r.StatusCode})");
-                return false;
-            }
-
-            var bytes = await r.Content.ReadAsByteArrayAsync();
-            if (bytes == null || bytes.Length == 0) return false;
-            await BridgeBucket.ConsumeAsync(bytes.Length, CancellationToken.None);
+            var bytes = await ReplicaFetchTorrent(main, it.hash);
+            if (bytes == null) return false;
 
             using var c = await Qbit();
-            var content = new MultipartFormDataContent();
-            var file = new ByteArrayContent(bytes);
-            file.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/x-bittorrent");
-            content.Add(file, "torrents", it.hash + ".torrent");
-            content.Add(new StringContent(ModInit.conf.downloadsPath), "savepath");
-            content.Add(new StringContent(ModInit.conf.category), "category");
-            // Лимиты отдачи новой раздачи; историю решения см. в ModuleConf.replicaSeedUpLimitKBps
-            // (до 25.08.2026 реплика не сидировала вовсе — 1 КБ/с и остановка на финише).
-            // ⚠️ Ноль в upLimit у qBit означает «без ограничения», а не «не отдавать» —
-            // поэтому «не ограничивать» и передаётся нулём. Общий потолок ставится не тут,
-            // а в самом qBittorrent реплики, иначе лимит был бы на каждую раздачу отдельно.
-            int upKBps = ModInit.conf.replicaSeedUpLimitKBps;
-            content.Add(new StringContent((upKBps > 0 ? upKBps * 1024 : 0).ToString()), "upLimit");
-            content.Add(new StringContent(ModInit.conf.replicaSeedRatioLimit
-                .ToString(System.Globalization.CultureInfo.InvariantCulture)), "ratioLimit");
-
-            var add = await c.PostAsync("/api/v2/torrents/add", content);
-
-            // 🔴 Не IsSuccessStatusCode: qBit на провал отвечает 200 с телом «Fails.», и
-            // прежний код печатал «поставлено в закачку», молча ретраясь каждые пять минут.
-            var outcome = QbitAddOutcome((int)add.StatusCode, await add.Content.ReadAsStringAsync());
+            var (outcome, status) = await ReplicaUploadTorrent(c, bytes, it.hash, ModInit.conf.category, null, stopped: false);
             bool ok = outcome != QbitAddStatus.Failed;
 
             Console.WriteLine($"[QbitDownload] replica: + «{it.name}» ({Bytes(it.size)}) — "
                 + (ok ? (outcome == QbitAddStatus.Duplicate ? "уже был в qBit" : "поставлено в закачку")
-                      : $"ОШИБКА добавления (http {(int)add.StatusCode})"));
+                      : $"ОШИБКА добавления (http {status})"));
             return ok;
         }
         catch (Exception ex)
@@ -553,6 +575,55 @@ public partial class QbitController
             Console.WriteLine("[QbitDownload] replica add " + it.hash + ": " + ex.Message);
             return false;
         }
+    }
+
+    /// <summary>.torrent с дома через мост (шейпер общий). null = не отдан (приватная → 403) или пуст.</summary>
+    static async Task<byte[]> ReplicaFetchTorrent(string main, string hash)
+    {
+        var r = await _replicaHttp.GetAsync(main + "/qdl/replica/torrent?hash=" + HttpUtility.UrlEncode(hash));
+        if (!r.IsSuccessStatusCode)
+        {
+            Console.WriteLine($"[QbitDownload] replica: .torrent для {hash} не отдан ({(int)r.StatusCode})");
+            return null;
+        }
+
+        var bytes = await r.Content.ReadAsByteArrayAsync();
+        if (bytes == null || bytes.Length == 0) return null;
+        await BridgeBucket.ConsumeAsync(bytes.Length, CancellationToken.None);
+        return bytes;
+    }
+
+    /// <summary>
+    /// Залить .torrent в свой qBit. Общая форма для основных (категория lampa, сразу в работу) и
+    /// доноров охоты (ReplicaDonors.cs: донорская категория, тег, ОСТАНОВЛЕННЫМ — приоритеты ставятся
+    /// после). Возвращает разбор ответа и http-код для лога.
+    /// </summary>
+    static async Task<(QbitAddStatus outcome, int status)> ReplicaUploadTorrent(HttpClient c, byte[] bytes, string hash, string category, string tags, bool stopped)
+    {
+        var content = new MultipartFormDataContent();
+        var file = new ByteArrayContent(bytes);
+        file.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/x-bittorrent");
+        content.Add(file, "torrents", hash + ".torrent");
+        content.Add(new StringContent(ModInit.conf.downloadsPath), "savepath");
+        content.Add(new StringContent(category ?? ModInit.conf.category), "category");
+        if (!string.IsNullOrWhiteSpace(tags)) content.Add(new StringContent(tags), "tags");
+        // qBit v5 понимает stopped, v4 — paused; лишнее поле обе версии игнорируют
+        if (stopped) { content.Add(new StringContent("true"), "stopped"); content.Add(new StringContent("true"), "paused"); }
+        // Лимиты отдачи новой раздачи; историю решения см. в ModuleConf.replicaSeedUpLimitKBps
+        // (до 25.08.2026 реплика не сидировала вовсе — 1 КБ/с и остановка на финише).
+        // ⚠️ Ноль в upLimit у qBit означает «без ограничения», а не «не отдавать» —
+        // поэтому «не ограничивать» и передаётся нулём. Общий потолок ставится не тут,
+        // а в самом qBittorrent реплики, иначе лимит был бы на каждую раздачу отдельно.
+        int upKBps = ModInit.conf.replicaSeedUpLimitKBps;
+        content.Add(new StringContent((upKBps > 0 ? upKBps * 1024 : 0).ToString()), "upLimit");
+        content.Add(new StringContent(ModInit.conf.replicaSeedRatioLimit
+            .ToString(System.Globalization.CultureInfo.InvariantCulture)), "ratioLimit");
+
+        var add = await c.PostAsync("/api/v2/torrents/add", content);
+
+        // 🔴 Не IsSuccessStatusCode: qBit на провал отвечает 200 с телом «Fails.», и
+        // прежний код печатал «поставлено в закачку», молча ретраясь каждые пять минут.
+        return (QbitAddOutcome((int)add.StatusCode, await add.Content.ReadAsStringAsync()), (int)add.StatusCode);
     }
 
     static async Task<bool> ReplicaPullMeta(string main, string hash)

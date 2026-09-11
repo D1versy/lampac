@@ -2500,6 +2500,15 @@ public partial class QbitController
     // невидимые в /qdl/list. Категория гарантирована фильтром запроса → удаляем с файлами безопасно.
     public static async Task ReconcileDonors()
     {
+        // 🔴 На реплике доноров ведёт манифест дома (ReplicaDonors.cs), а watch.json там пуст по
+        // построению — уборка «на кого не ссылается watch.json» сносила бы их всех С ФАЙЛАМИ при
+        // каждом старте контейнера.
+        if (ReplicaMode)
+        {
+            Console.WriteLine("[QbitDownload] hunt: роль реплики — стартовая уборка доноров пропущена (их ведёт манифест дома)");
+            return;
+        }
+
         try
         {
             // FAIL-SAFE миграции хранилища: watch.json ФИЗИЧЕСКИ отсутствует (пустой/несмигрированный
@@ -2769,9 +2778,9 @@ public partial class QbitController
     /// <summary>Серии ОДНОЙ карточки: локальный маркер-финал либо торрент + доноры охоты.</summary>
     static async Task<JArray> EpisodesJson(string hash)
     {
-        // watch-запись (доноры) + стабильный ключ сериала
-        JObject watchItem;
-        lock (_watchLock) { watchItem = LoadWatch().OfType<JObject>().FirstOrDefault(x => hash.Equals(x.Value<string>("hash"), StringComparison.OrdinalIgnoreCase)); }
+        // watch-запись (доноры) + стабильный ключ сериала. На реплике watch.json пуст по построению,
+        // доноры там приезжают снимком из дома (ReplicaDonors.cs) — WatchItemFor знает оба случая.
+        JObject watchItem = WatchItemFor(hash);
         int seriesId = watchItem?.Value<int?>("id") ?? 0;
         string link = watchItem?.Value<string>("link");
         if (seriesId == 0)

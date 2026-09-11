@@ -67,6 +67,7 @@
     "ReplicaRotate.cs",
     "ReplicaHistory.cs",
     "ReplicaNoti.cs",
+    "ReplicaDonors.cs",
     "HistoryBackfill.cs",
     "TestSandbox.cs",
     "Deploy.cs",

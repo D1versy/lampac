@@ -269,12 +269,14 @@ public partial class QbitController
         var group = SeriesGroupHashes(hash);
         if (group != null) targets.AddRange(group); else targets.Add(hash);
 
-        JArray watch;
-        lock (_watchLock) watch = LoadWatch();
-        foreach (var w in watch.OfType<JObject>())
+        // Дома watch читается один раз на все хеши группы; на реплике WatchItemFor берёт доноров из
+        // привезённого снимка (ReplicaDonors.cs) — watch.json там пуст по построению.
+        JArray watch = null;
+        if (!ReplicaMode) lock (_watchLock) watch = LoadWatch();
+        foreach (string th in targets.ToList())
         {
-            string wh = w.Value<string>("hash");
-            if (wh == null || !targets.Any(t => t.Equals(wh, StringComparison.OrdinalIgnoreCase))) continue;
+            var w = WatchItemFor(th, watch);
+            if (w == null) continue;
             // преемник раздачи (Successor.cs, qdl 2.115): его строки на экране серий живут по своему хешу
             var nhp = NextHashOf(w); if (nhp != null) targets.Add(nhp);
             if (w["donors"] is not JArray ds) continue;
