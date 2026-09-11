@@ -303,7 +303,7 @@ public partial class QbitController
         if (deleted > 0) parts.Add("−" + deleted);
         if (pending > 0) parts.Add("ждут " + pending);
         if (lowDisk != null) parts.Add(lowDisk);
-        parts.Add("всего " + myDonors.Count);
+        parts.Add("всего " + (myDonors.Count + added - deleted));   // myDonors — снимок до добора
         return ("доноры: " + string.Join(", ", parts), bridge);
     }
 
