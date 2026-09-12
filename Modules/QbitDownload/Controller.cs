@@ -938,7 +938,7 @@ public partial class QbitController : BaseController
                     ["has_poster"] = ValidHash(h) && HasPoster(h),
                     ["watched"] = watched.Contains(h),
                     ["added"] = addedOn,
-                    ["activity"] = CardActivity(addedOn, t.Value<long?>("completion_on") ?? 0, prog, ActivityStored(act, h), nowUnix)
+                    ["activity"] = ListActivity(addedOn, t.Value<long?>("completion_on") ?? 0, prog, ActivityStored(act, h), nowUnix)
                 };
                 var meta = LoadMeta(h);
                 if (meta != null) item["meta"] = meta;
@@ -999,8 +999,9 @@ public partial class QbitController : BaseController
                         XsmartDecorateListItem(item, loc, xsModes);
                         // строго ПОСЛЕ декорации: слаг для jut-обложки берётся из item["jut"] (§BV)
                         DecorateListPoster(item);
-                        // без Touch activity == added → финализированный транскод позицию не меняет (§AG)
-                        item["activity"] = Math.Max(item.Value<long?>("added") ?? 0, ActivityStored(act, h));
+                        // без Touch activity == added → финализированный транскод позицию не меняет (§AG).
+                        // На реплике домашний штамп главнее местной даты появления маркера (qdl 2.117).
+                        item["activity"] = ListActivity(item.Value<long?>("added") ?? 0, 0, 1.0, ActivityStored(act, h), nowUnix);
                         var lmeta = LoadMeta(h);
                         if (lmeta != null) item["meta"] = lmeta;
                         result.Add(item);
@@ -1043,7 +1044,7 @@ public partial class QbitController : BaseController
                         else
                             JutDecorateListItem(item, inf.Value<string>("slug"), jutModes);
                         DecorateListPoster(item);
-                        item["activity"] = Math.Max(since, ActivityStored(act, h));
+                        item["activity"] = ListActivity(since, 0, 0, ActivityStored(act, h), nowUnix);
                         item["meta"] = LoadMeta(h) ?? InflightMeta(inf);
                         result.Add(item);
                     }
@@ -4951,6 +4952,32 @@ public partial class QbitController : BaseController
         DropListCache();
     }
 
+    /// <summary>
+    /// Пакетный Touch: один захват лока, одна запись файла, один сброс кеша списка.
+    /// Нужен реплике (qdl 2.117): домашние штампы приезжают пачкой на каждом тике, и поштучный
+    /// ActivityTouch означал бы десятки записей activity.json и столько же сбросов кеша
+    /// «Загрузок» каждые пять минут. Монотонность та же — запоздавший штамп не откатывает свежий.
+    /// </summary>
+    internal static void ActivityTouchMany(IEnumerable<(string hash, long ts)> items)
+    {
+        if (items == null) return;
+        bool changed = false;
+        lock (_activityLock)
+        {
+            var a = ActivityLoad();
+            foreach (var (h, ts) in items)
+            {
+                if (!ValidHash(h) || ts <= 0) continue;
+                string k = h.ToLowerInvariant();
+                if ((a.Value<long?>(k) ?? 0) >= ts) continue;
+                a[k] = ts;
+                changed = true;
+            }
+            if (changed) ActivitySave(a);
+        }
+        if (changed) DropListCache();
+    }
+
     static long ActivityStored(JObject snapshot, string hash)
         => snapshot?.Value<long?>((hash ?? "").ToLowerInvariant()) ?? 0;
 
@@ -4964,6 +4991,18 @@ public partial class QbitController : BaseController
             act = Math.Max(act, completionOn);
         return act;
     }
+
+    /// <summary>
+    /// Активность карточки для ВЫДАЧИ «Загрузок». Отличается от CardActivity ровно на реплике
+    /// (qdl 2.117): там added_on и completion_on своего qBittorrent говорят лишь «когда МЫ это
+    /// докачали» и всегда свежее домашнего штампа, а он монотонен и поднять их не может. Из-за
+    /// этого месячной давности фильм, приехавший вчера, стоял выше вчерашнего релиза — «Миньоны»
+    /// 12.09.2026 были на tv2 первыми, а дома сорок вторыми.
+    /// 🔴 CardActivity трогать нельзя: её же значение дом кладёт в манифест, и порядок отбора
+    /// реплики держится именно на нём.
+    /// </summary>
+    internal static long ListActivity(long added, long completionOn, double progress, long stored, long now)
+        => ReplicaMode && stored > 0 ? stored : CardActivity(added, completionOn, progress, stored, now);
 
     internal static void ActivityRemove(string hash)
     {

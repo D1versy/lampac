@@ -20,6 +20,9 @@ public class ReplicaTests
     const long GiB = 1024L * 1024 * 1024;
     const long Now = 2_000_000_000;
 
+    // 🔴 numComplete = 50 намеренно: у позиции БЕЗ сторонних сидов единственный источник — дом,
+    // она уходит в мост и с qdl 2.117 бюджета не тратит. Ноль по умолчанию сделал бы «мостовым»
+    // каждый элемент любого теста про бюджет, и ватерлиния перестала бы проверяться вовсе.
     static QbitController.ReplicaItem It(string hash, long sizeGb, long activity, long added = 0)
         => new QbitController.ReplicaItem
         {
@@ -27,7 +30,8 @@ public class ReplicaTests
             name = hash,
             size = sizeGb * GiB,
             activity = activity,
-            added = added == 0 ? activity : added
+            added = added == 0 ? activity : added,
+            numComplete = 50
         };
 
     // ── отбор по бюджету ──────────────────────────────────────────────────
@@ -35,8 +39,9 @@ public class ReplicaTests
     [Fact]
     public void Plan_takes_freshest_first()
     {
+        TestEnv.EnsureConf();   // отбор спрашивает ShouldBridge: без conf это NRE
         var all = new[] { It("a", 10, 100), It("b", 10, 300), It("c", 10, 200) };
-        var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 40);
+        var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 40).target;
 
         Assert.Equal(new[] { "b", "c", "a" }, plan.Select(x => x.hash));
     }
@@ -44,9 +49,10 @@ public class ReplicaTests
     [Fact]
     public void Plan_stops_at_low_watermark_not_at_budget()
     {
+        TestEnv.EnsureConf();
         // бюджет 100 ГБ, нижняя ватерлиния 85% → в план входит 8 файлов по 10 ГБ, девятый нет
         var all = Enumerable.Range(0, 12).Select(i => It("h" + i, 10, 1000 - i)).ToArray();
-        var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 100);
+        var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 100).target;
 
         Assert.Equal(8, plan.Count);
         Assert.Equal(80 * GiB, plan.Sum(x => x.size));
@@ -58,29 +64,103 @@ public class ReplicaTests
         // 🔥 Ради этого случая отбор и вынесен в чистую функцию: жадный обход, который на первом
         // же огромном элементе ОСТАНАВЛИВАЛСЯ БЫ, не набрал бы вообще ничего — реплика стояла бы
         // пустой и молчала. Кап на элемент 40% от 100 ГБ = 40 ГБ.
+        TestEnv.EnsureConf();
         var all = new[] { It("huge", 60, 900), It("ok1", 10, 800), It("ok2", 10, 700) };
-        var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 40);
+        var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 40).target;
 
         Assert.DoesNotContain(plan, x => x.hash == "huge");
         Assert.Equal(new[] { "ok1", "ok2" }, plan.Select(x => x.hash));
     }
 
     [Fact]
-    public void Plan_fills_the_tail_with_smaller_items()
+    public void Plan_stops_at_first_item_that_does_not_fit()
     {
-        // не влез — пропускаем и пробуем следующий: остаток добивается мелкими,
-        // иначе 85% бюджета простаивали бы из-за одного неудачно вставшего элемента
+        // 🔥 Ровно это и было причиной перекачки старых фильмов (qdl 2.117). Прежде отбор
+        // «добивал остаток мелкими», и в план всегда затягивало самое старое и лёгкое: оно же
+        // первым выселялось ротацией, когда приход свежей раздачи перетасовывал хвост, и тем же
+        // вечером качалось заново. На боевой реплике Spider-Man и «Мятеж» удалялись по три раза
+        // за неделю. Теперь набор — префикс домашней ленты: не влез — плану конец.
+        TestEnv.EnsureConf();
         var all = new[] { It("big", 80, 900), It("nope", 30, 800), It("small", 5, 700) };
         var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 100);
 
-        Assert.Equal(new[] { "big", "small" }, plan.Select(x => x.hash));
+        Assert.Equal(new[] { "big" }, plan.target.Select(x => x.hash));
+        Assert.Equal("nope", plan.bend?.hash);
+        Assert.Equal(5 * GiB, plan.slack);
+    }
+
+    [Fact]
+    public void Plan_keeps_on_disk_items_in_the_tail()
+    {
+        // Щель за прегибом добивается только тем, что УЖЕ лежит: трафика это не стоит, а
+        // нахождение в плане снимает позицию с выселения — без этого она уходила бы и
+        // возвращалась по кругу. «small» на диске, «fresh-but-absent» — нет и он не влез.
+        TestEnv.EnsureConf();
+        var all = new[] { It("big", 80, 900), It("nope", 30, 800), It("small", 5, 700) };
+        var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 100, it => it.hash == "small");
+
+        Assert.Equal(new[] { "big", "small" }, plan.target.Select(x => x.hash));
+        Assert.Equal("nope", plan.bend?.hash);
+    }
+
+    [Fact]
+    public void Plan_does_not_spend_budget_on_bridge_only_items()
+    {
+        // Мост для файлов отменён: аниме и приватные раздачи не приедут никогда, но бюджет под
+        // себя держали — 23 ГБ из 328 на боевой реплике. В план они входят (мета, постер, штамп
+        // порядка), в байты — нет. Иначе фантом вытесняет реальную раздачу.
+        TestEnv.EnsureConf();
+        var jut = It("anime", 50, 900); jut.slug = "naruto";
+        var all = new[] { jut, It("real", 80, 800) };
+
+        var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 100);
+
+        Assert.Equal(new[] { "anime", "real" }, plan.target.Select(x => x.hash));
+        Assert.Equal(80 * GiB, plan.planned);
+    }
+
+    [Fact]
+    public void Plan_never_bends_on_item_larger_than_the_watermark()
+    {
+        // Позиция тяжелее самой ватерлинии не влезет и в пустой план. Прегибаться на ней нельзя:
+        // одна такая наверху ленты навсегда оставила бы реплику пустой.
+        TestEnv.EnsureConf();
+        var all = new[] { It("whale", 90, 900), It("ok", 10, 800) };
+        var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 100);
+
+        Assert.Equal(new[] { "ok" }, plan.target.Select(x => x.hash));
+        Assert.Null(plan.bend);
+    }
+
+    [Fact]
+    public void Plan_is_stable_when_a_fresh_item_arrives()
+    {
+        // Регрессия на сам круг перекачки: приход свежей раздачи дома имеет право выбить из
+        // плана только ХВОСТ. Всё, что уже лежит и по-прежнему влезает, обязано остаться —
+        // иначе оно уедет ротацией и вернётся закачкой на следующем тике.
+        TestEnv.EnsureConf();
+
+        // Вчера лежали a и c. Сегодня дома появилась «new», а между ними в ленте стоит «big»,
+        // которой у нас нет и которая в остаток не влезает.
+        var onDisk = new HashSet<string> { "a", "c" };
+        var all = new[] { It("new", 20, 1000), It("a", 40, 900), It("big", 30, 800), It("c", 10, 700) };
+
+        var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 100, it => onDisk.Contains(it.hash));
+
+        // префикс кончился на «big» — и закачка за неё НЕ заглядывает: старое больше не втягивается
+        Assert.Equal("big", plan.bend?.hash);
+        Assert.DoesNotContain(plan.target, x => x.hash == "big");
+        // а лежащая «c» осталась в плане хвостом: значит ротация её не тронет и качать заново нечего
+        Assert.Equal(new[] { "new", "a", "c" }, plan.target.Select(x => x.hash));
+        Assert.Equal(70 * GiB, plan.planned);
     }
 
     [Fact]
     public void Plan_ignores_zero_sized_items()
     {
+        TestEnv.EnsureConf();
         var all = new[] { It("zero", 0, 900), It("ok", 1, 100) };
-        var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 100);
+        var plan = QbitController.ReplicaPlan(all, 100 * GiB, 85, 100).target;
 
         Assert.Single(plan);
         Assert.Equal("ok", plan[0].hash);
@@ -717,6 +797,37 @@ public class ReplicaTests
         Assert.Equal(500, QbitController.ReplicaEvictOrder(500, 100));   // активность важнее
         Assert.Equal(100, QbitController.ReplicaEvictOrder(0, 100));     // нет активности → дата
         Assert.Equal(0, QbitController.ReplicaEvictOrder(0, 0));         // нет ничего → первым
+    }
+
+    // ── порядок «Загрузок»: домашний штамп против местной даты (qdl 2.117) ──
+
+    [Fact]
+    public void List_order_on_replica_follows_home_stamp_not_local_download_date()
+    {
+        // 🔥 Симптом с боевой tv2 12.09.2026: «Миньоны и монстры» стояли в «Загрузках» первыми,
+        // хотя дома они сорок вторые — реплика докачала их накануне, и её added_on/completion_on
+        // перебивали домашний штамп. Порядок на реплике обязан быть домашним.
+        const long now = 2_000_000_000;
+        long homeStamp = now - 30 * 86400;   // дома скачано месяц назад
+        long weDownloadedYesterday = now - 86400;
+
+        string prev = ModInit.conf.replicaRole;
+        try
+        {
+            ModInit.conf.replicaRole = "replica";
+            Assert.Equal(homeStamp,
+                QbitController.ListActivity(weDownloadedYesterday, weDownloadedYesterday, 1.0, homeStamp, now));
+
+            // штампа ещё нет (первый тик не дошёл) — ведём себя как раньше, а не роняем карточку в 0
+            Assert.Equal(weDownloadedYesterday,
+                QbitController.ListActivity(weDownloadedYesterday, weDownloadedYesterday, 1.0, 0, now));
+        }
+        finally { ModInit.conf.replicaRole = prev; }
+
+        // дома правило прежнее: докачка поднимает карточку наверх
+        ModInit.conf.replicaRole = null;
+        Assert.Equal(weDownloadedYesterday,
+            QbitController.ListActivity(weDownloadedYesterday, weDownloadedYesterday, 1.0, homeStamp, now));
     }
 
     // ── применение закладок дома (qdl 2.61) ───────────────────────────────

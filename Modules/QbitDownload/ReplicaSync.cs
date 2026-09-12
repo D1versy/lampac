@@ -301,11 +301,10 @@ public partial class QbitController
         long budget = Math.Max(1, ModInit.conf.replicaBudgetGb) * GiB;
         long highMark = budget * Math.Clamp(ModInit.conf.replicaHighWatermark, 20, 100) / 100;
 
-        var target = ReplicaPlan(all, budget, ModInit.conf.replicaLowWatermark, ModInit.conf.replicaMaxItemPercent);
-        long planned = target.Sum(x => x.planSize);
-        var targetSet = new HashSet<string>(target.Select(x => x.hash), StringComparer.OrdinalIgnoreCase);
-
         // ── 4. что уже есть у нас ────────────────────────────────────────────────
+        // 🔴 Строго ДО отбора: с qdl 2.117 план знает, что уже лежит на диске, и добивает щель
+        // за прегибом только этим — иначе туда всякий раз затягивало самое старое и мелкое,
+        // а следующий тик его же выселял. Порядок шагов здесь и есть та защита от перекачки.
         var mine = new Dictionary<string, JObject>(StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -356,6 +355,13 @@ public partial class QbitController
             }
         }
         catch (Exception ex) { Console.WriteLine("[QbitDownload] replica: локальные маркеры: " + ex.Message); }
+
+        // ── 4б. отбор ────────────────────────────────────────────────────────────
+        var plan = ReplicaPlan(all, budget, ModInit.conf.replicaLowWatermark, ModInit.conf.replicaMaxItemPercent,
+            it => it != null && (mine.ContainsKey(it.hash) || myLocal.ContainsKey(it.hash)));
+        var target = plan.target;
+        long planned = plan.planned;
+        var targetSet = new HashSet<string>(target.Select(x => x.hash), StringComparer.OrdinalIgnoreCase);
 
         // ── 5. добор недостающего ────────────────────────────────────────────────
         int added = 0, bridgePending = 0;
@@ -414,13 +420,18 @@ public partial class QbitController
 
                 if (it.posterAt > 0 && FileStampUtc(PosterPath(it.hash)) < it.posterAt)
                     if (await ReplicaPullPoster(main, it.hash)) postersSynced++;
-
-                // Порядок «Загрузок» на реплике должен совпадать с домашним. ActivityTouch
-                // монотонен, поэтому местный просмотр домашним штампом не затирается.
-                if (it.activity > 0) ActivityTouch(it.hash, it.activity);
             }
             catch (Exception ex) { Console.WriteLine("[QbitDownload] replica meta/poster " + it.hash + ": " + ex.Message); }
         }
+
+        // Порядок «Загрузок» обязан совпадать с домашним, поэтому штамп берётся из манифеста и
+        // ничего местного в себе не несёт (его же читает /qdl/list на реплике — ListActivity).
+        // 🔴 Штампуем не только план, но и всё, что физически лежит: карточка, выпавшая из плана,
+        // до самого выселения обязана стоять на своём домашнем месте, а не всплывать наверх.
+        // Пакетом: поштучный Touch на ~90 позиций — это 90 записей файла и 90 сбросов кеша списка.
+        ActivityTouchMany(all.Where(x => x != null && x.activity > 0
+                && (targetSet.Contains(x.hash) || mine.ContainsKey(x.hash) || myLocal.ContainsKey(x.hash)))
+            .Select(x => (x.hash, x.activity)));
 
         // ── 7. засев рядов прогрева ──────────────────────────────────────────────
         int rowsSeeded = ReplicaSeedRows(manifest, state);
@@ -473,7 +484,9 @@ public partial class QbitController
             : homeKnown == null ? "зеркало: нет known; "
             : $"зеркало −{mirrored}, ждут {orphansPending}; ";
 
-        string summary = $"план {target.Count} шт / {Bytes(planned)}; добавлено {added}; мост ждёт {bridgePending}; мета {metaSynced}, постеры {postersSynced}; {mirrorNote}вычищено {evicted}"
+        string bendNote = plan.bend == null ? "" : $"; прегиб на «{plan.bend.name}» {Bytes(plan.bend.planSize)}, свободно {Bytes(plan.slack)}";
+
+        string summary = $"план {target.Count} шт / {Bytes(planned)}{bendNote}; добавлено {added}; мост ждёт {bridgePending}; мета {metaSynced}, постеры {postersSynced}; {mirrorNote}вычищено {evicted}"
             + (historyNote != null ? "; " + historyNote : "")
             + (notiNote != null ? "; " + notiNote : "")
             + (donorNote != null ? "; " + donorNote : "");
@@ -492,37 +505,99 @@ public partial class QbitController
         else HealthState.OkDirect(HealthState.Ids.Replica);
     }
 
+    /// <summary>Итог отбора. Кроме самого набора нужны ещё три вещи: сколько байт он занял
+    /// (не сумма planSize — мостовые позиции бюджета не тратят), на чём план прегнулся и сколько
+    /// места осталось незанятым. Без последних двух вопрос «почему не качает» через туннель
+    /// неотлаживаем.</summary>
+    internal sealed class ReplicaPlanResult
+    {
+        public List<ReplicaItem> target = new List<ReplicaItem>();
+        public long planned;
+        public ReplicaItem bend;   // первый не влезший = где кончился префикс (null — лента кончилась раньше)
+        public long slack;         // до нижней ватерлинии
+    }
+
     /// <summary>
     /// Отбор: что вообще должно лежать на реплике. Вынесено отдельной чистой функцией — это
-    /// самая тонкая часть цикла (ватерлиния, кап на элемент, skip-and-continue), и проверяться
+    /// самая тонкая часть цикла (ватерлиния, кап на элемент, прегиб префикса), и проверяться
     /// она обязана тестами, а не наблюдением за диском удалённой машины.
+    ///
+    /// 🔴 Отбор — ПРЕФИКС домашней ленты, а не «жадная укладка рюкзака» (qdl 2.117).
+    /// Прежний skip-and-continue добивал остаток мелкими, и туда всегда попадало самое старое:
+    /// 12.09.2026 на боевой реплике так оказались «Миньоны» (месяц в доме) и «2036 Nexus» 0,3 ГБ.
+    /// Дальше замыкался круг: план пересчитывается с нуля каждые 5 минут и не знает, что уже
+    /// лежит на диске; приход свежей раздачи перетасовывал хвост, вчерашняя «затычка» выпадала из
+    /// плана, ротация выселяла её ПЕРВОЙ (она же самая старая) — и следующий тик качал её заново.
+    /// В журнале ротации Spider-Man и «Мятеж» удалялись по три раза за неделю.
+    /// Теперь закачка стартует строго сверху вниз по свежести, а щель за прегибом добивается
+    /// ТОЛЬКО тем, что уже лежит: это ноль трафика и одновременно защита от выселения.
     /// </summary>
-    internal static List<ReplicaItem> ReplicaPlan(IEnumerable<ReplicaItem> all, long budget, int lowPct, int maxItemPct)
+    /// <param name="onDisk">Есть ли позиция у нас прямо сейчас. null = не знаем (тогда только префикс).</param>
+    internal static ReplicaPlanResult ReplicaPlan(IEnumerable<ReplicaItem> all, long budget, int lowPct, int maxItemPct,
+        Func<ReplicaItem, bool> onDisk = null)
     {
         long lowMark = budget * Math.Clamp(lowPct, 10, 99) / 100;
         long maxItem = budget * Math.Clamp(maxItemPct, 5, 100) / 100;
 
-        var target = new List<ReplicaItem>();
-        long planned = 0;
+        var res = new ReplicaPlanResult();
+        bool Have(ReplicaItem it) => onDisk != null && onDisk(it);
 
-        foreach (var it in all.OrderByDescending(x => x.activity).ThenByDescending(x => x.added))
+        // Байты, которые позиция реально у нас займёт. Мостовая позиция, которой ещё нет, не займёт
+        // их НИКОГДА (мост для файлов отменён 16.08.2026), а бюджет под себя держала: 23 ГБ из 328
+        // на боевой реплике — столько реальных раздач она вытесняла, молча стоя в «мост ждёт».
+        // В план такая позиция всё равно входит: мета, постер и штамп порядка ей нужны.
+        long Cost(ReplicaItem it) => !Have(it) && (it.IsJut || ShouldBridge(it)) ? 0 : it.planSize;
+
+        var ordered = all.Where(x => x != null && x.size > 0)
+                         .OrderByDescending(x => x.activity).ThenByDescending(x => x.added)
+                         .ToList();
+
+        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // ── проход 1: префикс — свежее сверху, до первого не влезшего ────────────────
+        foreach (var it in ordered)
         {
-            if (it == null || it.size <= 0) continue;
-
             // Элемент крупнее капа пропускаем НАВСЕГДА, а не останавливаем набор: жадный обход
             // на 300-ГБ ремуксе сверху не набрал бы вообще ничего, а без капа один такой файл
             // вытеснил бы всю библиотеку. Считаем вместе с донорами основной (planSize).
             if (it.planSize > maxItem) continue;
 
-            // skip-and-continue: не влез — пробуем следующий, остаток добьётся мелкими.
-            // Разрыв между ватерлиниями (85→95) гасит дребезг на границе.
-            if (planned + it.planSize > lowMark) continue;
+            long cost = Cost(it);
 
-            target.Add(it);
-            planned += it.planSize;
+            // Не влезет даже в ПУСТОЙ план — это свойство самой позиции, а не текущей набивки:
+            // прегибаться на ней нельзя, иначе один элемент тяжелее ватерлинии (такое возможно,
+            // когда кап на элемент задран выше неё) навсегда оставил бы реплику пустой.
+            if (cost > lowMark) continue;
+
+            if (res.planned + cost > lowMark) { res.bend = it; break; }
+
+            res.target.Add(it);
+            taken.Add(it.hash ?? "");
+            res.planned += cost;
         }
 
-        return target;
+        // ── проход 2: щель за прегибом — только тем, что УЖЕ лежит ───────────────────
+        // Трафика это не стоит, а нахождение в плане снимает позицию с выселения. Именно здесь
+        // старое доживает свой век: новые раздачи дома отодвигают прегиб, щель схлопывается,
+        // позиция выпадает из плана и уходит штатной ротацией — один раз и навсегда.
+        if (res.bend != null && onDisk != null)
+        {
+            foreach (var it in ordered)
+            {
+                if (taken.Contains(it.hash ?? "") || !Have(it)) continue;
+                if (it.planSize > maxItem) continue;
+
+                long cost = Cost(it);
+                if (cost > lowMark || res.planned + cost > lowMark) continue;
+
+                res.target.Add(it);
+                taken.Add(it.hash ?? "");
+                res.planned += cost;
+            }
+        }
+
+        res.slack = Math.Max(0, lowMark - res.planned);
+        return res;
     }
 
     /// <summary>

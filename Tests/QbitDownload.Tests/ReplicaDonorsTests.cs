@@ -145,10 +145,12 @@ public class ReplicaDonorsTests
     {
         // 🎯 Без этого донорские файлы съедали бы место мимо ватерлиний: бюджет 100 ГБ, нижняя 85%.
         // a = 50 ГБ + донор 40 ГБ = 90 > 85 → не влезает; b = 30 → влезает.
-        var a = new QbitController.ReplicaItem { hash = "a", name = "a", size = 50 * GiB, activity = 300, added = 300, donorBytes = 40 * GiB };
-        var b = new QbitController.ReplicaItem { hash = "b", name = "b", size = 30 * GiB, activity = 200, added = 200 };
+        TestEnv.EnsureConf();
+        // numComplete: без сторонних сидов позиция ушла бы в мост и бюджета бы не тратила (2.117)
+        var a = new QbitController.ReplicaItem { hash = "a", name = "a", size = 50 * GiB, activity = 300, added = 300, donorBytes = 40 * GiB, numComplete = 50 };
+        var b = new QbitController.ReplicaItem { hash = "b", name = "b", size = 30 * GiB, activity = 200, added = 200, numComplete = 50 };
 
-        var plan = QbitController.ReplicaPlan(new[] { a, b }, 100 * GiB, 85, 100);
+        var plan = QbitController.ReplicaPlan(new[] { a, b }, 100 * GiB, 85, 100).target;
 
         Assert.Equal(new[] { "b" }, plan.Select(x => x.hash));
         Assert.Equal(90 * GiB, a.planSize);
