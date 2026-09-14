@@ -54,6 +54,9 @@ public static class HealthState
         // Замена раздач (Successor.cs, qdl 2.115): через реестр наблюдений не проходит — вердикт
         // считается из watch.json (поле next) целиком, id здесь ради единого места ключей.
         public const string Successor = "successor";
+
+        // Псевдонимы названий (TitleAliases.cs, qdl 2.118): счётчики из своей БД снимком раз в минуту.
+        public const string Aliases = "aliases";
     }
 
     public const string StatusOk = "ok";

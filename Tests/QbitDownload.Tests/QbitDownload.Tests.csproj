@@ -80,6 +80,8 @@
     <Compile Include="..\..\Modules\QbitDownload\HealthState.cs" Link="Module\HealthState.cs" />
     <Compile Include="..\..\Modules\QbitDownload\Health.cs" Link="Module\Health.cs" />
     <Compile Include="..\..\Modules\QbitDownload\LocalIndex.cs" Link="Module\LocalIndex.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\TitleAliases.cs" Link="Module\TitleAliases.cs" />
+    <Compile Include="..\..\Modules\QbitDownload\AliasesAdmin.cs" Link="Module\AliasesAdmin.cs" />
     <Compile Include="..\..\Modules\QbitDownload\IndexCrawler.cs" Link="Module\IndexCrawler.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuParse.cs" Link="Module\JutSuParse.cs" />
     <Compile Include="..\..\Modules\QbitDownload\JutSuMatch.cs" Link="Module\JutSuMatch.cs" />

@@ -98,6 +98,36 @@ public class EpisodeHunterTests
     public void NameMatchesSeries_NoContext_Passes()
         => Assert.True(HunterAccess.NameMatchesSeries("Что угодно", null, null));
 
+    // ── qdl 2.118: псевдонимы названия (TitleAliases.cs) — ещё эталоны ТОГО ЖЕ строгого гейта ──
+    // «Истребитель демонов» на карточке, «Клинок, рассекающий демонов» на трекерах: без псевдонима
+    // отсев по имени (как было), с псевдонимом — проходит; сравнение остаётся равенством.
+    [Fact]
+    public void NameMatchesSeries_Alias_PassesButStrictnessKept()
+    {
+        string cardNorm = Shared.Services.Utilities.SearchNameTo.Convert("Истребитель демонов");
+        var aliases = new System.Collections.Generic.List<string> { Shared.Services.Utilities.SearchNameTo.Convert("Клинок, рассекающий демонов") };
+
+        Assert.False(HunterAccess.NameMatchesSeries("Клинок, рассекающий демонов / Kimetsu no Yaiba [2019, WEB-DL 1080p]", cardNorm, null, null));
+        Assert.True(HunterAccess.NameMatchesSeries("Клинок, рассекающий демонов / Kimetsu no Yaiba [2019, WEB-DL 1080p]", cardNorm, null, aliases));
+        // равенство, а не вхождение: другой тайтл франшизы с тем же началом не проходит
+        Assert.False(HunterAccess.NameMatchesSeries("Клинок, рассекающий демонов: Бесконечный замок / Mugen-jou Hen [2025]", cardNorm, null, aliases));
+        // только псевдонимы, без имён карточки — гейт включён (а не «нет контекста → пропускаем всё»)
+        Assert.False(HunterAccess.NameMatchesSeries("Счастливчик Люк / Lucky Luke [1984]", null, null, aliases));
+    }
+
+    [Fact]
+    public void DropReason_Alias_OpensNameGate_OnlyForAlias()
+    {
+        var scored = new JArray(
+            Cand("Клинок, рассекающий демонов / Kimetsu no Yaiba [1 сезон, 1-8 из 8] 1080p", 10),
+            Cand("Счастливчик Люк / Lucky Luke [1 сезон, 1-8 из 8] 1080p", 10));
+        var h = HunterAccess.MakeHuntCtx(MainHash, 1, new[] { MainHash }, null, 3, 1080, 150, 8,
+                                         Shared.Services.Utilities.SearchNameTo.Convert("Истребитель демонов"), null,
+                                         aliasNorms: new[] { Shared.Services.Utilities.SearchNameTo.Convert("Клинок, рассекающий демонов") });
+        Assert.Null(HunterAccess.DropReason(scored[0] as JObject, h));
+        Assert.Equal("имя", HunterAccess.DropReason(scored[1] as JObject, h));
+    }
+
     [Fact]
     public void FilterDonorCandidates_RejectsWrongShow_ByName()
     {

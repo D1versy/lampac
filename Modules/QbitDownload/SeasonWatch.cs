@@ -257,6 +257,7 @@ public partial class QbitController
         public int target;
         public int minSeeds;
         public string titleNorm, originalNorm;
+        public List<string> aliasNorms;                                                              // псевдонимы названия (TitleAliases.cs, qdl 2.118)
         public HashSet<string> knownHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);   // всё, что уже сидит в qBit
         public HashSet<string> selfTopics = new HashSet<string>(StringComparer.Ordinal);             // топики наших же раздач сериала
         public List<string> drops = new List<string>();                                              // причины отсева — в лог
@@ -282,7 +283,7 @@ public partial class QbitController
         foreach (var t in (scored ?? new JArray()).OfType<JObject>())
         {
             string title = t.Value<string>("title") ?? "";
-            if (!NameMatchesSeries(title, h.titleNorm, h.originalNorm)) { badName++; continue; }
+            if (!NameMatchesSeries(title, h.titleNorm, h.originalNorm, h.aliasNorms)) { badName++; continue; }
 
             var ss = TorrentScoring.ParseSeasons(title);
             if (ss.Count != 1 || ss[0] != h.target) { badSeason++; continue; }
@@ -676,6 +677,7 @@ public partial class QbitController
                         minSeeds = minSeeds,
                         titleNorm = Shared.Services.Utilities.SearchNameTo.Convert(ctitle),
                         originalNorm = Shared.Services.Utilities.SearchNameTo.Convert(ctx?.Value<string>("title_original")),
+                        aliasNorms = AliasNormsCached(id, true),   // qdl 2.118: память уже тёплая после SearchScored выше
                         selfTopics = SeriesSelfTopics(id)
                     };
                     try

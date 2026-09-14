@@ -363,6 +363,7 @@ public partial class QbitController
         public Dictionary<string, string> blacklistLinkTitles;   // no-episode: parselink → название на момент бана
         public int minSeeds, minQuality, minMb, maxGb;
         public string titleNorm, originalNorm;  // нормализованные названия сериала для строгого гейта имени
+        public List<string> aliasNorms;         // псевдонимы названия (TitleAliases.cs, qdl 2.118) — ещё эталоны для ТОГО ЖЕ строгого гейта
         public string selfTopicKey;             // топик САМОЙ основной раздачи (её перерегистрация — не донор)
 
         // qdl 2.107 — гейты, которых требовал инцидент «Укрытие» 2026-09-04 (XviD 720×400 донором):
@@ -602,8 +603,15 @@ public partial class QbitController
     // «Lucky Luke» → «счастливчиклюк»/«лакилюк»/«luckyluke» ≠ «лаки»/«lucky» → отсев. «Лаки / Lucky» → совпало.
     static readonly System.Text.RegularExpressions.Regex _yearInName = new System.Text.RegularExpressions.Regex(@"(?i)(19|20)\d{2}", System.Text.RegularExpressions.RegexOptions.Compiled);
     static bool NameMatchesSeries(string title, string titleNorm, string originalNorm)
+        => NameMatchesSeries(title, titleNorm, originalNorm, null);
+
+    // qdl 2.118: четвёртый параметр — псевдонимы названия (TitleAliases.cs). Строгость та же: точное
+    // равенство нормализованного сегмента одному из эталонов; эталонов просто больше. Contains здесь
+    // недопустим — жёсткость этого гейта держит инцидент «Укрытие» (§AK, §DJ).
+    static bool NameMatchesSeries(string title, string titleNorm, string originalNorm, List<string> aliasNorms)
     {
-        if (string.IsNullOrEmpty(titleNorm) && string.IsNullOrEmpty(originalNorm)) return true;   // нет контекста имён — не гейтим
+        bool haveAliases = aliasNorms != null && aliasNorms.Count > 0;
+        if (string.IsNullOrEmpty(titleNorm) && string.IsNullOrEmpty(originalNorm) && !haveAliases) return true;   // нет контекста имён — не гейтим
         foreach (var raw in (title ?? "").Split('/', '|'))
         {
             string seg = raw;
@@ -614,6 +622,7 @@ public partial class QbitController
             if (string.IsNullOrEmpty(n)) continue;
             if ((!string.IsNullOrEmpty(titleNorm) && n == titleNorm) ||
                 (!string.IsNullOrEmpty(originalNorm) && n == originalNorm)) return true;
+            if (haveAliases && aliasNorms.Any(a => !string.IsNullOrEmpty(a) && n == a)) return true;
         }
         return false;
     }
@@ -647,16 +656,17 @@ public partial class QbitController
     static bool NameMatchesSeriesOrId(JObject t, HuntCtx h)
     {
         string title = t.Value<string>("title") ?? "";
-        if (NameMatchesSeries(title, h.titleNorm, h.originalNorm)) return true;
+        if (NameMatchesSeries(title, h.titleNorm, h.originalNorm, h.aliasNorms)) return true;
         if (t.Value<bool?>("id_match") != true) return false;
         string hn = Shared.Services.Utilities.SearchNameTo.Convert(TitleHeadBeforeMarker(title));
         if (string.IsNullOrEmpty(hn)) return false;
-        string[] refs =
+        var refs = new List<string>
         {
             h.titleNorm, h.originalNorm,
             Shared.Services.Utilities.SearchNameTo.Convert(t.Value<string>("id_title")),
             Shared.Services.Utilities.SearchNameTo.Convert(t.Value<string>("id_title_original"))
         };
+        if (h.aliasNorms != null) refs.AddRange(h.aliasNorms);   // qdl 2.118: псевдонимы — те же эталоны
         foreach (var r in refs)
             if (!string.IsNullOrEmpty(r) && hn == r) return true;
         return false;
@@ -1574,6 +1584,8 @@ public partial class QbitController
             maxGb = conf.epSizeMaxGb,
             titleNorm = Shared.Services.Utilities.SearchNameTo.Convert(ctitle),
             originalNorm = Shared.Services.Utilities.SearchNameTo.Convert(titleOriginal),
+            // qdl 2.118: псевдонимы из памяти — её греет HuntPrepare (AliasesKnown) до сборки плана; без IO
+            aliasNorms = AliasNormsCached(m.Value<int?>("id") ?? 0, true),
             selfTopicKey = TopicKey(m.Value<string>("link")),
             requireRussian = conf.donorRequireRussian,
             rejectUnknownQuality = conf.donorRejectUnknownQuality,
@@ -1715,6 +1727,9 @@ public partial class QbitController
         int year = ctx?.Value<int?>("year") ?? 0;
 
         int tmdbNum = m.Value<int?>("id") ?? 0;
+        // qdl 2.118: псевдонимы названия для гейта имени — память/БД, без сети. ⚠️ По tmdbNum, а не по tmdbId
+        // выше: тот занулён при выключенном huntBitmagnet, а псевдонимы нужны независимо от bitmagnet.
+        if (tmdbNum > 0 && TitleAliasesOn) await AliasesKnown(tmdbNum, true);
         if (localOnly)
         {
             // Локальный тик: только сериалы, у которых есть чего ждать; только локальные базы;

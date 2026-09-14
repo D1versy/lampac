@@ -152,6 +152,94 @@ public class TorrentScoringTests
         Assert.Single(res);
     }
 
+    // ── qdl 2.118: псевдонимы названия (TitleAliases.cs) в гейте имени ────────
+    // Карточка «Истребитель демонов: Бесконечный замок» (tmdb 1311031, оригинал иероглифами),
+    // трекеры знают её как «Клинок, рассекающий демонов: Бесконечный замок».
+    const string DsTitle = "Истребитель демонов: Бесконечный замок";
+    const string DsOriginal = "劇場版「鬼滅の刃」無限城編 第一章 猗窩座再来";
+    const string DsTracker = "Клинок, рассекающий демонов: Бесконечный замок — Возвращение Акадзы / Gekijouban Kimetsu no Yaiba: Mugen-jou Hen (2025) [WEB-DL 1080p] ДБ";
+    static ScoreCtx DsCtx(bool withAliases)
+    {
+        var ctx = Ctx(DsTitle, DsOriginal, 2025, false);
+        if (withAliases)
+            ctx.aliasNorms = new System.Collections.Generic.List<string>
+            {
+                SearchNameTo.Convert("Клинок, рассекающий демонов: Бесконечный замок"),
+                SearchNameTo.Convert("Demon Slayer: Kimetsu no Yaiba Infinity Castle")
+            };
+        return ctx;
+    }
+
+    [Fact]
+    public void Score_Alias_OpensNameGate_WhereCardNameMisses()
+    {
+        var t = Tor(DsTracker, 189);
+        Assert.True(TorrentScoring.Score(t, DsCtx(false)).nameMiss);            // как было: чужое имя
+        var r = TorrentScoring.Score(t, DsCtx(true));
+        Assert.False(r.nameMiss);
+        Assert.Contains(r.why, w => w.Contains("псевдоним"));
+    }
+
+    [Fact]
+    public void Score_Alias_DoesNotOpenGateForForeignTitle()
+    {
+        var r = TorrentScoring.Score(Tor("Совсем другой фильм (2025) BDRip 1080p", 50), DsCtx(true));
+        Assert.True(r.nameMiss);
+    }
+
+    // Главный сценарий §DW: без псевдонимов трекерная строка вылетала на отсеве, а 59 строк bitmagnet
+    // (id_match) оставляли предохранитель «ничего не прошло» спящим — карточка показывала один bitmagnet.
+    [Fact]
+    public void SortAndMark_Alias_KeepsTrackerRow_NextToIdMatch_AndStarsIt()
+    {
+        var byId = new JObject { ["title"] = "Demon.Slayer.Kimetsu.no.Yaiba.Infinity.Castle.2025.1080p.CR.WEB-DL.ENG.ITA.JAP.x264", ["sid"] = 514, ["id_match"] = true, ["tracker"] = "bitmagnet", ["sid_hint"] = true };
+        var tracker = Tor(DsTracker, 189);
+        var foreign = Tor("Совсем другой фильм (2025) BDRip 1080p", 300);
+
+        var without = TorrentScoring.SortAndMark(new JArray(byId, tracker, foreign), DsCtx(false), 5);
+        Assert.Single(without);   // только bitmagnet — так и выглядела карточка
+
+        var with = TorrentScoring.SortAndMark(new JArray(byId, tracker, foreign), DsCtx(true), 5);
+        var titles = with.Select(x => x.Value<string>("title")).ToList();
+        Assert.Equal(2, with.Count);
+        Assert.Contains(DsTracker, titles);
+        Assert.DoesNotContain(titles, x => x.Contains("Совсем другой"));
+        // русская трекерная строка выше bitmagnet и получает ⭐ (bitmagnet её не получает никогда)
+        Assert.Equal(DsTracker, with[0].Value<string>("title"));
+        Assert.True(with[0].Value<bool?>("rec"));
+    }
+
+    // Иероглифический оригинал + пустой русский эталон: раньше гейт был выключен для всех (nameGateOff,
+    // ⭐ запрещена); псевдонимы возвращают гейт и ⭐.
+    [Fact]
+    public void Score_HieroglyphCard_AliasesTurnGateOn()
+    {
+        var ctx = Ctx("『』", DsOriginal, 2025, false);   // обе нормы пусты
+        Assert.True(TorrentScoring.Score(Tor(DsTracker, 189), ctx).nameGateOff);
+
+        ctx.aliasNorms = new System.Collections.Generic.List<string> { SearchNameTo.Convert("Клинок, рассекающий демонов: Бесконечный замок") };
+        var r = TorrentScoring.Score(Tor(DsTracker, 189), ctx);
+        Assert.False(r.nameGateOff);
+        Assert.False(r.nameMiss);
+        Assert.True(TorrentScoring.Score(Tor("Совсем другой фильм (2025) BDRip", 50), ctx).nameMiss);
+    }
+
+    // Relevant = те же три правила, что отсев SortAndMark. Живой случай: оригинал «മഞ്ഞുമ്മല്‍ BOYS» → норма
+    // «boys», трекеры отдают «Bad Boys (1995)»: гейт имени проходит вхождением, но год чужой — в выдаче
+    // строки нет, и для решения «знают ли трекеры имя» её тоже нет.
+    [Fact]
+    public void Relevant_MirrorsSortAndMarkDrops()
+    {
+        var ctx = Ctx("Парни из Манджуммела", "മഞ്ഞുമ്മല്‍ BOYS", 2024, false);
+        Assert.Equal("boys", ctx.originalNorm);
+        Assert.False(TorrentScoring.Relevant(Tor("Bad Boys / Плохие парни (1995) BDRip 1080p", 100), ctx));      // другой год
+        Assert.False(TorrentScoring.Relevant(Tor("Парни из Манджуммела (2024) OST MP3", 10), ctx));            // не видео
+        Assert.False(TorrentScoring.Relevant(Tor("Совсем другой фильм (2024) BDRip 1080p", 10), ctx));          // чужое имя
+        Assert.True(TorrentScoring.Relevant(Tor("Парни из Манджуммела / Manjummel Boys (2024) WEB-DL 1080p", 10), ctx));
+        var byId = new JObject { ["title"] = "Manjummel.Boys.2024.1080p", ["sid"] = 5, ["id_match"] = true };
+        Assert.True(TorrentScoring.Relevant(byId, ctx));
+    }
+
     // ── язык: русское в топ ───────────────────────────────────────────────
     [Theory]
     [InlineData("Миньоны / Minions (2015) BDRip 1080p", null)]              // кириллица

@@ -54,9 +54,11 @@ public static class HunterAccess
                                      string titleNorm = null, string originalNorm = null, string selfLink = null,
                                      bool requireRussian = false, bool rejectUnknownQuality = false, int targetQuality = 1080,
                                      IEnumerable<(string name, long size)> mainSig = null, string mainName = null,
-                                     bool rejectLegacy = true, bool rejectScreener = true)
+                                     bool rejectLegacy = true, bool rejectScreener = true,
+                                     IEnumerable<string> aliasNorms = null)
     {
         var h = Activator.CreateInstance(HuntCtxT);
+        if (aliasNorms != null) HuntCtxT.GetField("aliasNorms").SetValue(h, aliasNorms.ToList());   // qdl 2.118
         HuntCtxT.GetField("selfTopicKey").SetValue(h, selfLink == null ? null : TopicKey(selfLink));
         HuntCtxT.GetField("mainHash").SetValue(h, mainHash);
         HuntCtxT.GetField("season").SetValue(h, season);
@@ -88,6 +90,10 @@ public static class HunterAccess
 
     public static bool NameMatchesSeries(string title, string titleNorm, string originalNorm)
         => (bool)Access.Call("NameMatchesSeries", title, titleNorm, originalNorm);
+
+    // qdl 2.118: перегрузка с псевдонимами — по арности (4 аргумента) резолвится отдельно от трёхаргументной
+    public static bool NameMatchesSeries(string title, string titleNorm, string originalNorm, List<string> aliasNorms)
+        => (bool)Access.Call("NameMatchesSeries", title, titleNorm, originalNorm, aliasNorms);
 
     // ── qdl 2.107: bitmagnet в охоте ──────────────────────────────────────
     public static bool NameMatchesSeriesOrId(JObject cand, object huntCtx) => (bool)Access.Call("NameMatchesSeriesOrId", cand, huntCtx);

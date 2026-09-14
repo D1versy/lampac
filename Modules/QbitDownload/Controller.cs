@@ -321,6 +321,11 @@ public partial class QbitController : BaseController
         var fresh = SearchCache.TryRead(ckey, out var cached);
         if (fresh != SearchCache.Freshness.Miss && cached != null)
         {
+            // qdl 2.118: снимок мог быть добран псевдонимами — гейту имени в скоринге нужны те же
+            // эталоны. Память → БД, без сети (см. TitleAliases.cs).
+            if (int.TryParse(tmdb_id, out int tmdbForAliases) && tmdbForAliases > 0)
+                await AliasesKnown(tmdbForAliases, is_serial >= 2);
+
             var scored = ScoreResult(cached, query, title, title_original, year, is_serial, season, tmdb_id, store: false);
 
             if (fresh == SearchCache.Freshness.Stale)
@@ -435,13 +440,56 @@ public partial class QbitController : BaseController
         // FetchIndexer возвращает null именно на СБОЕ (не на пустой выдаче) — если развалились
         // все проходы к индексатору, это не «раздач нет», а «индексатор недоступен».
         // bitmagnet в счёт не идёт: он дополнительный и никогда не возвращает null.
-        if (all.Take(indexerPasses).All(a => a == null))
+        bool indexerDown = all.Take(indexerPasses).All(a => a == null);
+        if (indexerDown)
             Console.WriteLine($"[QbitDownload] поиск «{search}»: все проходы индексатора провалились"
                             + (bitmagnetPass.Result.Count > 0 ? $" — выдачу спас bitmagnet ({bitmagnetPass.Result.Count})" : " — клиенту уйдёт пустой список"));
 
+        // ── qdl 2.118: добор псевдонимами названия (TitleAliases.cs) ──
+        // Трекеры спрашивались русским именем карточки. Когда ни узкий, ни широкий проход не дали НИ ОДНОЙ
+        // строки, а индексатор жив, имя, скорее всего, не то, под которым тайтл знают трекеры («Истребитель
+        // демонов» ↔ «Клинок, рассекающий демонов», медиасервер claude/06 §DW). Тогда — и только тогда —
+        // резолвим псевдонимы (БД → TMDB → Shikimori) и повторяем ШИРОКИЙ проход лучшими из них (кап
+        // titleAliasMaxPasses). Обычная карточка сюда не заходит: ни резолвера, ни лишних походов к трекерам.
+        int tmdbNum = 0; int.TryParse(tmdb_id, out tmdbNum);
+        bool tv = is_serial >= 2;
+        if (tmdbNum > 0 && TitleAliasesOn) await AliasesKnown(tmdbNum, tv);   // память/БД, без сети — для гейта имени
+        // «Знают ли трекеры имя карточки» считаем НЕ по сырым строкам, а по прошедшим гейт имени: на
+        // «Парни из Манджуммела» трекеры честно отдают «Парни…» — чужие тайтлы, отсев срежет их все, и
+        // для решения о доборе такой ответ равен нулю (иначе карточка без единой строки не получала бы
+        // ни псевдонимов, ни правильного вида промаха).
+        var trackerRaw = all.Take(indexerPasses).Where(a => a != null).SelectMany(a => a.OfType<JObject>()).ToList();
+        int trackerRowsNamed = CountNamed(trackerRaw, BuildScoreCtx(query, title, title_original, year, is_serial, season, tmdb_id));
+        var aliasPasses = new List<JArray>();
+        if (trackerRowsNamed == 0 && !indexerDown && tmdbNum > 0 && TitleAliasesOn)
+        {
+            var aliases = await AliasesResolve(tmdbNum, tv, title, title_original, year);
+            var tryList = AliasesForSearch(aliases, ModInit.conf.titleAliasMaxPasses);
+            if (tryList.Count > 0)
+            {
+                var got = await Task.WhenAll(tryList.Select(a => FetchIndexer(a.alias, null, null, 0, 0, apikey)));
+                var ctxAliased = BuildScoreCtx(query, title, title_original, year, is_serial, season, tmdb_id);   // уже с найденными псевдонимами
+                var hits = new List<string>();
+                for (int i = 0; i < got.Length; i++)
+                {
+                    if (got[i] == null || got[i].Count == 0) continue;
+                    foreach (var t in got[i].OfType<JObject>()) t["alias"] = tryList[i].alias;   // чем нашли — видно в JSON и в админке
+                    aliasPasses.Add(got[i]);
+                    int named = CountNamed(got[i].OfType<JObject>(), ctxAliased);
+                    trackerRowsNamed += named;
+                    hits.Add($"«{tryList[i].alias}» → {got[i].Count}" + (named < got[i].Count ? $" (по имени {named})" : ""));
+                    if (named > 0) AliasHitAsync(tmdbNum, tv, tryList[i].norm);
+                }
+                Console.WriteLine($"[QbitDownload] поиск «{search}»: трекеры не знают имени карточки (сырых строк {trackerRaw.Count}) — добор псевдонимами: "
+                                + (hits.Count > 0 ? string.Join(", ", hits) : $"пробовал {string.Join(" · ", tryList.Select(a => a.alias))} — пусто"));
+            }
+        }
+
         var result = new JArray();
         var seen = new HashSet<string>();
-        foreach (var arr in all)
+        // Порядок дедупа: живые трекеры (основные проходы, затем добор псевдонимами) → bitmagnet → свой индекс.
+        // Добор идёт ДО индекса: иначе эхо той же раздачи из индекса побеждало бы живую строку с её сидами.
+        foreach (var arr in all.Take(indexerPasses).Concat(aliasPasses).Concat(all.Skip(indexerPasses)))
         {
             if (arr == null) continue;
             foreach (var t in arr)
@@ -475,8 +523,41 @@ public partial class QbitController : BaseController
         if (userPath)
             SearchCache.Write(SearchCache.Key(tmdb_id, queryNorm, year, is_serial), result, search);
 
-        return ScoreResult(result, query, title, title_original, year, is_serial, season, tmdb_id, store: userPath);
+        var sorted = ScoreResult(result, query, title, title_original, year, is_serial, season, tmdb_id, store: userPath);
+
+        // Журнал промахов (qdl 2.118) — по тому, что реально дошло до зрителя после отсева: есть хоть
+        // одна РУССКАЯ строка не из bitmagnet (трекеры или эхо индекса) → открытый промах закрывается;
+        // нет — промах: zero (трекеры дали 0) или noru (ответили, но русских нет — часто тоже имя).
+        // Только при живом индексаторе: авария ≠ промах.
+        if (tmdbNum > 0 && TitleAliasesOn && !indexerDown)
+        {
+            bool ruVisible = sorted.OfType<JObject>().Any(t => t.Value<string>("tracker") != "bitmagnet"
+                                                             && TorrentScoring.IsRussian(t.Value<string>("title"), t.Value<bool?>("lang_ru")));
+            if (ruVisible) MissResolveAutoAsync(tmdbNum, tv);
+            else MissRecordAsync(tmdbNum, tv, title ?? query, title_original, year, trackerRowsNamed == 0 ? MissZero : MissNoRu);
+        }
+
+        return sorted;
     }
+
+    // Контекст скоринга — один на живой путь, путь из кеша и предварительный подсчёт «знают ли трекеры имя».
+    // Псевдонимы — из памяти (её греют AliasesKnown/AliasesResolve), синхронно и без IO.
+    static ScoreCtx BuildScoreCtx(string query, string title, string title_original, int year, int is_serial, int season, string tmdb_id)
+        => new ScoreCtx
+        {
+            titleNorm = Shared.Services.Utilities.SearchNameTo.Convert(!string.IsNullOrWhiteSpace(title) ? title : query),
+            originalNorm = Shared.Services.Utilities.SearchNameTo.Convert(title_original),
+            year = year,
+            isSerial = is_serial >= 2,
+            wantSeason = season,
+            preferredQuality = ModInit.conf.preferredQuality,
+            aliasNorms = int.TryParse(tmdb_id, out int tmdbForCtx) ? AliasNormsCached(tmdbForCtx, is_serial >= 2) : null
+        };
+
+    // Сколько строк прошло бы отсев целиком (имя + год + не-видео) — ровно те, что дошли бы до зрителя.
+    // Relevant — чистая функция, элементы не трогает.
+    static int CountNamed(IEnumerable<JObject> rows, ScoreCtx ctx)
+        => rows.Count(t => TorrentScoring.Relevant(t, ctx));
 
     /// <summary>
     /// Скоринг и сортировка выдачи. Вынесено из SearchScored, потому что тем же путём должна
@@ -492,15 +573,7 @@ public partial class QbitController : BaseController
         // ⭐ rec + why у лучшей прошедшей гейты. Kill-switch searchScoring → старая сортировка по сидам.
         if (ModInit.conf.searchScoring)
         {
-            var ctx = new ScoreCtx
-            {
-                titleNorm = Shared.Services.Utilities.SearchNameTo.Convert(!string.IsNullOrWhiteSpace(title) ? title : query),
-                originalNorm = Shared.Services.Utilities.SearchNameTo.Convert(title_original),
-                year = year,
-                isSerial = is_serial >= 2,
-                wantSeason = season,
-                preferredQuality = ModInit.conf.preferredQuality
-            };
+            var ctx = BuildScoreCtx(query, title, title_original, year, is_serial, season, tmdb_id);   // qdl 2.118: с псевдонимами из памяти
             var sorted = TorrentScoring.SortAndMark(result, ctx, ModInit.conf.recommendMinSeeds);
             // fire-and-forget: пользователь не должен ждать индекс. Пишем ПОСЛЕ отсева —
             // мусор и чужие тайтлы в базу не попадают by design.

@@ -333,6 +333,14 @@ public class ModuleConf : ModuleBaseConf
     // /qdl/search: иностранные ПОШТУЧНЫЕ серии из bitmagnet показывать только когда русских раздач
     // в выдаче нет (§CE: ~80 китайских одиночек в списке «Скачать»). Паки не трогаем.
     public bool searchHideForeignSingles { get; set; } = true;
+    // ── Псевдонимы названий (TitleAliases.cs, qdl 2.118) ──
+    // Трекеры дали 0 → добор по другим именам карточки (БД title_alias → TMDB alternative_titles →
+    // Shikimori для аниме/дунхуа) и те же имена в гейтах имени выдачи и охоты. Обычной карточке — ноль стоимости.
+    public bool titleAliases { get; set; } = true;             // киллсвитч целиком
+    public int titleAliasMaxPasses { get; set; } = 2;          // сколько псевдонимов гнать по трекерам за один добор (каждый = веер по всем)
+    public bool titleAliasShikimori { get; set; } = true;      // Shikimori как источник для аниме/дунхуа (original_language ja/zh/ko)
+    public bool titleAliasMissJournal { get; set; } = true;    // журнал промахов title_miss (вкладка «Названия», прогон /title-aliases)
+    public int titleAliasCap { get; set; } = 8;                // кап автоматических псевдонимов на карточку
     public int epSizeMinMb { get; set; } = 150;            // оценка веса ОДНОЙ серии: не обрезок…
     public int epSizeMaxGb { get; set; } = 8;              // …и не ремукс по 40 ГБ
     public int donorMaxPerSeries { get; set; } = 3;

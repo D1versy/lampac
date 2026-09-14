@@ -221,6 +221,15 @@ public partial class QbitController
         }
         catch (Exception ex) { arr.Add(Svc(HealthState.Ids.Successor, "Замена раздач (слежение)", GrpSearch, "fail", 0, ShortErr(ex))); }
 
+        // ── Псевдонимы названий (TitleAliases.cs, qdl 2.118) ── открытые промахи = рабочий список прогона
+        // /title-aliases; счётчики — снимок раз в минуту в фоне, хелс БД не ждёт.
+        try
+        {
+            var (alStatus, alDetail) = AliasesHealthVerdict();
+            arr.Add(Svc(HealthState.Ids.Aliases, "Псевдонимы названий", GrpSearch, alStatus, 0, alDetail));
+        }
+        catch (Exception ex) { arr.Add(Svc(HealthState.Ids.Aliases, "Псевдонимы названий", GrpSearch, "fail", 0, ShortErr(ex))); }
+
         // ── jut.su ── вкладка выключена = киллсвитч, а не сбой
         string jutOff = JutOn ? null : "вкладка выключена";
         AddPassiveRow(arr, HealthState.Ids.JutHost, "jut.su", GrpJut, now, flap, jutOff);

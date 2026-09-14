@@ -107,7 +107,41 @@ create unique index if not exists torrent_title_tmdb_uq on torrent_title (torren
 create unique index if not exists torrent_title_norm_uq on torrent_title (torrent_id, query_norm, year) where query_norm is not null;
 create index if not exists torrent_title_lookup_tmdb on torrent_title (tmdb_id) where tmdb_id is not null;
 create index if not exists torrent_title_lookup_norm on torrent_title (query_norm, year) where query_norm is not null;
-create index if not exists torrent_index_last_seen on torrent_index (last_seen);", db);
+create index if not exists torrent_index_last_seen on torrent_index (last_seen);
+
+-- Псевдонимы названий (TitleAliases.cs, qdl 2.118): ещё имена карточки, под которыми её знают трекеры.
+-- source: tmdb | shikimori — автомат; claude | manual — подтверждённые живым запросом, автомат их не затирает.
+create table if not exists title_alias (
+  tmdb_id    int not null,
+  is_tv      boolean not null,
+  alias      text not null,
+  alias_norm text not null,
+  source     text not null,
+  note       text,
+  hits       int not null default 0,
+  added_at   timestamptz not null default now(),
+  unique (tmdb_id, is_tv, alias_norm)
+);
+
+-- Журнал промахов: карточки, где трекеры дали 0 даже с псевдонимами при живом индексаторе.
+-- Рабочий список вкладки «Названия» и прогона /title-aliases; resolved_by: auto | claude | manual.
+create table if not exists title_miss (
+  tmdb_id        int not null,
+  is_tv          boolean not null,
+  title          text,
+  title_original text,
+  year           int,
+  count          int not null default 1,
+  first_at       timestamptz not null default now(),
+  last_at        timestamptz not null default now(),
+  resolved_at    timestamptz,
+  resolved_by    text,
+  note           text,
+  kind           text not null default 'zero',   -- zero: трекеры дали 0 строк; noru: строки есть, русских нет
+  unique (tmdb_id, is_tv)
+);
+alter table title_miss add column if not exists kind text not null default 'zero';
+create index if not exists title_miss_open on title_miss (last_at) where resolved_at is null;", db);
                 await cmd.ExecuteNonQueryAsync();
             }
 

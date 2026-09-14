@@ -130,6 +130,7 @@
     <button class="tab" data-pane="decisions">Решения<span class="dn" id="dbadge"></span></button>
     <button class="tab" data-pane="events">Уведомления</button>
     <button class="tab" data-pane="online">Online<span class="dn" id="obadge"></span></button>
+    <button class="tab" data-pane="aliases">Названия<span class="dn" id="abadge"></span></button>
   </div>
 
   <!-- ───────── доступы ───────── -->
@@ -267,6 +268,45 @@
   </section>
 </div>
 <div id="toast"></div>
+
+  <!-- ───────── Названия: псевдонимы и журнал промахов (TitleAliases.cs, qdl 2.118) ───────── -->
+  <section class="pane" id="pane-aliases">
+    <div class="sub">
+      Трекеры спрашиваются <b>русским названием карточки с TMDB</b>. Когда трекеры знают тайтл под другим
+      переводом («Истребитель демонов» ↔ «Клинок, рассекающий демонов»), выдача с них — ноль, и в карточке
+      остаётся один bitmagnet. Сервер тогда сам добирает <b>псевдонимами</b> (TMDB, для аниме — Shikimori),
+      а если и они не помогли — пишет карточку в <b>журнал промахов</b> ниже. Это рабочий список для
+      периодического прогона <code>/title-aliases</code> (Claude в репо медиасервера) и для рук: открой
+      карточку, впиши имя, как его пишут трекеры, нажми «проверить» — сколько строк они дают — и сохрани.
+      Сохранённое имя используется при следующем поиске и в охоте за сериями. Ручные имена главнее
+      автоматических и не затираются. Промах закрывается сам, как только трекеры ответили.
+    </div>
+    <div class="warn" id="akill" style="display:none">⚠️ Псевдонимы <b>выключены</b> (<code>titleAliases: false</code> в init.conf).</div>
+    <div class="warn" id="anodb" style="display:none">⚠️ Своя БД не настроена (<code>localIndexConnection</code>) — псевдонимы живут только в памяти процесса, журнала промахов нет.</div>
+
+    <div class="bar">
+      <button class="mini" id="afix" style="border-color:#4a7dff">Фикс — промпт для Claude</button>
+      <label class="muted" style="flex:0;white-space:nowrap"><input type="checkbox" id="aopen" checked> только открытые</label>
+      <button class="mini" id="areload">Обновить</button>
+      <span class="muted" style="flex:0;min-width:0">Карточка по TMDB id:</span>
+      <input class="nm" id="atmdb" placeholder="tmdb id" style="max-width:110px" autocomplete="off">
+      <select id="atv" class="nm" style="max-width:110px"><option value="0">фильм</option><option value="1">сериал</option></select>
+      <button class="mini" id="aopenid">Открыть</button>
+    </div>
+
+    <div class="gcard" id="aprompt" style="display:none;padding:12px 14px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <b>Промпт для Claude</b>
+        <span class="muted" style="flex:1">Скопируй и вставь в Claude Code, открытый в <code>E:\Media-server</code> — он запустит прогон <code>/title-aliases</code> по этим карточкам, проверит имена живыми запросами и засеет базу.</span>
+        <button class="mini" id="acopy">Скопировать</button>
+        <button class="mini" id="apclose">Свернуть</button>
+      </div>
+      <textarea id="aptext" readonly spellcheck="false" style="width:100%;min-height:260px;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #2a3040;background:#0c0e12;color:#e6e9f0;font:12px/1.45 ui-monospace,Consolas,monospace;resize:vertical"></textarea>
+    </div>
+
+    <div id="acard" style="display:none"></div>
+    <div id="alist"></div>
+  </section>
 
   <!-- ───────── Online: эфир по ссылке (контейнер online) ───────── -->
   <section class="pane" id="pane-online">
@@ -415,6 +455,7 @@
       if (t.dataset.pane === 'decisions' && !decisionsLoaded) loadDecisions();
       if (t.dataset.pane === 'events' && !eventsLoaded) loadEvents();
       if (t.dataset.pane === 'online') loadOnline();
+      if (t.dataset.pane === 'aliases' && !aliasesLoaded) loadAliases();
       if (t.dataset.pane === 'access') qInput.focus();
     });
   });
@@ -1173,9 +1214,199 @@
     if (document.getElementById('pane-online').classList.contains('on')) loadOnline();
   }, 5000);
 
+  // ───────── Названия: псевдонимы и журнал промахов (qdl 2.118) ─────────
+  var aliasesLoaded = false, aSel = null;
+
+  function aAgo(iso) {
+    if (!iso) return '—';
+    var s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 0) s = 0;
+    if (s < 60) return 'только что';
+    if (s < 3600) return Math.floor(s / 60) + ' мин назад';
+    if (s < 86400) return Math.floor(s / 3600) + ' ч назад';
+    if (s < 86400 * 30) return Math.floor(s / 86400) + ' дн назад';
+    return new Date(iso).toLocaleDateString('ru-RU');
+  }
+
+  function aBadge(n) {
+    document.getElementById('abadge').textContent = n > 0 ? ' ' + n : '';
+  }
+
+  function loadAliasesBadge() {
+    getJson('/admin/d1v/api/aliases/misses?open=1&limit=1').then(function (res) {
+      if (res.ok) aBadge(res.j.open || 0);
+    }).catch(function () {});
+  }
+
+  function loadAliases() {
+    aliasesLoaded = true;
+    var box = document.getElementById('alist');
+    box.innerHTML = '<div class="empty">Загружаю…</div>';
+    var open = document.getElementById('aopen').checked ? 1 : 0;
+    getJson('/admin/d1v/api/aliases/misses?open=' + open + '&limit=300').then(function (res) {
+      if (!res.ok) throw new Error('http');
+      var j = res.j;
+      document.getElementById('akill').style.display = j.enabled === false ? '' : 'none';
+      document.getElementById('anodb').style.display = j.db === false ? '' : 'none';
+      aBadge(j.open || 0);
+      renderMisses(j.items || []);
+    }).catch(function () { box.innerHTML = '<div class="empty">Не удалось получить журнал промахов</div>'; });
+  }
+
+  function renderMisses(items) {
+    var box = document.getElementById('alist');
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">Промахов нет — на все имена трекеры отвечали (или журнал ещё пуст).</div>';
+      return;
+    }
+    box.innerHTML = '';
+    items.forEach(function (m) {
+      var row = document.createElement('div');
+      row.className = 'gcard';
+      row.style.cursor = 'pointer';
+      row.style.padding = '10px 14px';
+      var st = m.resolved_at
+        ? '<span class="muted">закрыт: ' + esc(m.resolved_by || '') + ' · ' + aAgo(m.resolved_at) + '</span>'
+        : '<b style="color:#f0b45a">открыт</b>';
+      st += ' <span class="muted">· ' + (m.kind === 'noru' ? 'трекеры отвечают, русских строк нет' : 'трекеры дали 0 строк') + '</span>';
+      row.innerHTML =
+        '<div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap">' +
+          '<b>' + esc(m.title || ('tmdb ' + m.tmdb_id)) + '</b>' +
+          '<span class="muted">' + (m.year || '') + ' · ' + (m.is_tv ? 'сериал' : 'фильм') + ' · tmdb ' + m.tmdb_id + '</span>' +
+          '<span class="muted">промахов: ' + (m.count || 0) + ' · последний ' + aAgo(m.last_at) + '</span>' +
+          st +
+        '</div>' +
+        (m.title_original ? '<div class="muted" style="font-size:12px;margin-top:4px">' + esc(m.title_original) + '</div>' : '') +
+        (m.note ? '<div class="muted" style="font-size:12px;margin-top:4px">📝 ' + esc(m.note) + '</div>' : '');
+      row.addEventListener('click', function () { openAliasCard(m.tmdb_id, !!m.is_tv, m); });
+      box.appendChild(row);
+    });
+  }
+
+  function openAliasCard(tmdb, tv, miss) {
+    aSel = { tmdb: tmdb, tv: tv, miss: miss || null };
+    var card = document.getElementById('acard');
+    card.style.display = '';
+    card.innerHTML = '<div class="gcard" style="padding:12px 14px"><div class="empty">Загружаю…</div></div>';
+    card.scrollIntoView({ block: 'nearest' });
+    getJson('/admin/d1v/api/aliases?tmdb_id=' + tmdb + '&is_tv=' + (tv ? 1 : 0)).then(function (res) {
+      if (!res.ok) throw new Error('http');
+      renderAliasCard(res.j.aliases || []);
+    }).catch(function () { card.innerHTML = '<div class="gcard"><div class="empty">Не удалось получить псевдонимы</div></div>'; });
+  }
+
+  function checkAlias(query, out) {
+    out.textContent = 'спрашиваю трекеры…';
+    return getJson('/admin/d1v/api/aliases/check?query=' + encodeURIComponent(query) + '&is_serial=0').then(function (res) {
+      var j = res.j || {};
+      if (!res.ok || !j.ok) { out.textContent = j.message || 'индексатор не ответил'; return; }
+      var parts = [];
+      Object.keys(j.trackers || {}).forEach(function (k) { parts.push(k + ' ' + j.trackers[k]); });
+      out.innerHTML = '<b>' + (j.rows || 0) + ' строк</b>' + (parts.length ? ' · ' + esc(parts.join(', ')) : '') +
+        ((j.sample || []).length ? '<div class="muted" style="font-size:12px;margin-top:4px">' +
+          j.sample.map(function (s) { return esc((s.tracker || '') + ' · ' + (s.title || '')) + ' (сидов ' + (s.sid || 0) + ')'; }).join('<br>') + '</div>' : '');
+    }).catch(function () { out.textContent = 'ошибка запроса'; });
+  }
+
+  function renderAliasCard(aliases) {
+    var s = aSel, card = document.getElementById('acard');
+    var m = s.miss || {};
+    var h = '<div class="gcard" style="padding:12px 14px">' +
+      '<div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px">' +
+        '<b>' + esc(m.title || ('tmdb ' + s.tmdb)) + '</b>' +
+        '<span class="muted">' + (s.tv ? 'сериал' : 'фильм') + ' · tmdb ' + s.tmdb + (m.year ? ' · ' + m.year : '') + '</span>' +
+        '<button class="mini" id="arefresh">Перечитать TMDB/Shikimori</button>' +
+        (m.tmdb_id && !m.resolved_at ? '<button class="mini" id="aresolve">Закрыть промах</button>' : '') +
+        '<button class="mini" id="aclose">Свернуть</button>' +
+      '</div>';
+    if (!aliases.length) h += '<div class="empty">Псевдонимов пока нет — автомат ничего не нашёл, впиши имя руками.</div>';
+    aliases.forEach(function (a) {
+      h += '<div style="display:flex;gap:10px;align-items:center;padding:6px 0;border-top:1px solid #2a3040;flex-wrap:wrap">' +
+        '<span style="flex:1;min-width:200px">' + esc(a.alias) + '</span>' +
+        '<span class="muted" style="font-size:12px">' + esc(a.source) + (a.hits ? ' · сработал ' + a.hits + '×' : '') + (a.note ? ' · ' + esc(a.note) : '') + '</span>' +
+        '<button class="mini" data-chk="' + esc(a.alias) + '">проверить</button>' +
+        '<button class="mini" data-del="' + esc(a.norm) + '">удалить</button>' +
+        '<span class="muted" style="flex-basis:100%;font-size:12px" data-out="' + esc(a.norm) + '"></span></div>';
+    });
+    h += '<div class="bar" style="margin-top:12px;margin-bottom:6px">' +
+      '<input class="nm" id="anew" placeholder="новое имя — как его пишут трекеры" style="max-width:420px" autocomplete="off">' +
+      '<button class="mini" id="achk">проверить</button>' +
+      '<button class="mini" id="aadd">сохранить</button></div>' +
+      '<div class="muted" id="achkres" style="font-size:13px"></div></div>';
+    card.innerHTML = h;
+
+    document.getElementById('aclose').addEventListener('click', function () { card.style.display = 'none'; });
+    document.getElementById('arefresh').addEventListener('click', function () {
+      card.querySelector('.empty') && (card.querySelector('.empty').textContent = 'перечитываю…');
+      post('/admin/d1v/api/aliases/refresh', { tmdb_id: s.tmdb, is_tv: s.tv, title: m.title || '', title_original: m.title_original || '', year: m.year || 0 })
+        .then(function (j) { renderAliasCard(j.aliases || []); toast('Перечитано: ' + (j.aliases || []).length + ' имён'); })
+        .catch(function () { toast('Не вышло перечитать'); });
+    });
+    var rs = document.getElementById('aresolve');
+    if (rs) rs.addEventListener('click', function () {
+      post('/admin/d1v/api/aliases/resolve', { tmdb_id: s.tmdb, is_tv: s.tv, by: 'manual' })
+        .then(function () { toast('Промах закрыт'); card.style.display = 'none'; loadAliases(); })
+        .catch(function () { toast('Не вышло'); });
+    });
+    [].forEach.call(card.querySelectorAll('[data-chk]'), function (b) {
+      b.addEventListener('click', function () {
+        var out = card.querySelector('[data-out="' + b.parentNode.querySelector('[data-del]').dataset.del + '"]');
+        checkAlias(b.dataset.chk, out);
+      });
+    });
+    [].forEach.call(card.querySelectorAll('[data-del]'), function (b) {
+      b.addEventListener('click', function () {
+        if (!confirm('Удалить имя?')) return;
+        post('/admin/d1v/api/aliases/delete', { tmdb_id: s.tmdb, is_tv: s.tv, norm: b.dataset.del })
+          .then(function () { openAliasCard(s.tmdb, s.tv, s.miss); })
+          .catch(function () { toast('Не вышло удалить'); });
+      });
+    });
+    document.getElementById('achk').addEventListener('click', function () {
+      var q = document.getElementById('anew').value.trim();
+      if (!q) return;
+      checkAlias(q, document.getElementById('achkres'));
+    });
+    document.getElementById('aadd').addEventListener('click', function () {
+      var q = document.getElementById('anew').value.trim();
+      if (!q) return;
+      post('/admin/d1v/api/aliases/add', { tmdb_id: s.tmdb, is_tv: s.tv, alias: q, source: 'manual' })
+        .then(function (j) {
+          if (j && j.ok === false) { toast(j.message || 'Не вышло'); return; }
+          toast('Сохранено');
+          openAliasCard(s.tmdb, s.tv, s.miss);
+        })
+        .catch(function () { toast('Не вышло сохранить'); });
+    });
+  }
+
+  document.getElementById('areload').addEventListener('click', loadAliases);
+  document.getElementById('aopen').addEventListener('change', loadAliases);
+  document.getElementById('afix').addEventListener('click', function () {
+    var box = document.getElementById('aprompt'), ta = document.getElementById('aptext');
+    box.style.display = '';
+    ta.value = 'собираю…';
+    fetch('/admin/d1v/api/aliases/prompt?limit=60', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.text(); })
+      .then(function (t) { ta.value = t; ta.focus(); ta.select(); })
+      .catch(function () { ta.value = 'Не удалось собрать промпт'; });
+  });
+  document.getElementById('apclose').addEventListener('click', function () { document.getElementById('aprompt').style.display = 'none'; });
+  document.getElementById('acopy').addEventListener('click', function () {
+    var ta = document.getElementById('aptext');
+    (navigator.clipboard ? navigator.clipboard.writeText(ta.value) : Promise.reject()).then(function () { toast('Скопировано'); })
+      .catch(function () { ta.focus(); ta.select(); toast('Выдели и скопируй вручную'); });
+  });
+  document.getElementById('aopenid').addEventListener('click', function () {
+    var id = parseInt(document.getElementById('atmdb').value, 10);
+    if (!id) { toast('Введи TMDB id'); return; }
+    openAliasCard(id, document.getElementById('atv').value === '1', null);
+  });
+
   load();
   loadOnline();                  // бейдж «● в эфире» на вкладке — сразу
   loadDecisions();               // бейдж «сколько ждёт ответа» рисуем сразу, не дожидаясь захода
+  loadAliasesBadge();            // бейдж «открытых промахов» — тоже сразу
   setInterval(load, 30000);   // чтобы новое устройство всплывало само, пока владелец ждёт с телефоном в руках
 })();
 </script>

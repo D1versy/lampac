@@ -18,6 +18,10 @@ public sealed class ScoreCtx
     public int wantSeason;          // number_of_seasons с карточки; 0 = неизвестен
     public int preferredQuality = 2160;
     public DateTime now = DateTime.UtcNow;   // инъецируется в тестах
+    // Псевдонимы названия (TitleAliases.cs, qdl 2.118): нормализованные имена, под которыми тайтл
+    // знают трекеры («Клинок, рассекающий демонов» у карточки «Истребитель демонов»). Ещё эталоны
+    // для ТОГО ЖЕ гейта имени — сравнение не мягче, эталонов больше. null/пусто = не знаем.
+    public List<string> aliasNorms;
 }
 
 // «N из M» из названия раздачи: сколько серий выложено / сколько всего.
@@ -307,7 +311,11 @@ public static class TorrentScoring
         // сверять имя не нужно и вредно: имена там латиницей и против русской карточки
         // всегда давали бы nameMiss.
         bool idMatch = t.Value<bool?>("id_match") == true;
-        bool haveNames = !string.IsNullOrEmpty(ctx.titleNorm) || !string.IsNullOrEmpty(ctx.originalNorm);
+        var aliases = ctx.aliasNorms;
+        bool haveAliases = aliases != null && aliases.Count > 0;
+        // Псевдонимы считаются контекстом имён: у карточки с иероглифическим оригиналом они — единственный
+        // способ включить гейт (и вернуть ⭐), иначе ветка nameGateOff ниже запрещала бы её навсегда.
+        bool haveNames = !string.IsNullOrEmpty(ctx.titleNorm) || !string.IsNullOrEmpty(ctx.originalNorm) || haveAliases;
         if (idMatch) { score += 40; r.why.Add("точное совпадение по TMDB"); }
         else if (!haveNames)
         {
@@ -329,7 +337,8 @@ public static class TorrentScoring
             string headNorm = SearchNameTo.Convert(TitleHead(title)) ?? "";
             bool exact = (!string.IsNullOrEmpty(ctx.titleNorm) && headNorm == ctx.titleNorm)
                       || (!string.IsNullOrEmpty(ctx.originalNorm) && headNorm == ctx.originalNorm);
-            if (exact) { score += 40; r.why.Add("точное имя"); }
+            bool exactAlias = !exact && haveAliases && aliases.Any(a => !string.IsNullOrEmpty(a) && headNorm == a);
+            if (exact || exactAlias) { score += 40; r.why.Add(exactAlias ? "точное имя (псевдоним)" : "точное имя"); }
             else
             {
                 // Contains по ПОЛНОМУ нормализованному title; короткие имена (<4) после нормализации
@@ -337,7 +346,8 @@ public static class TorrentScoring
                 bool contains =
                     (!string.IsNullOrEmpty(ctx.titleNorm) && ctx.titleNorm.Length >= 4 && SearchNameTo.Contains(title, ctx.titleNorm))
                  || (!string.IsNullOrEmpty(ctx.originalNorm) && ctx.originalNorm.Length >= 4 && SearchNameTo.Contains(title, ctx.originalNorm));
-                if (contains) { score += 25; r.why.Add("имя в названии"); }
+                bool containsAlias = !contains && haveAliases && aliases.Any(a => a != null && a.Length >= 4 && SearchNameTo.Contains(title, a));
+                if (contains || containsAlias) { score += 25; r.why.Add(containsAlias ? "псевдоним в названии" : "имя в названии"); }
                 else r.nameMiss = true;
             }
         }
@@ -468,6 +478,21 @@ public static class TorrentScoring
 
     // Скоринг всего списка: дописывает score/watchable/ep в каждый JObject, сортирует
     // score→sid→date, помечает ⭐ (rec=true + why) у первого прошедшего гейты.
+    /// <summary>
+    /// Прошла бы ли строка отсев SortAndMark: не видео / другой год у фильма без id_match / чужое имя.
+    /// Чистая — в t ничего не пишет. Нужна, чтобы «знают ли трекеры имя карточки» (добор псевдонимами,
+    /// Controller.CountNamed) считалось ТЕМИ ЖЕ правилами, что и отсев: на «Парни из Манджуммела» (оригинал
+    /// «… BOYS» → норма «boys») трекеры отдают «Bad Boys (1995)» — гейт имени он проходит вхождением, но
+    /// вылетает по году, и в выдаче его нет; значит, и для добора его нет. Порядок проверок — как в SortAndMark.
+    /// </summary>
+    public static bool Relevant(JObject t, ScoreCtx ctx)
+    {
+        string title = t.Value<string>("title");
+        if (IsNonVideo(title)) return false;
+        if (t.Value<bool?>("id_match") != true && IsOtherMovieYear(title, ctx.year, ctx.isSerial)) return false;
+        return !Score(t, ctx).nameMiss;
+    }
+
     public static JArray SortAndMark(JArray items, ScoreCtx ctx, int recommendMinSeeds, bool dropIrrelevant = true)
     {
         var scored = new List<(JObject t, ScoreResult r)>();
