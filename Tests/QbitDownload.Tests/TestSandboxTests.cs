@@ -211,6 +211,7 @@ public class TestSandboxTests
     [InlineData("d1v-test-55f581ba", "🧪 тест (headless)")]
     [InlineData("d1v-test-mac-7f427180", "🧪 тест (mac)")]
     [InlineData("d1v-test-ios-7f427180", "🧪 тест (ios)")]
+    [InlineData("d1v-test-tvos-7f427180", "🧪 тест (tvos)")]
     public void Имя_тестовой_строки_называет_платформу(string uid, string expected)
         => Assert.Equal(expected, Perms.TestNameFor(uid));
 

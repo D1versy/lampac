@@ -82,14 +82,14 @@ public static class Perms
 
     // Платформа для имени тестовой строки — из самого айди. Одно имя на всех врало бы в
     // интерфейсе ровно там, где владелец решает, чьё это устройство.
-    static readonly string[] _testPlatforms = { "mac", "ios", "android", "windows", "tizen", "web", "headless" };
+    static readonly string[] _testPlatforms = { "mac", "ios", "tvos", "android", "windows", "tizen", "web", "headless" };
 
 
     // ⚠️ Санация обязательна, а не гигиена: ValidateIdentity выключен, uid приходит из query без
     // единой проверки символов, а мы кладём его ключом в JSON и печатаем в админке.
     // Правила — те же, что у проверенного JutHistoryBucket (JutSuHistory.cs).
     static readonly Regex _uidRx = new Regex(@"[^a-z0-9\-_\.]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    static readonly Regex _platRx = new Regex(@"d1vision_(mac|ios|android|tizen|windows)/(\S+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    static readonly Regex _platRx = new Regex(@"d1vision_(mac|ios|tvos|android|tizen|windows)/(\S+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     // Headless-браузер честно представляется сам: Chrome пишет HeadlessChrome/<версия>, Edge —
     // аналогично. Ни один настоящий клиент D1Vision такого UA не шлёт.

@@ -57,6 +57,7 @@ public class PermsTests
     [Theory]
     [InlineData("Mozilla/5.0 ... lampa_client d1vision_mac/1.0.9-515", "mac", "1.0.9-515")]
     [InlineData("Mozilla/5.0 ... d1vision_ios/1.0.9-516", "ios", "1.0.9-516")]
+    [InlineData("Mozilla/5.0 ... lampa_client d1vision_tvos/1.0.13-525", "tvos", "1.0.13-525")]
     [InlineData("Mozilla/5.0 ... d1vision_android/1.2.3-590", "android", "1.2.3-590")]
     [InlineData("Mozilla/5.0 ... d1vision_windows/1.0.4", "windows", "1.0.4")]
     public void PlatformOf_читает_токен_как_и_клиентский_lampainit(string ua, string plat, string ver)
