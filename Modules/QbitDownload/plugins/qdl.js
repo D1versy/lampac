@@ -260,10 +260,27 @@
             '.qdl-det-bar{position:absolute;left:0;right:0;bottom:0;padding:.5em .6em;background:linear-gradient(0deg,rgba(0,0,0,.85),rgba(0,0,0,0));display:flex;align-items:flex-end;gap:.5em}' +
             '.qdl-det-name{flex:1;min-width:0;font-size:1.05em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
             '.qdl-det-time{font-size:1em;opacity:.85;flex:none}' +
-            '.qdl-det-view{position:fixed;left:0;top:0;width:100%;height:100%;z-index:900;background:#000;display:flex;align-items:center;justify-content:center}' +
-            '.qdl-det-view img{max-width:100%;max-height:100%;object-fit:contain}' +
-            '.qdl-det-head{position:absolute;left:0;right:0;top:0;padding:1em 1.4em;font-size:1.3em;background:linear-gradient(180deg,rgba(0,0,0,.85),rgba(0,0,0,0))}' +
-            '.qdl-det-foot{position:absolute;left:0;right:0;bottom:0;padding:1em 1.4em;text-align:center;font-size:1.1em;opacity:.85;background:linear-gradient(0deg,rgba(0,0,0,.85),rgba(0,0,0,0))}' +
+            // Полноэкранный просмотр кадра (2.120): лента из трёх слайдов, свайпы, ✕, зум.
+            // ⚠️ env(safe-area-inset-*) — отдельной строкой ПОСЛЕ обычного padding: движок без env()
+            // выбросит только её, а не весь отступ (айфон с чёлкой против старого WebView ТВ).
+            '.qdl-det-view{position:fixed;left:0;top:0;width:100%;height:100%;z-index:900;background:#000;overflow:hidden;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:none}' +
+            '.qdl-det-track{position:absolute;top:0;bottom:0;left:0;width:300%;display:flex;will-change:transform}' +
+            '.qdl-det-slide{flex:none;width:calc(100% / 3);height:100%;display:flex;align-items:center;justify-content:center;background-size:contain;background-position:center;background-repeat:no-repeat}' +
+            '.qdl-det-slide img{max-width:100%;max-height:100%;object-fit:contain;display:block;pointer-events:none;-webkit-touch-callout:none}' +
+            '.qdl-det-head{position:absolute;left:0;right:0;top:0;display:flex;align-items:flex-start;gap:1em;padding:1em 1.4em 1.8em;font-size:1.3em;background:linear-gradient(180deg,rgba(0,0,0,.85),rgba(0,0,0,0));transition:opacity .2s}' +
+            '.qdl-det-head{padding-top:calc(1em + env(safe-area-inset-top))}' +
+            '.qdl-det-head-text{flex:1;min-width:0}' +
+            '.qdl-det-close{flex:none;width:2em;height:2em;margin:-.35em -.5em 0 0;display:flex;align-items:center;justify-content:center;border-radius:50%;background:rgba(255,255,255,.16);font-size:1.05em;line-height:1;cursor:pointer}' +
+            '.qdl-det-nav{display:none;position:absolute;top:50%;width:2.2em;height:2.2em;margin-top:-1.1em;align-items:center;justify-content:center;border-radius:50%;background:rgba(0,0,0,.45);color:#fff;font-size:2em;line-height:1;cursor:pointer;opacity:.75;transition:opacity .2s}' +
+            '.qdl-det-nav--prev{left:.5em}.qdl-det-nav--next{right:.5em}' +
+            '@media (hover:hover) and (pointer:fine){.qdl-det-nav{display:flex}.qdl-det-nav:hover{opacity:1}}' +
+            '.qdl-det-view--first .qdl-det-nav--prev,.qdl-det-view--last .qdl-det-nav--next{display:none}' +
+            '.qdl-det-foot{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;align-items:center;gap:.55em;padding:1.8em 1.4em 1em;text-align:center;font-size:1.1em;background:linear-gradient(0deg,rgba(0,0,0,.85),rgba(0,0,0,0));transition:opacity .2s}' +
+            '.qdl-det-foot{padding-bottom:calc(1em + env(safe-area-inset-bottom))}' +
+            '.qdl-det-count{opacity:.85}' +
+            '.qdl-det-rec{padding:.5em 1.3em;border-radius:2em;background:rgba(255,255,255,.16);font-weight:600;cursor:pointer}' +
+            '.qdl-det-hint{min-height:1.2em;font-size:.85em;opacity:.7}' +
+            '.qdl-det-view--clean .qdl-det-head,.qdl-det-view--clean .qdl-det-foot,.qdl-det-view--clean .qdl-det-nav{opacity:0;pointer-events:none}' +
             // фокус пульта в наших списках/кнопках: Lampa вешает класс .focus только на ТВ/десктопе,
             // а генерического .selector.focus в её CSS нет — без этих правил фокус невидим
             '.qdl-row-focus{transition:box-shadow .1s}' +
@@ -5701,6 +5718,24 @@
         return d.getDate() + ' ' + LIVE_MONTHS_JS[d.getMonth()] + ', ' + LIVE_WDAYS_JS[d.getDay()];
     }
 
+    // ── жесты полноэкранного просмотра кадра (чистая функция — под тесты) ────────
+    // dx/dy — смещение пальца от точки касания (px), dt — длительность (мс), w/h — экран,
+    // zoom — текущее увеличение. Ответ — что делать по отпусканию:
+    //   'tap' — короткое касание без движения, 'next'/'prev' — листнуть,
+    //   'close' — закрыть свайпом вниз, 'none' — вернуть на место.
+    function detGesture(g) {
+        var ax = Math.abs(g.dx), ay = Math.abs(g.dy);
+        if (ax < 10 && ay < 10) return 'tap';
+        if (g.zoom > 1) return 'none';                 // увеличенный кадр таскают, а не листают
+        var flick = g.dt < 300;
+        if (ax > ay) {
+            if (ax > g.w * 0.2 || (flick && ax > 40)) return g.dx < 0 ? 'next' : 'prev';
+            return 'none';
+        }
+        if (g.dy > 0 && (g.dy > g.h * 0.15 || (flick && g.dy > 50))) return 'close';
+        return 'none';
+    }
+
     function ComponentLiveDetect(object) {
         var comp = this;
         var network = new Lampa.Reguest();
@@ -5922,51 +5957,271 @@
         }
 
         // ── полноэкранный просмотр кадра ─────────────────────────────────────────
+        // Лента из трёх слайдов (предыдущий/текущий/следующий): свайп тянет ленту за пальцем,
+        // соседний кадр виден сразу. Под оригиналом кадра лежит уменьшёнка из грида (она уже
+        // в кеше) — листается без чёрной паузы на загрузку ~340 КБ. Выход на телефоне: ✕,
+        // свайп вниз; тап прячет шапку/подвал; двойной тап и щипок увеличивают кадр.
+        // На пульте по-прежнему: ◀ ▶ листать, OK — запись, Back — выйти (§DB).
+        // 🔴 До 2.120 оверлей не имел ни одной тач-ручки: на айфоне он накрывал и кнопку
+        // «Назад» нижней панели Lampa, а свайп от края в приложении — это history back
+        // WebView, которой Lampa не пользуется. Выйти можно было только убив приложение.
+        var track = null, slides = [], zoom = { z: 1, x: 0, y: 0 };
+        var touch = null, lastTap = null, tapTimer = null, animTimer = null, hintShown = false;
+        var IS_TOUCH = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+        var ON_TV = false;
+        try { ON_TV = !!(Lampa.Platform && Lampa.Platform.tv && Lampa.Platform.tv()); } catch (e) {}
+
+        function thumbUrl(it, full) {
+            // Без w= — оригинал байт в байт: экономим на контейнере, а не на качестве.
+            return withUid(API + '/qdl/live/detect/thumb?' + (full ? '' : 'w=640&') + 'id=' + it.id);
+        }
+        function slideW() { return (view && view[0].clientWidth) || window.innerWidth || 1; }
+        function slideH() { return (view && view[0].clientHeight) || window.innerHeight || 1; }
+
+        function buildView() {
+            view = $('<div class="qdl-det-view' + (IS_TOUCH ? ' qdl-det-view--touch' : '') + '">' +
+                       '<div class="qdl-det-track">' +
+                         '<div class="qdl-det-slide"><img draggable="false"></div>' +
+                         '<div class="qdl-det-slide qdl-det-slide--cur"><img draggable="false"></div>' +
+                         '<div class="qdl-det-slide"><img draggable="false"></div>' +
+                       '</div>' +
+                       '<div class="qdl-det-head"><div class="qdl-det-head-text"></div><div class="qdl-det-close" title="Закрыть">✕</div></div>' +
+                       '<div class="qdl-det-nav qdl-det-nav--prev">‹</div><div class="qdl-det-nav qdl-det-nav--next">›</div>' +
+                       '<div class="qdl-det-foot"><div class="qdl-det-count"></div><div class="qdl-det-rec">▶ Запись</div><div class="qdl-det-hint"></div></div>' +
+                     '</div>');
+            track = view.find('.qdl-det-track');
+            slides = view.find('.qdl-det-slide').toArray();
+            $('body').append(view);
+
+            var el = view[0];
+            // passive:false — touchmove обязан гасить прокрутку ленты под оверлеем.
+            el.addEventListener('touchstart', onTouchStart, { passive: false });
+            el.addEventListener('touchmove', onTouchMove, { passive: false });
+            el.addEventListener('touchend', onTouchEnd, { passive: false });
+            el.addEventListener('touchcancel', onTouchEnd, { passive: false });
+            // Мышь (десктоп): кнопки кликом. На таче синтетический click глушится в touchend.
+            view.on('click', '.qdl-det-close', function (e) { e.stopPropagation(); closeView(); Lampa.Controller.toggle('content'); });
+            view.on('click', '.qdl-det-nav--prev', function (e) { e.stopPropagation(); moveView(-1); });
+            view.on('click', '.qdl-det-nav--next', function (e) { e.stopPropagation(); moveView(1); });
+            view.on('click', '.qdl-det-rec', function (e) { e.stopPropagation(); openRecording(items[viewIdx]); });
+            view.on('dblclick', '.qdl-det-slide--cur', function (e) { toggleZoom(e.clientX, e.clientY); });
+        }
+
         function openView(idx) {
             if (idx < 0 || idx >= items.length) return;
+            if (!view) buildView();
+            finishAnim();
             viewIdx = idx;
-            var it = items[idx];
-
-            if (!view) {
-                view = $('<div class="qdl-det-view"><img><div class="qdl-det-head"></div><div class="qdl-det-foot"></div></div>');
-                $('body').append(view);
+            zoom = { z: 1, x: 0, y: 0 };
+            view.removeClass('qdl-det-view--clean');
+            renderSlides();
+            paintView();
+            if (IS_TOUCH && !hintShown) {
+                hintShown = true;
+                view.find('.qdl-det-hint').text('листайте свайпом · вниз — закрыть');
+                setTimeout(function () { if (view) view.find('.qdl-det-hint').text(''); }, 3500);
             }
-
-            var img = view.find('img');
-            // Без w= — оригинал байт в байт: экономим на контейнере, а не на качестве.
-            img.attr('src', withUid(API + '/qdl/live/detect/thumb?id=' + it.id));
-            img.off('error').on('error', function () { this.src = './img/img_broken.svg'; });
-
-            view.find('.qdl-det-head').text(
-                (it.type === 'human' ? 'Человек' : 'Движение') + (it.confidence ? '  ·  ' + it.confidence + '%' : '') +
-                '   ·   ' + it.cameraName + '   ·   ' + (it.dayLabel || it.day) + ', ' + it.time);
-            view.find('.qdl-det-foot').text(
-                (idx + 1) + ' из ' + items.length + '   ·   ◀ ▶ листать' +
-                (it.recording ? '   ·   OK — открыть запись' : '') + '   ·   Назад — выйти');
-
-            preload(idx + 1);
             if (idx >= items.length - 5) comp.load(false);
         }
 
-        function preload(i) {
-            if (i < 0 || i >= items.length) return;
-            try { var im = new Image(); im.src = withUid(API + '/qdl/live/detect/thumb?id=' + items[i].id); } catch (e) {}
+        // Слоты не двигаются по DOM — меняются только src: <img> с прежним src браузер не перегружает.
+        function renderSlides() {
+            for (var k = -1; k <= 1; k++) {
+                var s = slides[k + 1], it = items[viewIdx + k], img = s.querySelector('img');
+                if (!it) { img.removeAttribute('src'); s.style.backgroundImage = ''; s.setAttribute('data-id', ''); continue; }
+                if (s.getAttribute('data-id') === String(it.id)) continue;
+                s.setAttribute('data-id', String(it.id));
+                s.style.backgroundImage = 'url("' + thumbUrl(it) + '")';
+                img.onerror = function () { this.onerror = null; this.src = './img/img_broken.svg'; };
+                img.src = thumbUrl(it, true);
+            }
+            setTrack(0, false);
+            applyZoom(false);
         }
 
+        function paintView() {
+            var it = items[viewIdx];
+            if (!it) return;
+            view.find('.qdl-det-head-text').text(
+                (it.type === 'human' ? 'Человек' : 'Движение') + (it.confidence ? '  ·  ' + it.confidence + '%' : '') +
+                '   ·   ' + it.cameraName + '   ·   ' + (it.dayLabel || it.day) + ', ' + it.time);
+            view.find('.qdl-det-count').text((viewIdx + 1) + ' из ' + items.length);
+            view.find('.qdl-det-rec').toggle(!!it.recording && !ON_TV);
+            view.find('.qdl-det-hint').text(IS_TOUCH ? '' :
+                '◀ ▶ листать' + (it.recording ? '   ·   OK — открыть запись' : '') + '   ·   Назад — выйти');
+            view.toggleClass('qdl-det-view--first', viewIdx === 0)
+                .toggleClass('qdl-det-view--last', viewIdx >= items.length - 1);
+        }
+
+        function setTrack(dx, animate) {
+            if (!track) return;
+            track[0].style.transition = animate ? 'transform .22s ease-out' : 'none';
+            track[0].style.transform = 'translate3d(' + (-slideW() + dx) + 'px,0,0)';
+            view[0].style.background = '';
+        }
+
+        function setDismiss(dy) {
+            track[0].style.transition = 'none';
+            track[0].style.transform = 'translate3d(' + (-slideW()) + 'px,' + dy + 'px,0)';
+            view[0].style.background = 'rgba(0,0,0,' + Math.max(0.25, 1 - dy / 400).toFixed(2) + ')';
+        }
+
+        function finishAnim() {
+            if (!animTimer) return;
+            clearTimeout(animTimer); animTimer = null;
+            if (view) renderSlides();
+        }
+
+        // Возвращает false, если листать некуда (лента вернётся на место).
         function moveView(dir) {
             var next = viewIdx + dir;
-            if (next < 0 || next >= items.length) return;
-            openView(next);
+            if (!view) return false;
+            if (next < 0 || next >= items.length) { setTrack(0, true); return false; }
+            finishAnim();
+            viewIdx = next;
+            zoom = { z: 1, x: 0, y: 0 };
+            paintView();
+            // Лента уезжает на соседний слайд; по концу анимации слоты пересобираются под новый центр.
+            setTrack(dir > 0 ? -slideW() : slideW(), true);
+            animTimer = setTimeout(function () { animTimer = null; if (view) renderSlides(); }, 240);
+            if (next >= items.length - 5) comp.load(false);
+            // Фокус ленты идёт следом за просмотром (§CO).
+            var el = grid.find('.qdl-det-card[data-idx="' + next + '"]');
+            if (el.length) last = el[0];
+            return true;
+        }
+
+        function dismiss() {
+            if (!view || view.hasClass('qdl-det-view--closing')) return;
+            view.addClass('qdl-det-view--clean qdl-det-view--closing');
+            track[0].style.transition = 'transform .18s ease-in';
+            track[0].style.transform = 'translate3d(' + (-slideW()) + 'px,' + slideH() + 'px,0)';
+            view[0].style.transition = 'background .18s';
+            view[0].style.background = 'rgba(0,0,0,0)';
+            setTimeout(function () { if (view) { closeView(); Lampa.Controller.toggle('content'); } }, 170);
         }
 
         function closeView() {
             if (!view) return;
+            clearTimeout(animTimer); animTimer = null;
+            clearTimeout(tapTimer); tapTimer = null;
             view.remove();
-            view = null;
+            view = null; track = null; slides = []; touch = null;
+            zoom = { z: 1, x: 0, y: 0 };
             // Фокус возвращаем на ту карточку, до которой долистали в просмотре (§CO).
             var el = grid.find('.qdl-det-card[data-idx="' + viewIdx + '"]');
             if (el.length) last = el[0];
             viewIdx = -1;
+        }
+
+        // ── зум: двойной тап ×2.5 в точку касания, щипок 1…4, увеличенный кадр таскается ──
+        function applyZoom(animate) {
+            var img = slides[1] && slides[1].querySelector('img');
+            if (!img || !view) return;
+            if (zoom.z > 1) {
+                // Кадр не уезжает за экран: смещение ограничено тем, что выходит за края.
+                var w = img.clientWidth || slideW(), h = img.clientHeight || slideH();
+                var maxX = Math.max(0, (w * zoom.z - slideW()) / 2), maxY = Math.max(0, (h * zoom.z - slideH()) / 2);
+                zoom.x = Math.min(maxX, Math.max(-maxX, zoom.x));
+                zoom.y = Math.min(maxY, Math.max(-maxY, zoom.y));
+            }
+            img.style.transition = animate ? 'transform .2s ease-out' : 'none';
+            img.style.transform = zoom.z > 1 ? 'translate3d(' + zoom.x + 'px,' + zoom.y + 'px,0) scale(' + zoom.z + ')' : '';
+            view.toggleClass('qdl-det-view--zoom', zoom.z > 1);
+        }
+        function resetZoom() { zoom = { z: 1, x: 0, y: 0 }; applyZoom(true); }
+        function toggleZoom(cx, cy) {
+            if (zoom.z > 1) { resetZoom(); return; }
+            // Точка под пальцем остаётся на месте: t = (центр − точка) · (z − 1).
+            zoom = { z: 2.5, x: (slideW() / 2 - cx) * 1.5, y: (slideH() / 2 - cy) * 1.5 };
+            applyZoom(true);
+        }
+
+        // ── тач ──────────────────────────────────────────────────────────────────
+        function tpt(e) {
+            var t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
+            return { x: t.clientX, y: t.clientY };
+        }
+        function tdist(e) {
+            var a = e.touches[0], b = e.touches[1];
+            return Math.sqrt(Math.pow(a.clientX - b.clientX, 2) + Math.pow(a.clientY - b.clientY, 2)) || 1;
+        }
+
+        function onTouchStart(e) {
+            if (!view || view.hasClass('qdl-det-view--closing')) return;
+            finishAnim();
+            if (e.touches && e.touches.length === 2) {
+                touch = { pinch: true, d0: tdist(e), z0: zoom.z, x0: zoom.x, y0: zoom.y,
+                          mx: (e.touches[0].clientX + e.touches[1].clientX) / 2 - slideW() / 2,
+                          my: (e.touches[0].clientY + e.touches[1].clientY) / 2 - slideH() / 2 };
+                return;
+            }
+            var p = tpt(e), now = Date.now();
+            touch = { x: p.x, y: p.y, t: now, axis: '', dx: 0, dy: 0, zx: zoom.x, zy: zoom.y,
+                      dbl: !!(lastTap && now - lastTap.t < 300 && Math.abs(p.x - lastTap.x) < 30 && Math.abs(p.y - lastTap.y) < 30) };
+        }
+
+        function onTouchMove(e) {
+            if (!view || !touch) return;
+            e.preventDefault();                          // лента под оверлеем не скроллится
+            if (touch.pinch) {
+                if (!e.touches || e.touches.length < 2) return;
+                var z = Math.min(4, Math.max(1, touch.z0 * tdist(e) / touch.d0));
+                // Точка между пальцами стоит на месте: смещение пересчитывается от масштаба.
+                zoom.z = z;
+                zoom.x = touch.mx - (touch.mx - touch.x0) * (z / touch.z0);
+                zoom.y = touch.my - (touch.my - touch.y0) * (z / touch.z0);
+                applyZoom(false);
+                return;
+            }
+            var p = tpt(e);
+            touch.dx = p.x - touch.x; touch.dy = p.y - touch.y;
+            if (zoom.z > 1) {                            // увеличенный кадр таскаем
+                zoom.x = touch.zx + touch.dx; zoom.y = touch.zy + touch.dy;
+                applyZoom(false);
+                return;
+            }
+            if (!touch.axis) {
+                if (Math.abs(touch.dx) < 8 && Math.abs(touch.dy) < 8) return;
+                touch.axis = Math.abs(touch.dx) > Math.abs(touch.dy) ? 'x' : 'y';
+            }
+            if (touch.axis === 'x') {
+                var dx = touch.dx;
+                // На краю ленты — сопротивление, как у фотоплёнки.
+                if ((dx > 0 && viewIdx === 0) || (dx < 0 && viewIdx >= items.length - 1)) dx = dx * 0.3;
+                setTrack(dx, false);
+            } else if (touch.dy > 0) {
+                setDismiss(touch.dy);
+            }
+        }
+
+        function onTouchEnd(e) {
+            if (!view || !touch) return;
+            var t = touch; touch = null;
+            if (t.pinch) { if (zoom.z <= 1.02) resetZoom(); else applyZoom(true); return; }
+            var what = detGesture({ dx: t.dx, dy: t.dy, dt: Date.now() - t.t, w: slideW(), h: slideH(), zoom: zoom.z });
+            if (what === 'tap') {
+                e.preventDefault();                      // иначе следом прилетит синтетический click — кнопка сработает дважды
+                onTap(e.target, t);
+            }
+            else if (what === 'next') moveView(1);
+            else if (what === 'prev') moveView(-1);
+            else if (what === 'close') dismiss();
+            else if (zoom.z > 1) applyZoom(true);
+            else setTrack(0, true);
+        }
+
+        function onTap(target, t) {
+            var $t = $(target);
+            if ($t.closest('.qdl-det-close').length) { closeView(); Lampa.Controller.toggle('content'); return; }
+            if ($t.closest('.qdl-det-nav--prev').length) { moveView(-1); return; }
+            if ($t.closest('.qdl-det-nav--next').length) { moveView(1); return; }
+            if ($t.closest('.qdl-det-rec').length) { openRecording(items[viewIdx]); return; }
+            clearTimeout(tapTimer); tapTimer = null;
+            if (t.dbl) { lastTap = null; toggleZoom(t.x, t.y); return; }
+            lastTap = { x: t.x, y: t.y, t: Date.now() };
+            // Одиночный тап: ждём, не станет ли он двойным, и только потом прячем/показываем шапку.
+            tapTimer = setTimeout(function () { tapTimer = null; if (view) view.toggleClass('qdl-det-view--clean'); }, 280);
         }
 
         function openRecording(it) {

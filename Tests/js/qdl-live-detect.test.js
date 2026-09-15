@@ -174,10 +174,136 @@ test('просмотр: Enter открывает оверлей с ОРИГИН�
 
   const view = m.body.find('.qdl-det-view');
   assert.strictEqual(view.length, 1);
-  const src = m.r.$(view.find('img')[0]).attr('src');
+  const src = view.find('.qdl-det-slide--cur img').attr('src');
   assert.ok(src.indexOf('id=100') !== -1 && src.indexOf('w=') === -1, 'без w= — оригинал: ' + src);
   assert.ok(view.text().indexOf('1 из 3') !== -1, 'счётчик в подвале');
   m.inst.destroy();
+});
+
+test('просмотр: сосед подгружен заранее, под оригиналом — уменьшёнка из грида как подложка', () => {
+  const m = mount();
+  m.r.$(cards(m)[0]).trigger('hover:enter');
+  const slides = m.body.find('.qdl-det-slide');
+  assert.strictEqual(slides.length, 3, 'лента из трёх слайдов');
+  assert.ok(!m.r.$(slides[0]).find('img').attr('src'), 'левее первого кадра пусто');
+  assert.ok(m.r.$(slides[2]).find('img').attr('src').indexOf('id=99') !== -1, 'следующий кадр уже грузится');
+  const bg = slides[1].style.backgroundImage;
+  assert.ok(bg.indexOf('w=640') !== -1 && bg.indexOf('id=100') !== -1, 'подложка — уменьшёнка (она в кеше грида): ' + bg);
+  m.inst.destroy();
+});
+
+// ─────────────── телефон: тач без единой кнопки Lampa (qdl 2.120) ───────────────
+//
+// Жалоба владельца с айфона: «открываю карточку на полный экран — не могу выйти, приходится
+// закрывать приложение; и должна быть возможность листать вперёд-назад как фотки».
+// Воспроизведено в симуляторе iPhone настоящими тапами: оверлей накрывал кнопку «Назад»
+// нижней панели Lampa, а свайп от края в приложении — history back WebView, не Lampa.
+
+function touchEv(w, type, el, x, y) {
+  const ev = new w.Event(type, { bubbles: true, cancelable: true });
+  const t = { clientX: x, clientY: y, target: el };
+  ev.touches = type === 'touchend' ? [] : [t];
+  ev.changedTouches = [t];
+  el.dispatchEvent(ev);
+  return ev;
+}
+function tap(m, el, x = 100, y = 100) {
+  touchEv(m.r.w, 'touchstart', el, x, y);
+  return touchEv(m.r.w, 'touchend', el, x, y);
+}
+function swipe(m, el, dx, dy) {
+  touchEv(m.r.w, 'touchstart', el, 200, 300);
+  touchEv(m.r.w, 'touchmove', el, 200 + dx / 2, 300 + dy / 2);
+  touchEv(m.r.w, 'touchmove', el, 200 + dx, 300 + dy);
+  touchEv(m.r.w, 'touchend', el, 200 + dx, 300 + dy);
+}
+const cur = (m) => m.body.find('.qdl-det-slide--cur')[0];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('телефон: ✕ закрывает просмотр тапом и не выходит из раздела', () => {
+  const m = mount();
+  m.r.$(cards(m)[0]).trigger('hover:enter');
+  const ev = tap(m, m.body.find('.qdl-det-close')[0]);
+  assert.strictEqual(m.body.find('.qdl-det-view').length, 0, 'оверлей закрыт');
+  assert.ok(ev.defaultPrevented, 'синтетический click после тапа погашен — иначе кнопка сработает дважды');
+  assert.ok(!m.calls.backward, 'из раздела не вышли');
+  m.inst.destroy();
+});
+
+test('телефон: свайп влево/вправо листает кадры, за края ленты не уходит', () => {
+  const m = mount();
+  m.r.$(cards(m)[0]).trigger('hover:enter');
+  swipe(m, cur(m), -200, 0);
+  assert.ok(m.body.find('.qdl-det-view').text().indexOf('2 из 3') !== -1, 'влево — вперёд');
+  swipe(m, cur(m), -200, 0);
+  swipe(m, cur(m), -200, 0);
+  assert.ok(m.body.find('.qdl-det-view').text().indexOf('3 из 3') !== -1, 'за последний не уходим');
+  swipe(m, cur(m), 200, 0);
+  assert.ok(m.body.find('.qdl-det-view').text().indexOf('2 из 3') !== -1, 'вправо — назад');
+  assert.strictEqual(m.body.find('.qdl-det-view').length, 1, 'горизонтальный свайп просмотр не закрывает');
+  m.inst.destroy();
+});
+
+test('телефон: свайп вниз закрывает просмотр', async () => {
+  const m = mount();
+  m.r.$(cards(m)[0]).trigger('hover:enter');
+  swipe(m, cur(m), 0, 200);
+  await sleep(250);
+  assert.strictEqual(m.body.find('.qdl-det-view').length, 0, 'оверлей закрыт свайпом вниз');
+  m.inst.destroy();
+});
+
+test('телефон: тап по кадру прячет шапку и подвал, второй тап возвращает', async () => {
+  const m = mount();
+  m.r.$(cards(m)[0]).trigger('hover:enter');
+  tap(m, cur(m));
+  await sleep(330);
+  assert.ok(m.body.find('.qdl-det-view').hasClass('qdl-det-view--clean'), 'шапка спрятана');
+  tap(m, cur(m));
+  await sleep(330);
+  assert.ok(!m.body.find('.qdl-det-view').hasClass('qdl-det-view--clean'), 'шапка вернулась');
+  m.inst.destroy();
+});
+
+test('телефон: двойной тап увеличивает кадр; увеличенный кадр таскают, а не листают', () => {
+  const m = mount();
+  m.r.$(cards(m)[0]).trigger('hover:enter');
+  tap(m, cur(m), 300, 200); tap(m, cur(m), 300, 200);
+  const view = m.body.find('.qdl-det-view');
+  assert.ok(view.hasClass('qdl-det-view--zoom'), 'зум включился');
+  assert.ok(view.find('.qdl-det-slide--cur img')[0].style.transform.indexOf('scale(2.5)') !== -1);
+  swipe(m, cur(m), -200, 0);
+  assert.ok(view.text().indexOf('1 из 3') !== -1, 'свайп при зуме не листает');
+  tap(m, cur(m), 300, 200); tap(m, cur(m), 300, 200);
+  assert.ok(!view.hasClass('qdl-det-view--zoom'), 'второй двойной тап вернул масштаб');
+  m.inst.destroy();
+});
+
+test('телефон: «▶ Запись» видна только у кадра с записью и открывает её тапом', () => {
+  const m = mount({ pages: [{ items: [evt(100, { recording: 8812 }), evt(99)], hasNext: false, cursor: 99, today: '2026-09-01' }] });
+  m.r.$(cards(m)[0]).trigger('hover:enter');
+  const rec = m.body.find('.qdl-det-rec');
+  assert.notStrictEqual(rec[0].style.display, 'none', 'у кадра с записью кнопка есть');
+  swipe(m, cur(m), -200, 0);
+  assert.strictEqual(rec[0].style.display, 'none', 'у кадра без записи — нет');
+  swipe(m, cur(m), 200, 0);
+  tap(m, rec[0]);
+  assert.strictEqual(m.calls.plays.length, 1, 'запись открылась');
+  assert.strictEqual(m.body.find('.qdl-det-view').length, 0, 'просмотр закрылся перед плеером');
+  m.inst.destroy();
+});
+
+test('detGesture: пороги — тап, листание, закрытие, зум', () => {
+  const g = mount().r.qdl.detGesture;
+  const base = { dt: 100, w: 400, h: 800, zoom: 1 };
+  assert.strictEqual(g({ ...base, dx: 3, dy: -4 }), 'tap');
+  assert.strictEqual(g({ ...base, dx: -100, dy: 10 }), 'next', 'резкий короткий свайп влево');
+  assert.strictEqual(g({ ...base, dx: 100, dy: 10 }), 'prev');
+  assert.strictEqual(g({ ...base, dx: -60, dy: 0, dt: 900 }), 'none', 'медленно и мало — вернуть');
+  assert.strictEqual(g({ ...base, dx: -90, dy: 0, dt: 900 }), 'next', 'медленно, но дальше 20 % ширины');
+  assert.strictEqual(g({ ...base, dx: 0, dy: 150 }), 'close', 'вниз — закрыть');
+  assert.strictEqual(g({ ...base, dx: 0, dy: -150 }), 'none', 'вверх — ничего');
+  assert.strictEqual(g({ ...base, dx: -200, dy: 0, zoom: 2 }), 'none', 'при зуме не листаем');
 });
 
 test('просмотр: стрелки листают события, Back закрывает и не выходит из раздела', () => {
