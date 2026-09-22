@@ -621,6 +621,12 @@ public partial class QbitController
     /// 🔴 Никакого [Staticache]: его ключ — Scheme+Host+Path+Query, без cookie и UA, и закэшированный
     /// ответ одного устройства уехал бы всем остальным.
     /// </summary>
+    /// <summary>
+    /// Настройки поиска для клиента (qdl 2.121) — ключ «search» в /qdl/features.
+    /// screen=false → qdl.js не трогает кнопку шапки и Lampa.Search.open: штатный оверлей Lampa как раньше.
+    /// </summary>
+    internal static JObject SearchClientConf() => new JObject { ["screen"] = ModInit.conf.searchScreen };
+
     [HttpGet, AllowAnonymous]
     [Route("qdl/features")]
     public ActionResult QdlFeatures()
@@ -643,6 +649,10 @@ public partial class QbitController
         // Едет сюда, потому что loadFeatures в qdl.js уже ходит на старте и каждые 60 с и
         // кеширует ответ — значит новое значение доезжает до флота за минуту без пересборки.
         card["progress"] = ProgressClientConf();
+
+        // Поиск (qdl 2.121): киллсвитч экрана поиска и маршрутизации кнопки шапки — тем же каналом
+        // и по той же причине (отдельным ключом, НЕ внутри features).
+        card["search"] = SearchClientConf();
 
         // Эфир: глобальная настройка «видео в плитках» (qdl 2.96). Тем же каналом и по той же
         // причине, что и progress выше — владелец переключает у себя, применяется всем.

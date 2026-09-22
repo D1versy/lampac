@@ -26,12 +26,21 @@ function catalogSrc() {
   return src.slice(i, j);
 }
 
+// С 2.121 саму карточку (постер по visible, обработчик ошибки, бейджи) строит общий jutCardEl —
+// один на каталог и экран поиска; в append каталога остались только его хуки (last/prefetch/меню).
+function cardElSrc() {
+  const src = H.qdlSource();
+  const i = src.indexOf('function jutCardEl(');
+  assert.ok(i > 0, 'jutCardEl не найден');
+  return src.slice(i, src.indexOf('\n    }', i));
+}
+
 function appendSrc() {
   const fn = catalogSrc();
   const i = fn.indexOf('this.append = function');
   assert.ok(i > 0, 'this.append не найден');
   const j = fn.indexOf('this.render = function', i);
-  return fn.slice(i, j > i ? j : i + 3000);
+  return cardElSrc() + '\n' + fn.slice(i, j > i ? j : i + 3000);
 }
 
 test('постер вешается на событие visible, а не присваивается при append', () => {

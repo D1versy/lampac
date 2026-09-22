@@ -83,6 +83,7 @@
             // Настройки живого прогресса (qdl 2.93) — отдельным ключом, НЕ внутри features:
             // тот объект читается qdlAllowed как булева карта прав, числа в нём стали бы «правом».
             if (r && r.progress) setProgressConf(r.progress);
+            if (r && r.search) setSearchConf(r.search);       // флаг экрана поиска (qdl 2.121), тем же каналом
             if (done) done();
         }, function () { if (done) done(); });
     }
@@ -357,15 +358,24 @@
             '.qdl-jut-skip svg{width:1.5em;height:1.5em;display:block}' +
             '.qdl-jut-skip.qdl-jut-skip--on{opacity:1;color:#19b531}' +
             '.qdl-jut-skip.focus{opacity:1;transform:scale(1.08)}' +
-            // Экран поиска jut.su: поле сверху (не впритык к краю) + лента «Недавнее» под ним
-            '.qdl-jut-search-wrap{padding:2em 1.5em 0;display:flex;justify-content:center}' +
-            '.qdl-jut-search-field{display:flex;align-items:center;gap:.7em;width:70%;max-width:44em;padding:.85em 1.2em;' +
+            // Экраны поиска (d1v_search, jut_search; форма — как у XSMART): поле сверху по центру,
+            // чипы недавних запросов, «Недавнее»/выдача сеткой под ним. Текст запроса в поле — .d1v-search-text.
+            '.d1v-search-wrap{padding:2em 1.5em 0;display:flex;justify-content:center}' +
+            '.d1v-search-field{display:flex;align-items:center;width:70%;max-width:44em;padding:.85em 1.2em;' +
             'background:rgba(255,255,255,.09);border:0.12em solid rgba(255,255,255,.16);border-radius:.7em;font-size:1.25em}' +
-            '.qdl-jut-search-field.focus{background:rgba(255,255,255,.18);border-color:#fff;transform:scale(1.01)}' +
-            '.qdl-jut-search-field input{flex:1;min-width:0;background:transparent;border:0;outline:0;color:inherit;font-size:1em;font-family:inherit}' +
-            '.qdl-jut-search-hint{opacity:.55}' +
-            '.qdl-jut-recent-title{padding:1.4em 1.5em .4em;font-size:1.3em;opacity:.7}' +
-            '@media screen and (max-width:580px){.qdl-jut-search-wrap{padding:1.2em 1em 0}.qdl-jut-search-field{width:100%}}';
+            '.d1v-search-field.focus{background:rgba(255,255,255,.18);border-color:#fff}' +
+            '.d1v-search-ico{margin-right:.7em}' +
+            '.d1v-search-field input{flex:1;min-width:0;background:transparent;border:0;outline:0;color:inherit;font-size:1em;font-family:inherit}' +
+            // Штатный input::placeholder Lampa — #6a6a6a: на нашем полупрозрачном поле подсказку почти не видно (скриншот телефона 22.09)
+            '.d1v-search-field input::placeholder{color:rgba(255,255,255,.55);opacity:1}' +
+            '.d1v-search-text{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+            '.d1v-search-text.d1v-search-hint{opacity:.55}' +
+            '.d1v-search-title{padding:1.4em 1.5em .4em;font-size:1.3em;opacity:.7}' +
+            '.d1v-search-chips{display:flex;flex-wrap:wrap;justify-content:center;padding:.9em 1.5em 0}' +
+            '.d1v-search-chip{margin:.3em .3em 0;padding:.35em .9em;border-radius:2em;background:rgba(255,255,255,.1);font-size:1.05em;max-width:18em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+            '.d1v-search-chip.focus{background:#fff;color:#000}' +
+            '.d1v-search-chip--alt{opacity:.7}' +
+            '@media screen and (max-width:580px){.d1v-search-wrap{padding:1.2em 1em 0}.d1v-search-field{width:100%}.d1v-search-chips{padding:.6em 1em 0}}';
         document.head.appendChild(st);
     }
 
@@ -1105,6 +1115,92 @@
 
     /// Жёсткая блокировка недокачанного включена? Киллсвитч partialPlayBlock с сервера.
     function pgBlockEnabled() { return _pgConf.block !== false; }
+
+    // ───────── Поиск (qdl 2.121): флаг с сервера + маршрутизация кнопки шапки ─────────
+    // Концепция (требование владельца, канон E:\Media-server\claude\19-search.md): поиск контекстный —
+    // в разделе XSMART кнопка шапки открывает поиск XSMART, в jut.su — поиск jut.su, везде остальное —
+    // наш экран d1v_search «как в XSMART». Киллсвитч searchScreen:false в init.conf (едет ключом
+    // search.screen в /qdl/features) возвращает штатный оверлей Lampa целиком.
+    var _searchConf = { screen: true };
+    function setSearchConf(c) {
+        if (!c || typeof c !== 'object') return;
+        if (typeof c.screen === 'boolean') _searchConf.screen = c.screen;
+        try { Lampa.Storage.set('qdl_search_cfg', _searchConf); } catch (e) {}
+    }
+    (function () {   // на старте — из кеша, чтобы первая же кнопка шапки не ждала /qdl/features
+        try { var c = Lampa.Storage.get('qdl_search_cfg', null); if (c) setSearchConf(c); } catch (e) {}
+    })();
+    function d1vSearchEnabled() { return _searchConf.screen !== false; }
+
+    var origSearchOpen = null;       // штатный Search.open (open$3 бандла) — фолбэк и чип «Штатный поиск»
+    var searchScreenActive = null;   // наш экран поиска на переднем плане (start → pause/destroy)
+
+    // Экран поиска, который сейчас на переднем плане, по имени активности. XSMART живёт в своём
+    // контейнере и объявляет себя сам (window.xsmart_search_active, xsmart.js 1.0.12+).
+    function searchScreenOf(comp) {
+        if (comp === 'xsmart_search') return window.xsmart_search_active || null;
+        if (comp === 'jut_search' || comp === 'd1v_search') return searchScreenActive;
+        return null;
+    }
+
+    // Куда ведёт поиск. p.input — готовый запрос (голосовой запрос Android-клиента приходит через
+    // Lampa.Search.open({input:q})); с ним клавиатуру не открываем, а сразу ищем.
+    function routeSearch(p) {
+        p = (p && typeof p === 'object') ? p : {};
+        var input = typeof p.input === 'string' ? p.input.replace(/^\s+|\s+$/g, '') : '';
+        if (!d1vSearchEnabled()) { if (origSearchOpen) origSearchOpen(p); return; }
+        var act = null;
+        try { act = Lampa.Activity.active(); } catch (e) {}
+        var comp = (act && act.component) || '';
+        if (comp === 'xsmart_search' || comp === 'jut_search' || comp === 'd1v_search') {
+            var scr = searchScreenOf(comp);
+            if (input && scr && typeof scr.submit === 'function') { scr.submit(input); return; }
+            try { Lampa.Controller.toggle('content'); } catch (e) {}
+            if (scr && typeof scr.openInput === 'function') scr.openInput();
+            else {   // xsmart.js до 1.0.12 (без openInput): Enter по полю — то же, что сделал бы зритель
+                var f = $('.activity--active .xsmart-search-field').first();
+                if (f.length) f.trigger('hover:enter');
+            }
+            return;
+        }
+        if (/^xsmart_/.test(comp)) {
+            Lampa.Activity.push({ url: '', title: 'XSMART — поиск', component: 'xsmart_search', page: 1, xsmart_query: input, xsmart_autokb: !input });
+            return;
+        }
+        if (JUT_PAGES[comp]) {
+            Lampa.Activity.push({ url: '', title: 'jut.su — поиск', component: 'jut_search', page: 1, query: input, autokb: !input });
+            return;
+        }
+        Lampa.Activity.push({ url: '', title: 'Поиск', component: 'd1v_search', page: 1, query: input, autokb: !input });
+    }
+
+    // Кнопка шапки: её hover:enter привязан в Head.addElement прямой ссылкой на замыкание open$3
+    // бандла — обёртка Lampa.Search.open клик НЕ перехватит. Снимаем штатный обработчик и вешаем
+    // свой. Идемпотентно (метка), зовётся из сторожа шапки: элемент может появиться позже нас.
+    function ensureSearchRoute() {
+        try {
+            $('.head .head__actions .open--search').each(function () {
+                var btn = $(this);
+                if (btn.attr('data-qdl-route')) return;
+                btn.attr('data-qdl-route', '1');
+                btn.off('hover:enter').on('hover:enter', function () { routeSearch({}); });   // jQuery-событие в routeSearch не передаём
+            });
+        } catch (e) {}
+    }
+
+    // Программные входы (нижняя панель телефона, голосовой запрос Android) идут через Lampa.Search.open —
+    // оборачиваем его, оригинал храним. Гард на повтор: qdl.js может приехать дважды.
+    function initSearchRoute() {
+        try {
+            if (Lampa.Search && typeof Lampa.Search.open === 'function' && !Lampa.Search.open.__qdlRoute) {
+                origSearchOpen = Lampa.Search.open;
+                var wrapped = function (p) { routeSearch(p); };
+                wrapped.__qdlRoute = true;
+                Lampa.Search.open = wrapped;
+            }
+        } catch (e) {}
+        ensureSearchRoute();
+    }
 
     function pgHasSubs() { for (var k in _pgSubs) if (_pgSubs.hasOwnProperty(k)) return true; return false; }
 
@@ -6908,19 +7004,20 @@
 
     function startHeaderNotiWatcher() {
         ensureHeaderNoti();
+        ensureSearchRoute();   // кнопка поиска шапки → наш маршрут (qdl 2.121)
         ensureJutAutopilot();
         ensureLiveDetectBtn();
         var deb = null;
         function onMut() {
             if (deb) return;
-            deb = setTimeout(function () { deb = null; ensureHeaderNoti(); ensureJutAutopilot(); ensureLiveDetectBtn(); }, 300);
+            deb = setTimeout(function () { deb = null; ensureHeaderNoti(); ensureSearchRoute(); ensureJutAutopilot(); ensureLiveDetectBtn(); }, 300);
         }
         try {
             var headEl = document.querySelector('.head') || document.body;   // узкий observer
             new MutationObserver(onMut).observe(headEl, { childList: true, subtree: true });
         } catch (e) {}
         [500, 1500, 3000, 6000].forEach(function (t) {
-            setTimeout(function () { ensureHeaderNoti(); ensureJutAutopilot(); ensureLiveDetectBtn(); }, t);
+            setTimeout(function () { ensureHeaderNoti(); ensureSearchRoute(); ensureJutAutopilot(); ensureLiveDetectBtn(); }, t);
         });
     }
 
@@ -7463,30 +7560,11 @@
                 if (seenSlugs[c.slug]) return;
                 seenSlugs[c.slug] = 1;
             }
-            var el = Lampa.Template.get('card', {
-                title: c.title || c.slug,
-                release_year: (c.years && c.years.length ? c.years[c.years.length - 1] : '') + ''
-            });
-            var img = el.find('.card__img');
-            img.on('error', function () { this.src = './img/img_broken.svg'; });
-
-            // 🔥 Постер грузим ТОЛЬКО когда карточка показалась. Раньше src ставился прямо тут,
-            // и страница из 30 карточек заказывала 30 постеров разом — 6.1 МБ при лимите браузера
-            // в 6 соединений на origin. Свой lazy писать не нужно: шаблон 'card' уже несёт класс
-            // layer--visible, а Lampa.Scroll сам зовёт Layer.visible(html) в ветке else от
-            // onScroll — событие уже летит нашим карточкам, на него просто никто не подписывался.
-            // Порог Layer — ±2 экрана, то есть картинка приезжает заранее, а не в момент показа.
-            // ⚠️ Отсюда запрет: в этом компоненте НЕЛЬЗЯ задавать scroll.onScroll — это отключит
-            // ту самую ветку и убьёт ленивую загрузку молча.
-            var psrc = jutPosterUrl(c.slug, c.pv);
-            var loadPoster = function () { if (img.attr('src') !== psrc) img.attr('src', psrc); };
-            el.on('visible', loadPoster);
-
-            var view = el.find('.card__view'); if (!view.length) view = el;
-            if (c.ongoing)
-                view.append('<div style="position:absolute;left:.4em;top:.4em;background:rgba(40,160,80,.92);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">онгоинг</div>');
-            if (c.episodes)
-                view.append('<div style="position:absolute;right:.4em;top:.4em;background:rgba(0,0,0,.65);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">' + c.episodes + '</div>');
+            // Карточка — общий строитель jutCardEl (2.121): постер ленивый (visible), бейджи онгоинг/серии.
+            // ⚠️ В этом компоненте НЕЛЬЗЯ задавать scroll.onScroll — это отключит ветку Scroll,
+            // которая шлёт visible, и убьёт ленивую загрузку молча (разбор — в jutCardEl).
+            var made = jutCardEl(c);
+            var el = made.el, loadPoster = made.loadPoster, psrc = made.bg;
 
             el.on('hover:focus', function () {
                 // Страховка к ленивой загрузке: сфокусированная карточка обязана быть с постером,
@@ -7836,150 +7914,458 @@
         };
     }
 
-    // ───────── Экран поиска jut.su: поле сверху + топ-50 недавнего ─────────
-    // Раньше плитка «Поиск» открывала клавиатуру сразу и на весь экран, а вернуться было
-    // некуда. Теперь это отдельный экран: поле ввода (не впритык к верхнему краю) и под ним
-    // лента последнего — сперва то, что реально смотрели, потом добор из поисковых выдач.
-    // Память ведёт сервер (/qdl/jut/recent), клиент только читает. С 2.52 она РАЗДЕЛЬНАЯ
-    // по устройствам: uid уезжает в запросах (withUid), у каждого клиента своя выдача.
+    // ───────── Единый экран поиска (qdl 2.121) ─────────
+    // Эталон — экран поиска XSMART (xsmart.js ComponentSearch): поле сверху, под ним «Недавнее»,
+    // выдача сеткой карточек НА ТОМ ЖЕ экране, страницы догружаются сами. Штатный оверлей Lampa
+    // (клавиатура слева, ряды по источникам) владельцу не нравится — он остаётся фолбэком
+    // (чип «Штатный поиск», киллсвитч searchScreen:false). Один конструктор на два экрана:
+    // d1v_search (весь каталог, TMDB) и jut_search (аниме jut.su). XSMART живёт в своём
+    // контейнере той же формой — дубль осознанный: плагины грузятся из разных контейнеров,
+    // порядок не гарантирован (lampainit-invc.js), общий модуль потребовал бы третьего файла.
+    // Канон — E:\Media-server\claude\19-search.md, разбор — claude/06 §EA.
     //
     // ⚠️ Клавиатура выбирается по устройству, а не по платформе «на глаз»: на ТВ нужна
     // экранная клавиатура Lampa (пультом), на телефоне и десктопе — системная.
+    // 🔴 tvOS — всегда экранная: приватный WebKit Apple TV системную по focus() не поднимет,
+    // а пульт там уже переведён в клавиши Lampa (D1VisionTV).
     function jutUseNativeInput() {
+        var p = window.d1vision_platform;
+        if (p === 'tvos') return false;
         try { if (Lampa.Storage.field('keyboard_type') === 'integrate') return true; } catch (e) {}
         try { if (isMobile() && Lampa.Platform.screen('mobile')) return true; } catch (e) {}
-        var p = window.d1vision_platform;
         return p === 'windows' || p === 'mac';
     }
 
-    function ComponentJutSearch(object) {
-        var comp = this;
-        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
-        var html = $('<div></div>');
-        var wrap = $('<div class="qdl-jut-search-wrap"></div>');
-        var field = $('<div class="selector qdl-jut-search-field"><span>🔍</span></div>');
-        var input = null;
-        var recentTitle = $('<div class="qdl-jut-recent-title">Недавнее</div>');
-        var body = $('<div class="category-full mapping--grid cols--6"></div>');
-        var last;
-
-        function submit(q) {
-            q = (q || '').trim();
-            if (!q) return;
-            Lampa.Activity.push({ url: '', title: 'jut.su — ' + q, component: 'jut_catalog', jut_query: q, page: 1 });
-        }
-
-        function openKeyboard() {
-            Lampa.Input.edit({ value: input ? input.val() : '', title: 'Поиск на jut.su', free: true }, function (q) {
-                // 🔴 Закрытие клавиатуры уводит фокус в 'settings_component' (штатный back
-                // у Input.edit) — без возврата экран остаётся живым, но глухим к пульту.
-                try { Lampa.Controller.toggle('content'); } catch (e) {}
-                submit(q);
-            });
-        }
-
-        this.create = function () {
-            injectCss();
-            this.activity.loader(true);
-            scroll.minus();                       // ⚠️ без этого на ТВ у .scroll нет высоты
-            html.append(scroll.render());
-
-            if (jutUseNativeInput()) {
-                input = $('<input type="text" placeholder="Название аниме" />');
-                field.append(input);
-                // Клавиши уходят движку Lampa (он слушает keydown без preventDefault) —
-                // без остановки всплытия набор текста дёргал бы навигацию и скролл.
-                input.on('keydown', function (ev) {
-                    ev.stopPropagation();
-                    if (ev.keyCode === 13) { ev.preventDefault(); submit(input.val()); }
-                });
-                field.on('hover:enter', function () { try { input[0].focus(); } catch (e) {} });
-                field.on('click', function () { try { input[0].focus(); } catch (e) {} });
-            } else {
-                field.append('<span class="qdl-jut-search-hint">Название аниме</span>');
-                field.on('hover:enter', openKeyboard);
-            }
-            field.on('hover:focus', function () { last = field[0]; scroll.update(field, true); });
-            field.on('hover:touch hover:hover', function () { last = markLast(field); });
-
-            wrap.append(field);
-            scroll.body().append(wrap);
-            scroll.body().append(recentTitle);
-            scroll.body().append(body);
-
-            this.load();
-            return this.render();
+    // Раскладка экранной клавиатуры наших экранов поиска — копия штатной `default` (та, что владелец
+    // видит в XSMART), без бессмысленной клавиши `http://`; на её месте {MIC}, если есть голосовой
+    // мост Android TV (иначе Keyboard звал бы Android.voiceStart() у оболочки, где его нет).
+    // 🔴 Свежая копия на каждый вызов: класс Keyboard дописывает в объект -shift-слои, а на electron
+    // мутирует его на месте. Ключ `sim` обязателен — без него {SIM} даёт пустую клавиатуру.
+    function kbLayout() {
+        var mic = false;
+        try { mic = !!(window.AndroidJS && typeof window.AndroidJS.voiceStart === 'function'); } catch (e) {}
+        var tail = mic ? ' {MIC}' : '';
+        return {
+            'default': ['{SIM} 1 2 3 4 5 6 7 8 9 0 - + = {BKSP}', '{LANG} й ц у к е н г ш щ з х ъ', 'ф ы в а п р о л д ж э {ENTER}', '{SHIFT} я ч с м и т ь б ю , . :' + tail, '{SPACE}'],
+            'en': ['{SIM} 1 2 3 4 5 6 7 8 9 0 - + = {BKSP}', '{LANG} q w e r t y u i o p', 'a s d f g h j k l / {ENTER}', '{SHIFT} z x c v b n m , . :' + tail, '{SPACE}'],
+            'uk': ['{SIM} 1 2 3 4 5 6 7 8 9 0 - + = {BKSP}', '{LANG} й ц у к е н г ш щ з х ї', 'ф і в а п р о л д ж є {ENTER}', '{SHIFT} я ч с м и т ь б ю . :' + tail, '{SPACE}'],
+            'he': ['{SIM} ק ר א ט ו ן ם פ {BKSP}', '{LANG} ש ד ג כ ע י ח ל ך ף', 'ז ס ב ה נ מ צ ת ץ . / {ENTER}', '{SHIFT} ! @ # $ % ^ & * ( ) {SPACE}'],
+            'sim': ['{ABC} 1 2 3 4 5 6 7 8 9 0 - + = {BKSP}', '{LANG} ! @ # $ % ^ & * ( ) [ ]', '- _ = + \\ | [ ] { }', '; : \' " , . < > / ?', '{SPACE}']
         };
-
-        this.load = function () {
-            req(API + '/qdl/jut/recent?limit=50', function (r) {
-                comp.activity.loader(false);
-                var items = (r && r.ok && r.items) || [];
-                if (!items.length) {
-                    recentTitle.remove();
-                    body.append($('<div style="width:100%;padding:2em;font-size:1.3em;opacity:.7">Пока пусто — найди что-нибудь, и оно появится здесь</div>'));
-                } else items.forEach(comp.append);
-                // Постеры ленивые: без этого вызова первая пачка осталась бы с заглушками
-                // (Scroll шлёт visible только при реальной прокрутке).
-                try { Lampa.Layer.visible(scroll.render(true)); } catch (e) {}
-                comp.activity.toggle();
-            }, function () {
-                comp.activity.loader(false);
-                recentTitle.remove();
-                body.append($('<div style="width:100%;padding:2em;font-size:1.3em;opacity:.7">Не удалось получить недавнее</div>'));
-                comp.activity.toggle();
-            });
-        };
-
-        this.append = function (c) {
-            var el = Lampa.Template.get('card', {
-                title: c.title || c.slug,
-                release_year: (c.years && c.years.length ? c.years[c.years.length - 1] : '') + ''
-            });
-            var img = el.find('.card__img');
-            img.on('error', function () { this.src = './img/img_broken.svg'; });
-
-            var psrc = jutPosterUrl(c.slug, c.pv);
-            var loadPoster = function () { if (img.attr('src') !== psrc) img.attr('src', psrc); };
-            el.on('visible', loadPoster);   // ⚠️ scroll.onScroll здесь задавать нельзя — убьёт lazy
-
-            var view = el.find('.card__view'); if (!view.length) view = el;
-            if (c.ongoing)
-                view.append('<div style="position:absolute;left:.4em;top:.4em;background:rgba(40,160,80,.92);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">онгоинг</div>');
-            if (c.episodes)
-                view.append('<div style="position:absolute;right:.4em;top:.4em;background:rgba(0,0,0,.65);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">' + c.episodes + '</div>');
-
-            el.on('hover:focus', function () { loadPoster(); last = el[0]; scroll.update(el, true); });
-            el.on('hover:touch hover:hover', function () { last = markLast(el); });
-            // Фон под фокусом (bgFocus): hover:focus — пульт, hover:hover — мышь десктопа.
-            el.on('hover:focus hover:hover', function () { bgFocus(psrc); });
-            el.on('hover:enter', function () {
-                Lampa.Activity.push({ url: '', title: c.title || c.slug, component: 'jut_title', jut_slug: c.slug, jut_card: c });
-            });
-            el.on('hover:long', function () { jutDownloadMenu(c.slug, null, 0); });
-
-            body.append(el);
-            try { if (!Lampa.Controller.own || Lampa.Controller.own(comp)) Lampa.Controller.collectionAppend(el); } catch (e) {}
-        };
-
-        this.render = function () { return html; };
-        this.start = function () {
-            Lampa.Controller.add('content', {
-                link: comp,
-                // Стартовый фокус — на поле: экран открывают, чтобы искать.
-                toggle: function () { focusBack(scroll, last); },
-                left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
-                right: function () { Navigator.move('right'); },
-                up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
-                down: function () { if (Navigator.canmove('down')) Navigator.move('down'); },
-                back: function () { Lampa.Activity.backward(); }
-            });
-            Lampa.Controller.toggle('content');
-        };
-        this.pause = function () {};
-        this.stop = function () {};
-        this.destroy = function () { scroll.destroy(); html.remove(); };
     }
+
+    // ⚠️ width:100% — правило .cols--N > * даёт долю ширины ЛЮБОМУ прямому потомку,
+    // иначе сообщение сожмётся до ширины одной карточки
+    function searchEmptyRow(txt) {
+        return $('<div style="width:100%;padding:2em;font-size:1.3em;opacity:.7"></div>').text(txt);
+    }
+
+    // Общий строитель карточки jut.su — каталог и экран поиска (до 2.121 две копии).
+    // 🔥 Постер грузим ТОЛЬКО когда карточка показалась (событие visible от Layer, порог ±2 экрана):
+    // страница из 30 карточек иначе заказывала 30 постеров разом — 6.1 МБ при лимите браузера
+    // в 6 соединений на origin. Свой lazy не нужен: шаблон 'card' уже несёт класс layer--visible.
+    // ⚠️ Отсюда запрет для экранов-потребителей: НЕЛЬЗЯ задавать scroll.onScroll — это отключит
+    // ветку Scroll, которая шлёт visible, и убьёт ленивую загрузку молча.
+    function jutCardEl(c) {
+        var el = Lampa.Template.get('card', {
+            title: c.title || c.slug,
+            release_year: (c.years && c.years.length ? c.years[c.years.length - 1] : '') + ''
+        });
+        var img = el.find('.card__img');
+        img.on('error', function () { this.src = './img/img_broken.svg'; });
+        var psrc = jutPosterUrl(c.slug, c.pv);
+        var loadPoster = function () { if (img.attr('src') !== psrc) img.attr('src', psrc); };
+        el.on('visible', loadPoster);
+        var view = el.find('.card__view'); if (!view.length) view = el;
+        if (c.ongoing)
+            view.append('<div style="position:absolute;left:.4em;top:.4em;background:rgba(40,160,80,.92);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">онгоинг</div>');
+        if (c.episodes)
+            view.append('<div style="position:absolute;right:.4em;top:.4em;background:rgba(0,0,0,.65);color:#fff;padding:.15em .5em;border-radius:.4em;font-size:.85em;z-index:5">' + c.episodes + '</div>');
+        return { el: el, loadPoster: loadPoster, bg: psrc };
+    }
+
+    // Фабрика экрана поиска. spec:
+    //   title        — заголовок клавиатуры;  placeholder — подсказка в поле;  minLen — минимум символов
+    //   search(q, page, ok, err) → ok({items, hasNext, notice}) / err(text)
+    //   recent(ok, err) → ok(items)            — «Недавнее», пока запрос не введён
+    //   card(item) → {el, loadPoster, bg}      — карточка (jutCardEl / d1vCardEl)
+    //   open(item), menu(item)|null            — Enter / долгое нажатие
+    //   key(item) → строка дедупа|null;  chips() → [запросы]|null;  remember(q)|null
+    //   alt: {label, run(q)}|null              — последний чип (у d1v — «Штатный поиск»)
+    // Объект активности: query (готовый запрос), autokb (открыть ввод сразу — с кнопки шапки).
+    function makeSearchScreen(spec) {
+        return function SearchScreen(object) {
+            var comp = this;
+            // 🔴 autokb снимаем СИНХРОННО, до первого save() активности: объект уезжает в Storage
+            // 'activity' и в адрес, иначе клавиатура всплывала бы при старте приложения и при Back.
+            var autokb = !!object.autokb; object.autokb = false;
+            var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+            var html = $('<div></div>');
+            var wrap = $('<div class="d1v-search-wrap"></div>');
+            var field = $('<div class="selector d1v-search-field"><span class="d1v-search-ico">🔍</span></div>');
+            var text = null, input = null;
+            var chips = $('<div class="d1v-search-chips"></div>');
+            var title = $('<div class="d1v-search-title">Недавнее</div>');
+            var body = $('<div class="category-full mapping--grid cols--6"></div>');
+            var last, page = 1, loading = false, hasNext = false, seen = {}, mode = 'recent';
+            var query = String(object.query || '').replace(/^\s+|\s+$/g, '');
+            var PREFETCH_AHEAD = 12;
+
+            // Поле ВСЕГДА показывает текущий запрос (фикс «набранного текста не видно»: до 2.121
+            // на ТВ здесь стояла статичная подсказка, которую никто не обновлял).
+            function showQuery() {
+                if (input) { input.val(query); return; }
+                if (!text) return;
+                if (query) text.text(query).removeClass('d1v-search-hint');
+                else text.text(spec.placeholder).addClass('d1v-search-hint');
+            }
+
+            function openKeyboard() {
+                if ($('.settings-input').length) return;   // уже открыта (autokb + Enter пультом)
+                var was = query;
+                Lampa.Input.edit({ title: spec.title, value: query, free: true, nosave: true, keyboard: 'lampa', layout: kbLayout() }, function (q) {
+                    // 🔴 Штатный back у Input.edit уводит фокус в 'settings_component' — без
+                    // принудительного возврата экран остаётся живым, но глухим к пульту.
+                    try { Lampa.Controller.toggle('content'); } catch (e) {}
+                    // Колбэк приходит и на Back — с прежним значением: тот же/пустой запрос не перезапускаем.
+                    q = String(q == null ? '' : q).replace(/^\s+|\s+$/g, '');
+                    if (!q || q === was) return;
+                    comp.submit(q);
+                });
+            }
+
+            // Открыть ввод: экранная клавиатура на ТВ, фокус в <input> на телефоне/десктопе.
+            this.openInput = function () {
+                if (input) { try { input[0].focus(); } catch (e) {} }
+                else openKeyboard();
+            };
+
+            function chip(label, cls, fn) {
+                var el = $('<div class="selector d1v-search-chip' + (cls ? ' ' + cls : '') + '"></div>').text(label);
+                el.on('hover:focus', function () { last = el[0]; scroll.update(el, true); });
+                el.on('hover:touch hover:hover', function () { last = markLast(el); });
+                el.on('hover:enter', fn);
+                return el;
+            }
+
+            function buildChips() {
+                chips.empty();
+                var list = [];
+                try { list = (spec.chips && spec.chips()) || []; } catch (e) { list = []; }
+                list.forEach(function (q) { chips.append(chip(q, '', function () { comp.submit(q); })); });
+                if (spec.alt) chips.append(chip(spec.alt.label, 'd1v-search-chip--alt', function () { spec.alt.run(query); }));
+                chips.toggle(chips.children().length > 0);
+            }
+
+            // Конец загрузки — один на все исходы (образец xsmart.js loaded()):
+            // Layer.visible — иначе первая пачка не получит ни одного visible и постеры останутся
+            // заглушками; blur() с нативного поля — тем же Enter, что запустил поиск, срабатывает
+            // hover:enter на поле и возвращает DOM-фокус в <input>, экран глохнет к клавишам;
+            // activity.toggle() ТОЛЬКО на первой странице — на догрузке он ставил фокус на первую
+            // карточку и утаскивал скролл в начало ленты. autokb стреляет здесь, ПОСЛЕ toggle:
+            // раньше у экрана ещё нет своего контроллера, и закрытие клавиатуры вернуло бы чужой.
+            function finish(first) {
+                try { Lampa.Layer.visible(scroll.render(true)); } catch (e) {}
+                if (input) { try { input[0].blur(); } catch (e) {} }
+                if (!first) return;
+                comp.activity.toggle();
+                if (autokb) { autokb = false; setTimeout(function () { comp.openInput(); }, 0); }
+            }
+
+            this.create = function () {
+                injectCss();
+                this.activity.loader(true);
+                scroll.minus();                       // ⚠️ без этого на ТВ у .scroll нет высоты
+                html.append(scroll.render());
+
+                if (jutUseNativeInput()) {
+                    input = $('<input type="text" />').attr('placeholder', spec.placeholder);
+                    field.append(input);
+                    // Клавиши уходят движку Lampa (он слушает keydown без preventDefault) —
+                    // без остановки всплытия набор текста дёргал бы навигацию и скролл.
+                    input.on('keydown', function (ev) {
+                        ev.stopPropagation();
+                        if (ev.keyCode === 13) { ev.preventDefault(); comp.submit(input.val()); }
+                    });
+                    field.on('hover:enter', function () { try { input[0].focus(); } catch (e) {} });
+                    field.on('click', function () { try { input[0].focus(); } catch (e) {} });
+                } else {
+                    text = $('<span class="d1v-search-text d1v-search-hint"></span>');
+                    field.append(text);
+                    field.on('hover:enter', openKeyboard);
+                }
+                showQuery();
+                field.on('hover:focus', function () { last = field[0]; scroll.update(field, true); });
+                field.on('hover:touch hover:hover', function () { last = markLast(field); });
+
+                wrap.append(field);
+                scroll.body().append(wrap);
+                scroll.body().append(chips);
+                scroll.body().append(title);
+                scroll.body().append(body);
+                // Догрузка следующей страницы по концу ленты — страховка для мыши/тача;
+                // на пульте раньше срабатывает prefetch по фокусу.
+                scroll.onEnd = function () { if (mode === 'results') comp.load(page + 1); };
+
+                if (query) { try { if (spec.remember) spec.remember(query); } catch (e) {} }
+                buildChips();
+                if (query) this.load(1);
+                else this.loadRecent();
+                return this.render();
+            };
+
+            this.loadRecent = function () {
+                mode = 'recent'; seen = {}; hasNext = false; loading = false;
+                body.empty(); title.text('Недавнее').show();
+                last = field[0];
+                spec.recent(function (items) {
+                    comp.activity.loader(false);
+                    items = items || [];
+                    if (!items.length) { title.hide(); body.append(searchEmptyRow('Пока пусто — найди что-нибудь, и оно появится здесь')); }
+                    else items.forEach(comp.append);
+                    finish(true);
+                }, function () {
+                    comp.activity.loader(false);
+                    title.hide(); body.append(searchEmptyRow('Не удалось получить недавнее'));
+                    finish(true);
+                });
+            };
+
+            this.submit = function (q) {
+                q = String(q == null ? '' : q).replace(/^\s+|\s+$/g, '');
+                if (!q) return;
+                var min = spec.minLen || 1;
+                if (q.length < min) { try { Lampa.Noty.show('Запрос от ' + min + ' символов'); } catch (e) {} return; }
+                query = q;
+                showQuery();
+                try { if (spec.remember) spec.remember(q); } catch (e) {}
+                buildChips();
+                this.load(1);
+            };
+
+            this.load = function (p) {
+                if (p > 1 && (loading || !hasNext)) return;
+                if (p === 1) {
+                    mode = 'results'; seen = {}; hasNext = false;
+                    body.empty(); title.hide();
+                    last = field[0];   // прежний last мог быть карточкой прошлой выдачи — узел уже снят
+                    this.activity.loader(true);
+                }
+                loading = true;
+                var q = query;
+                spec.search(q, p, function (r) {
+                    loading = false;
+                    if (q !== query || mode !== 'results') return;   // ответ на устаревший запрос
+                    comp.activity.loader(false);
+                    page = p; hasNext = !!(r && r.hasNext);
+                    ((r && r.items) || []).forEach(comp.append);
+                    if (p === 1 && !body.children().length) body.append(searchEmptyRow('Ничего не найдено'));
+                    if (r && r.notice) { try { Lampa.Noty.show(r.notice); } catch (e) {} }
+                    finish(p === 1);
+                }, function (msg) {
+                    loading = false;
+                    if (q !== query || mode !== 'results') return;
+                    comp.activity.loader(false);
+                    if (p === 1) { body.append(searchEmptyRow(msg || 'Поиск недоступен')); finish(true); }
+                });
+            };
+
+            // Догружаем ЗАРАНЕЕ — за два ряда до конца ленты, а не на самой последней карточке
+            // (на пульте иначе приходится доскроллить до упора и ТАМ ждать ответа сервера).
+            function prefetch(el) {
+                if (mode !== 'results' || loading || !hasNext) return;
+                var kids = body.children();
+                var i = kids.index(el);
+                if (i >= 0 && i >= kids.length - PREFETCH_AHEAD) comp.load(page + 1);
+            }
+
+            this.append = function (item) {
+                var k = spec.key ? spec.key(item) : null;
+                if (k) { if (seen[k]) return; seen[k] = 1; }   // дедуп: лента может сдвинуться между страницами
+                var made = spec.card(item);
+                var el = made.el;
+                el.on('hover:focus', function () {
+                    // Страховка к ленивой загрузке: сфокусированная карточка обязана быть с постером,
+                    // даже если пульт обогнал Layer (зажатый ArrowDown) или событие не пришло вовсе.
+                    if (made.loadPoster) made.loadPoster();
+                    last = el[0]; scroll.update(el, true); prefetch(el);
+                });
+                el.on('hover:touch hover:hover', function () { last = markLast(el); });
+                // Фон под фокусом: hover:focus — пульт, hover:hover — мышь десктопа (см. bgFocus).
+                if (made.bg) el.on('hover:focus hover:hover', function () { bgFocus(made.bg); });
+                el.on('hover:enter', function () { spec.open(item); });
+                if (spec.menu) el.on('hover:long', function () { spec.menu(item); });
+                body.append(el);
+                // ⚠️ Только пока контроллер наш: ответ мог прийти, когда пользователь уже ушёл.
+                try { if (!Lampa.Controller.own || Lampa.Controller.own(comp)) Lampa.Controller.collectionAppend(el); } catch (e) {}
+            };
+
+            this.render = function () { return html; };
+            this.start = function () {
+                searchScreenActive = comp;
+                Lampa.Controller.add('content', {
+                    link: comp,
+                    toggle: function () {
+                        Lampa.Controller.collectionSet(scroll.render());
+                        // Стартовый фокус — на поле: экран открывают, чтобы искать.
+                        Lampa.Controller.collectionFocus(last || field[0] || false, scroll.render());
+                    },
+                    left: function () { if (Navigator.canmove('left')) Navigator.move('left'); else Lampa.Controller.toggle('menu'); },
+                    right: function () { Navigator.move('right'); },
+                    up: function () { if (Navigator.canmove('up')) Navigator.move('up'); else Lampa.Controller.toggle('head'); },
+                    down: function () {
+                        if (Navigator.canmove('down')) { Navigator.move('down'); return; }
+                        // Страховка для ТВ: выдача есть, фокус на поле, а Навигатор кандидата «ниже»
+                        // не нашёл (поле отцентровано, карточки — слева) — ведём на первую сами.
+                        var first = body.find('.card.selector')[0];
+                        if (first && (!last || last === field[0])) {
+                            try { Lampa.Controller.collectionFocus(first, scroll.render()); } catch (e) {}
+                        }
+                    },
+                    back: function () { Lampa.Activity.backward(); }
+                });
+                Lampa.Controller.toggle('content');
+            };
+            this.pause = function () { if (searchScreenActive === comp) searchScreenActive = null; };
+            this.stop = function () { if (searchScreenActive === comp) searchScreenActive = null; };
+            this.destroy = function () {
+                if (searchScreenActive === comp) searchScreenActive = null;
+                scroll.destroy(); html.remove();
+            };
+        };
+    }
+
+    // ── d1v_search: поиск по всему каталогу (TMDB) ──
+    function d1vIsPerson(item) {
+        return !!item && (item.media_type === 'person' || item.gender != null || !!item.known_for_department);
+    }
+
+    function d1vImg(path, size) {
+        try { return Lampa.Api.sources.tmdb.img(path, size); } catch (e) {}
+        try { return Lampa.Api.img(path, size); } catch (e2) {}
+        return '';
+    }
+
+    // Карточка результата поиска / истории: штатный шаблон 'card' (постер, название, год, метка TV).
+    // Без меток «просмотрено/закладка/качество» штатного класса Card — он объявлен устаревшим.
+    function d1vCardEl(item) {
+        var person = d1vIsPerson(item);
+        var year = String(item.release_date || item.first_air_date || '').slice(0, 4);
+        var el = Lampa.Template.get('card', { title: item.title || item.name || '', release_year: year });
+        if (!year) el.find('.card__age').remove();
+        var img = el.find('.card__img');
+        img.on('error', function () { this.src = './img/img_broken.svg'; });
+        var path = item.poster_path || item.profile_path || '';
+        var psrc = path ? d1vImg(path, 'w300') : (item.img || item.poster || '');
+        var loadPoster = function () {
+            var want = psrc || './img/img_broken.svg';
+            if (img.attr('src') !== want) img.attr('src', want);
+        };
+        el.on('visible', loadPoster);
+        if (!person && cardType(item) === 'tv') {
+            el.addClass('card--tv');
+            var view = el.find('.card__view'); if (!view.length) view = el;
+            view.append('<div class="card__type">TV</div>');
+        }
+        var bg = '';
+        try { bg = Lampa.Utils.cardImgBackground(item) || ''; } catch (e) {}
+        return { el: el, loadPoster: loadPoster, bg: bg || null };
+    }
+
+    // Те же запросы и тот же прокси, что у штатного поиска Lampa (tmdb.get → url$1 → TMDB.api),
+    // но одним search/multi на страницу — с релевантностью TMDB вместо трёх раздельных списков.
+    // 🔴 tmdb.get, а не tmdb.list: у list кеш на 2 суток — первая страница по запросу замерзала бы.
+    function d1vSearchTmdb(q, page, ok, err) {
+        whenDmca(function () {
+            var src = null;
+            try { src = Lampa.Api.sources.tmdb; } catch (e) {}
+            if (!src || typeof src.get !== 'function') return err('Поиск недоступен');
+            src.get('search/multi', { query: encodeURIComponent(q), page: page }, function (json) {
+                var items = [];
+                ((json && json.results) || []).forEach(function (it) {
+                    if (!it || (it.media_type !== 'movie' && it.media_type !== 'tv' && it.media_type !== 'person')) return;
+                    if (it.media_type !== 'person' && isDmca(it.media_type, it.id)) return;
+                    it.source = 'tmdb';   // читают onCardMenu (probe.source) и полная карточка
+                    items.push(it);
+                });
+                ok({ items: items, hasNext: !!(json && page < (json.total_pages || 0)) });
+            }, function () { err('Поиск недоступен'); });
+        });
+    }
+
+    // Открытие — тем же маршрутом, что у штатных карточек (router 'full'/'actor'). Карточки истории
+    // jut.su/XSMART (source 'jutsu', id 'jut:<slug>') уводит в свои разделы перехват initHistoryRouting.
+    function d1vOpenCard(item) {
+        if (d1vIsPerson(item)) {
+            Lampa.Activity.push({ url: '', title: item.name || item.title || '', component: 'actor', id: item.id, source: item.source || 'tmdb' });
+            return;
+        }
+        Lampa.Activity.push({ url: '', title: item.title || item.name || '', component: 'full', id: item.id, method: cardType(item), card: item, source: item.source || 'tmdb' });
+    }
+
+    // Долгое нажатие — наше меню «Скачать/Следить…», как на карточках каталога (qdl 2.108).
+    // На реплике «Скачать» упёрлось бы в 403 — меню там не вешаем.
+    function d1vCardMenu(item) {
+        if (window.qdl_replica) return;
+        var en = 'content';
+        try { en = Lampa.Controller.enabled().name || 'content'; } catch (e) {}
+        onCardMenu({ type: 'menu', data: item, params: {}, enabled: en });
+    }
+
+    // «Недавнее» — история просмотров Lampa (у групп общая через Sync), свежие первыми.
+    function d1vRecentCards(ok) {
+        var list = [];
+        try { list = Lampa.Favorite.get({ type: 'history' }) || []; } catch (e) { list = []; }
+        ok(list.slice(0, 30));
+    }
+
+    // Чипы недавних запросов — общее со штатным оверлеем хранилище search_history.
+    // 🔴 Там свежие В КОНЦЕ (History.add делает push, показ — reverse): порядок соблюдаем,
+    // иначе штатный оверлей показал бы наши запросы перевёрнутыми.
+    function searchHistoryKeys() {
+        var keys = [];
+        try { keys = Lampa.Storage.get('search_history', '[]'); } catch (e) {}
+        if (typeof keys === 'string') { try { keys = JSON.parse(keys); } catch (e2) { keys = []; } }
+        return Object.prototype.toString.call(keys) === '[object Array]' ? keys : [];
+    }
+    function d1vChips() { return searchHistoryKeys().slice(-10).reverse(); }
+    function d1vRemember(q) {
+        var keys = searchHistoryKeys().filter(function (k) { return k !== q; });
+        keys.push(q);
+        try { Lampa.Storage.set('search_history', keys); } catch (e) {}
+    }
+
+    var D1V_SEARCH_SPEC = {
+        title: 'Поиск', placeholder: 'Название фильма или сериала', minLen: 2,
+        search: d1vSearchTmdb, recent: d1vRecentCards, card: d1vCardEl, open: d1vOpenCard, menu: d1vCardMenu,
+        key: function (it) { return it && it.id != null && it.id !== '' ? (it.media_type || 'x') + ':' + it.id : null; },
+        chips: d1vChips, remember: d1vRemember,
+        // Штатный оверлей — единственный путь к источникам плагинов («Клубничка», Lampac-online).
+        alt: { label: 'Штатный поиск', run: function (q) { if (origSearchOpen) origSearchOpen({ input: q || '' }); } }
+    };
+
+    // ── jut_search: аниме jut.su. Память «Недавнего» ведёт сервер (/qdl/jut/recent, JutSuHistory.cs),
+    // с 2.52 раздельная по устройствам (uid в запросах через withUid); клиент только читает.
+    var JUT_SEARCH_SPEC = {
+        title: 'Поиск на jut.su', placeholder: 'Название аниме', minLen: 1,
+        search: function (q, page, ok, err) {
+            req(API + '/qdl/jut/search?query=' + encodeURIComponent(q) + '&page=' + page, function (r) {
+                if (!r || !r.ok) return err(jutErrText(r));
+                ok({ items: r.items || [], hasNext: !!r.hasNext, notice: (page === 1 && r.stale) ? 'jut.su недоступен — показываю сохранённое' : null });
+            }, function () { err('jut.su недоступен'); });
+        },
+        recent: function (ok, err) {
+            req(API + '/qdl/jut/recent?limit=50', function (r) { ok((r && r.ok && r.items) || []); }, function () { err(); });
+        },
+        card: jutCardEl,
+        open: function (c) { Lampa.Activity.push({ url: '', title: c.title || c.slug, component: 'jut_title', jut_slug: c.slug, jut_card: c }); },
+        menu: function (c) { jutDownloadMenu(c.slug, null, 0); },
+        key: function (c) { return c && c.slug ? c.slug : null; },
+        chips: null, remember: null, alt: null
+    };
+
+    var ComponentJutSearch = makeSearchScreen(JUT_SEARCH_SPEC);
+    var ComponentD1VSearch = makeSearchScreen(D1V_SEARCH_SPEC);
 
     // ── Экран «Хелс-чеки» в настройках (qdl 2.39). Виден только по праву «действия»:
     // без него компонент вообще не регистрируется (плитку раздела иначе не скрыть).
@@ -8206,6 +8592,7 @@
         Lampa.Component.add('jut_title', ComponentJutTitle);
         Lampa.Component.add('jut_episodes', ComponentJutEpisodes);
         Lampa.Component.add('jut_search', ComponentJutSearch);
+        Lampa.Component.add('d1v_search', ComponentD1VSearch);   // общий поиск Lampa «как в XSMART» (qdl 2.121)
         Lampa.Listener.follow('full', addButton);
         Lampa.Listener.follow('qdl_card', onCardMenu);   // долгое нажатие на карточке каталога → наше меню (qdl 2.108)
         // Всё, что зависит от прав, перестраивается ОДНОЙ функцией — и на старте, и на каждом
@@ -8224,6 +8611,7 @@
         try { applySettingsLock(); } catch (e) {}   // по кешу прав — до ответа сервера
         loadFeatures(onFeatures);
         startMenuWatcher();
+        initSearchRoute();       // обёртка Lampa.Search.open + перевеска кнопки шапки — ДО сторожа шапки
         startHeaderNotiWatcher();
         startPlayerFsWatcher();
         try { registerHealthSettings(); } catch (e) {}     // «Хелс-чеки» — по праву «действия» (повтор в onFeatures)

@@ -31,7 +31,8 @@ function slice(from, to) {
 
 const AREAS = [
   { name: 'каталог jut.su', src: () => slice('function ComponentJutCatalog', 'function ComponentJutTitle'), url: 'bgFocus(psrc)' },
-  { name: 'поиск jut.su', src: () => slice('function ComponentJutSearch', 'function healthRow'), url: 'bgFocus(psrc)' },
+  // с 2.121 экраны поиска (jut_search + d1v_search) строит одна фабрика: карточка отдаёт bg, фабрика красит
+  { name: 'экраны поиска (фабрика makeSearchScreen)', src: () => slice('function makeSearchScreen', 'function d1vIsPerson'), url: 'bgFocus(made.bg)' },
   { name: '«Загрузки» и коллекции', src: () => slice('function ComponentDownloads', 'function dayTime'), url: 'bgFocus(posterUrl(' },
 ];
 

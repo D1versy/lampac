@@ -128,7 +128,10 @@ test('поиск открывается экранной клавиатурой 
   const src = H.qdlSource();
   assert.ok(src.includes('Lampa.Input.edit'),
     'ввод текста с пульта — только через штатную клавиатуру');
-  assert.ok(src.includes("component: 'jut_catalog', jut_query"));
+  // 2.121: экран поиска на общей фабрике — клавиатура как в XSMART (nosave, keyboard:'lampa', раскладка без http://),
+  // выдача на ТОМ ЖЕ экране через /qdl/jut/search (в jut_catalog с jut_query больше не толкаем)
+  assert.ok(src.includes("Lampa.Input.edit({ title: spec.title, value: query, free: true, nosave: true, keyboard: 'lampa', layout: kbLayout() }"));
+  assert.ok(src.includes("'/qdl/jut/search?query=' + encodeURIComponent(q) + '&page=' + page"));
 });
 
 test('экран тайтла даёт все четыре точки входа', () => {
