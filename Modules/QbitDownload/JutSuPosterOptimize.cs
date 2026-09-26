@@ -290,7 +290,7 @@ public partial class QbitController
         if (ModInit.conf?.jutPosterBackfill == false) return;
         if (Interlocked.CompareExchange(ref _jutBfRunning, 1, 0) != 0) return;
 
-        int queued = 0, have = 0, decided = 0, total = 0;
+        int queued = 0, have = 0, decided = 0, total = 0, oldFmt = 0;
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
         try
@@ -328,18 +328,20 @@ public partial class QbitController
                     if (!JutPosterOn || ModInit.conf?.jutPosterBackfill == false) return;
                 }
 
-                var years = new List<int>();
-                if (c["years"] is JArray ya)
-                    foreach (var y in ya) { int v = y?.Value<int?>() ?? 0; if (v > 0) years.Add(v); }
+                // Годы — промежутками (spans): у старых тайтлов карточка знает только бакет сайта.
+                // 🔴 Карточка без spans — снапшот старого формата: её years — края бакетов, решение
+                // по ним неверно и залегло бы на 14 суток. Ждём пересида по версии формата.
+                var spans = JutSpansOf(c);
+                if (spans == null) { oldFmt++; continue; }
 
                 JutPosterEnqueue(slug, c.Value<string>("title"), c.Value<string>("original"),
-                                 years, c.Value<string>("poster"));
+                                 spans, c.Value<string>("poster"));
                 queued++;
             }
 
-            if (queued > 0)
+            if (queued > 0 || oldFmt > 0)
                 Console.WriteLine($"[QbitDownload] jut poster: к апгрейду поставлено {queued} из {total} "
-                                + $"(уже с постером {have}, решение есть {decided})");
+                                + $"(уже с постером {have}, решение есть {decided}, ждут пересида снапшота {oldFmt})");
         }
         catch (Exception ex) { JutPosterOptNote("backfill: " + ex.Message); }
         finally
@@ -351,6 +353,7 @@ public partial class QbitController
                 ["queued"] = queued,
                 ["havePoster"] = have,
                 ["decided"] = decided,
+                ["oldFmt"] = oldFmt,
                 ["sec"] = (int)sw.Elapsed.TotalSeconds
             };
             Interlocked.Exchange(ref _jutBfRunning, 0);

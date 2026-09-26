@@ -161,9 +161,28 @@ public class JutSuParseTests
     [Fact]
     public void Годы_разворачивают_диапазоны()
     {
+        // years — легаси-метка для клиента (края бакета, как были); spans — честный промежуток для матчера
         var c = JutSuParse.ParseCard("anime_year_2015-2023 anime_year_ongoing", 1, @"<a href=""/x/"">");
         Assert.Contains(2015, c.years);
         Assert.Contains(2023, c.years);
+        Assert.Equal(new[] { new JutYearSpan(2015, 2023) }, c.spans);
+    }
+
+    [Fact]
+    public void Бакеты_годов_каталога_становятся_промежутками()
+    {
+        // 🔴 Живая витрина 26.09.2026 (bleeach): два бакета + онгоинг. До 2.122 это читалось как
+        // «2000, 2007, 2015, 2023», и сопоставление с базой аниме резало Bleach (2004) по году.
+        var c = JutSuParse.ParseCard("all_anime_global anime_ganre_action anime_year_2000-2007 anime_year_2015-2023 anime_year_ongoing",
+                                     1, @"<a href=""/bleeach/"">");
+        Assert.Equal(new[] { new JutYearSpan(2000, 2007), new JutYearSpan(2015, 2023) }, c.spans);
+        Assert.True(c.ongoing);
+
+        var old = JutSuParse.ParseCard("anime_year_before2000 anime_year_2015-2023", 1, @"<a href=""/rurouni-kenshi/"">");
+        Assert.Equal(new[] { new JutYearSpan(0, 1999), new JutYearSpan(2015, 2023) }, old.spans);
+
+        var fresh = JutSuParse.ParseCard("anime_year_2026 anime_year_ongoing", 1, @"<a href=""/x/"">");
+        Assert.Equal(new[] { JutYearSpan.Exact(2026) }, fresh.spans);
     }
 
     [Fact]

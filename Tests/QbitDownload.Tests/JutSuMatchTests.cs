@@ -79,7 +79,8 @@ public class JutSuMatchTests
         var refused = new List<string>();
         foreach (var c in cards)
         {
-            var m = JutSuMatch.Pick(c.titleOrig, c.titleRu, c.years, CandsFor(rec, c.titleOrig));
+            // spans, а не years — ровно тот путь, которым карточка идёт в очередь постеров
+            var m = JutSuMatch.Pick(c.titleOrig, c.titleRu, c.spans, CandsFor(rec, c.titleOrig));
             if (!m.ok) { refused.Add(c.titleOrig + " → " + m.reason); continue; }
 
             // Принятое обязано совпадать по названию — иначе это и есть «чужой постер».
@@ -278,6 +279,190 @@ public class JutSuMatchTests
     public void Пустая_выдача_отказ()
         => Assert.False(JutSuMatch.Pick("Mebius Dust", "Пыль Мёбиуса", new[] { 2026 },
                                         Array.Empty<JutAnimeCandidate>()).ok);
+
+    #endregion
+
+    #region промежутки лет (бакеты каталога) и уточнения «(TV)» / «(год)» — qdl 2.122
+
+    // Боевой замер 26.09.2026: 457 отказов year_mismatch из 1357 тайтлов. Причина одна на всех:
+    // класс anime_year_2008-2014 на карточке каталога читался как «2008, 2014», и вето «±1 год»
+    // резало кандидата с годом ВНУТРИ бакета. Второй, независимый случай — жалоба владельца на
+    // размытый постер «ДжоДжо»: точное романдзи в Shikimori — OVA 1993, сериал — «… (TV)».
+
+    static JutYearSpan Span(int a, int b) => new(a, b);
+
+    [Fact]
+    public void Бакет_каталога_покрывает_год_внутри_а_не_только_края()
+    {
+        // «Durarara!!» (2010): карточка помечена anime_year_2008-2014 anime_year_2015-2023
+        var cands = new[] { C(6746, "Durarara!!", "Дюрарара!!", "2010-01-08") };
+        var m = JutSuMatch.Pick("Durarara!!", "Дюрарара!!", new[] { Span(2008, 2014), Span(2015, 2023) }, cands);
+
+        Assert.True(m.ok);
+        Assert.Equal("romaji", m.reason);
+    }
+
+    [Fact]
+    public void Бакет_before2000_открыт_снизу()
+    {
+        var cands = new[] { C(45, "Rurouni Kenshin: Meiji Kenkaku Romantan", "Бродяга Кэнсин", "1996-01-10") };
+        var m = JutSuMatch.Pick("Rurouni Kenshin: Meiji Kenkaku Romantan", "Бродяга Кэнсин",
+                                new[] { JutYearSpan.ParseClass("before2000").Value, Span(2015, 2023) }, cands);
+
+        Assert.True(m.ok);
+        Assert.Equal(45, m.pick.id);
+    }
+
+    [Fact]
+    public void Год_вне_бакета_по_прежнему_вето()
+    {
+        // 1999 против бакета 2008-2014 — другая экранизация, допуск ±1 не спасает
+        var cands = new[] { C(136, "Hunter x Hunter", "Охотник х Охотник", "1999-10-16") };
+        var m = JutSuMatch.Pick("Hunter x Hunter", "Хантер х Хантер", new[] { Span(2008, 2014) }, cands);
+
+        Assert.False(m.ok);
+        Assert.Equal("year_mismatch", m.reason);
+    }
+
+    [Fact]
+    public void Точное_имя_не_по_году_а_вариант_с_уточнением_подходит_берём_вариант()
+    {
+        // 🔥 Жалоба владельца 26.09.2026: у «ДжоДжо» размытый постер. Хаб jut.su зовётся
+        // «JoJo no Kimyou na Bouken» и несёт годы сериала (2012…), а точное имя в Shikimori —
+        // OVA 1993 года; сериал там — «JoJo no Kimyou na Bouken (TV)», 2012. Живая выдача дословно.
+        var cands = new[]
+        {
+            C(666,   "JoJo no Kimyou na Bouken", "Невероятное приключение ДжоДжо OVA", "1993-11-19", "ova"),
+            C(37991, "JoJo no Kimyou na Bouken Part 5: Ougon no Kaze", "Золотой ветер", "2018-10-06"),
+            C(38972, "JoJo no Kimyou na Bouken Part 5: Ougon no Kaze Recaps", "Рекапы", "2019-01-05", "tv_special"),
+            C(14719, "JoJo no Kimyou na Bouken (TV)", "Невероятное приключение ДжоДжо", "2012-10-06"),
+            C(665,   "JoJo no Kimyou na Bouken: Adventure", "OVA (2000)", "2000-05-25", "ova"),
+            C(3603,  "JoJo no Kimyou na Bouken: Phantom Blood", "Призрачная кровь", "2007-02-17", "movie"),
+            C(41306, "JoJo no Kimyou na Bouken: Phantom Blood Pilot", "Пилотный выпуск", "2004-03-28", "special"),
+            C(61469, "Steel Ball Run: JoJo no Kimyou na Bouken", "Гонка «Стальной шар»", "2026-03-19", "ona")
+        };
+        var m = JutSuMatch.Pick("JoJo no Kimyou na Bouken", "Невероятные приключения ДжоДжо",
+                                new[] { 2012, 2014, 2015, 2016, 2018, 2021, 2026 }, cands);
+
+        Assert.True(m.ok);
+        Assert.Equal("romaji_variant", m.reason);
+        Assert.Equal(14719, m.pick.id);
+    }
+
+    [Fact]
+    public void Уточнение_годом_подходит_под_бакет_каталога()
+    {
+        // «Hunter x Hunter» на карточке — бакет 2008-2014; в Shikimori 1999-й и «(2011)»
+        var cands = new[]
+        {
+            C(136,   "Hunter x Hunter", "Охотник х Охотник", "1999-10-16"),
+            C(11061, "Hunter x Hunter (2011)", "Охотник х Охотник (2011)", "2011-10-02")
+        };
+        var m = JutSuMatch.Pick("Hunter x Hunter", "Хантер х Хантер", new[] { Span(2008, 2014) }, cands);
+
+        Assert.True(m.ok);
+        Assert.Equal("romaji_variant", m.reason);
+        Assert.Equal(11061, m.pick.id);
+    }
+
+    [Fact]
+    public void Точное_имя_подходит_по_году_вариант_не_рассматривается()
+    {
+        // Хаб содержит и 1999-й, и 2011-й: корень франшизы — честный выбор, как и раньше
+        var cands = new[]
+        {
+            C(136,   "Hunter x Hunter", "Охотник х Охотник", "1999-10-16"),
+            C(11061, "Hunter x Hunter (2011)", "Охотник х Охотник (2011)", "2011-10-02")
+        };
+        var m = JutSuMatch.Pick("Hunter x Hunter", "Хантер х Хантер",
+                                new[] { JutYearSpan.ParseClass("before2000").Value, Span(2008, 2014) }, cands);
+
+        Assert.True(m.ok);
+        Assert.Equal("romaji", m.reason);
+        Assert.Equal(136, m.pick.id);
+    }
+
+    [Fact]
+    public void Вариант_с_уточнением_вне_года_не_спасает()
+    {
+        var cands = new[]
+        {
+            C(1, "Trigun", "Триган", "1998-04-01"),
+            C(2, "Trigun (2030)", "Триган", "2030-01-01")
+        };
+        var m = JutSuMatch.Pick("Trigun", "Триган", new[] { 2023 }, cands);
+
+        Assert.False(m.ok);
+        Assert.Equal("year_mismatch", m.reason);
+    }
+
+    [Fact]
+    public void Два_варианта_под_год_отказ()
+    {
+        // Догадка и здесь дешевле отказа — и её здесь нет
+        var cands = new[]
+        {
+            C(1, "Grappler Baki", "Боец Баки", "1994-08-21", "ova"),
+            C(2, "Grappler Baki (TV)", "Боец Баки", "2001-01-08"),
+            C(3, "Grappler Baki (2001)", "Боец Баки", "2001-07-23")
+        };
+        var m = JutSuMatch.Pick("Grappler Baki", "Боец Баки", new[] { Span(2000, 2007) }, cands);
+
+        Assert.False(m.ok);
+        Assert.Equal(JutMatchVerdict.Ambiguous, m.verdict);
+    }
+
+    [Fact]
+    public void Уточнением_считаются_только_TV_и_год()
+    {
+        Assert.Equal("JoJo no Kimyou na Bouken", JutSuMatch.VariantBase("JoJo no Kimyou na Bouken (TV)"));
+        Assert.Equal("Hunter x Hunter", JutSuMatch.VariantBase("Hunter x Hunter (2011)"));
+        Assert.Null(JutSuMatch.VariantBase("JoJo no Kimyou na Bouken"));
+        Assert.Null(JutSuMatch.VariantBase("Fullmetal Alchemist: Brotherhood"));
+        Assert.Null(JutSuMatch.VariantBase("Kimi no Na wa. (Movie)"));
+        Assert.Null(JutSuMatch.VariantBase(null));
+    }
+
+    [Fact]
+    public void Русский_ключ_не_принимает_бакет_за_год()
+    {
+        // Русское имя плюс семилетнее окно — слишком слабо для чужого постера
+        var cands = new[] { C(5, "Yani Neko", "Табакошка", "2010-07-03") };
+
+        Assert.False(JutSuMatch.Pick("Smoking Cat", "Табакошка", new[] { Span(2008, 2014) }, cands).ok);
+        Assert.True(JutSuMatch.Pick("Smoking Cat", "Табакошка", new[] { Span(2010, 2010) }, cands).ok);
+    }
+
+    [Theory]
+    [InlineData("2026", 2026, 2026)]
+    [InlineData("2015-2023", 2015, 2023)]
+    [InlineData("before2000", 0, 1999)]
+    public void Класс_года_каталога_разбирается_в_промежуток(string cls, int from, int to)
+    {
+        var sp = JutYearSpan.ParseClass(cls);
+        Assert.True(sp.HasValue);
+        Assert.Equal((from, to), (sp.Value.from, sp.Value.to));
+    }
+
+    [Fact]
+    public void Служебный_и_незнакомый_класс_года_не_промежуток()
+    {
+        Assert.Null(JutYearSpan.ParseClass("ongoing"));
+        Assert.Null(JutYearSpan.ParseClass("2023-2015"));
+        Assert.Null(JutYearSpan.ParseClass(""));
+    }
+
+    [Fact]
+    public void Промежутки_переживают_JSON_а_без_поля_null()
+    {
+        var spans = new List<JutYearSpan> { Span(0, 1999), Span(2008, 2014), Span(2026, 2026) };
+        var back = JutYearSpan.FromJson(new JArray(spans.Select(s => s.ToJson())));
+
+        Assert.Equal(spans, back);
+        Assert.Null(JutYearSpan.FromJson(null));
+        Assert.Null(JutYearSpan.FromJson(new JObject()));
+        Assert.Equal("<2000,2008-2014,2026", string.Join(",", spans));
+    }
 
     #endregion
 

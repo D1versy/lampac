@@ -46,7 +46,7 @@ public partial class QbitController
         public string slug;
         public string titleRu;
         public string titleOrig;
-        public int[] years;
+        public JutYearSpan[] spans;   // годы: у страницы тайтла точные, у карточки каталога — бакеты сайта
         public string rawPoster;      // постер jut.su, уже разобранный каталогом (экономит загрузку страницы тайтла)
     }
 
@@ -127,6 +127,15 @@ public partial class QbitController
     /// </summary>
     internal static void JutPosterEnqueue(string slug, string titleRu, string titleOrig,
                                           IReadOnlyList<int> years, string rawPoster)
+        => JutPosterEnqueue(slug, titleRu, titleOrig, JutYearSpan.Exact(years), rawPoster);
+
+    /// <summary>
+    /// То же с промежутками лет. Карточка каталога знает про тайтлы старше 2016-го только бакет
+    /// фильтра (`anime_year_2008-2014`), и отдавать его матчеру как два точных года нельзя —
+    /// см. JutYearSpan. Страница тайтла даёт точные годы — они приезжают вырожденными промежутками.
+    /// </summary>
+    internal static void JutPosterEnqueue(string slug, string titleRu, string titleOrig,
+                                          IReadOnlyList<JutYearSpan> spans, string rawPoster)
     {
         if (!JutPosterOn || string.IsNullOrEmpty(slug) || !JutSuParse.IsValidSlug(slug)) return;
         if (string.IsNullOrWhiteSpace(titleOrig) && string.IsNullOrWhiteSpace(titleRu)) return;
@@ -143,7 +152,7 @@ public partial class QbitController
                 slug = slug,
                 titleRu = titleRu,
                 titleOrig = titleOrig,
-                years = years?.ToArray() ?? Array.Empty<int>(),
+                spans = spans?.ToArray() ?? Array.Empty<JutYearSpan>(),
                 rawPoster = rawPoster
             });
             JutPosterWorkerStart();
@@ -166,17 +175,17 @@ public partial class QbitController
         try
         {
             // ⚠️ Слаг проверяем ПЕРВЫМ: у тайтла тоже есть items, но там СЕРИИ, а не карточки.
-            if (jo["slug"] != null) JutPosterStampOne(jo);
+            if (jo["slug"] != null) JutPosterStampOne(jo, fromCard: false);
             else if (jo["items"] is JArray items)
             {
                 foreach (var it in items)
-                    if (it is JObject card) JutPosterStampOne(card);
+                    if (it is JObject card) JutPosterStampOne(card, fromCard: true);
             }
         }
         catch { }
     }
 
-    static void JutPosterStampOne(JObject c)
+    static void JutPosterStampOne(JObject c, bool fromCard)
     {
         string slug = c["slug"]?.Value<string>();
         if (string.IsNullOrEmpty(slug)) return;
@@ -186,12 +195,36 @@ public partial class QbitController
         if (JutHasUpPoster(slug)) { c["pv"] = JutUpPosterGen(slug); return; }
         if (!JutPosterOn) return;
 
-        var years = new List<int>();
-        if (c["years"] is JArray ya)
-            foreach (var y in ya) { int v = y?.Value<int?>() ?? 0; if (v > 0) years.Add(v); }
+        var spans = JutSpansOf(c);
+        if (spans == null)
+        {
+            // 🔴 Карточка снапшота старого формата (до 2.122): её years — КРАЯ бакетов фильтра сайта,
+            // решение по ним было бы прежним, неверным, и залегло бы на 14 суток. Не решаем вовсе:
+            // снапшот пересоберётся по версии формата (JutIdxFmt), карточка вернётся уже с spans.
+            // У страницы тайтла годы точные (текст ссылок «Год выпуска») — берём как есть: кеш
+            // тайтла, записанный до 2.122, поля spans ещё не несёт.
+            if (fromCard) return;
+            spans = JutYearSpan.Exact(JutYearsOf(c));
+        }
 
         JutPosterEnqueue(slug, c["title"]?.Value<string>(), c["original"]?.Value<string>(),
-                         years, c["poster"]?.Value<string>());
+                         spans, c["poster"]?.Value<string>());
+    }
+
+    /// <summary>
+    /// Промежутки лет из JSON карточки/тайтла — поле `spans` (с 2.122). null = поля нет: карточка
+    /// снапшота старого формата или кеш тайтла до 2.122; что с этим делать, решает вызывающий
+    /// (карточку — пропустить до пересида, тайтл — взять годы как точные).
+    /// </summary>
+    internal static List<JutYearSpan> JutSpansOf(JObject c) => JutYearSpan.FromJson(c?["spans"]);
+
+    /// <summary>Легаси-поле `years` как список. У тайтла — точные годы; у карточки — края бакетов (матчеру НЕ давать).</summary>
+    internal static List<int> JutYearsOf(JObject c)
+    {
+        var years = new List<int>();
+        if (c?["years"] is JArray ya)
+            foreach (var y in ya) { int v = y?.Value<int?>() ?? 0; if (v > 0) years.Add(v); }
+        return years;
     }
 
     /// <summary>
@@ -298,7 +331,8 @@ public partial class QbitController
         }
 
         var cands = JutSuMatch.ParseCandidates(arr);
-        var m = JutSuMatch.Pick(job.titleOrig, job.titleRu, job.years, cands);
+        var m = JutSuMatch.Pick(job.titleOrig, job.titleRu, job.spans, cands);
+        string yearsText = string.Join(",", job.spans ?? Array.Empty<JutYearSpan>());
 
         if (!m.ok)
         {
@@ -308,6 +342,7 @@ public partial class QbitController
                 ["reason"] = m.reason,
                 ["romaji"] = job.titleOrig,
                 ["title"] = job.titleRu,
+                ["years"] = yearsText,     // с чем сравнивали — иначе отказ по году не разобрать
                 ["raw"] = job.rawPoster
             });
             JutPosterNoteRefusal(job.slug + " · " + (job.titleRu ?? "") + " · " + m.reason);
@@ -359,6 +394,7 @@ public partial class QbitController
             ["romaji"] = job.titleOrig,
             ["matched"] = m.pick.name,
             ["title"] = job.titleRu,
+            ["years"] = yearsText,
             ["cover"] = cover,
             ["raw"] = job.rawPoster
         });

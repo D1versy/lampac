@@ -32,10 +32,20 @@ public partial class QbitController
     /// <summary>Столько карточек на странице отдаёт сам jut.su — тем же шагом режем снапшот.</summary>
     internal const int JutPageSize = 30;
 
+    /// <summary>
+    /// Версия ФОРМАТА карточки в снапшоте. Поднимать, когда JutCardsJson начинает отдавать поле,
+    /// без которого потребители снапшота работают неверно: снапшот со старой версией пересобирается
+    /// следующим тиком независимо от расписания (jutCatalogReseedDays=0 глушит плановый пересид,
+    /// а не миграцию). 2 — поле `spans` (2.122): годы-бакеты каталога, без них бэкфилл постеров
+    /// сравнивал края бакета как точные годы.
+    /// </summary>
+    internal const int JutIdxFmt = 2;
+
     internal sealed class JutIdxState
     {
         public DateTime seededAt, updatedAt;
         public bool complete;
+        public int fmt = JutIdxFmt;                  // формат карточек; у прочитанного с диска — какой был
         public int cursorPage;                       // докуда дошёл сид (0 = ещё ничего)
         public List<JObject> items = new();
         public HashSet<string> slugs = new(StringComparer.OrdinalIgnoreCase);
@@ -94,8 +104,18 @@ public partial class QbitController
                     st.cursorPage = jo.Value<int?>("cursorPage") ?? 0;
                     st.seededAt = jo.Value<DateTime?>("seededAt") ?? DateTime.MinValue;
                     st.updatedAt = jo.Value<DateTime?>("updatedAt") ?? DateTime.MinValue;
+                    st.fmt = jo.Value<int?>("fmt") ?? 1;
                     foreach (var c in (jo["items"] as JArray ?? new JArray()).OfType<JObject>())
                         st.Add(c);
+
+                    // Формат устарел: полный снапшот дослуживает до пересида (его назначит тик),
+                    // а недоделанный сид честнее начать заново — иначе в индексе смешались бы
+                    // карточки двух форматов, и старая половина не обновилась бы никогда.
+                    if (st.fmt < JutIdxFmt && !st.complete)
+                    {
+                        JutNet.Log("catalog", $"индекс формата {st.fmt} недоделан — сид начнётся заново (формат {JutIdxFmt})");
+                        st = new JutIdxState();
+                    }
                 }
             }
             catch (Exception ex)
@@ -120,6 +140,7 @@ public partial class QbitController
             var jo = new JObject
             {
                 ["ver"] = 1,
+                ["fmt"] = st.fmt,
                 ["complete"] = st.complete,
                 ["cursorPage"] = st.cursorPage,
                 ["seededAt"] = st.seededAt,
@@ -236,8 +257,11 @@ public partial class QbitController
             int reseedDays = ModInit.conf?.jutCatalogReseedDays ?? 30;
             // Ручной прогон пересобирает всегда: киллсвитч jutCatalogReseedDays=0 выключает
             // ПЛАНОВЫЙ ресид, но не должен блокировать явную кнопку «пересобрать».
+            // Смена формата карточек (JutIdxFmt) пересобирает вне расписания — это миграция данных,
+            // а не плановое обновление, и киллсвитч планового её не касается.
             bool needReseed = st.complete
-                              && (manual || (reseedDays > 0 && (DateTime.UtcNow - st.seededAt).TotalDays >= reseedDays));
+                              && (manual || st.fmt < JutIdxFmt
+                                  || (reseedDays > 0 && (DateTime.UtcNow - st.seededAt).TotalDays >= reseedDays));
 
             if (!st.complete) return await JutIdxSeed(st, res, loadPage);
             if (needReseed) return await JutIdxReseed(res, loadPage);
@@ -355,6 +379,13 @@ public partial class QbitController
         lock (_jutIdxLock) _jutIdx = shadow;
         JutIdxSave(shadow);
         Console.WriteLine("[QbitDownload] jut/catalog: ресид готов — тайтлов " + shadow.items.Count);
+
+        // После полного пересбора — тот же довод постеров, что и у головы при новинках. Пересид
+        // случается и при смене формата карточки (JutIdxFmt): до него решения по карточкам старого
+        // формата намеренно не принимались, и кому-то надо их принять. ⚠️ Инвариант #3 цел:
+        // зовётся отдельная джоба со своим киллсвитчем (jutPosterBackfill).
+        try { await JutPosterBackfillAll(); }
+        catch (Exception ex) { Console.WriteLine("[QbitDownload] jut poster backfill: " + ex.Message); }
         return res;
     }
 
@@ -492,6 +523,8 @@ public partial class QbitController
             {
                 ["enabled"] = JutIdxOn,
                 ["complete"] = st.complete,
+                ["fmt"] = st.fmt,
+                ["fmtCurrent"] = JutIdxFmt,
                 ["items"] = st.items.Count,
                 ["pages"] = (st.items.Count + JutPageSize - 1) / JutPageSize,
                 ["cursorPage"] = st.cursorPage,

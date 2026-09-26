@@ -157,6 +157,9 @@ public partial class QbitController
         ["ongoing"] = c.ongoing,
         ["viewed"] = c.viewed,
         ["years"] = new JArray(c.years),
+        // Промежутки лет для сопоставления постеров ([from,to]; from=0 — открыт снизу).
+        // ⚠️ years выше — легаси для метки на карточке, у старых тайтлов это края бакетов.
+        ["spans"] = new JArray(c.spans.Select(s => s.ToJson())),
         ["genres"] = new JArray(c.genres)
     }));
 
@@ -325,6 +328,7 @@ public partial class QbitController
         ["genres"] = new JArray(t.genres),
         ["themes"] = new JArray(t.themes),
         ["years"] = new JArray(t.years),
+        ["spans"] = new JArray(t.years.Select(y => JutYearSpan.Exact(y).ToJson())),   // у страницы годы точные
         ["seasons"] = new JArray(t.items.Where(e => e.kind == JutEpKind.Episode)
                                          .Select(e => e.season).Distinct().OrderBy(x => x)),
         ["count"] = t.items.Count,

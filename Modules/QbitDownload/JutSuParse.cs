@@ -44,7 +44,16 @@ public sealed class JutCard
     public int rate;               // своя оценка 1..5; 0 = нет
     public List<string> genres = new();
     public List<string> types = new();
+
+    /// <summary>
+    /// Легаси-список для клиента: каждое четырёхзначное число из классов `anime_year_*` как есть
+    /// (метка года на карточке — последний элемент). ⚠️ Для сопоставления с базами аниме НЕ годится:
+    /// у тайтлов старше 2016-го это края бакетов фильтра сайта, а не годы. Матчеру — spans.
+    /// </summary>
     public List<int> years = new();
+
+    /// <summary>Промежутки лет из тех же классов, разобранные честно (см. JutYearSpan). Отсортированы по концу.</summary>
+    public List<JutYearSpan> spans = new();
 }
 
 public sealed class JutCatalogPage
@@ -273,8 +282,18 @@ public static class JutSuParse
         foreach (Match t in _rxClsType.Matches(cls)) c.types.Add(t.Groups["v"].Value);
         foreach (Match y in _rxClsYear.Matches(cls))
         {
-            // anime_year_* смешивает точные годы, диапазоны (2015-2023) и служебные (ongoing/before2000)
-            foreach (Match yy in Regex.Matches(y.Groups["v"].Value, @"(19|20)\d{2}"))
+            string v = y.Groups["v"].Value;
+
+            // 🔴 anime_year_* — это ФИЛЬТР сайта, а не годы: точный год стоит только у тайтлов
+            // 2016+, всё старше помечено бакетами «2000-2007», «2008-2014», «2015-2023»,
+            // «before2000» (плюс служебный ongoing). Честный разбор — в spans; он и идёт в матчер
+            // постеров. Пока бакет читался как два точных года, треть каталога (457 из 1357)
+            // оставалась без обложки: вето «±1 год» резало кандидата с годом ВНУТРИ бакета.
+            var sp = JutYearSpan.ParseClass(v);
+            if (sp is JutYearSpan span && !c.spans.Contains(span)) c.spans.Add(span);
+
+            // Легаси-список для метки года на карточке клиента — как был (края бакета)
+            foreach (Match yy in Regex.Matches(v, @"(19|20)\d{2}"))
                 if (int.TryParse(yy.Value, out int yv) && !c.years.Contains(yv)) c.years.Add(yv);
         }
 
@@ -289,6 +308,7 @@ public static class JutSuParse
         }
 
         c.years.Sort();
+        c.spans.Sort((a, b) => a.to.CompareTo(b.to));
         return c;
     }
 

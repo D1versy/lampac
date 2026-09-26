@@ -30,6 +30,87 @@ namespace QbitDownload;
 // Документация: E:\Media-server\claude\jut\02-architecture.md
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// <summary>
+/// Промежуток лет, в котором у тайтла jut.su есть сезоны. Один тайтл несёт несколько.
+///
+/// 🔥 Зачем не просто int. Карточка каталога jut.su помечена классами `anime_year_*`, и для
+/// всего, что старше 2016-го, это НЕ годы, а бакеты фильтра сайта: `2000-2007`, `2008-2014`,
+/// `2015-2023`, `before2000`. Пока парсер вынимал из них все четырёхзначные числа как точные
+/// годы, «Durarara!!» (2010) превращалась в «2008, 2014», «Hunter x Hunter» (2011) — тоже
+/// в «2008, 2014», и вето «±1 год» резало ПРАВИЛЬНОГО кандидата. Боевой замер 26.09.2026:
+/// 457 отказов `year_mismatch` из 1357 тайтлов каталога — треть каталога без обложки из-за
+/// одного неверно понятого класса. Точный год страницы тайтла — вырожденный промежуток (y, y).
+/// </summary>
+public readonly record struct JutYearSpan(int from, int to)
+{
+    /// <summary>Открыт снизу («before2000» → to = 1999): нижней границы у сайта нет.</summary>
+    public bool Open => from <= 0;
+
+    /// <summary>Ровно один год (со страницы тайтла или из класса вида `anime_year_2026`).</summary>
+    public bool IsExact => !Open && from == to;
+
+    /// <summary>Год попадает в промежуток с допуском slack по обеим сторонам.</summary>
+    public bool Covers(int year, int slack)
+        => year <= to + slack && (Open || year >= from - slack);
+
+    public static JutYearSpan Exact(int year) => new(year, year);
+
+    public static List<JutYearSpan> Exact(IEnumerable<int> years)
+    {
+        var list = new List<JutYearSpan>();
+        if (years == null) return list;
+        foreach (int y in years) if (y > 0) list.Add(Exact(y));
+        return list;
+    }
+
+    /// <summary>
+    /// Значение класса `anime_year_*` карточки каталога → промежуток. Ровно четыре формы,
+    /// увиденные на живой витрине 26.09.2026: `2026` · `2015-2023` · `before2000` · `ongoing`
+    /// (последняя — не год, null). Незнакомое — тоже null: лучше без вето, чем с выдуманным.
+    /// </summary>
+    public static JutYearSpan? ParseClass(string v)
+    {
+        if (string.IsNullOrEmpty(v)) return null;
+        v = v.Trim().ToLowerInvariant();
+
+        if (v.Length == 4 && int.TryParse(v, out int y) && y >= 1900) return Exact(y);
+
+        if (v.Length == 9 && v[4] == '-'
+            && int.TryParse(v.AsSpan(0, 4), out int a) && int.TryParse(v.AsSpan(5, 4), out int b)
+            && a >= 1900 && b >= a)
+            return new JutYearSpan(a, b);
+
+        if (v.StartsWith("before", StringComparison.Ordinal)
+            && int.TryParse(v.AsSpan(6), out int lim) && lim >= 1900)
+            return new JutYearSpan(0, lim - 1);
+
+        return null;
+    }
+
+    /// <summary>JSON-форма: `[from, to]`. Компактно и без имён — карточек в снапшоте 1357.</summary>
+    public JArray ToJson() => new JArray(from, to);
+
+    /// <summary>
+    /// Обратно из `[[from,to], …]`. null — поля нет вовсе (старый снапшот, JSON тайтла до 2.122):
+    /// вызывающий тогда берёт `years` как точные годы. Мусорные элементы пропускаются.
+    /// </summary>
+    public static List<JutYearSpan> FromJson(JToken t)
+    {
+        if (t is not JArray arr) return null;
+        var list = new List<JutYearSpan>();
+        foreach (var it in arr)
+        {
+            if (it is not JArray pair || pair.Count != 2) continue;
+            int a = pair[0]?.Value<int?>() ?? -1, b = pair[1]?.Value<int?>() ?? -1;
+            if (b <= 0 || (a > 0 && a > b)) continue;
+            list.Add(new JutYearSpan(Math.Max(0, a), b));
+        }
+        return list;
+    }
+
+    public override string ToString() => Open ? "<" + (to + 1) : IsExact ? from.ToString() : from + "-" + to;
+}
+
 /// <summary>Кандидат из базы аниме (Shikimori). Ровно те поля, что нужны для решения.</summary>
 public sealed class JutAnimeCandidate
 {
@@ -135,9 +216,18 @@ public static class JutSuMatch
     /// Выбор кандидата. Порядок ключей принципиален и отражает замеры на реальной выдаче:
     /// романдзи совпал точно у 15 из 15 тайтлов, русское название — только у 8 из 15
     /// (jut.su сокращает длинные названия), поэтому русский — ТОЛЬКО запасной ключ и
-    /// ТОЛЬКО вместе с годом.
+    /// ТОЛЬКО вместе с годом. Годы — точные (страница тайтла); для карточки каталога есть
+    /// перегрузка с промежутками, см. JutYearSpan.
     /// </summary>
     public static JutMatchResult Pick(string romaji, string ru, IReadOnlyList<int> years,
+                                      IReadOnlyList<JutAnimeCandidate> cands)
+        => Pick(romaji, ru, JutYearSpan.Exact(years), cands);
+
+    /// <summary>
+    /// То же, но годы — промежутками (карточка каталога jut.su знает про старые тайтлы только
+    /// бакет вида 2008-2014). Точные годы страницы тайтла — вырожденные промежутки.
+    /// </summary>
+    public static JutMatchResult Pick(string romaji, string ru, IReadOnlyList<JutYearSpan> years,
                                       IReadOnlyList<JutAnimeCandidate> cands)
     {
         if (cands == null || cands.Count == 0) return Refuse(JutMatchVerdict.NoMatch, "no_candidates");
@@ -149,17 +239,34 @@ public static class JutSuMatch
         string nr = NormTitle(romaji);
         if (nr.Length >= MinNormLength)
         {
+            bool vetoed = false;
             var exact = pool.Where(c => NormTitle(c.name) == nr).ToList();
             if (exact.Count == 1)
-                return YearContradicts(exact[0], years)
-                    ? Refuse(JutMatchVerdict.NoMatch, "year_mismatch")
-                    : Accept(exact[0], "romaji");
+            {
+                if (!YearContradicts(exact[0], years)) return Accept(exact[0], "romaji");
+                // Имя совпало, год — нет: это ДРУГАЯ экранизация того же названия
+                // (OVA 1993 против сериала 2012). Прежде чем отказать — ключ 1a.
+                vetoed = true;
+            }
             if (exact.Count > 1)
             {
                 var tie = TieBreak(exact, ru, years);
                 return tie != null ? Accept(tie, "romaji_tie")
                                    : Refuse(JutMatchVerdict.Ambiguous, "ambiguous");
             }
+
+            // ── Ключ 1a: то же имя с уточнением MAL «(TV)» / «(2011)» ─────────────
+            // Так MyAnimeList (а за ним Shikimori) различает переэкранизации с одинаковым
+            // названием: «JoJo no Kimyou na Bouken» — OVA 1993, «JoJo no Kimyou na Bouken (TV)» —
+            // сериал 2012; «Hunter x Hunter» — 1999, «Hunter x Hunter (2011)». У jut.su хаб
+            // на всю франшизу называется без уточнения, и годы у него — от сериала. Уточнение —
+            // не догадка: имя равно символ-в-символ, год подходит, и такой кандидат ровно один.
+            // Два подошедших — отказ (Ambiguous), как и везде.
+            var variants = pool.Where(c => VariantBase(c.name) is string b && NormTitle(b) == nr
+                                           && !YearContradicts(c, years)).ToList();
+            if (variants.Count == 1) return Accept(variants[0], "romaji_variant");
+            if (variants.Count > 1) return Refuse(JutMatchVerdict.Ambiguous, "ambiguous_variant");
+            if (vetoed) return Refuse(JutMatchVerdict.NoMatch, "year_mismatch");
         }
 
         // ── Ключ 1b: длинный префикс романдзи ─────────────────────────────────
@@ -186,10 +293,14 @@ public static class JutSuMatch
 
         // ── Ключ 2: точное совпадение русского названия ПЛЮС совпадение года ──
         // Без года не пускаем: русские названия у разных сезонов часто одинаковы.
+        // ⚠️ Год здесь — только ТОЧНЫЙ (страница тайтла или класс вида anime_year_2026).
+        // Бакет «2008-2014» с карточки каталога годом не считается: русское имя плюс
+        // семилетнее окно — слишком слабое свидетельство для чужого постера.
         string nu = NormTitle(ru);
-        if (nu.Length >= MinNormLength && years != null && years.Count > 0)
+        if (nu.Length >= MinNormLength && years != null && years.Any(s => s.IsExact))
         {
-            var byRu = pool.Where(c => NormTitle(c.russian) == nu && c.year > 0 && years.Contains(c.year)).ToList();
+            var byRu = pool.Where(c => NormTitle(c.russian) == nu && c.year > 0
+                                       && years.Any(s => s.IsExact && s.from == c.year)).ToList();
             if (byRu.Count == 1) return Accept(byRu[0], "russian_year");
             if (byRu.Count > 1) return Refuse(JutMatchVerdict.Ambiguous, "ambiguous_ru");
         }
@@ -201,11 +312,11 @@ public static class JutSuMatch
     /// Несколько кандидатов с одинаковым романдзи. Сужаем только ПРОВЕРЯЕМЫМИ признаками;
     /// если после них всё ещё больше одного — возвращаем null (честный отказ, а не догадка).
     /// </summary>
-    static JutAnimeCandidate TieBreak(List<JutAnimeCandidate> list, string ru, IReadOnlyList<int> years)
+    static JutAnimeCandidate TieBreak(List<JutAnimeCandidate> list, string ru, IReadOnlyList<JutYearSpan> years)
     {
         if (years != null && years.Count > 0)
         {
-            var byYear = list.Where(c => c.year > 0 && years.Contains(c.year)).ToList();
+            var byYear = list.Where(c => c.year > 0 && years.Any(s => s.Covers(c.year, 0))).ToList();
             if (byYear.Count == 1) return byYear[0];
             if (byYear.Count > 1) list = byYear;
         }
@@ -227,10 +338,25 @@ public static class JutSuMatch
     /// больше чем на ±1 — совпало название, а тайтл другой. ±1 закрывает декабрь/январь и
     /// расхождение «премьера в Японии / показ у нас».
     /// </summary>
-    static bool YearContradicts(JutAnimeCandidate c, IReadOnlyList<int> years)
+    static bool YearContradicts(JutAnimeCandidate c, IReadOnlyList<JutYearSpan> years)
     {
         if (c == null || c.year <= 0 || years == null || years.Count == 0) return false;
-        return !years.Any(y => Math.Abs(y - c.year) <= 1);
+        return !years.Any(s => s.Covers(c.year, 1));
+    }
+
+    // «JoJo no Kimyou na Bouken (TV)» → «JoJo no Kimyou na Bouken»; «Hunter x Hunter (2011)» →
+    // «Hunter x Hunter». Только эти две формы уточнения — ровно те, которыми MAL разводит
+    // переэкранизации. «(Movie)», «: Part 2» и прочее — другие тайтлы, а не варианты.
+    static readonly System.Text.RegularExpressions.Regex _rxVariant =
+        new(@"^(?<b>.*\S)\s*\((?:TV|(?:19|20)\d{2})\)\s*$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>Имя без уточнения «(TV)»/«(год)», либо null, если уточнения нет.</summary>
+    public static string VariantBase(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return null;
+        var m = _rxVariant.Match(name);
+        return m.Success ? m.Groups["b"].Value : null;
     }
 
     static JutMatchResult Accept(JutAnimeCandidate c, string reason)

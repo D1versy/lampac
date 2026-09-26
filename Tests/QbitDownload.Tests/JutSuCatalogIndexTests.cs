@@ -55,6 +55,7 @@ public class JutSuCatalogIndexTests
         ModInit.conf.jutCatalogSeedMaxPages = 60;
         ModInit.conf.jutCatalogHeadMaxPages = 5;
         ModInit.conf.jutCatalogReseedDays = 30;
+        ModInit.conf.jutPosterBackfill = false;    // хвост головы/пересида зовёт бэкфилл постеров — тестам сеть не нужна
         QbitController.JutIdxReset();
     }
 
@@ -282,6 +283,58 @@ public class JutSuCatalogIndexTests
 
         Assert.False(res.Value<bool>("complete"));
         Assert.Equal(3, ((JArray)Serve(1)["items"]).Count);
+    }
+
+    [Fact]
+    public async Task Снапшот_старого_формата_пересобирается_даже_при_выключенном_расписании()
+    {
+        // 2.122: карточка получила поле spans (годы-бакеты), и снапшот с прежними карточками должен
+        // пересобраться сам — дома jutCatalogReseedDays = 0, планового пересида нет вовсе.
+        Fresh();
+        ModInit.conf.jutCatalogReseedDays = 0;
+        await QbitController.JutCatalogTick(loadPage: Pages(new[] { "a", "b" }));
+
+        // «Старый» файл: тот же снапшот, но без fmt (так писали до 2.122)
+        string path = Path.Combine(ModInit.conf.cachePath, "jut", "catalog-index.json");
+        var jo = JObject.Parse(File.ReadAllText(path));
+        Assert.Equal(QbitController.JutIdxFmt, jo.Value<int>("fmt"));
+        jo.Remove("fmt");
+        File.WriteAllText(path, jo.ToString());
+        QbitController.JutIdxReset();
+
+        var res = await QbitController.JutCatalogTick(loadPage: Pages(new[] { "a", "b", "c" }));
+        Assert.Equal("reseed", res.Value<string>("mode"));
+        Assert.Equal(3, ((JArray)Serve(1)["items"]).Count);
+        Assert.Equal(QbitController.JutIdxFmt, JObject.Parse(File.ReadAllText(path)).Value<int>("fmt"));
+
+        // Следующий тик — обычная голова: пересид не зациклился
+        res = await QbitController.JutCatalogTick(loadPage: Pages(new[] { "a", "b", "c" }));
+        Assert.Equal("head", res.Value<string>("mode"));
+    }
+
+    [Fact]
+    public async Task Карточка_снапшота_несёт_промежутки_лет_и_они_читаются_очередью_постеров()
+    {
+        Fresh();
+        var card = Card("durara");
+        card.spans.Add(new JutYearSpan(2008, 2014));
+        card.spans.Add(new JutYearSpan(2015, 2023));
+        card.years.AddRange(new[] { 2008, 2014, 2015, 2023 });
+        await QbitController.JutCatalogTick(loadPage: p => Task.FromResult((true, new JutCatalogPage
+        {
+            items = p == 1 ? new List<JutCard> { card } : new List<JutCard>(),
+            hasNext = false
+        })));
+
+        var served = (JObject)((JArray)Serve(1)["items"])[0];
+        Assert.Equal(new[] { new JutYearSpan(2008, 2014), new JutYearSpan(2015, 2023) },
+                     QbitController.JutSpansOf(served));
+
+        // Карточка старого снапшота (без spans) промежутков не даёт: её years — края бакетов, и очередь
+        // постеров такую карточку пропускает до пересида по версии формата. Годы отдельно — легаси.
+        served.Remove("spans");
+        Assert.Null(QbitController.JutSpansOf(served));
+        Assert.Equal(new[] { 2008, 2014, 2015, 2023 }, QbitController.JutYearsOf(served));
     }
 
     // ── пиггибек онгоингов ────────────────────────────────────────────────
